@@ -332,7 +332,8 @@ class OllamaProvider(AIProvider):
                 f"VIDEO SUMMARY:\n{video_summary[:1000]}\n\n"
                 f"CLIP TRANSCRIPT:\n{clip_transcript[:2000]}\n"
             )
-        raw = await self._call_text(prompt)
+        tokens = 16384 if is_description else 4096
+        raw = await self._call_text(prompt, max_tokens=tokens)
         try:
             data = normalize_seo_data(extract_json(raw))
             return ClipSEO(**data)

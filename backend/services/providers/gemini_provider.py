@@ -292,7 +292,8 @@ class GeminiProvider(AIProvider):
                 f"VIDEO SUMMARY:\n{video_summary}\n\n"
                 f"CLIP TRANSCRIPT:\n{clip_transcript}\n"
             )
-        raw = await self._call([prompt])
+        tokens = 16384 if is_description else 4096
+        raw = await self._call([prompt], max_tokens=tokens)
         try:
             data = normalize_seo_data(extract_json(raw))
             return ClipSEO(**data)

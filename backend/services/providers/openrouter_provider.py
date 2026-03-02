@@ -844,8 +844,13 @@ class OpenRouterProvider(AIProvider):
                 f"CLIP TRANSCRIPT:\n{capped_transcript}\n"
             )
         messages = [{"role": "user", "content": prompt}]
+        # Description generation needs more tokens — thinking-mode models
+        # (e.g. Qwen 3.5) spend many tokens on internal reasoning, leaving
+        # too few for the actual description at the default 4096 limit.
+        tokens = 16384 if is_description else 4096
         raw = await self._call_with_fallback(
-            self._text_model, self._text_fallbacks, messages, cancel_check=cancel_check,
+            self._text_model, self._text_fallbacks, messages,
+            max_tokens=tokens, cancel_check=cancel_check,
         )
         try:
             data = normalize_seo_data(extract_json(raw))

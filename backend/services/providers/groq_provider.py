@@ -225,7 +225,8 @@ class GroqProvider(AIProvider):
                 f"CLIP TRANSCRIPT:\n{clip_transcript}\n"
             )
         messages = [{"role": "user", "content": prompt}]
-        raw = await self._call(messages)
+        tokens = 16384 if is_description else 4096
+        raw = await self._call(messages, max_tokens=tokens)
         try:
             data = normalize_seo_data(extract_json(raw))
             return ClipSEO(**data)
