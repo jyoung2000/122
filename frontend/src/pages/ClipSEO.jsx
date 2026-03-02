@@ -118,6 +118,8 @@ export default function ClipSEO() {
   const [longFormDesc, setLongFormDesc] = useState('');
   const [generatingShorts, setGeneratingShorts] = useState(false);
   const [generatingLongForm, setGeneratingLongForm] = useState(false);
+  const [shortsElapsed, setShortsElapsed] = useState(0);
+  const [longFormElapsed, setLongFormElapsed] = useState(0);
 
   // Debounced save for user edits to SEO data
   const saveTimerRef = useRef(null);
@@ -530,7 +532,15 @@ export default function ClipSEO() {
     const isShorts = descType === 'shorts';
     const setter = isShorts ? setShortsDesc : setLongFormDesc;
     const setLoading = isShorts ? setGeneratingShorts : setGeneratingLongForm;
+    const setElapsed = isShorts ? setShortsElapsed : setLongFormElapsed;
     setLoading(true);
+    setElapsed(0);
+
+    const startMs = Date.now();
+    const timerInterval = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startMs) / 1000));
+    }, 1000);
+
     try {
       const res = await fetch(`/api/jobs/${jobId}/generate-description/${clipId}`, {
         method: 'POST',
@@ -547,9 +557,21 @@ export default function ClipSEO() {
     } catch (err) {
       showToast(err.message, 'error');
     } finally {
+      clearInterval(timerInterval);
       setLoading(false);
+      setElapsed(0);
     }
   }, [jobId, clipId]);
+
+  // Derive a status message from elapsed seconds for description generation
+  const descStatusMessage = (elapsed) => {
+    if (elapsed < 3) return 'Connecting to AI provider...';
+    if (elapsed < 8) return 'Analyzing transcript and key scenes...';
+    if (elapsed < 16) return 'Writing description with context...';
+    if (elapsed < 25) return 'Generating keywords and hashtags...';
+    if (elapsed < 40) return 'Refining output...';
+    return 'Almost done — large descriptions take longer...';
+  };
 
   const handleExport = useCallback(() => {
     if (startTime === null || endTime === null) return;
@@ -1428,14 +1450,49 @@ export default function ClipSEO() {
                       cursor: generatingShorts ? 'default' : 'pointer',
                     }}
                   >
-                    {generatingShorts ? 'Generating...' : (shortsDesc ? 'Regenerate' : 'Generate')}
+                    {generatingShorts ? `${shortsElapsed}s...` : (shortsDesc ? 'Regenerate' : 'Generate')}
                   </button>
                 </div>
               </div>
               <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
                 Optimized for YouTube Shorts SEO — hook line, keywords, hashtags, CTA. Under 500 characters.
               </p>
-              {shortsDesc ? (
+              {generatingShorts ? (
+                <div style={{
+                  padding: '16px', borderRadius: 'var(--radius-sm)',
+                  background: 'var(--bg-elevated)', border: '1px solid var(--accent-cyan)',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                    <div style={{
+                      width: 18, height: 18, flexShrink: 0,
+                      border: '2px solid var(--border)',
+                      borderTop: '2px solid var(--accent-cyan)',
+                      borderRadius: '50%',
+                      animation: 'seo-spin 1s linear infinite',
+                    }} />
+                    <span style={{
+                      fontSize: 12, color: 'var(--accent-cyan)',
+                      fontFamily: 'var(--font-mono)',
+                      animation: 'seo-pulse 2s ease-in-out infinite',
+                    }}>
+                      {descStatusMessage(shortsElapsed)}
+                    </span>
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginLeft: 'auto', flexShrink: 0 }}>
+                      {shortsElapsed}s
+                    </span>
+                  </div>
+                  <div style={{
+                    height: 3, borderRadius: 2, background: 'var(--border)', overflow: 'hidden',
+                  }}>
+                    <div style={{
+                      height: '100%', borderRadius: 2,
+                      background: 'var(--accent-cyan)',
+                      width: `${Math.min(95, shortsElapsed * 2.5)}%`,
+                      transition: 'width 1s linear',
+                    }} />
+                  </div>
+                </div>
+              ) : shortsDesc ? (
                 <textarea
                   value={shortsDesc}
                   onChange={(e) => { setShortsDesc(e.target.value); saveClipSeo({ shorts_description: e.target.value }); }}
@@ -1447,20 +1504,9 @@ export default function ClipSEO() {
                     fontFamily: 'var(--font-sans)',
                   }}
                 />
-              ) : !generatingShorts ? (
+              ) : (
                 <div style={{ padding: '20px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
                   Click "Generate" to create a Shorts-optimized description
-                </div>
-              ) : (
-                <div style={{ padding: '20px 0', textAlign: 'center' }}>
-                  <div style={{
-                    width: 20, height: 20, margin: '0 auto 8px',
-                    border: '2px solid var(--border)',
-                    borderTop: '2px solid var(--accent-cyan)',
-                    borderRadius: '50%',
-                    animation: 'seo-spin 1s linear infinite',
-                  }} />
-                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Generating Shorts description...</span>
                 </div>
               )}
             </div>
@@ -1496,14 +1542,49 @@ export default function ClipSEO() {
                       cursor: generatingLongForm ? 'default' : 'pointer',
                     }}
                   >
-                    {generatingLongForm ? 'Generating...' : (longFormDesc ? 'Regenerate' : 'Generate')}
+                    {generatingLongForm ? `${longFormElapsed}s...` : (longFormDesc ? 'Regenerate' : 'Generate')}
                   </button>
                 </div>
               </div>
               <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
                 Full YouTube description with keywords, timestamps, hashtags, and social links. 500-2000 characters.
               </p>
-              {longFormDesc ? (
+              {generatingLongForm ? (
+                <div style={{
+                  padding: '16px', borderRadius: 'var(--radius-sm)',
+                  background: 'var(--bg-elevated)', border: '1px solid var(--accent-cyan)',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 }}>
+                    <div style={{
+                      width: 18, height: 18, flexShrink: 0,
+                      border: '2px solid var(--border)',
+                      borderTop: '2px solid var(--accent-cyan)',
+                      borderRadius: '50%',
+                      animation: 'seo-spin 1s linear infinite',
+                    }} />
+                    <span style={{
+                      fontSize: 12, color: 'var(--accent-cyan)',
+                      fontFamily: 'var(--font-mono)',
+                      animation: 'seo-pulse 2s ease-in-out infinite',
+                    }}>
+                      {descStatusMessage(longFormElapsed)}
+                    </span>
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginLeft: 'auto', flexShrink: 0 }}>
+                      {longFormElapsed}s
+                    </span>
+                  </div>
+                  <div style={{
+                    height: 3, borderRadius: 2, background: 'var(--border)', overflow: 'hidden',
+                  }}>
+                    <div style={{
+                      height: '100%', borderRadius: 2,
+                      background: 'var(--accent-cyan)',
+                      width: `${Math.min(95, longFormElapsed * 2.5)}%`,
+                      transition: 'width 1s linear',
+                    }} />
+                  </div>
+                </div>
+              ) : longFormDesc ? (
                 <textarea
                   value={longFormDesc}
                   onChange={(e) => { setLongFormDesc(e.target.value); saveClipSeo({ longform_description: e.target.value }); }}
@@ -1515,20 +1596,9 @@ export default function ClipSEO() {
                     fontFamily: 'var(--font-sans)',
                   }}
                 />
-              ) : !generatingLongForm ? (
+              ) : (
                 <div style={{ padding: '20px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
                   Click "Generate" to create a full YouTube description
-                </div>
-              ) : (
-                <div style={{ padding: '20px 0', textAlign: 'center' }}>
-                  <div style={{
-                    width: 20, height: 20, margin: '0 auto 8px',
-                    border: '2px solid var(--border)',
-                    borderTop: '2px solid var(--accent-cyan)',
-                    borderRadius: '50%',
-                    animation: 'seo-spin 1s linear infinite',
-                  }} />
-                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Generating YouTube description...</span>
                 </div>
               )}
             </div>
