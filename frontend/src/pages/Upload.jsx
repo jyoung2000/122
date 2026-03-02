@@ -67,6 +67,17 @@ export default function Upload() {
   const navigate = useNavigate();
   const { isMobile } = useResponsive();
 
+  // Warn user before leaving during upload
+  useEffect(() => {
+    if (!uploading) return;
+    const handler = (e) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [uploading]);
+
   const handleFile = useCallback(async (file) => {
     if (!file) return;
     const ext = file.name.split('.').pop().toLowerCase();
@@ -260,6 +271,25 @@ export default function Upload() {
             message={uploadMessage}
             variant={uploadDone ? 'green' : 'cyan'}
           />
+        </div>
+      )}
+
+      {/* Upload in-progress warning */}
+      {uploading && !uploadDone && (
+        <div style={{
+          marginTop: 12,
+          padding: '10px 14px',
+          background: 'rgba(245, 158, 11, 0.08)',
+          border: '1px solid rgba(245, 158, 11, 0.3)',
+          borderRadius: 'var(--radius-sm)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+        }}>
+          <span style={{ fontSize: 16, flexShrink: 0 }}>&#9888;</span>
+          <span style={{ fontSize: 12, color: 'var(--accent-amber)', lineHeight: 1.4 }}>
+            Upload in progress — do not close this tab or navigate away until the upload is complete.
+          </span>
         </div>
       )}
 
