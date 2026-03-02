@@ -11,7 +11,7 @@ from backend.config import settings
 from backend.models import (
     FrameData, SceneDescription, TranscriptSegment, VideoSummary, ClipCandidate, ClipSEO,
 )
-from backend.services.providers.base import AIProvider, ProviderError, ProviderRateLimitError, extract_json, normalize_seo_data
+from backend.services.providers.base import AIProvider, ProviderError, ProviderRateLimitError, extract_json, extract_description_fallback, normalize_seo_data
 from backend.services.prompts import DEFAULT_FRAME_ANALYSIS_PROMPT, DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -857,8 +857,11 @@ class OpenRouterProvider(AIProvider):
             return ClipSEO(**data)
         except Exception:
             logger.warning(f"Failed to parse SEO JSON, using fallback. Raw (first 300): {raw[:300]}")
+            # For description generation, extract the full description text
+            # instead of truncating to 300 chars.
+            desc = extract_description_fallback(raw) if is_description and raw else (raw[:300] if raw else "SEO generation failed")
             return ClipSEO(
                 title=clip_title,
-                description=raw[:300] if raw else "SEO generation failed",
+                description=desc,
                 tags=[], platform_tips="",
             )

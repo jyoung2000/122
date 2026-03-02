@@ -6,9 +6,43 @@ from typing import Callable, Optional
 from backend.models import FrameData, SceneDescription, TranscriptSegment, VideoSummary, ClipCandidate, ClipSEO
 
 
+def _fix_json_newlines(text: str) -> str:
+    """Escape literal newlines that appear inside JSON string values.
+
+    LLMs frequently return JSON with unescaped newlines inside string
+    values (e.g. multi-paragraph descriptions).  ``json.loads`` rejects
+    these, so we walk the text and replace literal ``\\n`` inside quoted
+    strings with the escaped ``\\\\n`` sequence.
+    """
+    out: list[str] = []
+    in_string = False
+    escape_next = False
+    for ch in text:
+        if escape_next:
+            out.append(ch)
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            out.append(ch)
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+        if in_string and ch == '\n':
+            out.append('\\n')
+        elif in_string and ch == '\r':
+            out.append('\\r')
+        elif in_string and ch == '\t':
+            out.append('\\t')
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
 def extract_json(raw: str) -> dict:
     """Extract and parse JSON from an LLM response, handling thinking tags,
-    markdown code blocks, and other common wrappers."""
+    markdown code blocks, literal newlines in strings, and other common
+    wrappers."""
     text = raw.strip()
     # Strip <think>...</think> or <reasoning>...</reasoning> blocks
     text = re.sub(r'<(?:think|reasoning)>.*?</(?:think|reasoning)>', '', text, flags=re.DOTALL).strip()
@@ -24,11 +58,58 @@ def extract_json(raw: str) -> dict:
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end > start:
+        snippet = text[start:end + 1]
         try:
-            return json.loads(text[start:end + 1])
+            return json.loads(snippet)
+        except json.JSONDecodeError:
+            pass
+        # LLMs often put literal newlines inside JSON string values —
+        # escape them and retry.
+        try:
+            return json.loads(_fix_json_newlines(snippet))
         except json.JSONDecodeError:
             pass
     raise json.JSONDecodeError("No valid JSON found in response", text, 0)
+
+
+def extract_description_fallback(raw: str) -> str:
+    """Best-effort extraction of description text when JSON parsing fails.
+
+    Looks for ``"description": "..."`` in the raw response and pulls out
+    everything between the opening and closing quotes, handling the common
+    case where the AI returns well-structured JSON but with literal
+    newlines that break ``json.loads``.
+    """
+    # Strip thinking blocks first
+    text = re.sub(r'<(?:think|reasoning)>.*?</(?:think|reasoning)>', '', raw, flags=re.DOTALL)
+    m = re.search(r'"description"\s*:\s*"', text)
+    if not m:
+        return text[:500] if text else ""
+    start = m.end()
+    # Walk forward to find the unescaped closing quote
+    i = start
+    chars: list[str] = []
+    while i < len(text):
+        if text[i] == '\\' and i + 1 < len(text):
+            # Escaped character — keep the real char
+            nxt = text[i + 1]
+            if nxt == 'n':
+                chars.append('\n')
+            elif nxt == 't':
+                chars.append('\t')
+            elif nxt == '"':
+                chars.append('"')
+            elif nxt == '\\':
+                chars.append('\\')
+            else:
+                chars.append(nxt)
+            i += 2
+        elif text[i] == '"':
+            break  # unescaped closing quote
+        else:
+            chars.append(text[i])
+            i += 1
+    return ''.join(chars) or text[:500]
 
 
 def normalize_seo_data(data: dict) -> dict:
