@@ -1,0 +1,1453 @@
+import json
+import logging
+import os
+import re
+import time
+
+import httpx
+from fastapi import APIRouter
+from pydantic import BaseModel
+
+from typing import Optional
+
+from backend.config import Settings, settings, get_settings
+from backend.services.prompts import (
+    PromptSet, load_prompts, save_prompts, get_defaults, MAX_PROMPT_LENGTH,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api", tags=["settings"])
+
+
+def _resolve_data_dir() -> str:
+    """Find a writable data directory for persisting settings and caches.
+    Prefers /data/logs (Docker volume mount), falls back to a local .clipai dir."""
+    docker_path = "/data/logs"
+    if os.path.isdir(docker_path) and os.access(docker_path, os.W_OK):
+        return docker_path
+    # Fallback: project-local directory (works outside Docker)
+    local_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".clipai")
+    os.makedirs(local_path, exist_ok=True)
+    return local_path
+
+
+_DATA_DIR = _resolve_data_dir()
+MODEL_CACHE_PATH = os.path.join(_DATA_DIR, "model_cache.json")
+MODEL_CACHE_TTL = 86400  # 24 hours
+
+# Persistent user settings — saved so they survive container/process restarts.
+USER_SETTINGS_PATH = os.path.join(_DATA_DIR, "user_settings.json")
+
+_PLACEHOLDER_KEYS = {"sk-or-...", "sk-ant-...", "AIza...", "gsk_...", ""}
+
+# Keys that are persisted to user_settings.json
+_PERSISTABLE_KEYS = [
+    "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
+    "OPENROUTER_PRESET", "OPENROUTER_VISION_MODEL", "OPENROUTER_TEXT_MODEL",
+    "OPENROUTER_SUMMARY_MODEL", "WHISPER_MODEL", "WHISPER_BEAM_SIZE",
+    "WHISPER_VAD_FILTER", "FRAME_SAMPLE_RATE", "SUBJECT_TRACKING_ENABLED",
+    "FFMPEG_PRESET", "FFMPEG_CRF", "FFMPEG_THREADS", "FFMPEG_FASTSTART",
+    "AI_FALLBACK_CHAIN",
+]
+
+# API key fields specifically (used to filter out placeholder values)
+_API_KEY_FIELDS = {"OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY"}
+
+
+def _is_real_value(key: str, val: str) -> bool:
+    """Check if a value is a real user-entered value (not empty or a placeholder)."""
+    if not val:
+        return False
+    if val in _PLACEHOLDER_KEYS:
+        return False
+    return True
+
+
+def _persist_user_settings() -> bool:
+    """Save all user-mutable settings to a JSON file that survives restarts.
+
+    Returns True if settings were persisted successfully, False otherwise.
+    The file is stored on a Docker volume mount (/data/logs) so it
+    survives container stop/restart/recreate cycles.
+    """
+    data = {}
+    for key in _PERSISTABLE_KEYS:
+        val = getattr(settings, key, "")
+        # Non-string types (bool, int) are always persisted
+        if isinstance(val, (bool, int)):
+            data[key] = val
+            continue
+        # Skip empty values and placeholder API keys
+        if not _is_real_value(key, val):
+            continue
+        data[key] = val
+    try:
+        os.makedirs(os.path.dirname(USER_SETTINGS_PATH), exist_ok=True)
+        with open(USER_SETTINGS_PATH, "w") as f:
+            json.dump(data, f, indent=2)
+        logger.info(f"Persisted {len(data)} settings to {USER_SETTINGS_PATH}")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to persist user settings to {USER_SETTINGS_PATH}: {e}")
+        return False
+
+
+def _restore_user_settings():
+    """Load persisted settings and apply them to the settings object.
+    Called once at module import time so saved API keys survive restarts.
+
+    For API keys: persisted real keys always override env-injected placeholders.
+    For other settings: persisted values override defaults and placeholders."""
+    if not os.path.exists(USER_SETTINGS_PATH):
+        logger.info(f"No persisted settings found at {USER_SETTINGS_PATH}")
+        return
+    try:
+        with open(USER_SETTINGS_PATH, "r") as f:
+            data = json.load(f)
+        restored = 0
+        for key, val in data.items():
+            if key not in _PERSISTABLE_KEYS:
+                continue
+            # Bool/int types: always restore from persisted value
+            if isinstance(val, (bool, int)):
+                setattr(settings, key, val)
+                logger.info(f"Restored setting: {key}={val}")
+                restored += 1
+                continue
+            if not _is_real_value(key, val):
+                continue
+            current = getattr(settings, key, "")
+            # For API keys: always prefer a persisted real key over a placeholder
+            if key in _API_KEY_FIELDS:
+                if not _is_real_value(key, current):
+                    setattr(settings, key, val)
+                    logger.info(f"Restored API key: {key} (was placeholder)")
+                    restored += 1
+                # If current is a real key (user set it via env), keep it
+            else:
+                # For model/preset settings: override if current is default/empty
+                default = Settings.model_fields[key].default if key in Settings.model_fields else ""
+                if not current or current == default:
+                    setattr(settings, key, val)
+                    logger.info(f"Restored setting: {key}")
+                    restored += 1
+        logger.info(f"Restored {restored} persisted settings from {USER_SETTINGS_PATH}")
+    except Exception as e:
+        logger.warning(f"Failed to restore user settings from {USER_SETTINGS_PATH}: {e}")
+
+
+# Restore saved settings on module load
+_restore_user_settings()
+
+# Short-lived cache for /api/providers/status (avoid hammering Ollama on rapid re-renders)
+_status_cache: dict = {}
+_status_cache_ts: float = 0
+_STATUS_CACHE_TTL = 5  # seconds
+
+# Env var names per provider
+_PROVIDER_KEY_ENV = {
+    "openrouter": "OPENROUTER_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+    "groq": "GROQ_API_KEY",
+}
+
+# -- Cost estimation for a 10-min video --
+# 120 frames (sampled every 5s), each ~765 tokens as image input
+# Vision: 120 images * 765 ≈ 92K input tokens, ~12K output tokens
+# Text: ~15K input tokens (transcript+scenes), ~8K output tokens (summary+clips)
+_VISION_INPUT_TOKENS_10MIN = 100_000
+_VISION_OUTPUT_TOKENS_10MIN = 15_000
+_TEXT_INPUT_TOKENS_10MIN = 15_000
+_TEXT_OUTPUT_TOKENS_10MIN = 8_000
+
+# Speed ratings for known model families (estimated minutes to analyze a 10-min video).
+# Vision: frame analysis across ~60 frames. Text: summary + clip detection.
+# "speed" = "fast" | "medium" | "slow", "est_minutes" = estimated wall-clock minutes
+_MODEL_SPEED_PROFILES = {
+    # --- Free auto-router ---
+    # quality_score: 1=poor, 2=basic, 3=good, 4=excellent, 5=best
+    "openrouter/free": {"speed": "medium", "est_minutes_vision": 5.0, "est_minutes_text": 2.0, "quality": "basic", "quality_score": 2},
+    # --- Fast models (under 2 min for 10-min video) ---
+    "gemini-2.5-flash": {"speed": "fast", "est_minutes_vision": 1.5, "est_minutes_text": 0.5, "quality": "good", "quality_score": 3},
+    "gemini-2.0-flash": {"speed": "fast", "est_minutes_vision": 1.5, "est_minutes_text": 0.5, "quality": "good", "quality_score": 3},
+    "gemini-flash": {"speed": "fast", "est_minutes_vision": 1.5, "est_minutes_text": 0.5, "quality": "good", "quality_score": 3},
+    "llama-3.1-8b": {"speed": "fast", "est_minutes_vision": 0, "est_minutes_text": 0.5, "quality": "basic", "quality_score": 2},
+    "llama-3.3-70b": {"speed": "fast", "est_minutes_vision": 0, "est_minutes_text": 1.0, "quality": "good", "quality_score": 3},
+    "qwen": {"speed": "fast", "est_minutes_vision": 2.0, "est_minutes_text": 0.8, "quality": "good", "quality_score": 3},
+    "mistral": {"speed": "fast", "est_minutes_vision": 0, "est_minutes_text": 0.7, "quality": "good", "quality_score": 3},
+    "deepseek": {"speed": "fast", "est_minutes_vision": 0, "est_minutes_text": 1.0, "quality": "good", "quality_score": 3},
+    # --- Medium models (2-5 min) ---
+    "gemini-2.5-pro": {"speed": "medium", "est_minutes_vision": 3.0, "est_minutes_text": 1.5, "quality": "excellent", "quality_score": 4},
+    "gpt-4o-mini": {"speed": "medium", "est_minutes_vision": 2.5, "est_minutes_text": 1.0, "quality": "good", "quality_score": 3},
+    "gpt-4o": {"speed": "medium", "est_minutes_vision": 3.5, "est_minutes_text": 1.5, "quality": "excellent", "quality_score": 4},
+    "claude-haiku": {"speed": "medium", "est_minutes_vision": 2.0, "est_minutes_text": 1.0, "quality": "good", "quality_score": 3},
+    "pixtral": {"speed": "medium", "est_minutes_vision": 3.0, "est_minutes_text": 1.5, "quality": "good", "quality_score": 3},
+    # --- Slow models (5+ min) ---
+    "claude-sonnet": {"speed": "slow", "est_minutes_vision": 5.0, "est_minutes_text": 2.5, "quality": "excellent", "quality_score": 4},
+    "claude-opus": {"speed": "slow", "est_minutes_vision": 8.0, "est_minutes_text": 4.0, "quality": "best", "quality_score": 5},
+    "gpt-4-turbo": {"speed": "slow", "est_minutes_vision": 5.0, "est_minutes_text": 2.0, "quality": "excellent", "quality_score": 4},
+    "o1": {"speed": "slow", "est_minutes_vision": 6.0, "est_minutes_text": 3.0, "quality": "excellent", "quality_score": 4},
+    "o3": {"speed": "slow", "est_minutes_vision": 7.0, "est_minutes_text": 3.5, "quality": "best", "quality_score": 5},
+}
+
+# Free tier models are rate-limited (~20 RPM), multiply time by 3x
+_FREE_SPEED_MULTIPLIER = 3.0
+
+
+def _estimate_speed(model_id: str, role: str, is_free: bool) -> dict:
+    """Estimate analysis speed for a model on a 10-minute video.
+
+    Returns {"speed": "fast"|"medium"|"slow", "est_minutes": float, "quality": str}.
+    """
+    mid_lower = model_id.lower()
+
+    # Try to match against known profiles
+    best_match = None
+    for pattern, profile in _MODEL_SPEED_PROFILES.items():
+        if pattern in mid_lower:
+            best_match = profile
+            break
+
+    if best_match:
+        minutes = best_match.get(f"est_minutes_{role}", best_match.get("est_minutes_text", 2.0))
+        if is_free:
+            minutes *= _FREE_SPEED_MULTIPLIER
+        speed = best_match["speed"]
+        if is_free and speed == "fast":
+            speed = "medium"
+        quality = best_match["quality"]
+        quality_score = best_match.get("quality_score", 3)
+    else:
+        # Unknown model — estimate based on whether it's free
+        minutes = 4.0 if is_free else 2.0
+        speed = "medium"
+        quality = "good"
+        quality_score = 3
+
+    # Build display string
+    if minutes < 1:
+        time_str = f"~{int(minutes * 60)}s"
+    elif minutes < 10:
+        time_str = f"~{minutes:.1f}min"
+    else:
+        time_str = f"~{int(minutes)}min"
+
+    return {
+        "speed": speed,
+        "est_minutes": round(minutes, 1),
+        "est_time_display": time_str,
+        "quality": quality,
+        "quality_score": quality_score,
+    }
+
+
+def _key_is_set(key: str) -> bool:
+    return bool(key) and key not in _PLACEHOLDER_KEYS
+
+
+@router.get("/providers/status")
+async def provider_status():
+    global _status_cache, _status_cache_ts
+    now = time.time()
+    if _status_cache and now - _status_cache_ts < _STATUS_CACHE_TTL:
+        return _status_cache
+
+    from backend.services.providers.openrouter_provider import PRESETS
+
+    statuses = {}
+
+    # Ollama
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{settings.OLLAMA_HOST}/api/tags")
+            resp.raise_for_status()
+            data = resp.json()
+            models = [m["name"] for m in data.get("models", [])]
+            statuses["ollama"] = {
+                "status": "connected",
+                "models_loaded": models,
+                "host": settings.OLLAMA_HOST,
+            }
+    except Exception as e:
+        statuses["ollama"] = {"status": "offline", "error": str(e)}
+
+    # OpenRouter — always read model IDs from settings (the provider does
+    # the same), falling back to preset defaults if settings are empty.
+    if _key_is_set(settings.OPENROUTER_API_KEY):
+        preset_name = settings.OPENROUTER_PRESET
+        preset = PRESETS.get(preset_name, PRESETS["free"])
+        vision_model = settings.OPENROUTER_VISION_MODEL or preset["vision"]
+        text_model = settings.OPENROUTER_TEXT_MODEL or preset["text"]
+        summary_model = settings.OPENROUTER_SUMMARY_MODEL or text_model
+        statuses["openrouter"] = {
+            "status": "configured",
+            "preset": preset_name,
+            "vision_model": vision_model,
+            "summary_model": summary_model,
+            "text_model": text_model,
+        }
+    else:
+        statuses["openrouter"] = {"status": "not_configured"}
+
+    # Anthropic
+    if _key_is_set(settings.ANTHROPIC_API_KEY):
+        statuses["anthropic"] = {"status": "configured"}
+    else:
+        statuses["anthropic"] = {"status": "not_configured"}
+
+    # Gemini
+    if _key_is_set(settings.GEMINI_API_KEY):
+        statuses["gemini"] = {"status": "configured"}
+    else:
+        statuses["gemini"] = {"status": "not_configured"}
+
+    # Groq
+    if _key_is_set(settings.GROQ_API_KEY):
+        statuses["groq"] = {"status": "configured"}
+    else:
+        statuses["groq"] = {"status": "not_configured"}
+
+    # Determine the active provider and models based on fallback chain
+    chain = settings.active_provider_chain
+    active_provider = None
+    active_vision_model = None
+    active_text_model = None
+    active_summary_model = None
+    for name in chain:
+        info = statuses.get(name, {})
+        st = info.get("status", "not_configured")
+        if st in ("connected", "configured"):
+            active_provider = name
+            if name == "openrouter":
+                active_vision_model = info.get("vision_model", "")
+                active_summary_model = info.get("summary_model", "")
+                active_text_model = info.get("text_model", "")
+            elif name == "ollama":
+                active_vision_model = settings.OLLAMA_VISION_MODEL
+                active_text_model = settings.OLLAMA_TEXT_MODEL
+                active_summary_model = settings.OLLAMA_TEXT_MODEL
+            elif name == "gemini":
+                active_vision_model = "gemini-2.5-flash"
+                active_text_model = "gemini-2.5-flash"
+                active_summary_model = "gemini-2.5-flash"
+            elif name == "anthropic":
+                active_vision_model = "claude-sonnet-4"
+                active_text_model = "claude-sonnet-4"
+                active_summary_model = "claude-sonnet-4"
+            elif name == "groq":
+                active_vision_model = ""
+                active_text_model = "llama-3.1-8b-instant"
+                active_summary_model = "llama-3.1-8b-instant"
+            break
+
+    statuses["_active"] = {
+        "provider": active_provider or "none",
+        "transcript_model": settings.WHISPER_MODEL,
+        "whisper_beam_size": settings.WHISPER_BEAM_SIZE,
+        "whisper_vad_filter": settings.WHISPER_VAD_FILTER,
+        "vision_model": active_vision_model or "",
+        "summary_model": active_summary_model or "",
+        "text_model": active_text_model or "",
+        "preset": settings.OPENROUTER_PRESET if active_provider == "openrouter" else "",
+        "fallback_chain": chain,
+        "ollama_enabled": "ollama" in chain,
+    }
+
+    _status_cache = statuses
+    _status_cache_ts = time.time()
+    return statuses
+
+
+@router.post("/providers/test/{provider_name}")
+async def test_provider(provider_name: str):
+    """Live-test a provider by making a real API call and returning detailed status."""
+
+    if provider_name == "openrouter":
+        return await _test_openrouter()
+    elif provider_name == "ollama":
+        return await _test_ollama()
+    elif provider_name == "anthropic":
+        return await _test_anthropic()
+    elif provider_name == "gemini":
+        return await _test_gemini()
+    elif provider_name == "groq":
+        return await _test_groq()
+    else:
+        return {"status": "error", "message": f"Unknown provider: {provider_name}"}
+
+
+async def _test_openrouter():
+    key = settings.OPENROUTER_API_KEY
+    if not _key_is_set(key):
+        return {
+            "status": "not_configured",
+            "message": "OPENROUTER_API_KEY is not set. Add it to your .env file.",
+            "help": "Get a free key at https://openrouter.ai/keys",
+        }
+
+    # Step 1: Validate key by fetching account info
+    headers = {"Authorization": f"Bearer {key}"}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            # Check key validity via auth/key endpoint
+            auth_resp = await client.get(
+                "https://openrouter.ai/api/v1/auth/key",
+                headers=headers,
+            )
+            if auth_resp.status_code == 401:
+                return {
+                    "status": "invalid_key",
+                    "message": "API key is invalid or expired. Check your key at openrouter.ai/keys.",
+                }
+            if auth_resp.status_code == 403:
+                return {
+                    "status": "invalid_key",
+                    "message": "API key is forbidden. It may have been revoked.",
+                }
+
+            key_info = {}
+            if auth_resp.status_code == 200:
+                key_data = auth_resp.json().get("data", {})
+                key_info = {
+                    "label": key_data.get("label", ""),
+                    "usage_usd": key_data.get("usage", 0),
+                    "limit_usd": key_data.get("limit"),
+                    "is_free_tier": key_data.get("is_free_tier", False),
+                    "rate_limit_rpm": key_data.get("rate_limit", {}).get("requests", None),
+                }
+
+            # Step 2: Quick model ping — try multiple models to handle unavailable ones
+            from backend.services.providers.openrouter_provider import PRESETS
+            preset_name = settings.OPENROUTER_PRESET
+            preset = PRESETS.get(preset_name, PRESETS["free"])
+
+            # Build a list of models to try: current text model from settings, then fallbacks
+            effective_text = settings.OPENROUTER_TEXT_MODEL or preset["text"]
+            test_models = [effective_text]
+            for fb in (preset.get("text_fallbacks") or []):
+                if fb not in test_models:
+                    test_models.append(fb)
+            if preset.get("text_fallback") and preset["text_fallback"] not in test_models:
+                test_models.append(preset["text_fallback"])
+
+            model_ok = False
+            model_error = ""
+            tested_model = test_models[0]
+            for test_model in test_models:
+                tested_model = test_model
+                try:
+                    test_resp = await client.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={**headers, "Content-Type": "application/json"},
+                        json={
+                            "model": test_model,
+                            "messages": [{"role": "user", "content": "Say OK"}],
+                            "max_tokens": 5,
+                        },
+                        timeout=20.0,
+                    )
+                    if test_resp.status_code == 200:
+                        model_ok = True
+                        break
+                    else:
+                        try:
+                            err = test_resp.json()
+                            model_error = err.get("error", {}).get("message", test_resp.text[:200])
+                        except Exception:
+                            model_error = test_resp.text[:200]
+                        logger.info(f"Model test failed for {test_model}: {model_error}")
+                except httpx.TimeoutException:
+                    model_error = f"Timeout testing {test_model}"
+                    logger.info(model_error)
+
+            effective_vision = settings.OPENROUTER_VISION_MODEL or preset["vision"]
+            effective_summary = settings.OPENROUTER_SUMMARY_MODEL or effective_text
+            return {
+                "status": "connected" if model_ok else "key_valid_model_error",
+                "message": "API key validated and model responded successfully." if model_ok
+                    else f"Key is valid but model test failed: {model_error}. Try refreshing models to find available ones.",
+                "preset": preset_name,
+                "vision_model": effective_vision,
+                "summary_model": effective_summary,
+                "text_model": effective_text,
+                "tested_model": tested_model,
+                "model_test_passed": model_ok,
+                **key_info,
+            }
+
+    except httpx.TimeoutException:
+        return {"status": "timeout", "message": "Connection to OpenRouter timed out. Try again."}
+    except Exception as e:
+        logger.warning(f"OpenRouter test failed: {e}")
+        return {"status": "error", "message": f"Connection failed: {str(e)[:200]}"}
+
+
+async def _test_ollama():
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{settings.OLLAMA_HOST}/api/tags")
+            resp.raise_for_status()
+            data = resp.json()
+            models = [m["name"] for m in data.get("models", [])]
+
+            has_vision = any(
+                "moondream" in m or "llava" in m or "bakllava" in m
+                for m in models
+            )
+            return {
+                "status": "connected",
+                "message": f"Ollama connected with {len(models)} model(s) loaded.",
+                "models": models,
+                "has_vision_model": has_vision,
+                "host": settings.OLLAMA_HOST,
+            }
+    except Exception as e:
+        return {
+            "status": "offline",
+            "message": f"Cannot reach Ollama at {settings.OLLAMA_HOST}: {str(e)[:200]}",
+        }
+
+
+async def _test_anthropic():
+    key = settings.ANTHROPIC_API_KEY
+    if not _key_is_set(key):
+        return {"status": "not_configured", "message": "ANTHROPIC_API_KEY is not set."}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-haiku-4-5-20251001",
+                    "max_tokens": 5,
+                    "messages": [{"role": "user", "content": "Say OK"}],
+                },
+            )
+            if resp.status_code == 200:
+                return {"status": "connected", "message": "Anthropic API key is valid."}
+            elif resp.status_code == 401:
+                return {"status": "invalid_key", "message": "API key is invalid."}
+            else:
+                return {"status": "error", "message": f"Anthropic responded with status {resp.status_code}."}
+    except Exception as e:
+        return {"status": "error", "message": f"Connection failed: {str(e)[:200]}"}
+
+
+async def _test_gemini():
+    key = settings.GEMINI_API_KEY
+    if not _key_is_set(key):
+        return {"status": "not_configured", "message": "GEMINI_API_KEY is not set."}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={key}",
+                json={"contents": [{"parts": [{"text": "Say OK"}]}]},
+                headers={"Content-Type": "application/json"},
+            )
+            if resp.status_code == 200:
+                return {"status": "connected", "message": "Gemini API key is valid."}
+            elif resp.status_code == 400 and "API_KEY_INVALID" in resp.text:
+                return {"status": "invalid_key", "message": "API key is invalid."}
+            else:
+                return {"status": "error", "message": f"Gemini responded with status {resp.status_code}."}
+    except Exception as e:
+        return {"status": "error", "message": f"Connection failed: {str(e)[:200]}"}
+
+
+async def _test_groq():
+    key = settings.GROQ_API_KEY
+    if not _key_is_set(key):
+        return {"status": "not_configured", "message": "GROQ_API_KEY is not set."}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.1-8b-instant",
+                    "messages": [{"role": "user", "content": "Say OK"}],
+                    "max_tokens": 5,
+                },
+            )
+            if resp.status_code == 200:
+                return {"status": "connected", "message": "Groq API key is valid."}
+            elif resp.status_code == 401:
+                return {"status": "invalid_key", "message": "API key is invalid."}
+            else:
+                return {"status": "error", "message": f"Groq responded with status {resp.status_code}."}
+    except Exception as e:
+        return {"status": "error", "message": f"Connection failed: {str(e)[:200]}"}
+
+
+class SaveKeyRequest(BaseModel):
+    provider: str
+    key: str
+
+
+def _invalidate_status_cache():
+    global _status_cache, _status_cache_ts
+    _status_cache = {}
+    _status_cache_ts = 0
+
+
+@router.post("/providers/key")
+async def save_provider_key(req: SaveKeyRequest):
+    """Save an API key to .env and hot-reload settings.
+
+    Keys are persisted to two locations for redundancy:
+    1. user_settings.json on the Docker volume mount (survives container recreate)
+    2. .env file inside the container (survives container restart)
+    """
+    env_var = _PROVIDER_KEY_ENV.get(req.provider)
+    if not env_var:
+        return {"status": "error", "message": f"Unknown provider: {req.provider}"}
+
+    key_val = req.key.strip()
+    if not key_val:
+        return {"status": "error", "message": "Key cannot be empty"}
+
+    # Update the settings object in memory
+    setattr(settings, env_var, key_val)
+    _invalidate_status_cache()
+
+    # Persist to .env file (backup)
+    env_path = _find_env_file()
+    if env_path:
+        _upsert_env_var(env_path, env_var, key_val)
+
+    # Persist to user_settings.json (primary — on volume mount)
+    persisted = _persist_user_settings()
+    result = {"status": "saved", "provider": req.provider}
+    if not persisted:
+        result["warning"] = (
+            "Key is active in memory but could not be saved to disk. "
+            "It may not survive a container restart."
+        )
+    return result
+
+
+class SavePresetRequest(BaseModel):
+    preset: str
+    vision_model: str = ""
+    text_model: str = ""
+    summary_model: str = ""
+
+
+@router.post("/providers/preset")
+async def save_preset(req: SavePresetRequest):
+    """Save the active preset (and optional custom models) to settings.
+
+    When a known preset is selected (free/efficient/balanced/premium),
+    the model IDs in settings are updated to match the preset's defaults.
+    This ensures OpenRouterProvider always reads the correct models from
+    settings without needing to re-resolve the preset dict at init time.
+
+    When custom models are provided (req.vision_model, req.text_model),
+    those override the preset defaults.
+    """
+    from backend.services.providers.openrouter_provider import PRESETS as _PRESETS
+
+    settings.OPENROUTER_PRESET = req.preset
+
+    # Resolve effective model IDs: explicit overrides > preset defaults
+    preset_dict = _PRESETS.get(req.preset, _PRESETS["free"])
+    vision_model = req.vision_model or preset_dict["vision"]
+    text_model = req.text_model or preset_dict["text"]
+    summary_model = req.summary_model or preset_dict.get("summary", text_model)
+
+    settings.OPENROUTER_VISION_MODEL = vision_model
+    settings.OPENROUTER_TEXT_MODEL = text_model
+    settings.OPENROUTER_SUMMARY_MODEL = summary_model
+    _invalidate_status_cache()
+
+    env_path = _find_env_file()
+    if env_path:
+        _upsert_env_var(env_path, "OPENROUTER_PRESET", req.preset)
+        _upsert_env_var(env_path, "OPENROUTER_VISION_MODEL", vision_model)
+        _upsert_env_var(env_path, "OPENROUTER_TEXT_MODEL", text_model)
+        _upsert_env_var(env_path, "OPENROUTER_SUMMARY_MODEL", summary_model)
+
+    _persist_user_settings()
+    logger.info(
+        "Preset saved: %s (vision=%s, text=%s, summary=%s)",
+        req.preset, vision_model, text_model, summary_model,
+    )
+    return {"status": "saved", "preset": req.preset}
+
+
+class ToggleOllamaRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/providers/ollama/toggle")
+async def toggle_ollama(req: ToggleOllamaRequest):
+    """Add or remove Ollama from the fallback chain."""
+    chain = [p.strip() for p in settings.AI_FALLBACK_CHAIN.split(",") if p.strip()]
+    if req.enabled:
+        if "ollama" not in chain:
+            chain.append("ollama")
+    else:
+        chain = [p for p in chain if p != "ollama"]
+    settings.AI_FALLBACK_CHAIN = ",".join(chain)
+    _invalidate_status_cache()
+
+    env_path = _find_env_file()
+    if env_path:
+        _upsert_env_var(env_path, "AI_FALLBACK_CHAIN", settings.AI_FALLBACK_CHAIN)
+
+    _persist_user_settings()
+    return {
+        "status": "saved",
+        "ollama_enabled": "ollama" in chain,
+        "chain": chain,
+    }
+
+
+def _find_env_file() -> str | None:
+    """Find or create the .env file for persisting settings.
+
+    Checks project root, cwd, and common Docker paths. If no .env file
+    exists, creates one at the project root so API keys and settings
+    can be written as a backup alongside user_settings.json.
+    """
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    candidates = [
+        os.path.join(project_root, ".env"),
+        ".env",
+        "/app/.env",
+    ]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    # No .env found — create one at project root so subsequent writes succeed
+    env_path = candidates[0]
+    try:
+        with open(env_path, "w") as f:
+            f.write("# ClipAI settings (auto-created)\n")
+        logger.info(f"Created new .env file at {env_path}")
+        return env_path
+    except Exception as e:
+        logger.warning(f"Could not create .env at {env_path}: {e}")
+        return None
+
+
+def _upsert_env_var(env_path: str, var_name: str, value: str):
+    """Update or add an env var in a .env file."""
+    try:
+        with open(env_path, "r") as f:
+            lines = f.readlines()
+
+        pattern = re.compile(rf"^{re.escape(var_name)}\s*=")
+        found = False
+        new_lines = []
+        for line in lines:
+            if pattern.match(line):
+                new_lines.append(f"{var_name}={value}\n")
+                found = True
+            else:
+                new_lines.append(line)
+        if not found:
+            new_lines.append(f"{var_name}={value}\n")
+
+        with open(env_path, "w") as f:
+            f.writelines(new_lines)
+    except Exception as e:
+        logger.warning(f"Failed to update .env: {e}")
+
+
+@router.get("/providers/models/recommended")
+async def recommended_models():
+    """Dynamically discover vision-capable models from OpenRouter and build recommendations."""
+    if not _key_is_set(settings.OPENROUTER_API_KEY):
+        return {"models": [], "error": "OpenRouter API key not configured"}
+
+    all_models = await _fetch_openrouter_models()
+    if all_models is None:
+        return {"models": [], "error": "Failed to fetch models from OpenRouter"}
+
+    by_id = {m["id"]: m for m in all_models}
+
+    # Dynamically discover free vision models
+    free_vision = []
+    free_text = []
+    for m in all_models:
+        mid = m.get("id", "")
+        arch = m.get("architecture", {})
+        modality = arch.get("modality", "")
+        is_free = ":free" in mid or _is_zero_cost(m)
+        has_vision = "image" in modality
+
+        if is_free and has_vision:
+            free_vision.append(m)
+        if is_free:
+            free_text.append(m)
+
+    # Sort free vision by context length (larger = better, likely better model)
+    free_vision.sort(key=lambda m: m.get("context_length", 0), reverse=True)
+    free_text.sort(key=lambda m: m.get("context_length", 0), reverse=True)
+
+    # Build dynamic free tier from discovered models
+    best_free_vision = free_vision[0]["id"] if free_vision else None
+    second_free_vision = free_vision[1]["id"] if len(free_vision) > 1 else None
+    best_free_text = free_text[0]["id"] if free_text else None
+
+    # Build recommendations: dynamic free tiers + static paid tiers
+    curated = []
+
+    # Add dynamic free vision combos
+    if best_free_vision and best_free_text:
+        curated.append({
+            "id": "free-best",
+            "label": _short_name(by_id.get(best_free_vision, {})) + " (Free)",
+            "desc": "Best available free vision model",
+            "vision": best_free_vision,
+            "summary": best_free_text,
+            "text": best_free_text,
+            "tier": "free",
+        })
+    if second_free_vision and best_free_text:
+        curated.append({
+            "id": "free-alt",
+            "label": _short_name(by_id.get(second_free_vision, {})) + " (Free)",
+            "desc": "Alternative free vision model",
+            "vision": second_free_vision,
+            "summary": best_free_text,
+            "text": best_free_text,
+            "tier": "free",
+        })
+
+    # Add more free vision options (up to 4 total free combos)
+    for i, fv in enumerate(free_vision[2:6], start=3):
+        curated.append({
+            "id": f"free-{i}",
+            "label": _short_name(fv) + " (Free)",
+            "desc": f"Free vision model #{i}",
+            "vision": fv["id"],
+            "summary": best_free_text or fv["id"],
+            "text": best_free_text or fv["id"],
+            "tier": "free",
+        })
+
+    # Static paid tiers (these are stable model IDs unlikely to vanish)
+    paid_combos = [
+        {
+            "id": "efficient",
+            "label": "Gemini 2.5 Flash",
+            "desc": "Fastest paid model — great value",
+            "vision": "google/gemini-2.5-flash",
+            "summary": "google/gemini-2.5-flash",
+            "text": "google/gemini-2.5-flash",
+            "tier": "efficient",
+        },
+        {
+            "id": "balanced",
+            "label": "Flash + Gemini Pro",
+            "desc": "Fast vision & summary, smart clip detection",
+            "vision": "google/gemini-2.5-flash",
+            "summary": "google/gemini-2.5-flash",
+            "text": "google/gemini-2.5-pro",
+            "tier": "balanced",
+        },
+        {
+            "id": "premium",
+            "label": "Gemini Pro + Claude",
+            "desc": "Best quality, highest accuracy",
+            "vision": "google/gemini-2.5-pro",
+            "summary": "google/gemini-2.5-flash",
+            "text": "anthropic/claude-sonnet-4",
+            "tier": "premium",
+        },
+        {
+            "id": "gemini-pro-full",
+            "label": "Gemini 2.5 Pro (Full)",
+            "desc": "Gemini Pro for everything",
+            "vision": "google/gemini-2.5-pro",
+            "summary": "google/gemini-2.5-pro",
+            "text": "google/gemini-2.5-pro",
+            "tier": "premium",
+        },
+    ]
+    curated.extend(paid_combos)
+
+    result = []
+    for combo in curated:
+        v_model = by_id.get(combo["vision"])
+        s_model = by_id.get(combo.get("summary", combo["text"]))
+        t_model = by_id.get(combo["text"])
+
+        v_cost = _estimate_cost(v_model, "vision") if v_model else 0
+        s_cost = _estimate_cost(s_model, "text") if s_model else 0
+        t_cost = _estimate_cost(t_model, "text") if t_model else 0
+        total_cost = v_cost + s_cost + t_cost
+
+        summary_id = combo.get("summary", combo["text"])
+        result.append({
+            "id": combo["id"],
+            "label": combo["label"],
+            "desc": combo["desc"],
+            "tier": combo["tier"],
+            "vision_model": combo["vision"],
+            "summary_model": summary_id,
+            "text_model": combo["text"],
+            "vision_model_name": v_model.get("name", combo["vision"]) if v_model else combo["vision"],
+            "summary_model_name": s_model.get("name", summary_id) if s_model else summary_id,
+            "text_model_name": t_model.get("name", combo["text"]) if t_model else combo["text"],
+            "cost_per_10min": round(total_cost, 4),
+            "cost_per_10min_display": f"${total_cost:.4f}" if total_cost > 0 else "FREE",
+            "available": v_model is not None and t_model is not None,
+        })
+
+    # Count stats
+    total_free_vision = len(free_vision)
+    total_free_text = len(free_text)
+
+    return {
+        "models": result,
+        "free_vision_count": total_free_vision,
+        "free_text_count": total_free_text,
+    }
+
+
+def _short_name(model_data: dict) -> str:
+    """Extract a short display name from a model's full name."""
+    name = model_data.get("name", model_data.get("id", "Unknown"))
+    # Remove common suffixes/prefixes for brevity
+    for remove in ["(free)", "(Free)", ":free"]:
+        name = name.replace(remove, "").strip()
+    return name
+
+
+def _is_zero_cost(model_data: dict) -> bool:
+    """Check if a model has zero pricing."""
+    pricing = model_data.get("pricing", {})
+    try:
+        prompt = float(pricing.get("prompt", "1"))
+        completion = float(pricing.get("completion", "1"))
+        return prompt == 0 and completion == 0
+    except (ValueError, TypeError):
+        return False
+
+
+async def _fetch_openrouter_models() -> list | None:
+    """Fetch model list from OpenRouter, using cache if fresh."""
+    # Check cache first
+    if os.path.exists(MODEL_CACHE_PATH):
+        try:
+            with open(MODEL_CACHE_PATH, "r") as f:
+                cache = json.load(f)
+            if time.time() - cache.get("timestamp", 0) < MODEL_CACHE_TTL:
+                return cache.get("raw_models", [])
+        except Exception:
+            pass
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://openrouter.ai/api/v1/models",
+                headers={"Authorization": f"Bearer {settings.OPENROUTER_API_KEY}"},
+            )
+            resp.raise_for_status()
+            models = resp.json().get("data", [])
+    except Exception as e:
+        logger.warning(f"Failed to fetch OpenRouter models: {e}")
+        return None
+
+    # Save to cache (include raw models for reuse)
+    _save_model_cache(models)
+    return models
+
+
+def _save_model_cache(models: list):
+    """Save raw model list to cache file."""
+    vision_models = []
+    text_models = []
+    for m in models:
+        model_id = m.get("id", "")
+        model_info = {
+            "id": model_id,
+            "name": m.get("name", model_id),
+            "pricing": m.get("pricing", {}),
+            "context_length": m.get("context_length", 0),
+        }
+        architecture = m.get("architecture", {})
+        modality = architecture.get("modality", "")
+        if "image" in modality:
+            vision_models.append(model_info)
+        text_models.append(model_info)
+
+    cache_data = {
+        "timestamp": time.time(),
+        "raw_models": models,
+        "data": {
+            "vision_models": vision_models,
+            "text_models": text_models,
+            "cached": True,
+        },
+    }
+    os.makedirs(os.path.dirname(MODEL_CACHE_PATH), exist_ok=True)
+    try:
+        with open(MODEL_CACHE_PATH, "w") as f:
+            json.dump(cache_data, f)
+    except Exception as e:
+        logger.warning(f"Failed to save model cache: {e}")
+
+
+def _estimate_cost(model_data: dict, role: str) -> float:
+    """Estimate cost for a 10-minute video based on model pricing."""
+    pricing = model_data.get("pricing", {})
+    try:
+        prompt_price = float(pricing.get("prompt", "0"))  # per token
+        completion_price = float(pricing.get("completion", "0"))  # per token
+    except (ValueError, TypeError):
+        return 0.0
+
+    if role == "vision":
+        return (prompt_price * _VISION_INPUT_TOKENS_10MIN +
+                completion_price * _VISION_OUTPUT_TOKENS_10MIN)
+    else:
+        return (prompt_price * _TEXT_INPUT_TOKENS_10MIN +
+                completion_price * _TEXT_OUTPUT_TOKENS_10MIN)
+
+
+@router.get("/providers/models")
+async def list_models():
+    """Fetch OpenRouter model list, cached for 24h."""
+    # Check cache
+    if os.path.exists(MODEL_CACHE_PATH):
+        try:
+            with open(MODEL_CACHE_PATH, "r") as f:
+                cache = json.load(f)
+            if time.time() - cache.get("timestamp", 0) < MODEL_CACHE_TTL:
+                cached_data = cache.get("data", {})
+                if cached_data:
+                    return cached_data
+        except Exception:
+            pass
+
+    # Fetch from OpenRouter
+    if not _key_is_set(settings.OPENROUTER_API_KEY):
+        return {"vision_models": [], "text_models": [], "cached": False}
+
+    models = await _fetch_openrouter_models()
+    if models is None:
+        return {"vision_models": [], "text_models": [], "cached": False}
+
+    # Return from the cache that _fetch_openrouter_models just wrote
+    try:
+        with open(MODEL_CACHE_PATH, "r") as f:
+            cache = json.load(f)
+        return cache.get("data", {"vision_models": [], "text_models": [], "cached": True})
+    except Exception:
+        return {"vision_models": [], "text_models": [], "cached": False}
+
+
+@router.post("/providers/models/refresh")
+async def refresh_models():
+    """Force-refresh the model list from OpenRouter (clears cache)."""
+    # Delete cache to force re-fetch
+    if os.path.exists(MODEL_CACHE_PATH):
+        try:
+            os.remove(MODEL_CACHE_PATH)
+        except Exception:
+            pass
+
+    if not _key_is_set(settings.OPENROUTER_API_KEY):
+        return {"status": "error", "message": "OpenRouter API key not configured"}
+
+    models = await _fetch_openrouter_models()
+    if models is None:
+        return {"status": "error", "message": "Failed to fetch models from OpenRouter"}
+
+    # Count vision models
+    vision_count = 0
+    free_vision_count = 0
+    for m in models:
+        arch = m.get("architecture", {})
+        modality = arch.get("modality", "")
+        if "image" in modality:
+            vision_count += 1
+            if ":free" in m.get("id", "") or _is_zero_cost(m):
+                free_vision_count += 1
+
+    return {
+        "status": "refreshed",
+        "total_models": len(models),
+        "vision_models": vision_count,
+        "free_vision_models": free_vision_count,
+        "message": f"Loaded {len(models)} models ({vision_count} with vision, {free_vision_count} free vision)",
+    }
+
+
+# ── Per-Task Model Selection ──────────────────────────────────────
+
+# Whisper model options (always available locally, free)
+_WHISPER_MODELS = [
+    {"id": "tiny", "name": "Whisper Tiny", "provider": "local", "desc": "Fastest, least accurate (~39M params)", "cost_per_hour": 0, "is_free": True, "quality_score": 1, "quality": "poor"},
+    {"id": "base", "name": "Whisper Base", "provider": "local", "desc": "Fast, low accuracy (~74M params)", "cost_per_hour": 0, "is_free": True, "quality_score": 2, "quality": "basic"},
+    {"id": "small", "name": "Whisper Small", "provider": "local", "desc": "Good accuracy/speed balance (~244M params, default)", "cost_per_hour": 0, "is_free": True, "quality_score": 3, "quality": "good"},
+    {"id": "medium", "name": "Whisper Medium", "provider": "local", "desc": "High accuracy, slower (~769M params)", "cost_per_hour": 0, "is_free": True, "quality_score": 4, "quality": "excellent"},
+    {"id": "large-v3", "name": "Whisper Large V3", "provider": "local", "desc": "Best accuracy, needs GPU (~1.5B params)", "cost_per_hour": 0, "is_free": True, "quality_score": 5, "quality": "best"},
+]
+
+# Known models for direct providers (when user has their API key)
+# "created" = approximate release Unix timestamp so sorting by recency works
+_ANTHROPIC_MODELS = [
+    {"id": "anthropic/claude-sonnet-4", "name": "Claude Sonnet 4", "provider": "anthropic", "context_length": 200000, "vision": True, "created": 1747872000, "quality_score": 4, "quality": "excellent"},
+    {"id": "anthropic/claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5", "provider": "anthropic", "context_length": 200000, "vision": True, "created": 1727740800, "quality_score": 3, "quality": "good"},
+]
+
+_GEMINI_MODELS = [
+    {"id": "google/gemini-2.5-flash", "name": "Gemini 2.5 Flash", "provider": "gemini", "context_length": 1000000, "vision": True, "created": 1744502400, "quality_score": 3, "quality": "good"},
+    {"id": "google/gemini-2.5-pro", "name": "Gemini 2.5 Pro", "provider": "gemini", "context_length": 1000000, "vision": True, "created": 1742860800, "quality_score": 4, "quality": "excellent"},
+    {"id": "google/gemini-2.0-flash", "name": "Gemini 2.0 Flash", "provider": "gemini", "context_length": 1000000, "vision": True, "created": 1738886400, "quality_score": 3, "quality": "good"},
+]
+
+
+def _cost_per_hour(model_data: dict, role: str) -> float:
+    """Estimate cost for a 1-hour video based on model pricing."""
+    return _estimate_cost(model_data, role) * 6  # 6 × 10-min segments
+
+
+@router.get("/providers/models/available")
+async def available_models():
+    """Return all available models grouped by task (transcript, vision, text).
+    Each list is sorted: free/cheapest first. Filtered by capability."""
+
+    transcript = list(_WHISPER_MODELS)
+    vision = []
+    text = []
+
+    # Always add the OpenRouter free auto-router at the top
+    if _key_is_set(settings.OPENROUTER_API_KEY):
+        _auto_speed = _estimate_speed("openrouter/free", "vision", True)
+        _auto = {
+            "id": "openrouter/free", "name": "Free Auto-Router",
+            "provider": "openrouter", "cost_per_hour": 0, "is_free": True,
+            "context_length": 0, "created": int(time.time()),
+            "desc": "Auto-routes to best available free model",
+            **_auto_speed,
+        }
+        vision.append(dict(_auto))
+        text.append({**_auto, **_estimate_speed("openrouter/free", "text", True)})
+
+    # Fetch OpenRouter models
+    all_models = await _fetch_openrouter_models() if _key_is_set(settings.OPENROUTER_API_KEY) else None
+
+    if all_models:
+        for m in all_models:
+            mid = m.get("id", "")
+            if mid == "openrouter/free":
+                continue  # already added above
+            name = m.get("name", mid)
+            arch = m.get("architecture", {})
+            modality = arch.get("modality", "")
+            has_vision = "image" in modality
+            is_free = ":free" in mid or _is_zero_cost(m)
+            ctx = m.get("context_length", 0)
+            created = m.get("created", 0)  # Unix timestamp
+
+            entry_base = {
+                "id": mid, "name": name, "provider": "openrouter",
+                "is_free": is_free, "context_length": ctx, "created": created,
+            }
+
+            if has_vision:
+                v_cost = _cost_per_hour(m, "vision")
+                v_speed = _estimate_speed(mid, "vision", is_free)
+                vision.append({**entry_base, "cost_per_hour": round(v_cost, 4),
+                               "desc": f"{'FREE' if is_free else f'~${v_cost:.3f}/hr'} — {ctx:,} ctx",
+                               **v_speed})
+
+            t_cost = _cost_per_hour(m, "text")
+            t_speed = _estimate_speed(mid, "text", is_free)
+            text.append({**entry_base, "cost_per_hour": round(t_cost, 4),
+                         "desc": f"{'FREE' if is_free else f'~${t_cost:.3f}/hr'} — {ctx:,} ctx",
+                         **t_speed})
+
+    # Add direct provider models if keys are set
+    if _key_is_set(settings.ANTHROPIC_API_KEY):
+        for m in _ANTHROPIC_MODELS:
+            mid = m["id"]
+            entry = {**m, "cost_per_hour": 0, "is_free": False,
+                     "desc": f"Direct Anthropic API — {m['context_length']:,} ctx"}
+            if m.get("vision"):
+                vision.append({**entry, **_estimate_speed(mid, "vision", False)})
+            text.append({**entry, **_estimate_speed(mid, "text", False)})
+
+    if _key_is_set(settings.GEMINI_API_KEY):
+        for m in _GEMINI_MODELS:
+            mid = m["id"]
+            entry = {**m, "cost_per_hour": 0, "is_free": False,
+                     "desc": f"Direct Gemini API — {m['context_length']:,} ctx"}
+            if m.get("vision"):
+                vision.append({**entry, **_estimate_speed(mid, "vision", False)})
+            text.append({**entry, **_estimate_speed(mid, "text", False)})
+
+    # Sort: free first, then newer + cheaper towards the top
+    # Within free models: newest first.  Within paid: newest first, then cheapest.
+    def _sort_key(m):
+        is_paid = 0 if m.get("is_free") else 1
+        newest_first = -(m.get("created", 0))  # negate so newer = smaller = first
+        cost = m.get("cost_per_hour", 999)
+        return (is_paid, newest_first, cost)
+
+    vision.sort(key=_sort_key)
+    text.sort(key=_sort_key)
+
+    # Limit to top 100 per category to avoid overwhelming the UI
+    return {
+        "transcript": transcript,
+        "vision": vision[:100],
+        "text": text[:100],
+        "current": {
+            "transcript_model": settings.WHISPER_MODEL,
+            "vision_model": settings.OPENROUTER_VISION_MODEL,
+            "text_model": settings.OPENROUTER_TEXT_MODEL,
+        },
+    }
+
+
+class SaveModelsRequest(BaseModel):
+    transcript_model: str = ""
+    vision_model: str = ""
+    text_model: str = ""
+
+
+@router.post("/providers/models/save")
+async def save_models(req: SaveModelsRequest):
+    """Save per-task model selections to settings and .env."""
+    env_path = _find_env_file()
+
+    if req.transcript_model:
+        settings.WHISPER_MODEL = req.transcript_model
+        if env_path:
+            _upsert_env_var(env_path, "WHISPER_MODEL", req.transcript_model)
+
+    if req.vision_model:
+        settings.OPENROUTER_VISION_MODEL = req.vision_model
+        settings.OPENROUTER_PRESET = "custom"
+        if env_path:
+            _upsert_env_var(env_path, "OPENROUTER_VISION_MODEL", req.vision_model)
+            _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
+
+    if req.text_model:
+        settings.OPENROUTER_TEXT_MODEL = req.text_model
+        settings.OPENROUTER_SUMMARY_MODEL = req.text_model
+        settings.OPENROUTER_PRESET = "custom"
+        if env_path:
+            _upsert_env_var(env_path, "OPENROUTER_TEXT_MODEL", req.text_model)
+            _upsert_env_var(env_path, "OPENROUTER_SUMMARY_MODEL", req.text_model)
+            _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
+
+    _invalidate_status_cache()
+    _persist_user_settings()
+    return {
+        "status": "saved",
+        "transcript_model": settings.WHISPER_MODEL,
+        "vision_model": settings.OPENROUTER_VISION_MODEL,
+        "text_model": settings.OPENROUTER_TEXT_MODEL,
+    }
+
+
+# ── Transcription Settings ────────────────────────────────────────
+
+
+class SaveTranscriptionSettingsRequest(BaseModel):
+    beam_size: Optional[int] = None      # 1-5
+    vad_filter: Optional[bool] = None
+    frame_sample_rate: Optional[int] = None  # 5-30 seconds
+
+
+@router.get("/transcription/settings")
+async def get_transcription_settings():
+    """Return current transcription speed/quality settings."""
+    return {
+        "whisper_model": settings.WHISPER_MODEL,
+        "beam_size": settings.WHISPER_BEAM_SIZE,
+        "vad_filter": settings.WHISPER_VAD_FILTER,
+        "frame_sample_rate": settings.FRAME_SAMPLE_RATE,
+    }
+
+
+@router.post("/transcription/settings")
+async def save_transcription_settings(req: SaveTranscriptionSettingsRequest):
+    """Save transcription speed/quality settings."""
+    env_path = _find_env_file()
+
+    if req.beam_size is not None:
+        clamped = max(1, min(5, req.beam_size))
+        settings.WHISPER_BEAM_SIZE = clamped
+        if env_path:
+            _upsert_env_var(env_path, "WHISPER_BEAM_SIZE", str(clamped))
+
+    if req.vad_filter is not None:
+        settings.WHISPER_VAD_FILTER = req.vad_filter
+        if env_path:
+            _upsert_env_var(env_path, "WHISPER_VAD_FILTER", str(req.vad_filter))
+
+    if req.frame_sample_rate is not None:
+        clamped = max(5, min(30, req.frame_sample_rate))
+        settings.FRAME_SAMPLE_RATE = clamped
+        if env_path:
+            _upsert_env_var(env_path, "FRAME_SAMPLE_RATE", str(clamped))
+
+    _invalidate_status_cache()
+    _persist_user_settings()
+    return {
+        "status": "saved",
+        "beam_size": settings.WHISPER_BEAM_SIZE,
+        "vad_filter": settings.WHISPER_VAD_FILTER,
+        "frame_sample_rate": settings.FRAME_SAMPLE_RATE,
+    }
+
+
+# ── Encoding Settings ─────────────────────────────────────────────
+
+_VALID_PRESETS = {"ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"}
+
+
+class SaveEncodingSettingsRequest(BaseModel):
+    preset: Optional[str] = None
+    crf: Optional[int] = None
+    threads: Optional[int] = None
+    faststart: Optional[bool] = None
+
+
+@router.get("/encoding/settings")
+async def get_encoding_settings():
+    """Return current FFmpeg encoding settings."""
+    return {
+        "preset": settings.FFMPEG_PRESET,
+        "crf": settings.FFMPEG_CRF,
+        "threads": settings.FFMPEG_THREADS,
+        "faststart": settings.FFMPEG_FASTSTART,
+    }
+
+
+@router.post("/encoding/settings")
+async def save_encoding_settings(req: SaveEncodingSettingsRequest):
+    """Save FFmpeg encoding settings."""
+    env_path = _find_env_file()
+
+    if req.preset is not None and req.preset in _VALID_PRESETS:
+        settings.FFMPEG_PRESET = req.preset
+        if env_path:
+            _upsert_env_var(env_path, "FFMPEG_PRESET", req.preset)
+
+    if req.crf is not None:
+        clamped = max(0, min(51, req.crf))
+        settings.FFMPEG_CRF = clamped
+        if env_path:
+            _upsert_env_var(env_path, "FFMPEG_CRF", str(clamped))
+
+    if req.threads is not None:
+        clamped = max(0, min(32, req.threads))
+        settings.FFMPEG_THREADS = clamped
+        if env_path:
+            _upsert_env_var(env_path, "FFMPEG_THREADS", str(clamped))
+
+    if req.faststart is not None:
+        settings.FFMPEG_FASTSTART = req.faststart
+        if env_path:
+            _upsert_env_var(env_path, "FFMPEG_FASTSTART", str(req.faststart))
+
+    _persist_user_settings()
+    return {
+        "status": "saved",
+        "preset": settings.FFMPEG_PRESET,
+        "crf": settings.FFMPEG_CRF,
+        "threads": settings.FFMPEG_THREADS,
+        "faststart": settings.FFMPEG_FASTSTART,
+    }
+
+
+# ── Subject Tracking ──────────────────────────────────────────────
+
+
+@router.get("/subject-tracking")
+async def get_subject_tracking():
+    """Return current subject tracking enabled state."""
+    return {"enabled": settings.SUBJECT_TRACKING_ENABLED}
+
+
+class SubjectTrackingRequest(BaseModel):
+    enabled: bool
+
+
+@router.post("/subject-tracking")
+async def set_subject_tracking(req: SubjectTrackingRequest):
+    """Toggle subject tracking on/off."""
+    settings.SUBJECT_TRACKING_ENABLED = req.enabled
+    _persist_user_settings()
+    return {"status": "saved", "enabled": settings.SUBJECT_TRACKING_ENABLED}
+
+
+# ── Prompt Management ──────────────────────────────────────────────
+
+
+class SavePromptsRequest(BaseModel):
+    frame_analysis: Optional[str] = None
+    viral_clip_detection: Optional[str] = None
+    subject_tracking: Optional[str] = None
+
+
+@router.get("/prompts")
+async def get_prompts():
+    """Return current custom prompts and defaults."""
+    current = load_prompts()
+    defaults = get_defaults()
+    return {
+        "current": current.model_dump(),
+        "defaults": defaults.model_dump(),
+    }
+
+
+@router.post("/prompts")
+async def update_prompts(req: SavePromptsRequest):
+    """Save custom prompts. Pass null/empty to reset a prompt to default."""
+    current = load_prompts()
+    defaults = get_defaults()
+
+    if req.frame_analysis is not None:
+        text = req.frame_analysis.strip()
+        if len(text) > MAX_PROMPT_LENGTH:
+            return {
+                "status": "error",
+                "message": f"Frame analysis prompt exceeds {MAX_PROMPT_LENGTH} characters",
+            }
+        current.frame_analysis = text if text else defaults.frame_analysis
+
+    if req.viral_clip_detection is not None:
+        text = req.viral_clip_detection.strip()
+        if len(text) > MAX_PROMPT_LENGTH:
+            return {
+                "status": "error",
+                "message": f"Viral clip detection prompt exceeds {MAX_PROMPT_LENGTH} characters",
+            }
+        current.viral_clip_detection = text if text else defaults.viral_clip_detection
+
+    if req.subject_tracking is not None:
+        text = req.subject_tracking.strip()
+        if len(text) > MAX_PROMPT_LENGTH:
+            return {
+                "status": "error",
+                "message": f"Subject tracking prompt exceeds {MAX_PROMPT_LENGTH} characters",
+            }
+        current.subject_tracking = text if text else defaults.subject_tracking
+
+    save_prompts(current)
+    return {"status": "saved", "prompts": current.model_dump()}
+
+
+@router.post("/prompts/reset")
+async def reset_prompts():
+    """Reset all prompts to defaults."""
+    defaults = get_defaults()
+    save_prompts(defaults)
+    return {"status": "reset", "prompts": defaults.model_dump()}

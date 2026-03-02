@@ -1,0 +1,1468 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import ModelBrowser from '../components/ModelBrowser';
+import CostTracker from '../components/CostTracker';
+import { showToast } from '../components/Toast';
+import useResponsive from '../hooks/useResponsive';
+
+const FONT_ACCEPT = '.ttf,.otf,.woff,.woff2,.eot,.TTF,.OTF,.WOFF,.WOFF2,.EOT';
+
+const PROVIDER_KEYS = [
+  { name: 'openrouter', label: 'OpenRouter', placeholder: 'sk-or-v1-...', helpUrl: 'https://openrouter.ai/keys', helpText: '300+ AI models through one key — free tier available' },
+  { name: 'anthropic', label: 'Anthropic', placeholder: 'sk-ant-...', helpUrl: 'https://console.anthropic.com/settings/keys', helpText: 'Claude models — best for complex reasoning' },
+  { name: 'gemini', label: 'Google Gemini', placeholder: 'AIza...', helpUrl: 'https://aistudio.google.com/apikey', helpText: 'Gemini models — great vision + long context' },
+];
+
+// Shared styles
+const dropdownStyle = {
+  width: '100%', padding: '8px 12px', background: 'var(--bg-panel)',
+  border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)',
+  fontSize: 12, fontFamily: 'var(--font-mono)', boxSizing: 'border-box',
+  appearance: 'none', cursor: 'pointer',
+  backgroundImage: 'url("data:image/svg+xml,%3csvg xmlns=\'http://www.w3.org/2000/svg\' fill=\'none\' viewBox=\'0 0 20 20\'%3e%3cpath stroke=\'%236b7280\' stroke-linecap=\'round\' stroke-linejoin=\'round\' stroke-width=\'1.5\' d=\'M6 8l4 4 4-4\'/%3e%3c/svg%3e")',
+  backgroundPosition: 'right 8px center', backgroundRepeat: 'no-repeat', backgroundSize: '16px',
+  paddingRight: 28,
+};
+
+const TAB_NAME_TO_INDEX = { 'ai-provider': 0, prompts: 1, fonts: 2, presets: 3, advanced: 4, 'usage-costs': 5 };
+
+export default function Settings() {
+  const { isMobile } = useResponsive();
+  const [searchParams] = useSearchParams();
+  const [settingsTab, setSettingsTab] = useState(() => {
+    const tab = searchParams.get('tab');
+    return tab && TAB_NAME_TO_INDEX[tab] !== undefined ? TAB_NAME_TO_INDEX[tab] : 0;
+  });
+  const [statuses, setStatuses] = useState({});
+  const viralAlgorithmRef = useRef(null);
+
+  // Auto-scroll to section when navigated with ?section=viral-algorithm
+  useEffect(() => {
+    const section = searchParams.get('section');
+    if (section === 'viral-algorithm' && settingsTab === 1) {
+      // Small delay to let the tab content render
+      const timer = setTimeout(() => {
+        viralAlgorithmRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 150);
+      return () => clearTimeout(timer);
+    }
+  }, [settingsTab, searchParams]);
+
+  // Per-provider API key state
+  const [providerKeys, setProviderKeys] = useState({});
+  const [providerSaving, setProviderSaving] = useState({});
+  const [providerTesting, setProviderTesting] = useState({});
+  const [providerResults, setProviderResults] = useState({});
+
+  // Per-task model selection
+  const [availableModels, setAvailableModels] = useState({ transcript: [], vision: [], text: [] });
+  const [currentModels, setCurrentModels] = useState({ transcript_model: '', vision_model: '', text_model: '' });
+  const [pendingModels, setPendingModels] = useState({ transcript_model: '', vision_model: '', text_model: '' });
+  const [modelsSaving, setModelsSaving] = useState(false);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Transcription speed settings
+  const [transSettings, setTransSettings] = useState({ beam_size: 1, vad_filter: true, frame_sample_rate: 10 });
+  const [transSaved, setTransSaved] = useState({ beam_size: 1, vad_filter: true, frame_sample_rate: 10 });
+  const [transSaving, setTransSaving] = useState(false);
+
+  // Prompt customization state
+  const [prompts, setPrompts] = useState({ frame_analysis: '', viral_clip_detection: '', subject_tracking: '' });
+  const [promptDefaults, setPromptDefaults] = useState({ frame_analysis: '', viral_clip_detection: '', subject_tracking: '' });
+  const [promptsSaving, setPromptsSaving] = useState(false);
+  const [promptsLoaded, setPromptsLoaded] = useState(false);
+
+  // Subject tracking toggle
+  const [subjectTrackingEnabled, setSubjectTrackingEnabled] = useState(true);
+  const [subjectTrackingSaving, setSubjectTrackingSaving] = useState(false);
+
+  // Font management state
+  const [customFonts, setCustomFonts] = useState([]);
+  const [fontUploading, setFontUploading] = useState(false);
+  const fontInputRef = useRef(null);
+
+  // Preset management state
+  const [presets, setPresets] = useState([]);
+  const [editingPresetId, setEditingPresetId] = useState(null);
+  const [editPresetName, setEditPresetName] = useState('');
+
+  // Load provider statuses
+  useEffect(() => {
+    fetch('/api/providers/status')
+      .then((r) => r.json())
+      .then(setStatuses)
+      .catch(() => {});
+  }, []);
+
+  // Load presets
+  useEffect(() => {
+    fetch('/api/clip-presets')
+      .then((r) => r.ok ? r.json() : [])
+      .then(setPresets)
+      .catch(() => {});
+  }, []);
+
+  // Load transcription settings
+  useEffect(() => {
+    fetch('/api/transcription/settings')
+      .then((r) => r.json())
+      .then((data) => {
+        const s = { beam_size: data.beam_size ?? 1, vad_filter: data.vad_filter ?? true, frame_sample_rate: data.frame_sample_rate ?? 10 };
+        setTransSettings(s);
+        setTransSaved(s);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Load prompts
+  useEffect(() => {
+    fetch('/api/prompts')
+      .then((r) => r.json())
+      .then((data) => {
+        setPrompts(data.current);
+        setPromptDefaults(data.defaults);
+        setPromptsLoaded(true);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Load subject tracking toggle
+  useEffect(() => {
+    fetch('/api/subject-tracking')
+      .then((r) => r.json())
+      .then((data) => setSubjectTrackingEnabled(data.enabled))
+      .catch(() => {});
+  }, []);
+
+  // Load custom fonts
+  useEffect(() => {
+    fetch('/api/fonts')
+      .then((r) => r.ok ? r.json() : [])
+      .then(setCustomFonts)
+      .catch(() => {});
+  }, []);
+
+  const handleFontUpload = async (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    setFontUploading(true);
+    try {
+      for (const file of files) {
+        const form = new FormData();
+        form.append('file', file);
+        const res = await fetch('/api/fonts/upload', { method: 'POST', body: form });
+        if (!res.ok) { showToast(`Failed to upload ${file.name}`, 'error'); continue; }
+        const font = await res.json();
+        setCustomFonts((prev) => prev.some((f) => f.name === font.name) ? prev : [...prev, font]);
+        showToast(`Font "${font.name}" uploaded`, 'success');
+      }
+    } catch { showToast('Font upload failed', 'error'); }
+    setFontUploading(false);
+    e.target.value = '';
+  };
+
+  const handleDeleteFont = async (font) => {
+    try {
+      await fetch(`/api/fonts/${encodeURIComponent(font.filename)}`, { method: 'DELETE' });
+      setCustomFonts((prev) => prev.filter((f) => f.name !== font.name));
+      showToast(`Font "${font.name}" removed`, 'info');
+    } catch { showToast('Failed to remove font', 'error'); }
+  };
+
+  // Load available models when any provider is configured
+  const loadAvailableModels = async () => {
+    setModelsLoading(true);
+    try {
+      const res = await fetch('/api/providers/models/available');
+      if (res.ok) {
+        const data = await res.json();
+        setAvailableModels({ transcript: data.transcript || [], vision: data.vision || [], text: data.text || [] });
+        if (data.current) {
+          setCurrentModels(data.current);
+          setPendingModels(data.current);
+        }
+      }
+    } catch {} finally {
+      setModelsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadAvailableModels();
+  }, []);
+
+  // Reload models when provider status changes
+  useEffect(() => {
+    const hasProvider = statuses.openrouter?.status === 'configured' || statuses.openrouter?.status === 'connected'
+      || statuses.anthropic?.status === 'configured' || statuses.gemini?.status === 'configured';
+    if (hasProvider) loadAvailableModels();
+  }, [statuses.openrouter?.status, statuses.anthropic?.status, statuses.gemini?.status]);
+
+  // Save & test a provider key
+  const handleSaveKey = async (providerName) => {
+    const key = (providerKeys[providerName] || '').trim();
+    if (!key) { showToast('Enter an API key first', 'warning'); return; }
+    setProviderSaving((p) => ({ ...p, [providerName]: true }));
+    try {
+      const res = await fetch('/api/providers/key', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: providerName, key }),
+      });
+      if (res.ok) {
+        showToast('Key saved! Testing...', 'info');
+        await handleTestProvider(providerName);
+        loadAvailableModels();
+      } else {
+        showToast('Failed to save key', 'error');
+      }
+    } catch {
+      showToast('Failed to save key', 'error');
+    } finally {
+      setProviderSaving((p) => ({ ...p, [providerName]: false }));
+    }
+  };
+
+  const handleTestProvider = async (providerName) => {
+    setProviderTesting((p) => ({ ...p, [providerName]: true }));
+    setProviderResults((p) => ({ ...p, [providerName]: null }));
+    try {
+      const res = await fetch(`/api/providers/test/${providerName}`, { method: 'POST' });
+      if (res.ok) {
+        const result = await res.json();
+        setProviderResults((p) => ({ ...p, [providerName]: result }));
+        setStatuses((prev) => ({
+          ...prev,
+          [providerName]: { ...prev[providerName], status: result.status === 'connected' ? 'connected' : result.status === 'invalid_key' ? 'invalid_key' : prev[providerName]?.status || 'configured' },
+        }));
+        if (result.status === 'connected') {
+          showToast(`${providerName}: Connected!`, 'success');
+        } else if (result.status === 'invalid_key') {
+          showToast(`${providerName}: Invalid key`, 'error');
+        } else {
+          showToast(result.message || `${providerName}: ${result.status}`, 'warning');
+        }
+      }
+    } catch {
+      showToast(`Failed to test ${providerName}`, 'error');
+    } finally {
+      setProviderTesting((p) => ({ ...p, [providerName]: false }));
+    }
+  };
+
+  // Buffer a model selection (does NOT save yet)
+  const handleSelectModel = (task, modelId) => {
+    const key = task + '_model';
+    setPendingModels((prev) => ({ ...prev, [key]: modelId }));
+  };
+
+  // Check if any model selection has changed from the saved state
+  const modelsHaveChanges =
+    pendingModels.transcript_model !== currentModels.transcript_model ||
+    pendingModels.vision_model !== currentModels.vision_model ||
+    pendingModels.text_model !== currentModels.text_model;
+
+  // Save all pending model changes at once
+  const handleSaveAllModels = async () => {
+    setModelsSaving(true);
+    const body = {};
+    if (pendingModels.transcript_model !== currentModels.transcript_model)
+      body.transcript_model = pendingModels.transcript_model;
+    if (pendingModels.vision_model !== currentModels.vision_model)
+      body.vision_model = pendingModels.vision_model;
+    if (pendingModels.text_model !== currentModels.text_model)
+      body.text_model = pendingModels.text_model;
+
+    try {
+      const res = await fetch('/api/providers/models/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCurrentModels(data);
+        setPendingModels(data);
+        fetch('/api/providers/status').then((r) => r.json()).then(setStatuses).catch(() => {});
+        showToast('Models saved successfully', 'success');
+      }
+    } catch {
+      showToast('Failed to save models', 'error');
+    } finally {
+      setModelsSaving(false);
+    }
+  };
+
+  // Legacy single-task save for Advanced tab ModelBrowser
+  const handleSaveModel = async (task, modelId) => {
+    const body = {};
+    if (task === 'transcript') body.transcript_model = modelId;
+    if (task === 'vision') body.vision_model = modelId;
+    if (task === 'text') body.text_model = modelId;
+    try {
+      const res = await fetch('/api/providers/models/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCurrentModels(data);
+        setPendingModels(data);
+        fetch('/api/providers/status').then((r) => r.json()).then(setStatuses).catch(() => {});
+        showToast('Model saved', 'success');
+      }
+    } catch {
+      showToast('Failed to save model', 'error');
+    }
+  };
+
+  // Refresh models from OpenRouter
+  const handleRefreshModels = async () => {
+    setRefreshing(true);
+    try {
+      const res = await fetch('/api/providers/models/refresh', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        showToast(data.message || 'Models refreshed', 'success');
+        await loadAvailableModels();
+      }
+    } catch {
+      showToast('Failed to refresh models', 'error');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // Transcription settings handlers
+  const transHasChanges = transSettings.beam_size !== transSaved.beam_size || transSettings.vad_filter !== transSaved.vad_filter || transSettings.frame_sample_rate !== transSaved.frame_sample_rate;
+
+  const handleSaveTransSettings = async () => {
+    setTransSaving(true);
+    try {
+      const res = await fetch('/api/transcription/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(transSettings),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const saved = { beam_size: data.beam_size, vad_filter: data.vad_filter, frame_sample_rate: data.frame_sample_rate };
+        setTransSettings(saved);
+        setTransSaved(saved);
+        fetch('/api/providers/status').then((r) => r.json()).then(setStatuses).catch(() => {});
+        showToast('Transcription settings saved', 'success');
+      }
+    } catch { showToast('Failed to save transcription settings', 'error'); }
+    finally { setTransSaving(false); }
+  };
+
+  // Prompt handlers
+  const handleSavePrompts = async () => {
+    setPromptsSaving(true);
+    try {
+      const res = await fetch('/api/prompts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(prompts),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.status === 'error') showToast(data.message, 'error');
+        else { setPrompts(data.prompts); showToast('Prompts saved', 'success'); }
+      }
+    } catch { showToast('Failed to save prompts', 'error'); }
+    finally { setPromptsSaving(false); }
+  };
+
+  const handleResetAllPrompts = async () => {
+    setPromptsSaving(true);
+    try {
+      const res = await fetch('/api/prompts/reset', { method: 'POST' });
+      if (res.ok) { const data = await res.json(); setPrompts(data.prompts); showToast('Prompts reset', 'success'); }
+    } catch { showToast('Failed to reset', 'error'); }
+    finally { setPromptsSaving(false); }
+  };
+
+  const handleToggleSubjectTracking = async (enabled) => {
+    setSubjectTrackingSaving(true);
+    try {
+      const res = await fetch('/api/subject-tracking', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      if (res.ok) {
+        setSubjectTrackingEnabled(enabled);
+        showToast(`Subject tracking ${enabled ? 'enabled' : 'disabled'}`, 'success');
+      }
+    } catch { showToast('Failed to update subject tracking', 'error'); }
+    finally { setSubjectTrackingSaving(false); }
+  };
+
+  const handleRenamePreset = async (presetId) => {
+    const name = editPresetName.trim();
+    if (!name) return;
+    try {
+      const res = await fetch(`/api/clip-presets/${presetId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (res.ok) {
+        const updated = await res.json();
+        setPresets((prev) => prev.map((p) => p.id === presetId ? updated : p));
+        setEditingPresetId(null);
+        setEditPresetName('');
+        showToast('Preset renamed', 'success');
+      }
+    } catch { showToast('Rename failed', 'error'); }
+  };
+
+  const handleDeletePresetSettings = async (presetId) => {
+    try {
+      const res = await fetch(`/api/clip-presets/${presetId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setPresets((prev) => prev.filter((p) => p.id !== presetId));
+        showToast('Preset deleted', 'success');
+      }
+    } catch { showToast('Delete failed', 'error'); }
+  };
+
+  const handleExportPreset = (preset) => {
+    const blob = new Blob([JSON.stringify(preset, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `preset-${preset.name.replace(/\s+/g, '-')}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const SETTINGS_TABS = ['AI Provider', 'Prompts', 'Fonts', 'Presets', 'Advanced', 'Usage & Costs'];
+  const active = statuses._active || {};
+
+  // Model dropdown renderer
+  // Format Unix timestamp to "Mon YYYY"
+  const formatRelease = (ts) => {
+    if (!ts) return '';
+    const d = new Date(ts * 1000);
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return `${months[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+  };
+
+  const speedBadge = (m) => {
+    if (!m.speed) return '';
+    const label = m.speed === 'fast' ? 'FAST' : m.speed === 'slow' ? 'SLOW' : 'MED';
+    return `[${label}${m.est_time_display ? ' ' + m.est_time_display : ''}]`;
+  };
+
+  const qualityStars = (score) => {
+    if (!score || score < 1) return '';
+    const filled = Math.min(5, Math.max(1, score));
+    return '\u2605'.repeat(filled) + '\u2606'.repeat(5 - filled);
+  };
+
+  const ModelDropdown = ({ task, models, pendingValue, savedValue, label, desc }) => {
+    const isChanged = pendingValue !== savedValue;
+    const selectedModel = models.find((m) => m.id === pendingValue);
+    return (
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+          <h4 style={{ fontSize: 13, margin: 0, color: 'var(--text-primary)' }}>
+            {label}
+            {isChanged && (
+              <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--accent-amber)', marginLeft: 8 }}>
+                unsaved
+              </span>
+            )}
+          </h4>
+          {savedValue && (
+            <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: isChanged ? 'var(--text-muted)' : 'var(--accent-cyan)' }}>
+              {savedValue}
+            </span>
+          )}
+        </div>
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.5 }}>{desc}</p>
+        <div style={{ position: 'relative' }}>
+          <select
+            value={pendingValue || ''}
+            onChange={(e) => handleSelectModel(task, e.target.value)}
+            style={{
+              ...dropdownStyle,
+              borderColor: isChanged ? 'var(--accent-amber)' : undefined,
+            }}
+          >
+            <option value="">-- Select a model --</option>
+            {models.map((m) => {
+              const price = m.is_free ? '[FREE]' : m.cost_per_hour > 0 ? `[$${m.cost_per_hour.toFixed(3)}/hr]` : '';
+              const released = m.created ? `[${formatRelease(m.created)}]` : '';
+              const provider = m.provider !== 'local' ? ` (${m.provider})` : '';
+              const speed = speedBadge(m);
+              const stars = m.quality_score ? qualityStars(m.quality_score) : '';
+              return (
+                <option key={m.id} value={m.id}>
+                  {[stars, speed, price, released, m.name + provider].filter(Boolean).join(' ')}
+                </option>
+              );
+            })}
+          </select>
+        </div>
+        {/* Speed / quality info for selected model */}
+        {selectedModel && (selectedModel.speed || selectedModel.quality_score) && (
+          <div style={{
+            marginTop: 6, padding: '6px 10px', borderRadius: 'var(--radius-sm)',
+            background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+            display: 'flex', gap: 12, alignItems: 'center', fontSize: 11, flexWrap: 'wrap',
+          }}>
+            {selectedModel.speed && (
+              <span style={{
+                padding: '2px 8px', borderRadius: 8, fontWeight: 700, fontSize: 10,
+                fontFamily: 'var(--font-mono)',
+                background: selectedModel.speed === 'fast' ? 'var(--success)' : selectedModel.speed === 'slow' ? 'var(--accent-amber)' : 'var(--accent-cyan)',
+                color: 'var(--bg-base)',
+              }}>
+                {selectedModel.speed === 'fast' ? 'SPEED' : selectedModel.speed === 'slow' ? 'QUALITY' : 'BALANCED'}
+              </span>
+            )}
+            {selectedModel.speed && (
+              <span style={{ color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>
+                10 min video: {selectedModel.est_time_display || '~2min'}
+              </span>
+            )}
+            {selectedModel.quality_score && (
+              <span style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                color: selectedModel.quality_score >= 4 ? 'var(--accent-amber)' : selectedModel.quality_score <= 2 ? 'var(--text-muted)' : 'var(--accent-cyan)',
+              }}>
+                <span style={{ fontSize: 12, letterSpacing: 1 }}>
+                  {qualityStars(selectedModel.quality_score)}
+                </span>
+                <span style={{ fontSize: 10, textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
+                  {selectedModel.quality || `${selectedModel.quality_score}/5`}
+                </span>
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      <h2 style={{ fontSize: isMobile ? 18 : 20, marginBottom: isMobile ? 20 : 24 }}>Settings</h2>
+
+      {/* Settings tabs */}
+      <div className="responsive-tabs" style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)', marginBottom: isMobile ? 20 : 24 }}>
+        {SETTINGS_TABS.map((t, i) => (
+          <button
+            key={t}
+            onClick={() => setSettingsTab(i)}
+            style={{
+              padding: isMobile ? '10px 14px' : '10px 20px', background: 'none', border: 'none',
+              borderBottom: settingsTab === i ? '2px solid var(--accent-cyan)' : '2px solid transparent',
+              color: settingsTab === i ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+              fontSize: 13, fontWeight: settingsTab === i ? 600 : 400, fontFamily: 'var(--font-mono)',
+              whiteSpace: 'nowrap', flexShrink: 0,
+            }}
+          >
+            {t}
+          </button>
+        ))}
+      </div>
+
+      {/* ═══════ Tab 0: AI Provider ═══════ */}
+      {settingsTab === 0 && (
+        <div style={{ maxWidth: isMobile ? '100%' : 640 }}>
+
+          {/* ── Active Models Banner ── */}
+          <div style={{
+            background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)', padding: isMobile ? '12px 14px' : '14px 18px', marginBottom: 24,
+            boxShadow: 'var(--shadow-sm)',
+          }}>
+            <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>
+              Active Models
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: 12 }}>
+              {[
+                { label: 'Transcript', model: active.transcript_model || currentModels.transcript_model || 'base', color: 'var(--accent-amber)' },
+                { label: 'Vision', model: active.vision_model || currentModels.vision_model, color: 'var(--accent-cyan)' },
+                { label: 'Text', model: active.text_model || currentModels.text_model, color: 'var(--success)' },
+              ].map(({ label, model, color }) => (
+                <div key={label}>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 2 }}>{label}</div>
+                  <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color, fontWeight: 600, wordBreak: 'break-all' }}>
+                    {model ? model.replace(/^.*\//, '') : 'Not set'}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* ── API Keys Section ── */}
+          <h3 style={{ fontSize: 14, marginBottom: 12, color: 'var(--text-secondary)' }}>
+            API Keys
+          </h3>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.6 }}>
+            Add API keys for the providers you want to use. Each key is tested automatically after saving.
+          </p>
+
+          <div style={{ display: 'grid', gap: 12, marginBottom: 32 }}>
+            {PROVIDER_KEYS.map((prov) => {
+              const st = statuses[prov.name]?.status || 'not_configured';
+              const isUp = st === 'connected' || st === 'configured';
+              const isBusy = providerSaving[prov.name] || providerTesting[prov.name];
+              const result = providerResults[prov.name];
+              return (
+                <div key={prov.name} style={{
+                  background: 'var(--bg-panel)', border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)', padding: isMobile ? '12px' : '12px 16px',
+                  boxShadow: 'var(--shadow-sm)',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <div style={{
+                      width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+                      background: st === 'connected' ? 'var(--success)' : isUp ? 'var(--accent-cyan)' : st === 'invalid_key' ? 'var(--danger)' : 'var(--text-muted)',
+                    }} />
+                    <span style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>{prov.label}</span>
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                      {isUp ? 'Connected' : st === 'invalid_key' ? 'Invalid' : 'Not configured'}
+                    </span>
+                  </div>
+                  <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.4 }}>
+                    {prov.helpText} —{' '}
+                    <a href={prov.helpUrl} target="_blank" rel="noopener noreferrer"
+                      style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>Get key</a>
+                  </p>
+                  <div style={{ display: 'flex', gap: 6, flexDirection: isMobile ? 'column' : 'row' }}>
+                    <input
+                      type="password"
+                      placeholder={prov.placeholder}
+                      value={providerKeys[prov.name] || ''}
+                      onChange={(e) => setProviderKeys((p) => ({ ...p, [prov.name]: e.target.value }))}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSaveKey(prov.name)}
+                      style={{
+                        flex: 1, padding: '7px 10px', background: 'var(--bg-base)',
+                        border: `1px solid ${isUp ? 'var(--success)' : 'var(--border)'}`,
+                        borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-mono)',
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                    <button
+                      onClick={() => handleSaveKey(prov.name)}
+                      disabled={isBusy || !(providerKeys[prov.name] || '').trim()}
+                      style={{
+                        padding: '7px 14px', background: 'var(--accent-cyan)', color: 'var(--bg-base)',
+                        border: 'none', borderRadius: 'var(--radius-sm)', fontSize: 11, fontWeight: 600,
+                        opacity: isBusy || !(providerKeys[prov.name] || '').trim() ? 0.5 : 1, whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {providerSaving[prov.name] ? 'Saving...' : 'Save & Test'}
+                    </button>
+                    {isUp && (
+                      <button
+                        onClick={() => handleTestProvider(prov.name)}
+                        disabled={isBusy}
+                        style={{
+                          padding: '7px 10px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 11,
+                          opacity: isBusy ? 0.5 : 1, whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {providerTesting[prov.name] ? '...' : 'Test'}
+                      </button>
+                    )}
+                  </div>
+                  {result && (
+                    <div style={{
+                      marginTop: 8, padding: '6px 10px', borderRadius: 'var(--radius-sm)', fontSize: 11, lineHeight: 1.5,
+                      background: result.status === 'connected' ? 'var(--success-dim)' : result.status === 'invalid_key' ? 'var(--danger-dim)' : 'var(--amber-dim)',
+                      color: result.status === 'connected' ? 'var(--success)' : result.status === 'invalid_key' ? 'var(--danger)' : 'var(--accent-amber)',
+                    }}>
+                      {result.message}
+                      {result.usage_usd !== undefined && (
+                        <span style={{ marginLeft: 8, color: 'var(--text-muted)' }}>
+                          Usage: ${Number(result.usage_usd).toFixed(4)}
+                        </span>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {/* Ollama (local) — toggle to enable/disable */}
+            <div style={{
+              background: 'var(--bg-panel)', border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)', padding: '12px 16px',
+              opacity: statuses._active?.ollama_enabled ? 1 : 0.6,
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                <div style={{
+                  width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+                  background: statuses.ollama?.status === 'connected' ? 'var(--success)' : 'var(--text-muted)',
+                }} />
+                <span style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>Ollama (Local)</span>
+                <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 11, color: 'var(--text-secondary)' }}>
+                  {statuses._active?.ollama_enabled ? 'Enabled' : 'Disabled'}
+                  <input
+                    type="checkbox"
+                    checked={!!statuses._active?.ollama_enabled}
+                    onChange={async (e) => {
+                      const enabled = e.target.checked;
+                      try {
+                        const res = await fetch('/api/providers/ollama/toggle', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ enabled }),
+                        });
+                        if (res.ok) {
+                          const data = await res.json();
+                          showToast(enabled ? 'Ollama enabled in fallback chain' : 'Ollama disabled', 'success');
+                          setStatuses(prev => ({
+                            ...prev,
+                            _active: { ...prev._active, ollama_enabled: enabled, fallback_chain: data.chain },
+                          }));
+                        }
+                      } catch {
+                        showToast('Failed to toggle Ollama', 'error');
+                      }
+                    }}
+                    style={{ accentColor: 'var(--accent)' }}
+                  />
+                </label>
+                {statuses._active?.ollama_enabled && (
+                  <button
+                    onClick={() => handleTestProvider('ollama')}
+                    disabled={providerTesting.ollama}
+                    style={{
+                      padding: '4px 10px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                      border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 11,
+                      opacity: providerTesting.ollama ? 0.5 : 1,
+                    }}
+                  >
+                    {providerTesting.ollama ? '...' : 'Test'}
+                  </button>
+                )}
+              </div>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4, margin: 0 }}>
+                No API key needed — runs models locally.
+                {!statuses._active?.ollama_enabled && ' Toggle on to add Ollama as a fallback provider.'}
+                {statuses._active?.ollama_enabled && statuses.ollama?.models_loaded?.length > 0 && (
+                  <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 10, marginTop: 4 }}>
+                    Models: {statuses.ollama.models_loaded.join(', ')}
+                  </span>
+                )}
+              </p>
+            </div>
+          </div>
+
+          {/* ── Model Selection Section ── */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <h3 style={{ fontSize: 14, margin: 0, color: 'var(--text-secondary)' }}>
+              Model Selection
+            </h3>
+            <button
+              onClick={handleRefreshModels}
+              disabled={refreshing}
+              style={{
+                padding: '5px 12px', background: 'var(--bg-elevated)',
+                color: refreshing ? 'var(--text-muted)' : 'var(--accent-cyan)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 11, fontWeight: 500,
+                display: 'flex', alignItems: 'center', gap: 6, opacity: refreshing ? 0.6 : 1,
+              }}
+            >
+              <span style={{ display: 'inline-block', transition: 'transform 0.3s', transform: refreshing ? 'rotate(180deg)' : 'none' }}>
+                &#x21bb;
+              </span>
+              {refreshing ? 'Refreshing...' : 'Refresh Models'}
+            </button>
+          </div>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 20, lineHeight: 1.6 }}>
+            Pick which AI model handles each task. Free models are listed first.
+            Costs shown are estimates per 1-hour video.
+          </p>
+
+          {modelsLoading ? (
+            <div style={{ padding: 16, color: 'var(--text-muted)', fontSize: 12 }}>Loading models...</div>
+          ) : (
+            <>
+              <ModelDropdown
+                task="transcript"
+                models={availableModels.transcript}
+                pendingValue={pendingModels.transcript_model}
+                savedValue={currentModels.transcript_model}
+                label="Transcript AI (Local Whisper)"
+                desc="Speech-to-text runs locally using OpenAI Whisper — always free, no API key needed. Cloud providers like OpenRouter only offer text/vision LLMs, not transcription. Larger models are more accurate but need more RAM/GPU."
+              />
+
+              {/* ── Transcription Speed/Quality ── */}
+              <div style={{
+                background: 'var(--bg-panel)', border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-md)', padding: '14px 16px', marginBottom: 20,
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <h4 style={{ fontSize: 13, margin: 0, color: 'var(--text-primary)' }}>
+                    Transcription Speed
+                    {transHasChanges && (
+                      <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--accent-amber)', marginLeft: 8 }}>
+                        unsaved
+                      </span>
+                    )}
+                  </h4>
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
+                  Control the speed vs accuracy tradeoff. VAD filter skips silence for a major speedup.
+                  Lower beam size is faster but less accurate.
+                </p>
+
+                {/* VAD Filter toggle */}
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, padding: '6px 0' }}>
+                  <div>
+                    <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>Skip Silence (VAD Filter)</span>
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'block' }}>
+                      Skips non-speech sections — 2-3x faster
+                    </span>
+                  </div>
+                  <button
+                    onClick={() => setTransSettings((p) => ({ ...p, vad_filter: !p.vad_filter }))}
+                    style={{
+                      width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
+                      background: transSettings.vad_filter ? 'var(--accent-cyan)' : 'var(--border)',
+                      position: 'relative', transition: 'background 0.2s',
+                    }}
+                  >
+                    <div style={{
+                      width: 18, height: 18, borderRadius: '50%', background: 'white',
+                      position: 'absolute', top: 3,
+                      left: transSettings.vad_filter ? 23 : 3,
+                      transition: 'left 0.2s',
+                    }} />
+                  </button>
+                </div>
+
+                {/* Beam Size slider */}
+                <div style={{ padding: '6px 0' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                    <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>Beam Size</span>
+                    <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
+                      {transSettings.beam_size === 1 ? '1 (Fast)' : transSettings.beam_size >= 5 ? '5 (Accurate)' : transSettings.beam_size}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>Fast</span>
+                    <input
+                      type="range"
+                      min="1"
+                      max="5"
+                      value={transSettings.beam_size}
+                      onChange={(e) => setTransSettings((p) => ({ ...p, beam_size: parseInt(e.target.value) }))}
+                      style={{ flex: 1, accentColor: 'var(--accent-cyan)' }}
+                    />
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>Accurate</span>
+                  </div>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'block', marginTop: 4 }}>
+                    1 = greedy (fastest), 5 = beam search (most accurate)
+                  </span>
+                </div>
+
+                {/* Frame Sample Rate slider */}
+                <div style={{ padding: '6px 0' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                    <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>Frame Sample Rate</span>
+                    <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
+                      Every {transSettings.frame_sample_rate}s
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>5s</span>
+                    <input
+                      type="range"
+                      min="5"
+                      max="30"
+                      step="5"
+                      value={transSettings.frame_sample_rate}
+                      onChange={(e) => setTransSettings((p) => ({ ...p, frame_sample_rate: parseInt(e.target.value) }))}
+                      style={{ flex: 1, accentColor: 'var(--accent-cyan)' }}
+                    />
+                    <span style={{ fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>30s</span>
+                  </div>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'block', marginTop: 4 }}>
+                    Lower = more visual detail but slower processing. Higher = faster but less detail.
+                  </span>
+                </div>
+
+                {/* Save button */}
+                {transHasChanges && (
+                  <button
+                    onClick={handleSaveTransSettings}
+                    disabled={transSaving}
+                    style={{
+                      marginTop: 10, padding: '7px 20px',
+                      background: 'var(--accent-cyan)', color: 'var(--bg-base)',
+                      border: 'none', borderRadius: 'var(--radius-sm)', fontSize: 12, fontWeight: 600,
+                      opacity: transSaving ? 0.5 : 1, width: '100%',
+                    }}
+                  >
+                    {transSaving ? 'Saving...' : 'Save Transcription Settings'}
+                  </button>
+                )}
+              </div>
+
+              <ModelDropdown
+                task="vision"
+                models={availableModels.vision}
+                pendingValue={pendingModels.vision_model}
+                savedValue={currentModels.vision_model}
+                label="Vision AI"
+                desc="Analyzes video frames for visual content, importance, and social media potential. Requires a vision-capable model."
+              />
+              <ModelDropdown
+                task="text"
+                models={availableModels.text}
+                pendingValue={pendingModels.text_model}
+                savedValue={currentModels.text_model}
+                label="Text AI"
+                desc="Generates content summaries and detects viral clip candidates. Any text model works — smarter models find better clips."
+              />
+
+              {/* ── Save Button ── */}
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 12,
+                padding: '14px 0', borderTop: '1px solid var(--border)', marginTop: 4,
+              }}>
+                <button
+                  onClick={handleSaveAllModels}
+                  disabled={!modelsHaveChanges || modelsSaving}
+                  style={{
+                    padding: '10px 28px',
+                    background: modelsHaveChanges ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+                    color: modelsHaveChanges ? 'var(--bg-base)' : 'var(--text-muted)',
+                    border: modelsHaveChanges ? 'none' : '1px solid var(--border)',
+                    borderRadius: 'var(--radius-sm)', fontSize: 13, fontWeight: 600,
+                    opacity: (!modelsHaveChanges || modelsSaving) ? 0.5 : 1,
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  {modelsSaving ? 'Saving...' : 'Save Models'}
+                </button>
+                {modelsHaveChanges && !modelsSaving && (
+                  <span style={{ fontSize: 11, color: 'var(--accent-amber)' }}>
+                    You have unsaved changes
+                  </span>
+                )}
+                {!modelsHaveChanges && !modelsSaving && currentModels.vision_model && (
+                  <span style={{ fontSize: 11, color: 'var(--success)' }}>
+                    All models saved
+                  </span>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ═══════ Tab 1: Prompts ═══════ */}
+      {settingsTab === 1 && (
+        <div style={{ maxWidth: isMobile ? '100%' : 640 }}>
+          <h3 style={{ fontSize: 14, marginBottom: 8, color: 'var(--text-secondary)' }}>
+            AI Analysis Prompts
+          </h3>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 20, lineHeight: 1.6 }}>
+            Customize the instructions sent to the AI when analyzing your videos.
+            The JSON output format and clip duration constraints are enforced separately.
+          </p>
+
+          {/* Subject Tracking Toggle */}
+          <div style={{
+            background: 'var(--bg-panel)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)', padding: '14px 18px', marginBottom: 24,
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h4 style={{ fontSize: 13, margin: 0, color: 'var(--text-primary)' }}>
+                  Intelligent Dynamic Subject Tracking
+                </h4>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '4px 0 0', lineHeight: 1.5 }}>
+                  AI tracks the main subject across frames to keep it centered when cropping to different aspect ratios.
+                </p>
+              </div>
+              <button
+                onClick={() => handleToggleSubjectTracking(!subjectTrackingEnabled)}
+                disabled={subjectTrackingSaving}
+                style={{
+                  position: 'relative', width: 44, height: 24, borderRadius: 12, border: 'none',
+                  background: subjectTrackingEnabled ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+                  cursor: subjectTrackingSaving ? 'default' : 'pointer', flexShrink: 0, marginLeft: 16,
+                  transition: 'background 0.2s',
+                  opacity: subjectTrackingSaving ? 0.5 : 1,
+                }}
+              >
+                <div style={{
+                  position: 'absolute', top: 3, left: subjectTrackingEnabled ? 23 : 3,
+                  width: 18, height: 18, borderRadius: '50%', background: 'var(--nav-active-icon-text)',
+                  transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                }} />
+              </button>
+            </div>
+            <div style={{
+              marginTop: 8, fontSize: 10, fontFamily: 'var(--font-mono)',
+              color: subjectTrackingEnabled ? 'var(--accent-cyan)' : 'var(--text-muted)',
+            }}>
+              {subjectTrackingEnabled ? 'Enabled — subjects will be tracked and centered during crop' : 'Disabled — crops will use center of frame'}
+            </div>
+          </div>
+
+          {!promptsLoaded ? (
+            <div style={{ padding: 16, color: 'var(--text-muted)', fontSize: 12 }}>Loading prompts...</div>
+          ) : (
+            <>
+              {/* Frame Analysis Prompt */}
+              <div style={{ marginBottom: 28 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <h4 style={{ fontSize: 13, margin: 0, color: 'var(--text-primary)' }}>Scene / Frame Analysis</h4>
+                  <button
+                    onClick={() => setPrompts((prev) => ({ ...prev, frame_analysis: promptDefaults.frame_analysis }))}
+                    disabled={prompts.frame_analysis === promptDefaults.frame_analysis}
+                    style={{
+                      padding: '3px 10px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                      border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 11,
+                      opacity: prompts.frame_analysis === promptDefaults.frame_analysis ? 0.4 : 1,
+                    }}
+                  >
+                    Reset to Default
+                  </button>
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.5 }}>
+                  Tells the AI what to look for in each video frame.
+                </p>
+                <textarea
+                  value={prompts.frame_analysis}
+                  onChange={(e) => setPrompts((prev) => ({ ...prev, frame_analysis: e.target.value }))}
+                  rows={8}
+                  style={{
+                    width: '100%', minHeight: 120, maxHeight: 400, padding: '10px 12px', resize: 'vertical',
+                    background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                    color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-mono)', lineHeight: 1.6, boxSizing: 'border-box',
+                  }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                    {prompts.frame_analysis.length.toLocaleString()} / 10,000
+                  </span>
+                  {prompts.frame_analysis !== promptDefaults.frame_analysis && (
+                    <span style={{ fontSize: 10, color: 'var(--accent-amber)' }}>Modified</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Viral Algorithm Section */}
+              <div ref={viralAlgorithmRef} style={{
+                background: 'var(--bg-panel)', border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-md)', padding: '14px 18px', marginBottom: 24,
+              }}>
+                <h4 style={{ fontSize: 13, margin: '0 0 8px', color: 'var(--text-primary)' }}>
+                  Viral Algorithm
+                </h4>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 }}>
+                  This is the core prompt that controls how the AI identifies viral-worthy clips.
+                  Edit the strategy below to change what the AI looks for — hooks, engagement patterns,
+                  platform targeting, scoring criteria. Changes are saved and persist across container restarts.
+                </p>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+                  <button
+                    onClick={() => setPrompts((prev) => ({ ...prev, viral_clip_detection: promptDefaults.viral_clip_detection }))}
+                    disabled={prompts.viral_clip_detection === promptDefaults.viral_clip_detection}
+                    style={{
+                      padding: '3px 10px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                      border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 11,
+                      opacity: prompts.viral_clip_detection === promptDefaults.viral_clip_detection ? 0.4 : 1,
+                    }}
+                  >
+                    Reset to Default
+                  </button>
+                </div>
+                <textarea
+                  value={prompts.viral_clip_detection}
+                  onChange={(e) => setPrompts((prev) => ({ ...prev, viral_clip_detection: e.target.value }))}
+                  rows={12}
+                  style={{
+                    width: '100%', minHeight: 160, maxHeight: 500, padding: '10px 12px', resize: 'vertical',
+                    background: 'var(--bg-base)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                    color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-mono)', lineHeight: 1.6, boxSizing: 'border-box',
+                  }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                    {prompts.viral_clip_detection.length.toLocaleString()} / 10,000
+                  </span>
+                  {prompts.viral_clip_detection !== promptDefaults.viral_clip_detection && (
+                    <span style={{ fontSize: 10, color: 'var(--accent-amber)' }}>Modified — will be used for all future clip generation</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Subject Tracking Prompt */}
+              <div style={{ marginBottom: 28, opacity: subjectTrackingEnabled ? 1 : 0.4, pointerEvents: subjectTrackingEnabled ? 'auto' : 'none' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <h4 style={{ fontSize: 13, margin: 0, color: 'var(--text-primary)' }}>Subject Tracking</h4>
+                  <button
+                    onClick={() => setPrompts((prev) => ({ ...prev, subject_tracking: promptDefaults.subject_tracking }))}
+                    disabled={prompts.subject_tracking === promptDefaults.subject_tracking}
+                    style={{
+                      padding: '3px 10px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                      border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 11,
+                      opacity: prompts.subject_tracking === promptDefaults.subject_tracking ? 0.4 : 1,
+                    }}
+                  >
+                    Reset to Default
+                  </button>
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.5 }}>
+                  Instructions for estimating subject position in each frame. Used for smart cropping across aspect ratios.
+                </p>
+                <textarea
+                  value={prompts.subject_tracking}
+                  onChange={(e) => setPrompts((prev) => ({ ...prev, subject_tracking: e.target.value }))}
+                  rows={6}
+                  style={{
+                    width: '100%', minHeight: 100, maxHeight: 400, padding: '10px 12px', resize: 'vertical',
+                    background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                    color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-mono)', lineHeight: 1.6, boxSizing: 'border-box',
+                  }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                    {prompts.subject_tracking.length.toLocaleString()} / 10,000
+                  </span>
+                  {prompts.subject_tracking !== promptDefaults.subject_tracking && (
+                    <span style={{ fontSize: 10, color: 'var(--accent-amber)' }}>Modified</span>
+                  )}
+                </div>
+              </div>
+
+              {/* Action buttons */}
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  onClick={handleSavePrompts}
+                  disabled={promptsSaving}
+                  style={{
+                    padding: '8px 20px', background: 'var(--accent-cyan)', color: 'var(--bg-base)',
+                    border: 'none', borderRadius: 'var(--radius-sm)', fontSize: 12, fontWeight: 600, opacity: promptsSaving ? 0.5 : 1,
+                  }}
+                >
+                  {promptsSaving ? 'Saving...' : 'Save Prompts'}
+                </button>
+                <button
+                  onClick={handleResetAllPrompts}
+                  disabled={promptsSaving || (prompts.frame_analysis === promptDefaults.frame_analysis && prompts.viral_clip_detection === promptDefaults.viral_clip_detection && prompts.subject_tracking === promptDefaults.subject_tracking)}
+                  style={{
+                    padding: '8px 16px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                    border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 12,
+                    opacity: (promptsSaving || (prompts.frame_analysis === promptDefaults.frame_analysis && prompts.viral_clip_detection === promptDefaults.viral_clip_detection && prompts.subject_tracking === promptDefaults.subject_tracking)) ? 0.4 : 1,
+                  }}
+                >
+                  Reset All to Defaults
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ═══════ Tab 2: Fonts ═══════ */}
+      {settingsTab === 2 && (
+        <div style={{ maxWidth: isMobile ? '100%' : 640 }}>
+          <h3 style={{ fontSize: 14, marginBottom: 8, color: 'var(--text-secondary)' }}>
+            Custom Fonts
+          </h3>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 20, lineHeight: 1.6 }}>
+            Upload custom fonts for use in clip subtitles. Supported formats: TTF, OTF, WOFF, WOFF2, EOT (max 20MB each).
+          </p>
+
+          {/* Upload area */}
+          <div style={{
+            border: '2px dashed var(--border)',
+            borderRadius: 'var(--radius-md)',
+            padding: '24px',
+            textAlign: 'center',
+            marginBottom: 24,
+            background: 'var(--bg-panel)',
+            cursor: fontUploading ? 'default' : 'pointer',
+            opacity: fontUploading ? 0.6 : 1,
+          }}
+            onClick={() => !fontUploading && fontInputRef.current?.click()}
+          >
+            <input
+              ref={fontInputRef}
+              type="file"
+              accept={FONT_ACCEPT}
+              multiple
+              style={{ display: 'none' }}
+              onChange={handleFontUpload}
+            />
+            <div style={{ fontSize: 32, marginBottom: 8, opacity: 0.4 }}>Aa</div>
+            <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 4 }}>
+              {fontUploading ? 'Uploading...' : 'Click to upload fonts'}
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              .ttf, .otf, .woff, .woff2, .eot
+            </div>
+          </div>
+
+          {/* Font list */}
+          {customFonts.length > 0 ? (
+            <div style={{ display: 'grid', gap: 8 }}>
+              {customFonts.map((font) => (
+                <div key={font.name} style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: '10px 16px',
+                  background: 'var(--bg-panel)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)',
+                }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                      {font.name}
+                    </div>
+                    <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                      {font.filename}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleDeleteFont(font)}
+                    style={{
+                      padding: '4px 12px',
+                      background: 'var(--danger-dim)',
+                      color: 'var(--danger)',
+                      border: '1px solid var(--danger)',
+                      borderRadius: 'var(--radius-sm)',
+                      fontSize: 11,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{
+              textAlign: 'center',
+              padding: '32px 16px',
+              color: 'var(--text-muted)',
+              fontSize: 12,
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)',
+              background: 'var(--bg-panel)',
+            }}>
+              No custom fonts uploaded yet. Upload fonts above to use them in clip subtitles.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ═══════ Tab 3: Presets ═══════ */}
+      {settingsTab === 3 && (
+        <div style={{ maxWidth: isMobile ? '100%' : 640 }}>
+          <h3 style={{ fontSize: 14, marginBottom: 8, color: 'var(--text-secondary)' }}>Clip Setting Presets</h3>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 20, lineHeight: 1.6 }}>
+            Manage your saved clip export presets. These are shared across the Analysis and SEO pages.
+          </p>
+          {presets.length === 0 ? (
+            <div style={{
+              textAlign: 'center', padding: '32px 16px', color: 'var(--text-muted)',
+              fontSize: 12, border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+              background: 'var(--bg-panel)',
+            }}>
+              No presets saved yet. Save presets from the Clip Settings panel or the SEO page.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {presets.map((p) => (
+                <div key={p.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 12,
+                  padding: '10px 14px', background: 'var(--bg-panel)',
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                  flexWrap: 'wrap',
+                }}>
+                  {editingPresetId === p.id ? (
+                    <div style={{ flex: 1, minWidth: 200, display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <input
+                        type="text" value={editPresetName}
+                        onChange={(e) => setEditPresetName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleRenamePreset(p.id);
+                          if (e.key === 'Escape') setEditingPresetId(null);
+                        }}
+                        autoFocus
+                        style={{
+                          flex: 1, padding: '4px 8px', fontSize: 13,
+                          background: 'var(--bg-elevated)', color: 'var(--accent-cyan)',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                          fontFamily: 'var(--font-mono)', outline: 'none',
+                        }}
+                      />
+                      <button
+                        onClick={() => handleRenamePreset(p.id)}
+                        style={{
+                          padding: '4px 10px', fontSize: 11,
+                          background: 'var(--accent-cyan)', color: 'var(--bg-base)',
+                          border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                        }}
+                      >
+                        Save
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+                      <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', marginTop: 2 }}>
+                        {p.created_at ? new Date(p.created_at).toLocaleDateString() : ''}
+                        {p.settings?.aspectRatio ? ` | ${p.settings.aspectRatio}` : ''}
+                        {p.settings?.subtitlesEnabled ? ' | subs' : ''}
+                      </div>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      onClick={() => { setEditingPresetId(p.id); setEditPresetName(p.name); }}
+                      style={{
+                        padding: '4px 10px', fontSize: 11, background: 'var(--bg-elevated)',
+                        color: 'var(--text-secondary)', border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                      }}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      onClick={() => handleExportPreset(p)}
+                      style={{
+                        padding: '4px 10px', fontSize: 11, background: 'var(--bg-elevated)',
+                        color: 'var(--accent-cyan)', border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                      }}
+                    >
+                      Export
+                    </button>
+                    <button
+                      onClick={() => handleDeletePresetSettings(p.id)}
+                      style={{
+                        padding: '4px 10px', fontSize: 11, background: 'var(--danger-dim)',
+                        color: 'var(--danger)', border: '1px solid var(--danger)',
+                        borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ═══════ Tab 4: Advanced ═══════ */}
+      {settingsTab === 4 && (
+        <div>
+          <div style={{ maxWidth: isMobile ? '100%' : 480 }}>
+            <h3 style={{ fontSize: 14, marginBottom: 16, color: 'var(--text-secondary)' }}>Model Override</h3>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
+              Browse all OpenRouter models and select custom overrides.
+            </p>
+
+            <div style={{ marginBottom: 24 }}>
+              <h4 style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>Vision Model</h4>
+              <ModelBrowser type="vision" onSelect={(id) => { handleSaveModel('vision', id); }} />
+            </div>
+
+            <div style={{ marginBottom: 24 }}>
+              <h4 style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8 }}>Text Model</h4>
+              <ModelBrowser type="text" onSelect={(id) => { handleSaveModel('text', id); }} />
+            </div>
+
+            <h3 style={{ fontSize: 14, marginBottom: 16, color: 'var(--text-secondary)' }}>Analysis Settings</h3>
+
+            <div style={{ display: 'grid', gap: 12 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
+                <span style={{ fontSize: 13 }}>Whisper Model</span>
+                <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{currentModels.transcript_model || 'base'}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
+                <span style={{ fontSize: 13 }}>Beam Size</span>
+                <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
+                  {transSaved.beam_size}{transSaved.beam_size === 1 ? ' (fast)' : transSaved.beam_size >= 5 ? ' (accurate)' : ''}
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
+                <span style={{ fontSize: 13 }}>VAD Filter (Skip Silence)</span>
+                <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: transSaved.vad_filter ? 'var(--success)' : 'var(--text-muted)' }}>
+                  {transSaved.vad_filter ? 'On' : 'Off'}
+                </span>
+              </div>
+
+              {/* Frame Sample Rate — editable slider */}
+              <div style={{ padding: '10px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 13 }}>Frame Sample Rate</span>
+                  <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
+                    Every {transSettings.frame_sample_rate}s
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>5s</span>
+                  <input
+                    type="range"
+                    min="5"
+                    max="30"
+                    step="5"
+                    value={transSettings.frame_sample_rate}
+                    onChange={(e) => setTransSettings((p) => ({ ...p, frame_sample_rate: parseInt(e.target.value) }))}
+                    style={{ flex: 1, accentColor: 'var(--accent-cyan)' }}
+                  />
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>30s</span>
+                </div>
+                <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'block', marginTop: 4 }}>
+                  Lower = more visual detail but slower. Higher = faster but less detail for clip detection.
+                </span>
+                {transSettings.frame_sample_rate !== transSaved.frame_sample_rate && (
+                  <button
+                    onClick={handleSaveTransSettings}
+                    disabled={transSaving}
+                    style={{
+                      marginTop: 8, padding: '4px 14px', background: 'var(--accent-cyan)',
+                      color: 'var(--bg-base)', border: 'none', borderRadius: 'var(--radius-sm)',
+                      fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                    }}
+                  >
+                    {transSaving ? 'Saving...' : 'Save'}
+                  </button>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
+                <span style={{ fontSize: 13 }}>Max Clip Candidates</span>
+                <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>12</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
+                <span style={{ fontSize: 13 }}>Fallback Chain</span>
+                <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{(statuses._active?.fallback_chain || ['openrouter', 'gemini', 'groq']).join(' \u2192 ')}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ═══════ Tab 4: Usage & Costs ═══════ */}
+      {settingsTab === 5 && <CostTracker />}
+    </div>
+  );
+}

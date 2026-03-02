@@ -1,0 +1,192 @@
+from enum import Enum
+from typing import Optional, Union
+from pydantic import BaseModel
+
+
+class JobStatus(str, Enum):
+    QUEUED = "queued"
+    EXTRACTING_FRAMES = "extracting_frames"
+    TRANSCRIBING = "transcribing"
+    ANALYZING_SCENES = "analyzing_scenes"
+    GENERATING_SUMMARY = "generating_summary"
+    DETECTING_CLIPS = "detecting_clips"
+    COMPLETE = "complete"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class FrameData(BaseModel):
+    timestamp: float
+    path: str
+    base64: Optional[str] = None
+
+
+class SceneDescription(BaseModel):
+    timestamp: float
+    description: str
+    importance_score: int  # 1-10
+    thumbnail_path: str
+    subject_x: int = 50  # 0-100, horizontal subject position (0=left, 50=center, 100=right)
+
+
+class WordTimestamp(BaseModel):
+    start: float
+    end: float
+    word: str
+
+
+class TranscriptSegment(BaseModel):
+    start: float
+    end: float
+    text: str
+    speaker: str  # "Speaker 1", "Speaker 2", etc.
+    words: Optional[list[WordTimestamp]] = None  # per-word timestamps from Whisper
+
+
+class ClipCandidate(BaseModel):
+    id: int
+    title: str
+    start_time: float
+    end_time: float
+    duration: float
+    viral_score: int  # 1-100
+    viral_score_reasoning: str
+    clip_type: str
+    platform: str  # tiktok | youtube_shorts | both
+    suggested_caption: str
+    hook_text: str
+    why_this_works: str
+    clip_focus: Optional[str] = None  # The focus topic used to generate this clip, if any
+
+
+class VideoSummary(BaseModel):
+    overview: str
+    key_topics: list[str]
+    tone: str
+    estimated_audience: str
+    content_category: str
+
+
+class JobResult(BaseModel):
+    job_id: str
+    filename: str
+    file_path: str
+    language: str = ""  # ISO 639-1 code, empty = auto-detect
+    duration: float = 0.0
+    resolution: str = ""
+    fps: float = 0.0
+    file_size_mb: float = 0.0
+    status: JobStatus = JobStatus.QUEUED
+    progress: int = 0  # 0-100
+    progress_message: str = ""
+    provider_used: dict = {}  # {task: model_name}
+    created_at: str = ""
+    updated_at: str = ""
+    analysis_started_at: Optional[str] = None  # ISO timestamp when analysis began
+    analysis_duration_seconds: Optional[float] = None  # total wall-clock time for analysis
+    summary: Optional[VideoSummary] = None
+    scenes: list[SceneDescription] = []
+    transcript: list[TranscriptSegment] = []
+    clips: list[ClipCandidate] = []
+    speaker_names: dict[str, str] = {}  # {"Speaker 1": "Eric", "Speaker 2": "Alice"}
+    exported_clips: list[dict] = []
+    error: Optional[str] = None
+    estimated_cost_usd: Optional[float] = None
+
+
+class ClipSEO(BaseModel):
+    title: str
+    description: str
+    tags: list[str] = []
+    platform_tips: str = ""
+
+
+class SubtitleSettings(BaseModel):
+    font: str = "DM Sans"
+    size: Union[str, int, float] = "medium"  # "small" | "medium" | "large" | numeric px (12-72)
+    font_weight: str = "bold"  # "normal" | "bold"
+    font_color: str = "#FFFFFF"  # default subtitle text color (hex)
+    position: str = "bottom"  # "top" | "center" | "bottom"
+    speaker_colors: dict[str, str] = {}  # {"Speaker 1": "#00D9FF"}
+    use_speaker_colors: bool = True  # True = per-speaker colors, False = uniform font_color
+    background_enabled: bool = False
+    background_color: str = "#000000"
+    background_opacity: int = 75  # 0-100
+    background_radius: int = 0  # 0-20, border radius in px for subtitle background
+    outline_color: str = "#000000"  # text outline color (hex)
+    outline_opacity: int = 100  # 0-100, text outline opacity
+    outline_width: int = 2  # 0-10, text outline thickness in reference pixels
+    show_speaker_labels: bool = False  # show "Speaker:" prefix in subtitle text
+    max_width: int = 90  # 50-100, max subtitle width as % of video width
+    offset_v: int = 4  # 0-100, vertical offset from edge as % of video height
+    max_words: int = 0  # 0 = disabled, 1-20 = max words per subtitle event
+    active_word_enabled: bool = False  # highlight the currently spoken word
+    active_word_color: str = "#FFD700"  # text color of the active word (gold)
+    active_word_outline_color: str = "#000000"  # outline/stroke color of the active word
+    active_word_bg_color: str = "#000000"  # background color behind the active word
+    active_word_bg_opacity: int = 0  # 0-100, background opacity (0 = no background)
+
+
+class ExportRequest(BaseModel):
+    start: float
+    end: float
+    clip_id: int
+    clip_title: Optional[str] = None  # optional title — used as export filename
+    aspect_ratio: Optional[str] = None  # "16:9" | "9:16" | "1:1" | "4:5" | None=source
+    subtitles_enabled: bool = False
+    subtitle_settings: Optional[SubtitleSettings] = None
+    export_quality: str = "1080p"  # "720p" | "1080p" | "4k"
+
+
+class FullVideoExportRequest(BaseModel):
+    aspect_ratio: Optional[str] = None  # "16:9" | "9:16" | "1:1" | "4:5" | None=source
+    subtitles_enabled: bool = False
+    subtitle_settings: Optional[SubtitleSettings] = None
+    export_quality: str = "1080p"  # "720p" | "1080p" | "4k"
+
+
+class UpdateClipTitleRequest(BaseModel):
+    title: str
+
+
+class UpdateClipTimesRequest(BaseModel):
+    start_time: Optional[float] = None
+    end_time: Optional[float] = None
+
+
+class GenerateClipsRequest(BaseModel):
+    min_duration: float = 15
+    max_duration: float = 600
+    clip_count: Optional[int] = None  # None = use settings.MAX_CLIP_CANDIDATES
+    clip_focus: Optional[str] = None  # Optional focus topic (e.g. "fighting", "cooking tips")
+    viral_score_min: int = 0  # Minimum viral score (0-100), clips below are filtered out
+    viral_score_max: int = 100  # Maximum viral score (0-100), clips above are filtered out
+
+
+class SettingsUpdate(BaseModel):
+    ai_provider: Optional[str] = None
+    openrouter_preset: Optional[str] = None
+    openrouter_api_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
+    gemini_api_key: Optional[str] = None
+    groq_api_key: Optional[str] = None
+    whisper_model: Optional[str] = None
+    frame_sample_rate: Optional[int] = None
+    max_clip_candidates: Optional[int] = None
+    fallback_chain: Optional[str] = None
+
+
+class ClipPreset(BaseModel):
+    id: str
+    name: str
+    settings: dict
+    created_at: str
+
+
+class SavePresetRequest(BaseModel):
+    name: str
+    settings: dict
+
+
+class RenamePresetRequest(BaseModel):
+    name: str

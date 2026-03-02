@@ -1,0 +1,50 @@
+services:
+  app:
+    build: .
+    container_name: clipai-app
+    restart: unless-stopped
+    ports:
+      - "1353:1353"
+    volumes:
+      - ./data/uploads:/data/uploads
+      - ./data/outputs:/data/outputs
+      - ./data/logs:/data/logs
+      - ./data/fonts:/data/fonts
+      - whisper_models:/root/.cache/huggingface
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - path: .env
+        required: false
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:1353/api/jobs"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: clipai-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=5m
+      - OLLAMA_MAX_LOADED_MODELS=1
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+
+volumes:
+  ollama_models:
+  whisper_models:

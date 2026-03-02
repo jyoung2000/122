@@ -1,0 +1,898 @@
+import asyncio
+import logging
+import os
+import time
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from backend import database
+from backend.config import settings
+from backend.models import ExportRequest, FullVideoExportRequest, GenerateClipsRequest, UpdateClipTimesRequest, UpdateClipTitleRequest
+from backend.services.clip_exporter import export_clip
+from backend.services.pipeline import broadcast_ws
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api", tags=["clips"])
+
+# Track active clip generation tasks per job so we can cancel on re-trigger
+_active_clip_tasks: dict[str, asyncio.Task] = {}
+_clip_cancel_events: dict[str, asyncio.Event] = {}
+
+# Track active export tasks and their cancellation events
+_active_export_tasks: dict[str, asyncio.Task] = {}
+_export_cancel_events: dict[str, asyncio.Event] = {}
+
+# Timeout for the AI clip detection call (15 minutes — large videos with
+# many transcript segments and scenes need more time for AI analysis)
+_CLIP_DETECTION_TIMEOUT = 900
+
+
+@router.post("/jobs/{job_id}/export-clip")
+async def export_clip_endpoint(
+    job_id: str,
+    req: ExportRequest,
+):
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    # Parse video resolution for crop/subtitle positioning
+    vid_w, vid_h = 1920, 1080
+    if job.resolution:
+        try:
+            parts = job.resolution.split("x")
+            vid_w, vid_h = int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            pass
+
+    # Gather scenes for subject tracking — include nearest boundary scenes
+    # so _build_subject_keyframes can interpolate at clip edges rather than
+    # falling back to center (50) when no scenes fall strictly within range.
+    clip_subject_x = 50
+    clip_scenes = []
+    logger.info(
+        "[SubjectTracking] ═══ EXPORT REQUEST clip %s: %.1f-%.1fs, aspect=%s, quality=%s, tracking_enabled=%s, total_scenes=%d ═══",
+        req.clip_id, req.start, req.end, req.aspect_ratio or "original",
+        req.export_quality or "1080p",
+        settings.SUBJECT_TRACKING_ENABLED,
+        len(job.scenes) if job.scenes else 0,
+    )
+    if settings.SUBJECT_TRACKING_ENABLED and job.scenes:
+        in_range = [s for s in job.scenes if req.start <= s.timestamp <= req.end]
+        before = [s for s in job.scenes if s.timestamp < req.start]
+        after = [s for s in job.scenes if s.timestamp > req.end]
+        nearest_before = max(before, key=lambda s: s.timestamp) if before else None
+        nearest_after = min(after, key=lambda s: s.timestamp) if after else None
+
+        # Build scene list: nearest-before + in-range + nearest-after
+        clip_scenes = []
+        if nearest_before:
+            clip_scenes.append(nearest_before)
+        clip_scenes.extend(in_range)
+        if nearest_after:
+            clip_scenes.append(nearest_after)
+
+        logger.info(
+            "[SubjectTracking] clip %s: gathered %d scenes (in_range=%d, boundary=%d) — timestamps: %s",
+            req.clip_id, len(clip_scenes), len(in_range),
+            (1 if nearest_before else 0) + (1 if nearest_after else 0),
+            [f"t={s.timestamp:.1f},sx={s.subject_x}" for s in clip_scenes],
+        )
+
+        if in_range:
+            clip_subject_x = round(sum(s.subject_x for s in in_range) / len(in_range))
+            sx_values = [s.subject_x for s in in_range]
+            logger.info(
+                "[SubjectTracking] clip %s: %d in-range scenes, subject_x range [%d, %d], avg=%d",
+                req.clip_id, len(in_range),
+                min(sx_values), max(sx_values), clip_subject_x,
+            )
+        elif nearest_before and nearest_after:
+            # No scenes within range — interpolate from boundary scenes
+            mid = (req.start + req.end) / 2
+            dt = nearest_after.timestamp - nearest_before.timestamp
+            if dt > 0:
+                frac = (mid - nearest_before.timestamp) / dt
+                clip_subject_x = round(nearest_before.subject_x + (nearest_after.subject_x - nearest_before.subject_x) * frac)
+            else:
+                clip_subject_x = nearest_before.subject_x
+            logger.info(
+                "[SubjectTracking] clip %s: no in-range scenes, interpolated subject_x=%d from boundary (before=t%.1f/sx=%d, after=t%.1f/sx=%d)",
+                req.clip_id, clip_subject_x,
+                nearest_before.timestamp, nearest_before.subject_x,
+                nearest_after.timestamp, nearest_after.subject_x,
+            )
+        elif nearest_before:
+            clip_subject_x = nearest_before.subject_x
+            logger.info(
+                "[SubjectTracking] clip %s: no in-range scenes, using nearest before scene (t=%.1f, sx=%d)",
+                req.clip_id, nearest_before.timestamp, clip_subject_x,
+            )
+        elif nearest_after:
+            clip_subject_x = nearest_after.subject_x
+            logger.info(
+                "[SubjectTracking] clip %s: no in-range scenes, using nearest after scene (t=%.1f, sx=%d)",
+                req.clip_id, nearest_after.timestamp, clip_subject_x,
+            )
+        else:
+            logger.info("[SubjectTracking] clip %s: no scenes available — using default center (50)", req.clip_id)
+    elif not settings.SUBJECT_TRACKING_ENABLED:
+        logger.info("[SubjectTracking] clip %s: TRACKING DISABLED — using default center crop", req.clip_id)
+    else:
+        logger.info("[SubjectTracking] clip %s: no scene data in job — using default center crop", req.clip_id)
+
+    export_key = f"{job_id}_{req.clip_id}"
+    cancel_event = asyncio.Event()
+    _export_cancel_events[export_key] = cancel_event
+
+    async def _do_export():
+        try:
+            export_start = time.monotonic()
+            clip_dur = req.end - req.start
+
+            await broadcast_ws(job_id, {
+                "type": "status",
+                "status": "exporting",
+                "progress": 0,
+                "message": f"Starting export for clip {req.clip_id} ({clip_dur:.1f}s) [{req.export_quality or '1080p'}]",
+            })
+
+            # Log subject tracking status for this export
+            if settings.SUBJECT_TRACKING_ENABLED and clip_scenes:
+                tracking_type = "dynamic" if len(clip_scenes) > 1 else "static"
+                await broadcast_ws(job_id, {
+                    "type": "subject_tracking",
+                    "enabled": True,
+                    "tracked_scenes": len(clip_scenes),
+                    "message": f"Intelligent Dynamic Subject Tracking: AI is centering the subject in frame using {len(clip_scenes)} tracked positions ({tracking_type} crop)",
+                })
+                await broadcast_ws(job_id, {
+                    "type": "status",
+                    "status": "exporting",
+                    "progress": 25,
+                    "message": f"AI Subject Tracking: centering subject in {req.aspect_ratio or 'original'} frame (subject_x={clip_subject_x}, {len(clip_scenes)} scene positions)",
+                })
+            elif not settings.SUBJECT_TRACKING_ENABLED:
+                await broadcast_ws(job_id, {
+                    "type": "subject_tracking",
+                    "enabled": False,
+                    "message": "Subject tracking disabled — using center crop",
+                })
+            else:
+                await broadcast_ws(job_id, {
+                    "type": "status",
+                    "status": "exporting",
+                    "progress": 25,
+                    "message": f"No subject tracking data available — using center crop for {req.aspect_ratio or 'original'} frame",
+                })
+
+            async def _export_progress(msg: str):
+                await broadcast_ws(job_id, {
+                    "type": "status",
+                    "status": "exporting",
+                    "progress": 50,
+                    "message": msg,
+                })
+
+            output_path = await export_clip(
+                job_id=job_id,
+                video_path=job.file_path,
+                start=req.start,
+                end=req.end,
+                clip_id=req.clip_id,
+                clip_title=req.clip_title,
+                aspect_ratio=req.aspect_ratio,
+                subtitles_enabled=req.subtitles_enabled,
+                subtitle_settings=req.subtitle_settings.model_dump() if req.subtitle_settings else None,
+                transcript=[s.model_dump() for s in job.transcript] if req.subtitles_enabled else None,
+                video_width=vid_w,
+                video_height=vid_h,
+                subject_x=clip_subject_x,
+                subject_scenes=clip_scenes or None,
+                progress_callback=_export_progress,
+                cancel_event=cancel_event,
+                export_quality=req.export_quality or "1080p",
+            )
+
+            elapsed = int(time.monotonic() - export_start)
+
+            # Update job record
+            j = await database.load_job(job_id)
+            if j:
+                from datetime import datetime, timezone
+                j.exported_clips.append({
+                    "clip_id": req.clip_id,
+                    "path": output_path,
+                    "filename": os.path.basename(output_path),
+                    "title": req.clip_title or f"Clip {req.clip_id}",
+                    "start": req.start,
+                    "end": req.end,
+                    "exported_at": datetime.now(timezone.utc).isoformat(),
+                    "duration": round(req.end - req.start, 2),
+                    "export_quality": req.export_quality or "1080p",
+                    "aspect_ratio": req.aspect_ratio,
+                    "subtitles_enabled": req.subtitles_enabled,
+                    "subtitle_settings": req.subtitle_settings.model_dump() if req.subtitle_settings else None,
+                })
+                await database.save_job(j)
+
+            await broadcast_ws(job_id, {
+                "type": "export_complete",
+                "clip_id": req.clip_id,
+                "download_url": f"/api/files/{job_id}/clips/{os.path.basename(output_path)}",
+                "message": f"Clip {req.clip_id} exported in {elapsed}s [{req.export_quality or '1080p'}]",
+                "qa_passed": True,
+            })
+        except asyncio.CancelledError:
+            await broadcast_ws(job_id, {
+                "type": "error",
+                "message": f"Clip {req.clip_id} export cancelled",
+            })
+        except Exception as e:
+            await broadcast_ws(job_id, {
+                "type": "error",
+                "message": f"Clip {req.clip_id} export failed: {str(e)}",
+            })
+        finally:
+            _active_export_tasks.pop(export_key, None)
+            _export_cancel_events.pop(export_key, None)
+
+    task = asyncio.create_task(_do_export())
+    _active_export_tasks[export_key] = task
+    return {"export_id": export_key, "status": "exporting"}
+
+
+@router.post("/jobs/{job_id}/cancel-export/{clip_id}")
+async def cancel_export_endpoint(job_id: str, clip_id: int):
+    """Cancel an in-progress clip export."""
+    export_key = f"{job_id}_{clip_id}"
+
+    cancel_event = _export_cancel_events.get(export_key)
+    if cancel_event:
+        cancel_event.set()
+
+    task = _active_export_tasks.get(export_key)
+    if not task or task.done():
+        raise HTTPException(status_code=404, detail="No active export found for this clip")
+
+    # Give the task a moment to handle cancellation gracefully
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+    except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+        pass
+
+    return {"export_id": export_key, "status": "cancelled"}
+
+
+@router.post("/jobs/{job_id}/export-full-video")
+async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
+    """Export the entire video with clip settings (aspect ratio, subtitles, subject tracking) applied."""
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.file_path or not job.duration:
+        raise HTTPException(status_code=400, detail="Video file or duration not available")
+
+    vid_w, vid_h = 1920, 1080
+    if job.resolution:
+        try:
+            parts = job.resolution.split("x")
+            vid_w, vid_h = int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            pass
+
+    # Use all scenes for subject tracking across the full video
+    full_subject_x = 50
+    full_scenes = []
+    if settings.SUBJECT_TRACKING_ENABLED and job.scenes:
+        full_scenes = list(job.scenes)
+        sx_values = [s.subject_x for s in full_scenes if hasattr(s, "subject_x")]
+        if sx_values:
+            full_subject_x = round(sum(sx_values) / len(sx_values))
+
+    # Use clip_id=0 to denote full-video export (matches frontend's ${jobId}_0 convention)
+    export_key = f"{job_id}_0"
+    cancel_event = asyncio.Event()
+    _export_cancel_events[export_key] = cancel_event
+
+    async def _do_export():
+        try:
+            export_start = time.monotonic()
+            await broadcast_ws(job_id, {
+                "type": "status",
+                "status": "exporting",
+                "progress": 0,
+                "message": f"Starting full video export ({job.duration:.0f}s) [{req.export_quality or '1080p'}]",
+            })
+
+            if settings.SUBJECT_TRACKING_ENABLED and full_scenes:
+                tracking_type = "dynamic" if len(full_scenes) > 1 else "static"
+                await broadcast_ws(job_id, {
+                    "type": "subject_tracking",
+                    "enabled": True,
+                    "tracked_scenes": len(full_scenes),
+                    "message": f"Intelligent Dynamic Subject Tracking: centering subject using {len(full_scenes)} tracked positions ({tracking_type} crop)",
+                })
+
+            async def _export_progress(msg: str):
+                await broadcast_ws(job_id, {
+                    "type": "status",
+                    "status": "exporting",
+                    "progress": 50,
+                    "message": msg,
+                })
+
+            output_path = await export_clip(
+                job_id=job_id,
+                video_path=job.file_path,
+                start=0,
+                end=job.duration,
+                clip_id=0,
+                clip_title=os.path.splitext(job.filename or "full_video")[0],
+                aspect_ratio=req.aspect_ratio,
+                subtitles_enabled=req.subtitles_enabled,
+                subtitle_settings=req.subtitle_settings.model_dump() if req.subtitle_settings else None,
+                transcript=[s.model_dump() for s in job.transcript] if req.subtitles_enabled and job.transcript else None,
+                video_width=vid_w,
+                video_height=vid_h,
+                subject_x=full_subject_x,
+                subject_scenes=full_scenes or None,
+                progress_callback=_export_progress,
+                cancel_event=cancel_event,
+                export_quality=req.export_quality or "1080p",
+            )
+
+            elapsed = int(time.monotonic() - export_start)
+
+            j = await database.load_job(job_id)
+            if j:
+                from datetime import datetime, timezone
+                j.exported_clips.append({
+                    "clip_id": 0,
+                    "path": output_path,
+                    "filename": os.path.basename(output_path),
+                    "title": os.path.splitext(job.filename or "full_video")[0],
+                    "start": 0,
+                    "end": job.duration,
+                    "exported_at": datetime.now(timezone.utc).isoformat(),
+                    "duration": round(job.duration, 2),
+                    "export_quality": req.export_quality or "1080p",
+                    "aspect_ratio": req.aspect_ratio,
+                    "subtitles_enabled": req.subtitles_enabled,
+                    "subtitle_settings": req.subtitle_settings.model_dump() if req.subtitle_settings else None,
+                    "is_full_video": True,
+                })
+                await database.save_job(j)
+
+            await broadcast_ws(job_id, {
+                "type": "export_complete",
+                "clip_id": 0,
+                "download_url": f"/api/files/{job_id}/clips/{os.path.basename(output_path)}",
+                "message": f"Full video exported in {elapsed}s [{req.export_quality or '1080p'}]",
+                "qa_passed": True,
+            })
+        except asyncio.CancelledError:
+            await broadcast_ws(job_id, {
+                "type": "error",
+                "message": "Full video export cancelled",
+            })
+        except Exception as e:
+            logger.exception("Full video export failed for job %s", job_id)
+            await broadcast_ws(job_id, {
+                "type": "error",
+                "message": f"Full video export failed: {str(e)}",
+            })
+        finally:
+            _active_export_tasks.pop(export_key, None)
+            _export_cancel_events.pop(export_key, None)
+
+    task = asyncio.create_task(_do_export())
+    _active_export_tasks[export_key] = task
+    return {"export_id": export_key, "status": "exporting"}
+
+
+@router.get("/active-exports")
+async def list_active_exports():
+    """List all currently active export tasks."""
+    active = []
+    for key, task in _active_export_tasks.items():
+        if not task.done():
+            parts = key.split("_", 1)
+            active.append({
+                "export_id": key,
+                "job_id": parts[0] if len(parts) > 1 else key,
+                "clip_id": parts[1] if len(parts) > 1 else None,
+                "status": "encoding",
+            })
+    return active
+
+
+@router.put("/jobs/{job_id}/clips/{clip_id}/title")
+async def update_clip_title(job_id: str, clip_id: int, req: UpdateClipTitleRequest):
+    """Update the title of a clip candidate."""
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    clip = next((c for c in job.clips if c.id == clip_id), None)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    clip.title = req.title
+    await database.save_job(job)
+    return {"job_id": job_id, "clip_id": clip_id, "title": req.title}
+
+
+@router.put("/jobs/{job_id}/clips/{clip_id}/times")
+async def update_clip_times(job_id: str, clip_id: int, req: UpdateClipTimesRequest):
+    """Update the start/end times of a clip candidate."""
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    clip = next((c for c in job.clips if c.id == clip_id), None)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    if req.start_time is not None:
+        clip.start_time = req.start_time
+    if req.end_time is not None:
+        clip.end_time = req.end_time
+    clip.duration = round(clip.end_time - clip.start_time, 2)
+
+    await database.save_job(job)
+    return {
+        "job_id": job_id,
+        "clip_id": clip_id,
+        "start_time": clip.start_time,
+        "end_time": clip.end_time,
+        "duration": clip.duration,
+    }
+
+
+@router.delete("/jobs/{job_id}/clips/{clip_id}")
+async def delete_clip(job_id: str, clip_id: int):
+    """Delete a single clip candidate and any exported files for it."""
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    clip = next((c for c in job.clips if c.id == clip_id), None)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    # Remove from clips list
+    job.clips = [c for c in job.clips if c.id != clip_id]
+
+    # Remove matching exported clips and their files from disk
+    remaining_exports = []
+    for ec in job.exported_clips:
+        if ec.get("clip_id") == clip_id:
+            filepath = ec.get("path", "")
+            if filepath and os.path.isfile(filepath):
+                try:
+                    os.remove(filepath)
+                    logger.info("Deleted exported file %s for clip %s/%s", filepath, job_id, clip_id)
+                except OSError as e:
+                    logger.warning("Failed to delete exported file %s: %s", filepath, e)
+        else:
+            remaining_exports.append(ec)
+    job.exported_clips = remaining_exports
+
+    await database.save_job(job)
+    return {"job_id": job_id, "clip_id": clip_id, "deleted": True, "remaining_clips": len(job.clips)}
+
+
+class DeleteClipsRequest(BaseModel):
+    clip_ids: list[int]
+
+
+@router.post("/jobs/{job_id}/delete-clips")
+async def delete_clips_bulk(job_id: str, req: DeleteClipsRequest):
+    """Delete multiple clip candidates and their exported files."""
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    ids_to_delete = set(req.clip_ids)
+    deleted_count = 0
+
+    # Remove from clips list
+    original_count = len(job.clips)
+    job.clips = [c for c in job.clips if c.id not in ids_to_delete]
+    deleted_count = original_count - len(job.clips)
+
+    # Remove matching exported clips and their files
+    remaining_exports = []
+    for ec in job.exported_clips:
+        if ec.get("clip_id") in ids_to_delete:
+            filepath = ec.get("path", "")
+            if filepath and os.path.isfile(filepath):
+                try:
+                    os.remove(filepath)
+                except OSError as e:
+                    logger.warning("Failed to delete exported file %s: %s", filepath, e)
+        else:
+            remaining_exports.append(ec)
+    job.exported_clips = remaining_exports
+
+    await database.save_job(job)
+    return {
+        "job_id": job_id,
+        "deleted_count": deleted_count,
+        "remaining_clips": len(job.clips),
+    }
+
+
+@router.post("/jobs/{job_id}/generate-clips")
+async def generate_clips_endpoint(
+    job_id: str,
+    req: GenerateClipsRequest,
+):
+    """Re-run viral clip detection using existing transcript and scenes."""
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if not job.transcript or not job.scenes:
+        raise HTTPException(
+            status_code=400,
+            detail="Transcript and scenes must be available before generating clips",
+        )
+
+    # Cancel any existing generation for this job before starting a new one
+    await _cancel_existing_generation(job_id)
+
+    # Set up cancellation event for this generation
+    cancel_event = asyncio.Event()
+    _clip_cancel_events[job_id] = cancel_event
+
+    # Capture job data at request time so background task uses fresh data
+    transcript = job.transcript
+    scenes = job.scenes
+    duration = job.duration
+
+    # Build a summary string for the AI to understand overall video context
+    summary_text = None
+    if job.summary:
+        parts = [job.summary.overview]
+        if job.summary.key_topics:
+            parts.append(f"Key topics: {', '.join(job.summary.key_topics)}")
+        if job.summary.tone:
+            parts.append(f"Tone: {job.summary.tone}")
+        if job.summary.content_category:
+            parts.append(f"Category: {job.summary.content_category}")
+        if job.summary.estimated_audience:
+            parts.append(f"Audience: {job.summary.estimated_audience}")
+        summary_text = "\n".join(parts)
+
+    async def _do_generate():
+        try:
+            from backend.services.ai_orchestrator import AIOrchestrator
+            from backend.services.prompts import load_prompts
+
+            start_time = time.monotonic()
+
+            def _check_cancelled():
+                if cancel_event.is_set():
+                    raise asyncio.CancelledError("Clip generation cancelled")
+
+            _check_cancelled()
+
+            is_focus_mode = bool(req.clip_focus and req.clip_focus.strip())
+            focus_topic = req.clip_focus.strip() if is_focus_mode else None
+
+            if is_focus_mode:
+                await broadcast_ws(job_id, {
+                    "type": "status",
+                    "status": "detecting_clips",
+                    "progress": 82,
+                    "message": f"Clip Focus: searching for \"{focus_topic}\" — analyzing {len(transcript)} transcript segments, {len(scenes)} scenes...",
+                })
+            else:
+                await broadcast_ws(job_id, {
+                    "type": "status",
+                    "status": "detecting_clips",
+                    "progress": 82,
+                    "message": f"Preparing viral clip detection — {len(transcript)} transcript segments, {len(scenes)} scenes...",
+                })
+
+            custom_prompts = load_prompts()
+            orchestrator = AIOrchestrator(
+                ws_broadcast=broadcast_ws,
+                custom_prompts=custom_prompts,
+                cancel_check=_check_cancelled,
+            )
+
+            if is_focus_mode:
+                await broadcast_ws(job_id, {
+                    "type": "status",
+                    "status": "detecting_clips",
+                    "progress": 85,
+                    "message": f"AI is analyzing video for \"{focus_topic}\" — scanning transcript and scenes...",
+                })
+            else:
+                await broadcast_ws(job_id, {
+                    "type": "status",
+                    "status": "detecting_clips",
+                    "progress": 85,
+                    "message": "Sending transcript and scenes to AI for viral clip analysis...",
+                })
+
+            # Heartbeat: broadcast progress updates while AI processes
+            async def _heartbeat():
+                step = 0
+                if is_focus_mode:
+                    phases = [
+                        f"AI is scanning video for \"{focus_topic}\" content...",
+                        f"Identifying segments related to \"{focus_topic}\"...",
+                        f"Analyzing scene context for \"{focus_topic}\" relevance...",
+                        f"Evaluating clip boundaries for \"{focus_topic}\" moments...",
+                        f"Finalizing focused clips for \"{focus_topic}\"...",
+                    ]
+                else:
+                    phases = [
+                        "AI is analyzing transcript for viral moments...",
+                        "Identifying high-engagement segments...",
+                        "Scoring clip candidates by viral potential...",
+                        "Evaluating hook strength and audience retention...",
+                        "Finalizing clip boundaries and scores...",
+                    ]
+
+                # Estimate total time based on data size
+                seg_count = len(transcript)
+                scene_count = len(scenes)
+                # Heuristic: ~1s per 3 segments + ~1s per 2 scenes, minimum 30s, maximum 300s
+                estimated_total = max(30, min(300, seg_count / 3 + scene_count / 2 + 20))
+
+                await asyncio.sleep(8)
+                while True:
+                    elapsed = int(time.monotonic() - start_time)
+                    phase = phases[min(step, len(phases) - 1)]
+                    pct = min(95, 85 + step * 2)
+
+                    # Calculate ETA from elapsed time and estimate
+                    remaining = max(0, int(estimated_total - elapsed))
+                    if elapsed > 10 and remaining > 0:
+                        if remaining < 60:
+                            eta = f" — ~{remaining}s remaining"
+                        else:
+                            m, s = divmod(remaining, 60)
+                            eta = f" — ~{m}m {s}s remaining"
+                    else:
+                        eta = ""
+
+                    await broadcast_ws(job_id, {
+                        "type": "status",
+                        "status": "detecting_clips",
+                        "progress": pct,
+                        "message": f"{phase} ({elapsed}s elapsed{eta})",
+                    })
+                    step += 1
+                    await asyncio.sleep(6)
+
+            heartbeat_task = asyncio.create_task(_heartbeat())
+            try:
+                clips, clips_provider = await asyncio.wait_for(
+                    orchestrator.detect_viral_clips(
+                        transcript, scenes, duration, job_id,
+                        clip_count=req.clip_count,
+                        min_duration=req.min_duration,
+                        max_duration=req.max_duration,
+                        clip_focus=req.clip_focus,
+                        video_summary=summary_text,
+                    ),
+                    timeout=_CLIP_DETECTION_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                timeout_min = _CLIP_DETECTION_TIMEOUT // 60
+                logger.warning(
+                    f"Clip detection timed out for {job_id} after {_CLIP_DETECTION_TIMEOUT}s "
+                    f"({len(transcript)} segments, {len(scenes)} scenes)"
+                )
+                await broadcast_ws(job_id, {
+                    "type": "error",
+                    "message": (
+                        f"Clip detection timed out after {timeout_min} minutes "
+                        f"({len(transcript)} transcript segments, {len(scenes)} scenes). "
+                        f"Try reducing the number of clips or using a faster AI provider."
+                    ),
+                })
+                return
+            finally:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+
+            _check_cancelled()
+
+            elapsed = int(time.monotonic() - start_time)
+
+            if is_focus_mode:
+                await broadcast_ws(job_id, {
+                    "type": "status",
+                    "status": "detecting_clips",
+                    "progress": 96,
+                    "message": f"AI found {len(clips)} clips for \"{focus_topic}\" via {clips_provider} — filtering by duration ({int(req.min_duration)}-{int(req.max_duration)}s)...",
+                })
+            else:
+                await broadcast_ws(job_id, {
+                    "type": "status",
+                    "status": "detecting_clips",
+                    "progress": 96,
+                    "message": f"AI returned {len(clips)} viral candidates via {clips_provider} — filtering by duration ({int(req.min_duration)}-{int(req.max_duration)}s)...",
+                })
+
+            # Stamp clip_focus on each clip so the UI can distinguish
+            # clips generated via focus from viral algorithm clips
+            if req.clip_focus and req.clip_focus.strip():
+                for c in clips:
+                    c.clip_focus = req.clip_focus.strip()
+
+            # Filter clips by user's duration preferences
+            filtered = []
+            skipped = 0
+            for c in clips:
+                if c.duration < req.min_duration or c.duration > req.max_duration:
+                    skipped += 1
+                    continue
+                filtered.append(c)
+
+            filter_note = f" ({skipped} outside {int(req.min_duration)}-{int(req.max_duration)}s range)" if skipped else ""
+
+            # Filter by viral score range if specified
+            if req.viral_score_min > 0 or req.viral_score_max < 100:
+                score_filtered = [
+                    c for c in filtered
+                    if req.viral_score_min <= c.viral_score <= req.viral_score_max
+                ]
+                score_skipped = len(filtered) - len(score_filtered)
+                if score_skipped > 0:
+                    filter_note += f" ({score_skipped} outside {req.viral_score_min}-{req.viral_score_max} viral score range)"
+                filtered = score_filtered
+
+            j = await database.load_job(job_id)
+            if j:
+                existing_clips = j.clips or []
+                # Start IDs after the highest existing ID to avoid conflicts
+                max_existing_id = max((c.id for c in existing_clips), default=0)
+                for idx, clip in enumerate(filtered, start=max_existing_id + 1):
+                    clip.id = idx
+
+                merged_clips = existing_clips + list(filtered)
+                provider_used = j.provider_used or {}
+                provider_used["clips"] = clips_provider
+                focus_label = f" for \"{focus_topic}\"" if is_focus_mode else ""
+                await database.update_job_status(
+                    job_id,
+                    status="complete",
+                    clips=merged_clips,
+                    provider_used=provider_used,
+                    progress=100,
+                    progress_message=f"Found {len(filtered)} new clips{focus_label} in {elapsed}s{filter_note} ({len(merged_clips)} total)",
+                )
+
+            focus_label = f" for \"{focus_topic}\"" if is_focus_mode else ""
+            await broadcast_ws(job_id, {
+                "type": "clips_generated",
+                "count": len(filtered),
+                "total": len(merged_clips),
+                "message": f"Found {len(filtered)} new clips{focus_label} via {clips_provider} in {elapsed}s{filter_note} ({len(merged_clips)} total)",
+            })
+        except asyncio.CancelledError:
+            logger.info(f"Clip generation for {job_id} was cancelled (replaced by new generation)")
+        except Exception as e:
+            logger.exception(f"Clip generation failed for {job_id}")
+            await broadcast_ws(job_id, {
+                "type": "error",
+                "message": f"Clip generation failed: {str(e)}",
+            })
+        finally:
+            _active_clip_tasks.pop(job_id, None)
+            _clip_cancel_events.pop(job_id, None)
+
+    task = asyncio.create_task(_do_generate())
+    _active_clip_tasks[job_id] = task
+    return {"status": "generating", "message": "Generating clips..."}
+
+
+async def _cancel_existing_generation(job_id: str):
+    """Cancel any in-progress clip generation for the given job."""
+    # Signal cancellation via the event
+    cancel_event = _clip_cancel_events.get(job_id)
+    if cancel_event:
+        cancel_event.set()
+
+    # Cancel the asyncio task
+    existing_task = _active_clip_tasks.pop(job_id, None)
+    if existing_task and not existing_task.done():
+        existing_task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(existing_task), timeout=3.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            pass
+        logger.info(f"Cancelled previous clip generation for {job_id}")
+
+    _clip_cancel_events.pop(job_id, None)
+
+
+@router.get("/jobs/{job_id}/clips")
+async def list_clips(job_id: str):
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return [
+        {
+            "clip_id": c.get("clip_id"),
+            "filename": c.get("filename"),
+            "download_url": f"/api/files/{job_id}/clips/{c.get('filename')}",
+            "start": c.get("start"),
+            "end": c.get("end"),
+        }
+        for c in job.exported_clips
+    ]
+
+
+@router.post("/jobs/{job_id}/seo/{clip_id}")
+async def generate_seo_endpoint(job_id: str, clip_id: int):
+    """Generate SEO-optimized title, description, and tags for a clip."""
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    clip = next((c for c in job.clips if c.id == clip_id), None)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    # Build clip transcript from segments within the clip time range
+    clip_transcript = "\n".join(
+        f"{s.speaker}: {s.text}"
+        for s in job.transcript
+        if s.start >= clip.start_time and s.end <= clip.end_time
+    )
+    if not clip_transcript:
+        clip_transcript = clip.suggested_caption or clip.title
+
+    video_summary = ""
+    if job.summary:
+        video_summary = job.summary.overview
+
+    await broadcast_ws(job_id, {
+        "type": "status",
+        "status": "generating_seo",
+        "progress": 10,
+        "message": f"Generating SEO metadata for clip {clip_id}...",
+    })
+
+    try:
+        from backend.services.ai_orchestrator import AIOrchestrator
+
+        orchestrator = AIOrchestrator(ws_broadcast=broadcast_ws)
+
+        seo, provider = await orchestrator.generate_seo(
+            clip_title=clip.title,
+            clip_transcript=clip_transcript,
+            video_summary=video_summary,
+            platform=clip.platform,
+            job_id=job_id,
+        )
+
+        await broadcast_ws(job_id, {
+            "type": "status",
+            "status": "generating_seo",
+            "progress": 100,
+            "message": f"SEO generated via {provider}",
+        })
+
+        return {
+            "clip_id": clip_id,
+            "provider": provider,
+            "seo": seo.model_dump(),
+        }
+    except Exception as e:
+        logger.exception(f"SEO generation failed for {job_id}/{clip_id}")
+        raise HTTPException(status_code=500, detail=f"SEO generation failed: {str(e)}")

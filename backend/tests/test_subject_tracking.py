@@ -1,0 +1,620 @@
+"""Tests for the subject tracking pipeline — clip_exporter helpers and Ollama provider extraction."""
+import asyncio
+import json
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+# ── Pre-mock heavy native deps to avoid import failures in CI ──
+for _mod in (
+    "google.generativeai", "google.generativeai.types", "google.ai",
+    "google.ai.generativelanguage_v1beta", "anthropic", "groq", "httpx",
+    "openai", "ctranslate2", "faster_whisper",
+):
+    sys.modules.setdefault(_mod, MagicMock())
+
+from backend.services.clip_exporter import (
+    _safe_subject_x,
+    _center_crop_offset,
+    _build_subject_keyframes,
+    _smooth_keyframes,
+    _build_crop_x_expr,
+    _build_filter_chain,
+)
+from backend.models import SceneDescription
+
+
+def _scene(timestamp, subject_x=50, description="scene", importance_score=5):
+    """Helper to create SceneDescription with required fields."""
+    return SceneDescription(
+        timestamp=timestamp,
+        description=description,
+        importance_score=importance_score,
+        thumbnail_path="/tmp/thumb.jpg",
+        subject_x=subject_x,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# _safe_subject_x
+# ══════════════════════════════════════════════════════════════════════
+
+class TestSafeSubjectX:
+    def test_center_unchanged(self):
+        assert _safe_subject_x(50) == 50
+
+    def test_clamp_low(self):
+        assert _safe_subject_x(0) == 10
+        assert _safe_subject_x(5) == 10
+
+    def test_clamp_high(self):
+        assert _safe_subject_x(100) == 90
+        assert _safe_subject_x(95) == 90
+
+    def test_within_range_unchanged(self):
+        assert _safe_subject_x(30) == 30
+        assert _safe_subject_x(70) == 70
+
+    def test_boundary_values(self):
+        assert _safe_subject_x(10) == 10
+        assert _safe_subject_x(90) == 90
+
+
+# ══════════════════════════════════════════════════════════════════════
+# _center_crop_offset
+# ══════════════════════════════════════════════════════════════════════
+
+class TestCenterCropOffset:
+    def test_center_subject(self):
+        # Subject at 50% of 1920px, crop width 1080
+        # Expected: 1920*0.5 - 1080/2 = 960 - 540 = 420
+        assert _center_crop_offset(50, 1920, 1080) == 420
+
+    def test_left_subject_clamped(self):
+        # Subject at 10% → offset would be negative → clamped to 0
+        assert _center_crop_offset(10, 1920, 1080) == 0
+
+    def test_right_subject_clamped(self):
+        # Subject at 95% → offset exceeds max → clamped
+        offset = _center_crop_offset(95, 1920, 1080)
+        max_offset = 1920 - 1080
+        assert offset == max_offset
+
+    def test_zero_crop_width(self):
+        assert _center_crop_offset(50, 1920, 1920) == 0
+
+
+# ══════════════════════════════════════════════════════════════════════
+# _build_subject_keyframes
+# ══════════════════════════════════════════════════════════════════════
+
+class TestBuildSubjectKeyframes:
+    def test_empty_scenes(self):
+        result = _build_subject_keyframes([], 0, 60)
+        assert result == [(0.0, 50)]
+
+    def test_no_overlapping_scenes(self):
+        """Scene is after clip range — boundary interpolation uses nearest scene value."""
+        scenes = [_scene(timestamp=100.0, subject_x=30)]
+        result = _build_subject_keyframes(scenes, 0, 60)
+        # Boundary interpolation correctly uses the nearest after scene (sx=30)
+        # rather than falling back to default center (50)
+        assert result[0][1] == 30
+        assert result[-1][1] == 30
+
+    def test_single_overlapping_scene(self):
+        scenes = [_scene(timestamp=30.0, subject_x=70)]
+        result = _build_subject_keyframes(scenes, 0, 60)
+        # Should have boundary at 0, the scene at 30, and boundary at 60
+        assert len(result) == 3
+        assert result[0] == (0.0, 70)   # boundary copies first value
+        assert result[1] == (30.0, 70)  # the scene (70 is within safe range)
+        assert result[2] == (60.0, 70)  # boundary copies last value
+
+    def test_multiple_scenes_sorted(self):
+        scenes = [
+            _scene(timestamp=45.0, subject_x=80),
+            _scene(timestamp=15.0, subject_x=20),
+            _scene(timestamp=30.0, subject_x=50),
+        ]
+        result = _build_subject_keyframes(scenes, 0, 60)
+        # Should be sorted by time with boundaries
+        times = [kf[0] for kf in result]
+        assert times == sorted(times)
+        assert result[0][0] == 0.0
+        assert result[-1][0] == 60.0
+
+    def test_scene_at_boundary(self):
+        scenes = [_scene(timestamp=0.0, subject_x=40)]
+        result = _build_subject_keyframes(scenes, 0, 60)
+        assert result[0][0] == 0.0
+        assert result[-1][0] == 60.0
+
+    def test_subject_x_clamped_to_safe_range(self):
+        scenes = [_scene(timestamp=10.0, subject_x=5)]
+        result = _build_subject_keyframes(scenes, 0, 60)
+        # subject_x=5 should be clamped to 10 by _safe_subject_x
+        assert all(kf[1] >= 10 for kf in result)
+
+    def test_dict_scenes(self):
+        """Scenes can be dicts (from serialized DB data)."""
+        scenes = [{"timestamp": 20.0, "subject_x": 60}]
+        result = _build_subject_keyframes(scenes, 0, 60)
+        assert len(result) >= 2
+        # Should extract subject_x from dict
+        assert any(kf[1] == 60 for kf in result)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# _smooth_keyframes
+# ══════════════════════════════════════════════════════════════════════
+
+class TestSmoothKeyframes:
+    def test_empty(self):
+        assert _smooth_keyframes([]) == []
+
+    def test_single_keyframe(self):
+        kf = [(0.0, 50)]
+        assert _smooth_keyframes(kf) == [(0.0, 50)]
+
+    def test_no_change_needed(self):
+        """Slow movement within max_speed should pass through unchanged."""
+        kf = [(0.0, 50), (10.0, 55)]  # 0.5 units/s < 50 units/s
+        result = _smooth_keyframes(kf)
+        assert result == kf
+
+    def test_fast_movement_clamped(self):
+        """Large jump should be clamped by max_speed."""
+        kf = [(0.0, 20), (1.0, 80)]  # 60 units in 1s > 50 units/s
+        result = _smooth_keyframes(kf, max_speed=50)
+        assert result[0] == (0.0, 20)
+        assert result[1][0] == 1.0
+        assert result[1][1] == 70  # 20 + 50*1 = 70
+
+    def test_fast_movement_left(self):
+        """Large jump leftward should be clamped."""
+        kf = [(0.0, 80), (1.0, 20)]  # -60 units in 1s
+        result = _smooth_keyframes(kf, max_speed=50)
+        assert result[1][1] == 30  # 80 - 50*1 = 30
+
+    def test_zero_dt(self):
+        """Same timestamp should keep previous value."""
+        kf = [(0.0, 50), (0.0, 80)]
+        result = _smooth_keyframes(kf)
+        assert result[1][1] == 50
+
+
+# ══════════════════════════════════════════════════════════════════════
+# _build_crop_x_expr
+# ══════════════════════════════════════════════════════════════════════
+
+class TestBuildCropXExpr:
+    def test_zero_max_offset(self):
+        assert _build_crop_x_expr([(0.0, 50)], 0) == "0"
+
+    def test_static_keyframes(self):
+        """All same subject_x → returns plain integer offset."""
+        kf = [(0.0, 50), (10.0, 50), (20.0, 50)]
+        result = _build_crop_x_expr(kf, 840, src_w=1920, crop_w=1080)
+        # Should be a static integer, not an expression
+        assert result.isdigit() or result == "0"
+
+    def test_dynamic_keyframes_produces_expression(self):
+        """Varied subject_x → returns FFmpeg expression with clip()."""
+        kf = [(0.0, 20), (10.0, 80)]
+        result = _build_crop_x_expr(kf, 840, src_w=1920, crop_w=1080)
+        # Should contain clip() wrapper and if() segments
+        assert "clip(" in result
+        assert "if(" in result
+
+    def test_single_keyframe_static(self):
+        kf = [(0.0, 30)]
+        result = _build_crop_x_expr(kf, 840, src_w=1920, crop_w=1080)
+        # Single keyframe → static offset
+        assert "if(" not in result
+
+
+# ══════════════════════════════════════════════════════════════════════
+# _build_filter_chain
+# ══════════════════════════════════════════════════════════════════════
+
+class TestBuildFilterChain:
+    def test_no_aspect_no_subs(self):
+        vf, is_complex = _build_filter_chain(None, 1920, 1080, None)
+        assert vf is None
+        assert is_complex is False
+
+    def test_aspect_ratio_with_static_subject(self):
+        vf, is_complex = _build_filter_chain("9:16", 1920, 1080, None, subject_x=30)
+        assert vf is not None
+        assert "crop=" in vf
+        assert "scale=" in vf
+
+    def test_aspect_ratio_with_dynamic_keyframes(self):
+        kf = [(0.0, 20), (5.0, 50), (10.0, 80)]
+        vf, _ = _build_filter_chain("9:16", 1920, 1080, None, subject_keyframes=kf)
+        assert vf is not None
+        # Dynamic keyframes should produce expression-based crop
+        assert "crop=" in vf
+        # Should contain FFmpeg expression elements
+        assert "clip(" in vf or "if(" in vf
+
+    def test_same_aspect_ratio_no_crop(self):
+        """16:9 source → 16:9 target → no crop needed."""
+        vf, _ = _build_filter_chain("16:9", 1920, 1080, None, subject_x=30)
+        # Should just scale, no crop (src ratio == target ratio)
+        if vf:
+            assert "scale=" in vf
+
+    def test_subtitles_only(self):
+        vf, _ = _build_filter_chain(None, 1920, 1080, "/tmp/test.ass")
+        assert vf is not None
+        assert "subtitles=" in vf
+
+
+# ══════════════════════════════════════════════════════════════════════
+# End-to-end centering validation across all aspect ratios
+# ══════════════════════════════════════════════════════════════════════
+
+ASPECT_RATIOS = {
+    "9:16": 9 / 16,
+    "1:1": 1.0,
+    "4:5": 4 / 5,
+}
+
+class TestSubjectCenteringAllAspectRatios:
+    """Verify that subject tracking correctly centers subjects for every
+    supported aspect ratio at various subject_x positions.
+
+    For each aspect ratio and subject_x value:
+    1. Compute the crop dimensions (matching _build_filter_chain logic)
+    2. Compute the crop offset via _center_crop_offset
+    3. Verify the subject pixel lands within 1% of center of the crop window
+       (unless edge-clamped)
+    """
+
+    @pytest.mark.parametrize("aspect_ratio", ["9:16", "1:1", "4:5"])
+    @pytest.mark.parametrize("subject_x", [10, 20, 30, 40, 50, 60, 70, 80, 90])
+    def test_centering_1920x1080(self, aspect_ratio, subject_x):
+        """16:9 source (1920x1080) → various targets."""
+        self._verify_centering(1920, 1080, aspect_ratio, subject_x)
+
+    @pytest.mark.parametrize("aspect_ratio", ["9:16", "1:1", "4:5"])
+    @pytest.mark.parametrize("subject_x", [10, 30, 50, 70, 90])
+    def test_centering_2560x1440(self, aspect_ratio, subject_x):
+        """16:9 source (2560x1440) → various targets."""
+        self._verify_centering(2560, 1440, aspect_ratio, subject_x)
+
+    @pytest.mark.parametrize("aspect_ratio", ["9:16", "1:1", "4:5"])
+    @pytest.mark.parametrize("subject_x", [10, 30, 50, 70, 90])
+    def test_centering_3840x2160(self, aspect_ratio, subject_x):
+        """4K source (3840x2160) → various targets."""
+        self._verify_centering(3840, 2160, aspect_ratio, subject_x)
+
+    @pytest.mark.parametrize("aspect_ratio", ["9:16", "1:1", "4:5"])
+    @pytest.mark.parametrize("subject_x", [10, 30, 50, 70, 90])
+    def test_centering_1280x720(self, aspect_ratio, subject_x):
+        """720p source (1280x720) → various targets."""
+        self._verify_centering(1280, 720, aspect_ratio, subject_x)
+
+    def _verify_centering(self, src_w, src_h, aspect_ratio, subject_x):
+        target_ratio = ASPECT_RATIOS[aspect_ratio]
+        src_ratio = src_w / src_h
+
+        # Skip if same aspect ratio (no crop)
+        if abs(src_ratio - target_ratio) <= 0.01:
+            return
+
+        # Compute crop dimensions (matching _build_filter_chain)
+        if target_ratio < src_ratio:
+            crop_h = src_h
+            crop_w = int(src_h * target_ratio)
+        else:
+            crop_w = src_w
+            crop_h = int(src_w / target_ratio)
+        crop_w = crop_w - (crop_w % 2)
+        crop_h = crop_h - (crop_h % 2)
+
+        sx = _safe_subject_x(subject_x)
+        x_offset = _center_crop_offset(sx, src_w, crop_w)
+
+        # Where the subject is in source pixels
+        subject_pixel = src_w * sx / 100
+        # Where the subject lands in the crop window
+        subject_in_crop = subject_pixel - x_offset
+        crop_center = crop_w / 2
+
+        max_offset = src_w - crop_w
+        is_edge_clamped = x_offset == 0 or x_offset == max_offset
+
+        if not is_edge_clamped:
+            # When not edge-clamped, subject should be within 1px of center
+            error_px = abs(subject_in_crop - crop_center)
+            assert error_px <= 1.0, (
+                f"Subject off-center by {error_px:.1f}px for {src_w}x{src_h}→{aspect_ratio} "
+                f"sx={sx}: subject@{subject_pixel:.0f}px, offset={x_offset}, "
+                f"in_crop={subject_in_crop:.0f}, center={crop_center:.0f}"
+            )
+        else:
+            # When edge-clamped, subject should still be inside the crop window
+            assert 0 <= subject_in_crop <= crop_w, (
+                f"Subject outside crop window for {src_w}x{src_h}→{aspect_ratio} "
+                f"sx={sx}: subject@{subject_pixel:.0f}px, offset={x_offset}, "
+                f"in_crop={subject_in_crop:.0f}"
+            )
+
+
+class TestFrontendBackendEquivalence:
+    """Verify that the frontend subjectXToCenterPct formula produces
+    an equivalent visual result to the backend _center_crop_offset.
+
+    The frontend uses:  objectPosition = ((R * sx - 50) / (R - 1))%
+    The backend uses:   crop_x = round(src_w * sx / 100 - crop_w / 2)
+
+    These should produce equivalent centering results.
+    """
+
+    @pytest.mark.parametrize("aspect_ratio", ["9:16", "1:1", "4:5"])
+    @pytest.mark.parametrize("subject_x", [10, 20, 30, 40, 50, 60, 70, 80, 90])
+    def test_equivalence_1920x1080(self, aspect_ratio, subject_x):
+        self._verify_equivalence(1920, 1080, aspect_ratio, subject_x)
+
+    def _verify_equivalence(self, src_w, src_h, aspect_ratio, subject_x):
+        target_ratio = ASPECT_RATIOS[aspect_ratio]
+        src_ratio = src_w / src_h
+
+        if abs(src_ratio - target_ratio) <= 0.01:
+            return
+
+        R = src_ratio / target_ratio
+        if R <= 1.01:
+            return
+
+        sx = _safe_subject_x(subject_x)
+
+        # --- Frontend formula ---
+        center_pct = (R * sx - 50) / (R - 1)
+        center_pct = max(0, min(100, center_pct))
+
+        # The frontend objectPosition means: the center_pct% point of the
+        # content is aligned with the center_pct% point of the container.
+        # For a source of width src_w rendered at scale R into container of
+        # width (src_w / R), the visible left edge of the content is:
+        #   content_left = center_pct/100 * src_w - center_pct/100 * (src_w / R)
+        #                = center_pct/100 * src_w * (1 - 1/R)
+        #                = center_pct/100 * (src_w - crop_w)  [since crop_w = src_w/R ≈ src_h * target_ratio]
+        # This is exactly the same as the backend crop offset when we use
+        # crop_w = src_h * target_ratio for horizontal cropping.
+
+        # --- Backend formula ---
+        if target_ratio < src_ratio:
+            crop_w = int(src_h * target_ratio)
+        else:
+            crop_w = src_w
+        crop_w = crop_w - (crop_w % 2)
+        max_offset = src_w - crop_w
+
+        backend_offset = _center_crop_offset(sx, src_w, crop_w)
+
+        # Frontend equivalent offset
+        frontend_offset = center_pct / 100 * max_offset
+
+        # They should agree within a few pixels (rounding differences)
+        diff = abs(frontend_offset - backend_offset)
+        tolerance = 3  # pixels — accounts for int rounding in crop_w
+        assert diff <= tolerance, (
+            f"Frontend/backend mismatch for {src_w}x{src_h}→{aspect_ratio} sx={sx}: "
+            f"frontend_offset={frontend_offset:.1f} (centerPct={center_pct:.2f}%), "
+            f"backend_offset={backend_offset}, diff={diff:.1f}px"
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Boundary interpolation QA
+# ══════════════════════════════════════════════════════════════════════
+
+class TestBoundaryInterpolation:
+    """QA tests verifying that clips between scenes get correctly
+    interpolated subject_x values rather than falling back to center."""
+
+    def test_clip_between_two_scenes(self):
+        """Clip is entirely between two scenes — should interpolate."""
+        scenes = [
+            _scene(timestamp=10.0, subject_x=20),
+            _scene(timestamp=50.0, subject_x=80),
+        ]
+        result = _build_subject_keyframes(scenes, 25.0, 35.0)
+        # At t=25 (midpoint of 10-50): frac = (25-10)/(50-10) = 0.375
+        # sx = 20 + 60 * 0.375 = 42.5 → 43 (after round)
+        assert len(result) >= 2
+        sx_start = result[0][1]
+        assert 35 <= sx_start <= 50, f"Expected interpolated sx near 43, got {sx_start}"
+
+    def test_clip_after_all_scenes(self):
+        """Clip starts after all scenes — should use last scene's value."""
+        scenes = [
+            _scene(timestamp=10.0, subject_x=30),
+            _scene(timestamp=20.0, subject_x=70),
+        ]
+        result = _build_subject_keyframes(scenes, 50.0, 60.0)
+        # Only after scenes — uses first after scene (which is the last scene, subject_x=70)
+        assert result[0][1] == 70
+
+    def test_clip_before_all_scenes(self):
+        """Clip ends before all scenes — should use first scene's value."""
+        scenes = [
+            _scene(timestamp=50.0, subject_x=30),
+            _scene(timestamp=60.0, subject_x=70),
+        ]
+        result = _build_subject_keyframes(scenes, 10.0, 20.0)
+        assert result[0][1] == 30
+
+    def test_dynamic_tracking_filter_chain(self):
+        """End-to-end: scenes with varied subject_x should produce dynamic FFmpeg expression."""
+        scenes = [
+            _scene(timestamp=0.0, subject_x=20),
+            _scene(timestamp=15.0, subject_x=50),
+            _scene(timestamp=30.0, subject_x=80),
+        ]
+        kf = _build_subject_keyframes(scenes, 0.0, 30.0)
+        smoothed = _smooth_keyframes(kf)
+        unique_sx = set(k[1] for k in smoothed)
+        assert len(unique_sx) > 1, "Expected dynamic keyframes with multiple unique sx values"
+
+        vf, _ = _build_filter_chain("9:16", 1920, 1080, None, subject_keyframes=smoothed)
+        assert vf is not None
+        assert "clip(" in vf, f"Expected dynamic expression, got: {vf}"
+
+    def test_static_tracking_filter_chain(self):
+        """Scenes with identical subject_x should produce static crop."""
+        scenes = [
+            _scene(timestamp=0.0, subject_x=40),
+            _scene(timestamp=15.0, subject_x=40),
+            _scene(timestamp=30.0, subject_x=40),
+        ]
+        kf = _build_subject_keyframes(scenes, 0.0, 30.0)
+        smoothed = _smooth_keyframes(kf)
+
+        vf, _ = _build_filter_chain("9:16", 1920, 1080, None, subject_keyframes=smoothed)
+        assert vf is not None
+        # Static crop — should NOT contain dynamic expression
+        assert "clip(" not in vf or "if(" not in vf
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Ollama provider subject_x extraction
+# ══════════════════════════════════════════════════════════════════════
+
+def _make_ollama_provider():
+    """Create OllamaProvider with mocked settings."""
+    with patch("backend.services.providers.ollama_provider.settings") as mock_settings:
+        mock_settings.OLLAMA_HOST = "http://localhost:11434"
+        mock_settings.OLLAMA_VISION_MODEL = "moondream"
+        mock_settings.OLLAMA_TEXT_MODEL = "llama3"
+        from backend.services.providers.ollama_provider import OllamaProvider
+        return OllamaProvider()
+
+
+def _make_frame(timestamp=10.0):
+    from backend.models import FrameData
+    return FrameData(timestamp=timestamp, path="/tmp/frame.jpg", base64="dGVzdA==")
+
+
+class TestOllamaSubjectX:
+    def test_json_response_extracts_subject_x(self):
+        """When Ollama returns valid JSON, subject_x should be extracted."""
+        provider = _make_ollama_provider()
+        frame = _make_frame()
+        json_response = json.dumps({
+            "timestamp": 10.0,
+            "description": "Person walking left",
+            "importance_score": 7,
+            "subject_x": 25,
+        })
+        with patch.object(provider, "_call_vision", new_callable=AsyncMock, return_value=json_response):
+            scenes = asyncio.get_event_loop().run_until_complete(provider.analyze_frames([frame]))
+        assert len(scenes) == 1
+        assert scenes[0].subject_x == 25
+        assert scenes[0].importance_score == 7
+        assert scenes[0].description == "Person walking left"
+
+    def test_json_array_response(self):
+        """Ollama might return a JSON array — should take first element."""
+        provider = _make_ollama_provider()
+        frame = _make_frame()
+        json_response = json.dumps([{
+            "timestamp": 10.0,
+            "description": "Array response",
+            "importance_score": 6,
+            "subject_x": 75,
+        }])
+        with patch.object(provider, "_call_vision", new_callable=AsyncMock, return_value=json_response):
+            scenes = asyncio.get_event_loop().run_until_complete(provider.analyze_frames([frame]))
+        assert len(scenes) == 1
+        assert scenes[0].subject_x == 75
+
+    def test_json_with_code_fence(self):
+        """Ollama sometimes wraps JSON in markdown code fences."""
+        provider = _make_ollama_provider()
+        frame = _make_frame()
+        json_response = '```json\n{"timestamp": 10.0, "description": "Fenced", "importance_score": 8, "subject_x": 35}\n```'
+        with patch.object(provider, "_call_vision", new_callable=AsyncMock, return_value=json_response):
+            scenes = asyncio.get_event_loop().run_until_complete(provider.analyze_frames([frame]))
+        assert len(scenes) == 1
+        assert scenes[0].subject_x == 35
+
+    def test_raw_text_fallback(self):
+        """When JSON parsing fails, should fall back to word-scanning and subject_x=50."""
+        provider = _make_ollama_provider()
+        frame = _make_frame()
+        raw_text = "This frame shows a person talking. The importance is 7 out of 10."
+        with patch.object(provider, "_call_vision", new_callable=AsyncMock, return_value=raw_text):
+            scenes = asyncio.get_event_loop().run_until_complete(provider.analyze_frames([frame]))
+        assert len(scenes) == 1
+        assert scenes[0].subject_x == 50  # Default when JSON fails
+        assert scenes[0].importance_score == 7  # Extracted from text
+
+    def test_subject_x_clamped(self):
+        """subject_x values outside 0-100 should be clamped."""
+        provider = _make_ollama_provider()
+        frame = _make_frame()
+        json_response = json.dumps({
+            "timestamp": 10.0,
+            "description": "Extreme",
+            "importance_score": 5,
+            "subject_x": 150,
+        })
+        with patch.object(provider, "_call_vision", new_callable=AsyncMock, return_value=json_response):
+            scenes = asyncio.get_event_loop().run_until_complete(provider.analyze_frames([frame]))
+        assert scenes[0].subject_x == 100
+
+    def test_missing_subject_x_defaults_50(self):
+        """JSON response without subject_x should default to 50."""
+        provider = _make_ollama_provider()
+        frame = _make_frame()
+        json_response = json.dumps({
+            "timestamp": 10.0,
+            "description": "No tracking",
+            "importance_score": 5,
+        })
+        with patch.object(provider, "_call_vision", new_callable=AsyncMock, return_value=json_response):
+            scenes = asyncio.get_event_loop().run_until_complete(provider.analyze_frames([frame]))
+        assert scenes[0].subject_x == 50
+
+    def test_error_fallback_has_subject_x(self):
+        """When vision call fails, error fallback should include subject_x=50."""
+        provider = _make_ollama_provider()
+        frame = _make_frame()
+        with patch.object(
+            provider, "_call_vision", new_callable=AsyncMock,
+            side_effect=Exception("Connection refused"),
+        ):
+            scenes = asyncio.get_event_loop().run_until_complete(provider.analyze_frames([frame]))
+        assert len(scenes) == 1
+        assert scenes[0].subject_x == 50
+        assert scenes[0].importance_score == 5
+
+    def test_progress_callback(self):
+        """Progress callback should fire for each frame."""
+        provider = _make_ollama_provider()
+        frame = _make_frame()
+        json_response = json.dumps({
+            "timestamp": 10.0, "description": "t", "importance_score": 5, "subject_x": 50,
+        })
+        callback = AsyncMock()
+        with patch.object(provider, "_call_vision", new_callable=AsyncMock, return_value=json_response):
+            asyncio.get_event_loop().run_until_complete(
+                provider.analyze_frames([frame], progress_callback=callback)
+            )
+        callback.assert_awaited_once_with(1, 1)
+
+    def test_empty_base64_skipped(self):
+        """Frames without base64 should be skipped."""
+        provider = _make_ollama_provider()
+        from backend.models import FrameData
+        frame = FrameData(timestamp=5.0, path="/tmp/f.jpg", base64="")
+        with patch.object(provider, "_call_vision", new_callable=AsyncMock) as mock_call:
+            scenes = asyncio.get_event_loop().run_until_complete(provider.analyze_frames([frame]))
+        mock_call.assert_not_awaited()
+        assert scenes == []
