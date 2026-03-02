@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import time
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
