@@ -9,6 +9,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
 
 from backend.routers import upload, jobs, clips, fonts, presets, settings as settings_router, ws
+from backend.routers import agent as agent_router
+from backend.routers.api_v1 import router as api_v1_router
 
 LOG_FILE = "/data/logs/app.log"
 
@@ -72,6 +74,32 @@ app.include_router(fonts.router)
 app.include_router(presets.router)
 app.include_router(settings_router.router)
 app.include_router(ws.router)
+app.include_router(agent_router.router)
+app.include_router(api_v1_router)
+
+# Mount MCP server at /mcp (if mcp package is available)
+try:
+    from mcp.server.fastmcp import FastMCP
+
+    clipai_mcp = FastMCP(
+        name="ClipAI",
+        stateless_http=True,
+        description=(
+            "Video intelligence platform — upload videos, analyze content, "
+            "generate viral clips with subtitles and SEO metadata"
+        ),
+    )
+
+    # Import and register MCP tools
+    from backend.mcp_tools import register_tools
+    register_tools(clipai_mcp)
+
+    app.mount("/mcp", clipai_mcp.streamable_http_app())
+    logger.info("MCP server mounted at /mcp")
+except ImportError:
+    logger.warning("mcp package not installed — MCP endpoint disabled. Install with: pip install 'mcp>=1.8.0'")
+except Exception as exc:
+    logger.warning("Failed to mount MCP server: %s", exc)
 
 # Ensure data dirs exist
 for d in ["/data/uploads", "/data/outputs", "/data/logs", "/data/fonts"]:

@@ -24,7 +24,7 @@ const dropdownStyle = {
   paddingRight: 28,
 };
 
-const TAB_NAME_TO_INDEX = { 'ai-provider': 0, prompts: 1, fonts: 2, presets: 3, advanced: 4, 'usage-costs': 5 };
+const TAB_NAME_TO_INDEX = { 'ai-provider': 0, prompts: 1, fonts: 2, presets: 3, advanced: 4, 'usage-costs': 5, 'api-access': 6 };
 
 export default function Settings() {
   const { isMobile } = useResponsive();
@@ -87,6 +87,15 @@ export default function Settings() {
   const [editingPresetId, setEditingPresetId] = useState(null);
   const [editPresetName, setEditPresetName] = useState('');
 
+  // API Access state
+  const [apiKey, setApiKey] = useState('');
+  const [apiKeyMasked, setApiKeyMasked] = useState('');
+  const [apiKeyRevealed, setApiKeyRevealed] = useState(false);
+  const [apiKeyLoading, setApiKeyLoading] = useState(false);
+  const [apiKeyRegenerating, setApiKeyRegenerating] = useState(false);
+  const [apiTestResult, setApiTestResult] = useState(null);
+  const [apiTesting, setApiTesting] = useState(false);
+
   // Load provider statuses
   useEffect(() => {
     fetch('/api/providers/status')
@@ -142,6 +151,62 @@ export default function Settings() {
       .then(setCustomFonts)
       .catch(() => {});
   }, []);
+
+  // Load API key when API Access tab is selected
+  useEffect(() => {
+    if (settingsTab === 6 && !apiKey) {
+      setApiKeyLoading(true);
+      fetch('/api/v1/auth/current-key')
+        .then((r) => r.json())
+        .then((envelope) => {
+          if (envelope.success && envelope.data) {
+            setApiKey(envelope.data.key);
+            setApiKeyMasked(envelope.data.masked);
+          }
+        })
+        .catch(() => showToast('Failed to load API key', 'error'))
+        .finally(() => setApiKeyLoading(false));
+    }
+  }, [settingsTab]);
+
+  const handleRegenerateApiKey = async () => {
+    if (!confirm('Regenerate API key? The current key will be permanently invalidated.')) return;
+    setApiKeyRegenerating(true);
+    try {
+      const res = await fetch('/api/v1/auth/regenerate-key', { method: 'POST' });
+      const envelope = await res.json();
+      if (envelope.success && envelope.data) {
+        setApiKey(envelope.data.key);
+        setApiKeyMasked(envelope.data.masked);
+        setApiKeyRevealed(false);
+        showToast('API key regenerated', 'success');
+      } else {
+        showToast('Failed to regenerate key', 'error');
+      }
+    } catch { showToast('Failed to regenerate key', 'error'); }
+    setApiKeyRegenerating(false);
+  };
+
+  const handleTestApiConnection = async () => {
+    setApiTesting(true);
+    setApiTestResult(null);
+    try {
+      const res = await fetch('/api/v1/health', {
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+      });
+      const data = await res.json();
+      if (data.success) {
+        setApiTestResult({ status: 'success', message: 'Connection successful' });
+        showToast('API connection test passed', 'success');
+      } else {
+        setApiTestResult({ status: 'error', message: 'Unexpected response' });
+      }
+    } catch {
+      setApiTestResult({ status: 'error', message: 'Connection failed' });
+      showToast('API connection test failed', 'error');
+    }
+    setApiTesting(false);
+  };
 
   const handleFontUpload = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -442,7 +507,7 @@ export default function Settings() {
     URL.revokeObjectURL(url);
   };
 
-  const SETTINGS_TABS = ['AI Provider', 'Prompts', 'Fonts', 'Presets', 'Advanced', 'Usage & Costs'];
+  const SETTINGS_TABS = ['AI Provider', 'Prompts', 'Fonts', 'Presets', 'Advanced', 'Usage & Costs', 'API Access'];
   const active = statuses._active || {};
 
   // Model dropdown renderer
@@ -1461,8 +1526,232 @@ export default function Settings() {
         </div>
       )}
 
-      {/* ═══════ Tab 4: Usage & Costs ═══════ */}
+      {/* ═══════ Tab 5: Usage & Costs ═══════ */}
       {settingsTab === 5 && <CostTracker />}
+
+      {/* ═══════ Tab 6: API Access ═══════ */}
+      {settingsTab === 6 && (
+        <div style={{ maxWidth: isMobile ? '100%' : 640 }}>
+
+          {/* API Key Section */}
+          <div style={{ marginBottom: 24 }}>
+            <h3 style={{ fontSize: 15, marginBottom: 12 }}>API Key</h3>
+            <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
+              Use this key to authenticate requests to the REST API (<code style={{ fontSize: 11, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>/api/v1/*</code>).
+            </p>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '10px 12px', background: 'var(--bg-panel)',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+            }}>
+              {apiKeyLoading ? (
+                <span style={{ fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading...</span>
+              ) : (
+                <code style={{
+                  flex: 1, fontSize: 12, fontFamily: 'var(--font-mono)',
+                  color: 'var(--accent-cyan)', wordBreak: 'break-all',
+                  userSelect: apiKeyRevealed ? 'all' : 'none',
+                }}>
+                  {apiKeyRevealed ? apiKey : apiKeyMasked}
+                </code>
+              )}
+              <button
+                onClick={() => setApiKeyRevealed(!apiKeyRevealed)}
+                style={{
+                  padding: '4px 10px', fontSize: 11, background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                  color: 'var(--text-secondary)', cursor: 'pointer', whiteSpace: 'nowrap',
+                }}
+              >
+                {apiKeyRevealed ? 'Hide' : 'Reveal'}
+              </button>
+              <button
+                onClick={() => { navigator.clipboard.writeText(apiKey); showToast('API key copied', 'success'); }}
+                style={{
+                  padding: '4px 10px', fontSize: 11, background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                  color: 'var(--text-secondary)', cursor: 'pointer', whiteSpace: 'nowrap',
+                }}
+              >
+                Copy
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button
+                onClick={handleRegenerateApiKey}
+                disabled={apiKeyRegenerating}
+                style={{
+                  padding: '6px 14px', fontSize: 12, fontWeight: 500,
+                  background: 'transparent', border: '1px solid var(--accent-amber)',
+                  borderRadius: 'var(--radius-sm)', color: 'var(--accent-amber)',
+                  cursor: apiKeyRegenerating ? 'not-allowed' : 'pointer', opacity: apiKeyRegenerating ? 0.5 : 1,
+                }}
+              >
+                {apiKeyRegenerating ? 'Regenerating...' : 'Regenerate Key'}
+              </button>
+            </div>
+          </div>
+
+          {/* Endpoints Section */}
+          <div style={{ marginBottom: 24 }}>
+            <h3 style={{ fontSize: 15, marginBottom: 12 }}>Endpoints</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {[
+                { label: 'REST API', value: `${window.location.origin}/api/v1` },
+                { label: 'MCP Server', value: `${window.location.origin}/mcp` },
+                { label: 'Health Check', value: `${window.location.origin}/api/v1/health` },
+                { label: 'Agent Skill', value: `${window.location.origin}/api/v1/skill` },
+              ].map(({ label, value }) => (
+                <div key={label} style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '8px 12px', background: 'var(--bg-panel)',
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                }}>
+                  <span style={{ fontSize: 13 }}>{label}</span>
+                  <code style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', wordBreak: 'break-all' }}>{value}</code>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Connection Test */}
+          <div style={{ marginBottom: 24 }}>
+            <h3 style={{ fontSize: 15, marginBottom: 12 }}>Connection Test</h3>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button
+                onClick={handleTestApiConnection}
+                disabled={apiTesting}
+                style={{
+                  padding: '6px 14px', fontSize: 12, fontWeight: 500,
+                  background: 'var(--accent-cyan)', border: 'none',
+                  borderRadius: 'var(--radius-sm)', color: 'var(--bg-base)',
+                  cursor: apiTesting ? 'not-allowed' : 'pointer', opacity: apiTesting ? 0.5 : 1,
+                }}
+              >
+                {apiTesting ? 'Testing...' : 'Test Connection'}
+              </button>
+              {apiTestResult && (
+                <span style={{
+                  fontSize: 12,
+                  color: apiTestResult.status === 'success' ? 'var(--success)' : 'var(--error)',
+                }}>
+                  {apiTestResult.message}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Quick Start Snippets */}
+          <div style={{ marginBottom: 24 }}>
+            <h3 style={{ fontSize: 15, marginBottom: 12 }}>Quick Start</h3>
+
+            {/* cURL Example */}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>cURL</div>
+              <div style={{
+                position: 'relative', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                padding: '10px 12px', paddingRight: 60,
+              }}>
+                <pre style={{
+                  fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
+                  whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0,
+                }}>{`curl ${window.location.origin}/api/v1/health \\
+  -H "Authorization: Bearer ${apiKeyRevealed ? apiKey : '<your-key>'}"`.trim()}</pre>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(`curl ${window.location.origin}/api/v1/health -H "Authorization: Bearer ${apiKey}"`);
+                    showToast('Copied', 'success');
+                  }}
+                  style={{
+                    position: 'absolute', top: 6, right: 6,
+                    padding: '2px 8px', fontSize: 10, background: 'var(--bg-elevated)',
+                    border: '1px solid var(--border)', borderRadius: 3,
+                    color: 'var(--text-secondary)', cursor: 'pointer',
+                  }}
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+
+            {/* Python Example */}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>Python</div>
+              <div style={{
+                position: 'relative', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                padding: '10px 12px', paddingRight: 60,
+              }}>
+                <pre style={{
+                  fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
+                  whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0,
+                }}>{`import httpx
+
+client = httpx.Client(
+    base_url="${window.location.origin}/api/v1",
+    headers={"Authorization": "Bearer ${apiKeyRevealed ? apiKey : '<your-key>'}"}
+)
+
+# Check health
+resp = client.get("/health")
+print(resp.json())`.trim()}</pre>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(`import httpx\n\nclient = httpx.Client(\n    base_url="${window.location.origin}/api/v1",\n    headers={"Authorization": "Bearer ${apiKey}"}\n)\n\nresp = client.get("/health")\nprint(resp.json())`);
+                    showToast('Copied', 'success');
+                  }}
+                  style={{
+                    position: 'absolute', top: 6, right: 6,
+                    padding: '2px 8px', fontSize: 10, background: 'var(--bg-elevated)',
+                    border: '1px solid var(--border)', borderRadius: 3,
+                    color: 'var(--text-secondary)', cursor: 'pointer',
+                  }}
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+
+            {/* MCP Config Example */}
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>MCP Client Config</div>
+              <div style={{
+                position: 'relative', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                padding: '10px 12px', paddingRight: 60,
+              }}>
+                <pre style={{
+                  fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
+                  whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0,
+                }}>{`{
+  "mcpServers": {
+    "clipai": {
+      "type": "streamable-http",
+      "url": "${window.location.origin}/mcp"
+    }
+  }
+}`.trim()}</pre>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(JSON.stringify({ mcpServers: { clipai: { type: 'streamable-http', url: `${window.location.origin}/mcp` } } }, null, 2));
+                    showToast('Copied', 'success');
+                  }}
+                  style={{
+                    position: 'absolute', top: 6, right: 6,
+                    padding: '2px 8px', fontSize: 10, background: 'var(--bg-elevated)',
+                    border: '1px solid var(--border)', borderRadius: 3,
+                    color: 'var(--text-secondary)', cursor: 'pointer',
+                  }}
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      )}
     </div>
   );
 }
