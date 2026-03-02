@@ -806,21 +806,43 @@ class OpenRouterProvider(AIProvider):
         self, clip_title: str, clip_transcript: str, video_summary: str,
         platform: str, cancel_check=None,
     ) -> ClipSEO:
+        # Detect description-generation override: the enriched summary starts
+        # with a marker so we can skip the default SEO prompt (whose short
+        # character limits conflict with description generation).
+        is_description = video_summary.startswith("DESCRIPTION_OVERRIDE")
+
         # Cap data to fit model context
         context_budget = self._get_context_budget(self._text_model)
-        overhead = len(DEFAULT_SEO_PROMPT) + 200  # prompt template + metadata
-        data_budget = max(1000, context_budget - overhead)
-        summary_budget = min(len(video_summary), int(data_budget * 0.4))
-        transcript_cap = data_budget - summary_budget
+        if is_description:
+            # Description override: video_summary IS the prompt, give it
+            # the majority of the budget; transcript supplements it.
+            overhead = 200  # metadata only, no DEFAULT_SEO_PROMPT
+            data_budget = max(1000, context_budget - overhead)
+            summary_budget = min(len(video_summary), int(data_budget * 0.6))
+            transcript_cap = data_budget - summary_budget
+        else:
+            overhead = len(DEFAULT_SEO_PROMPT) + 200
+            data_budget = max(1000, context_budget - overhead)
+            summary_budget = min(len(video_summary), int(data_budget * 0.4))
+            transcript_cap = data_budget - summary_budget
         capped_summary = video_summary[:summary_budget] if len(video_summary) > summary_budget else video_summary
         capped_transcript = clip_transcript[:transcript_cap] if len(clip_transcript) > transcript_cap else clip_transcript
-        prompt = (
-            f"{DEFAULT_SEO_PROMPT}\n\n"
-            f"CLIP TITLE: {clip_title}\n"
-            f"TARGET PLATFORM: {platform}\n\n"
-            f"VIDEO SUMMARY:\n{capped_summary}\n\n"
-            f"CLIP TRANSCRIPT:\n{capped_transcript}\n"
-        )
+
+        if is_description:
+            prompt = (
+                f"{capped_summary}\n\n"
+                f"CLIP TITLE: {clip_title}\n"
+                f"TARGET PLATFORM: {platform}\n\n"
+                f"CLIP TRANSCRIPT:\n{capped_transcript}\n"
+            )
+        else:
+            prompt = (
+                f"{DEFAULT_SEO_PROMPT}\n\n"
+                f"CLIP TITLE: {clip_title}\n"
+                f"TARGET PLATFORM: {platform}\n\n"
+                f"VIDEO SUMMARY:\n{capped_summary}\n\n"
+                f"CLIP TRANSCRIPT:\n{capped_transcript}\n"
+            )
         messages = [{"role": "user", "content": prompt}]
         raw = await self._call_with_fallback(
             self._text_model, self._text_fallbacks, messages, cancel_check=cancel_check,

@@ -1044,18 +1044,19 @@ async def generate_description_endpoint(
     else:
         desc_prompt = _LONGFORM_DESCRIPTION_PROMPT
 
-    # Build rich context with video summary, scene descriptions, and transcript
+    # Build rich context with video summary and scene descriptions.
+    # NOTE: clip_transcript is passed separately to generate_seo(), so we don't
+    # duplicate it here — the provider already includes it in the prompt.
     context_parts = [f"VIDEO OVERVIEW:\n{video_summary}"] if video_summary else []
     if scene_context:
         context_parts.append(f"KEY SCENES IN THIS CLIP (with timestamps relative to clip start):\n{scene_context}")
-    if clip_transcript:
-        context_parts.append(f"FULL CLIP TRANSCRIPT (use this to reference specific quotes and topics):\n{clip_transcript}")
     full_context = "\n\n".join(context_parts)
 
-    # Embed the specialized prompt into the video_summary field so it reaches
-    # every provider's generate_seo method without modifying provider code.
+    # Use a marker prefix so providers can detect this is a description
+    # generation call and skip the default SEO prompt (which conflicts with
+    # our character-length and formatting requirements).
     enriched_summary = (
-        f"IMPORTANT: Ignore the standard SEO format. Instead follow these instructions:\n"
+        f"DESCRIPTION_OVERRIDE\n"
         f"{desc_prompt}\n\n"
         f"{full_context}"
     )
