@@ -57,6 +57,13 @@ class ClipCandidate(BaseModel):
     hook_text: str
     why_this_works: str
     clip_focus: Optional[str] = None  # The focus topic used to generate this clip, if any
+    # Persisted SEO data (populated by generation endpoints)
+    seo_title: Optional[str] = None
+    seo_description: Optional[str] = None
+    seo_tags: list[str] = []
+    seo_platform_tips: Optional[str] = None
+    shorts_description: Optional[str] = None
+    longform_description: Optional[str] = None
 
 
 class VideoSummary(BaseModel):

@@ -687,12 +687,17 @@ async def get_seo(job_id: str, clip_id: int):
     if not clip:
         _err("CLIP_NOT_FOUND", f"Clip {clip_id} not found", 404)
 
-    # SEO is not persisted per-clip in the current model — return clip info
     return _ok({
         "clip_id": clip_id,
         "title": clip.title,
         "suggested_caption": clip.suggested_caption,
         "platform": clip.platform,
+        "seo_title": clip.seo_title,
+        "seo_description": clip.seo_description,
+        "seo_tags": clip.seo_tags,
+        "seo_platform_tips": clip.seo_platform_tips,
+        "shorts_description": clip.shorts_description,
+        "longform_description": clip.longform_description,
     })
 
 

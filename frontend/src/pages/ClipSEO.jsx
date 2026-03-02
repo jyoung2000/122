@@ -119,6 +119,20 @@ export default function ClipSEO() {
   const [generatingShorts, setGeneratingShorts] = useState(false);
   const [generatingLongForm, setGeneratingLongForm] = useState(false);
 
+  // Debounced save for user edits to SEO data
+  const saveTimerRef = useRef(null);
+  const saveClipSeo = useCallback((fields) => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      fetch(`/api/jobs/${jobId}/clips/${clipId}/seo`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(fields),
+      }).catch(() => {});
+    }, 800);
+  }, [jobId, clipId]);
+  useEffect(() => () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); }, []);
+
   const videoRef = useRef(null);
   const videoContainerRef = useRef(null);
   const wsRef = useRef(null);
@@ -208,6 +222,17 @@ export default function ClipSEO() {
             setEndTime(found.end_time);
             setStartText(formatDuration(found.start_time));
             setEndText(formatDuration(found.end_time));
+            // Restore persisted SEO data
+            if (found.seo_title) {
+              setSeo({
+                title: found.seo_title,
+                description: found.seo_description || '',
+                tags: found.seo_tags || [],
+                platform_tips: found.seo_platform_tips || '',
+              });
+            }
+            if (found.shorts_description) setShortsDesc(found.shorts_description);
+            if (found.longform_description) setLongFormDesc(found.longform_description);
           }
         }
       })
@@ -1413,7 +1438,7 @@ export default function ClipSEO() {
               {shortsDesc ? (
                 <textarea
                   value={shortsDesc}
-                  onChange={(e) => setShortsDesc(e.target.value)}
+                  onChange={(e) => { setShortsDesc(e.target.value); saveClipSeo({ shorts_description: e.target.value }); }}
                   style={{
                     width: '100%', minHeight: 120, padding: 10,
                     background: 'var(--bg-elevated)', color: 'var(--text-primary)',
@@ -1481,7 +1506,7 @@ export default function ClipSEO() {
               {longFormDesc ? (
                 <textarea
                   value={longFormDesc}
-                  onChange={(e) => setLongFormDesc(e.target.value)}
+                  onChange={(e) => { setLongFormDesc(e.target.value); saveClipSeo({ longform_description: e.target.value }); }}
                   style={{
                     width: '100%', minHeight: 200, padding: 10,
                     background: 'var(--bg-elevated)', color: 'var(--text-primary)',

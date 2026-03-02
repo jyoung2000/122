@@ -901,10 +901,18 @@ async def generate_seo_endpoint(job_id: str, clip_id: int):
             "message": f"SEO generated via {provider}",
         })
 
+        # Persist SEO data on the clip
+        seo_data = seo.model_dump()
+        clip.seo_title = seo_data.get("title", "")
+        clip.seo_description = seo_data.get("description", "")
+        clip.seo_tags = seo_data.get("tags", [])
+        clip.seo_platform_tips = seo_data.get("platform_tips", "")
+        await database.save_job(job)
+
         return {
             "clip_id": clip_id,
             "provider": provider,
-            "seo": seo.model_dump(),
+            "seo": seo_data,
         }
     except Exception as e:
         logger.exception(f"SEO generation failed for {job_id}/{clip_id}")
@@ -1025,6 +1033,13 @@ async def generate_description_endpoint(
         # The AI should have returned the description in the description field
         description = seo_result.description or ""
 
+        # Persist description on the clip
+        if req.description_type == "shorts":
+            clip.shorts_description = description
+        else:
+            clip.longform_description = description
+        await database.save_job(job)
+
         return {
             "clip_id": clip_id,
             "description_type": req.description_type,
@@ -1037,3 +1052,51 @@ async def generate_description_endpoint(
             status_code=500,
             detail=f"Description generation failed: {str(e)}",
         )
+
+
+# ── Persist SEO edits ──────────────────────────────────────────────────
+
+class UpdateClipSEORequest(BaseModel):
+    seo_title: Optional[str] = None
+    seo_description: Optional[str] = None
+    seo_tags: Optional[list[str]] = None
+    seo_platform_tips: Optional[str] = None
+    shorts_description: Optional[str] = None
+    longform_description: Optional[str] = None
+
+
+@router.put("/jobs/{job_id}/clips/{clip_id}/seo")
+async def update_clip_seo(job_id: str, clip_id: int, req: UpdateClipSEORequest):
+    """Persist user-edited SEO data on a clip."""
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    clip = next((c for c in job.clips if c.id == clip_id), None)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    if req.seo_title is not None:
+        clip.seo_title = req.seo_title
+    if req.seo_description is not None:
+        clip.seo_description = req.seo_description
+    if req.seo_tags is not None:
+        clip.seo_tags = req.seo_tags
+    if req.seo_platform_tips is not None:
+        clip.seo_platform_tips = req.seo_platform_tips
+    if req.shorts_description is not None:
+        clip.shorts_description = req.shorts_description
+    if req.longform_description is not None:
+        clip.longform_description = req.longform_description
+
+    await database.save_job(job)
+
+    return {
+        "clip_id": clip_id,
+        "seo_title": clip.seo_title,
+        "seo_description": clip.seo_description,
+        "seo_tags": clip.seo_tags,
+        "seo_platform_tips": clip.seo_platform_tips,
+        "shorts_description": clip.shorts_description,
+        "longform_description": clip.longform_description,
+    }
