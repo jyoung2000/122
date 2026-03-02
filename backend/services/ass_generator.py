@@ -239,7 +239,7 @@ def generate_ass(
     # so visible per-side = scaledOlWidth = round(olWidth * fontScale).
     # ASS `\bord` specifies the border expanding outward from the glyph —
     # it IS the per-side width — so it should equal the same 1x value.
-    scaled_outline_width = max(0, round(outline_width * font_scale * 3)) if outline_width > 0 else 0
+    scaled_outline_width = max(0, round(outline_width * font_scale)) if outline_width > 0 else 0
 
     # Horizontal margin from max_width_pct: (100% - max_width%) / 2 of output width
     margin_h = max(20, int(video_width * (100 - max_width_pct) / 100 / 2))

@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     AI_PROVIDER: str = "openrouter"
 
     # OpenRouter (uses OpenAI-compatible API — set your key from openrouter.ai)
-    OPENROUTER_API_KEY: str = "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"
+    OPENROUTER_API_KEY: str = ""
     OPENROUTER_PRESET: str = "balanced"  # free | efficient | balanced | premium | custom
     OPENROUTER_VISION_MODEL: str = "google/gemini-2.5-flash"
     OPENROUTER_TEXT_MODEL: str = "google/gemini-2.5-pro"

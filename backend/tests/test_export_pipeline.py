@@ -371,11 +371,11 @@ def test_ass_outline_mode():
 
     check("BorderStyle=1 (outline)", sp1.get("BorderStyle") == "1",
           f"got {sp1.get('BorderStyle')}")
-    # outline_width=3 scaled by font_scale=1.0 at 1080p with 3x factor → round(3*1.0*3)=9
-    check("Outline width=9 (3x factor)", sp1.get("Outline") == "9",
+    # outline_width=3 scaled by font_scale=1.0 at 1080p → round(3*1.0)=3
+    check("Outline width=3 (1x factor)", sp1.get("Outline") == "3",
           f"got {sp1.get('Outline')}")
-    # Shadow = max(1, min(4, round(9*0.75))) = max(1, min(4, 7)) = 4
-    check("Shadow depth=4 (outline mode with width>0)", sp1.get("Shadow") == "4",
+    # Shadow = max(1, min(4, round(3*0.75))) = max(1, min(4, 2)) = 2
+    check("Shadow depth=2 (outline mode with width>0)", sp1.get("Shadow") == "2",
           f"got {sp1.get('Shadow')}")
 
     expected_ol_color = _hex_to_ass_color_with_alpha("#FF0000", 80)
@@ -671,14 +671,14 @@ def test_ass_value_clamping():
     margin_l2 = int(styles2.get("Speaker 1", {}).get("MarginL", 0))
     check("max_width=10 clamped → MarginL=480", margin_l2 == 480, f"got {margin_l2}")
 
-    # outline_width > 10 → clamped to 10, then scaled with 3x: round(10*1.0*3)=30
+    # outline_width > 10 → clamped to 10, then scaled with 1x: round(10*1.0)=10
     result3 = generate_ass(
         segments=SAMPLE_SEGMENTS, start_time=10.0, end_time=25.0,
         outline_width=25,
     )
     styles3 = parse_ass_styles(result3)
     ol = int(styles3.get("Speaker 1", {}).get("Outline", 0))
-    check("outline_width=25 clamped to 10 then 3x=30", ol == 30, f"got {ol}")
+    check("outline_width=25 clamped to 10 then 1x=10", ol == 10, f"got {ol}")
 
     # outline_width < 0 → clamped to 0
     result4 = generate_ass(

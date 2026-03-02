@@ -335,12 +335,19 @@ export default function Analysis() {
         try {
           const msg = JSON.parse(evt.data);
           if (msg.type === 'status' || msg.type === 'complete') {
-            setJob((prev) => prev ? {
-              ...prev,
-              status: msg.status || prev.status,
-              progress: msg.progress ?? prev.progress,
-              progress_message: msg.message || prev.progress_message,
-            } : prev);
+            // Ignore export-related status messages — encoding progress is
+            // handled by useEncodingManager.  Updating job.status to
+            // 'exporting' would cause isProcessing to toggle and the
+            // analysis progress bar to blink in and out.
+            const isExportStatus = msg.status === 'exporting' || msg.status === 'generating_seo';
+            if (!isExportStatus) {
+              setJob((prev) => prev ? {
+                ...prev,
+                status: msg.status || prev.status,
+                progress: msg.progress ?? prev.progress,
+                progress_message: msg.message || prev.progress_message,
+              } : prev);
+            }
             // Track clip generation state from status messages
             if (msg.status === 'detecting_clips') {
               setIsGeneratingClips(true);

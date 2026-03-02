@@ -331,6 +331,62 @@ select {
 .clip-settings-sidebar::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
 
 /* ═══════════════════════════════════════════════════════
+   RANGE SLIDER FIX
+   Ensure slider thumb can reach min/max without clipping
+   ═══════════════════════════════════════════════════════ */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--bg-elevated);
+  border-radius: 2px;
+  outline: none;
+  border: none;
+  padding: 0;
+  margin: 8px 0;
+  cursor: pointer;
+  overflow: visible;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  cursor: pointer;
+  border: 2px solid var(--bg-base);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--accent-cyan);
+  cursor: pointer;
+  border: 2px solid var(--bg-base);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-elevated);
+}
+
+input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-elevated);
+}
+
+input[type="range"]:focus::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--accent-cyan-dim);
+}
+
+/* ═══════════════════════════════════════════════════════
    RESPONSIVE LAYOUT
    ═══════════════════════════════════════════════════════ */
 
@@ -425,6 +481,17 @@ select {
     width: 100% !important;
     position: static !important;
     max-height: none !important;
+  }
+}
+
+/* Desktop: >= 1024px — panels side-by-side */
+@media (min-width: 1024px) {
+  .clip-panel-layout {
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+  }
+  .clip-panel-layout > * {
+    min-width: 0;
   }
 }
 

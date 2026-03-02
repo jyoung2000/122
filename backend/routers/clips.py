@@ -861,6 +861,19 @@ async def generate_seo_endpoint(job_id: str, clip_id: int):
     if job.summary:
         video_summary = job.summary.overview
 
+    # Check that at least one AI provider has an API key configured
+    has_any_key = any([
+        settings.OPENROUTER_API_KEY,
+        settings.ANTHROPIC_API_KEY,
+        settings.GEMINI_API_KEY,
+        settings.GROQ_API_KEY,
+    ])
+    if not has_any_key:
+        raise HTTPException(
+            status_code=400,
+            detail="No OpenRouter API key configured. Please add your key in Settings.",
+        )
+
     await broadcast_ws(job_id, {
         "type": "status",
         "status": "generating_seo",
@@ -896,3 +909,131 @@ async def generate_seo_endpoint(job_id: str, clip_id: int):
     except Exception as e:
         logger.exception(f"SEO generation failed for {job_id}/{clip_id}")
         raise HTTPException(status_code=500, detail=f"SEO generation failed: {str(e)}")
+
+
+# ── YouTube Description Generators ─────────────────────────────────────
+
+_SHORTS_DESCRIPTION_PROMPT = (
+    "You are a YouTube Shorts SEO expert. Generate a YouTube Shorts description "
+    "that is optimized for discoverability and engagement.\n\n"
+    "Requirements:\n"
+    "- Hook line in the first sentence (attention-grabbing, keyword-rich)\n"
+    "- 2-3 sentences describing the clip content naturally with relevant keywords woven in\n"
+    "- 3-5 relevant hashtags at the bottom (mix broad and niche tags)\n"
+    "- Total visible text above '...more' fold: 100-200 characters\n"
+    "- Full description under 500 characters total\n"
+    "- Include a call-to-action (e.g., 'Follow for more', 'Like if you agree')\n"
+    "- Write naturally — not like a marketer or robot\n\n"
+    "Return ONLY valid JSON:\n"
+    '{"description": "the full description text including hashtags"}'
+)
+
+_LONGFORM_DESCRIPTION_PROMPT = (
+    "You are a YouTube SEO expert. Generate a traditional YouTube long-form video "
+    "description optimized for search ranking and viewer engagement.\n\n"
+    "Requirements:\n"
+    "- Strong opening paragraph (first 2-3 lines appear in search results — front-load keywords)\n"
+    "- Detailed paragraph describing the video content and what the viewer will learn/see\n"
+    "- Timestamp section with placeholders (e.g., '0:00 - Introduction')\n"
+    "- Relevant keyword-rich paragraph for search ranking\n"
+    "- 3-5 hashtags section\n"
+    "- Social links placeholder section (e.g., 'Follow me on: [Instagram] [Twitter] [TikTok]')\n"
+    "- Total length: 500-2000 characters\n"
+    "- Write naturally and engagingly — match the tone of the video content\n\n"
+    "Return ONLY valid JSON:\n"
+    '{"description": "the full description text"}'
+)
+
+
+class GenerateDescriptionRequest(BaseModel):
+    description_type: str  # "shorts" or "long_form"
+
+
+@router.post("/jobs/{job_id}/generate-description/{clip_id}")
+async def generate_description_endpoint(
+    job_id: str, clip_id: int, req: GenerateDescriptionRequest,
+):
+    """Generate a YouTube Shorts or long-form description for a clip."""
+    if req.description_type not in ("shorts", "long_form"):
+        raise HTTPException(status_code=400, detail="description_type must be 'shorts' or 'long_form'")
+
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    clip = next((c for c in job.clips if c.id == clip_id), None)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    # Check that at least one AI provider has an API key configured
+    has_any_key = any([
+        settings.OPENROUTER_API_KEY,
+        settings.ANTHROPIC_API_KEY,
+        settings.GEMINI_API_KEY,
+        settings.GROQ_API_KEY,
+    ])
+    if not has_any_key:
+        raise HTTPException(
+            status_code=400,
+            detail="No OpenRouter API key configured. Please add your key in Settings.",
+        )
+
+    # Build clip transcript
+    clip_transcript = "\n".join(
+        f"{s.speaker}: {s.text}"
+        for s in job.transcript
+        if s.start >= clip.start_time and s.end <= clip.end_time
+    )
+    if not clip_transcript:
+        clip_transcript = clip.suggested_caption or clip.title
+
+    video_summary = ""
+    if job.summary:
+        video_summary = job.summary.overview
+        if job.summary.key_topics:
+            video_summary += "\nTopics: " + ", ".join(job.summary.key_topics)
+        if job.summary.content_category:
+            video_summary += "\nCategory: " + job.summary.content_category
+
+    # Select the appropriate prompt prefix
+    if req.description_type == "shorts":
+        desc_prompt = _SHORTS_DESCRIPTION_PROMPT
+    else:
+        desc_prompt = _LONGFORM_DESCRIPTION_PROMPT
+
+    # Embed the specialized prompt into the video_summary field so it reaches
+    # every provider's generate_seo method without modifying provider code.
+    enriched_summary = (
+        f"IMPORTANT: Ignore the standard SEO format. Instead follow these instructions:\n"
+        f"{desc_prompt}\n\n"
+        f"VIDEO CONTEXT:\n{video_summary}"
+    )
+
+    try:
+        from backend.services.ai_orchestrator import AIOrchestrator
+
+        orchestrator = AIOrchestrator(ws_broadcast=broadcast_ws)
+
+        seo_result, provider = await orchestrator.generate_seo(
+            clip_title=clip.title,
+            clip_transcript=clip_transcript,
+            video_summary=enriched_summary,
+            platform=clip.platform,
+            job_id=job_id,
+        )
+
+        # The AI should have returned the description in the description field
+        description = seo_result.description or ""
+
+        return {
+            "clip_id": clip_id,
+            "description_type": req.description_type,
+            "description": description,
+            "provider": provider,
+        }
+    except Exception as e:
+        logger.exception(f"Description generation failed for {job_id}/{clip_id}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Description generation failed: {str(e)}",
+        )

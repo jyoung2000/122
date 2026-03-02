@@ -228,7 +228,7 @@ def _validate_ass_settings(
     expected_font_size = max(16, round(base_size_px * font_scale))
     expected_bold = ASS_FONT_WEIGHT_MAP.get(font_weight, 0)
     expected_alignment = 2  # Always bottom-center for absolute vertical positioning
-    scaled_outline_width = max(0, round(outline_width * font_scale * 3)) if outline_width > 0 else 0
+    scaled_outline_width = max(0, round(outline_width * font_scale)) if outline_width > 0 else 0
 
     # Expected margins
     expected_margin_h = max(20, int(video_width * (100 - max_width_pct) / 100 / 2))
@@ -1071,7 +1071,8 @@ def _build_crop_x_expr(
         return "0"
 
     def _sx_to_offset(sx: int) -> int:
-        """Convert subject_x to a centering crop offset."""
+        """Convert subject_x to a centering crop offset with safety clamping."""
+        sx = _safe_subject_x(sx)
         if src_w > 0 and crop_w > 0:
             return _center_crop_offset(sx, src_w, crop_w)
         # Fallback to proportional if dimensions not provided
@@ -1239,11 +1240,16 @@ def _build_filter_chain(
             crop_w = crop_w - (crop_w % 2)
             crop_h = crop_h - (crop_h % 2)
 
-            max_x_offset = src_w - crop_w
+            # Clamp crop dimensions to never exceed source frame
+            crop_w = min(crop_w, src_w)
+            crop_h = min(crop_h, src_h)
 
-            # Keep vertical crop centered
+            max_x_offset = max(0, src_w - crop_w)
+
+            # Keep vertical crop centered — clamp to valid range
+            max_y_offset = max(0, src_h - crop_h)
             y_offset = (src_h - crop_h) // 2
-            y_offset = max(0, min(src_h - crop_h, y_offset))
+            y_offset = max(0, min(max_y_offset, y_offset))
 
             logger.info(
                 "[SubjectTracking] _build_filter_chain: %s→%s, src=%dx%d, crop=%dx%d, max_x_offset=%d",

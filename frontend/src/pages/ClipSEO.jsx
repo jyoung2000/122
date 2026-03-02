@@ -114,6 +114,10 @@ export default function ClipSEO() {
   const [genStatus, setGenStatus] = useState('');
   const [genElapsed, setGenElapsed] = useState(0);
   const [copied, setCopied] = useState(null);
+  const [shortsDesc, setShortsDesc] = useState('');
+  const [longFormDesc, setLongFormDesc] = useState('');
+  const [generatingShorts, setGeneratingShorts] = useState(false);
+  const [generatingLongForm, setGeneratingLongForm] = useState(false);
 
   const videoRef = useRef(null);
   const videoContainerRef = useRef(null);
@@ -497,6 +501,31 @@ export default function ClipSEO() {
     }
   }, [jobId, clipId]);
 
+  const generateDescription = useCallback(async (descType) => {
+    const isShorts = descType === 'shorts';
+    const setter = isShorts ? setShortsDesc : setLongFormDesc;
+    const setLoading = isShorts ? setGeneratingShorts : setGeneratingLongForm;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/generate-description/${clipId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description_type: descType }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Description generation failed');
+      }
+      const data = await res.json();
+      setter(data.description || '');
+      showToast(`${isShorts ? 'Shorts' : 'YouTube'} description generated via ${data.provider}`, 'success');
+    } catch (err) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  }, [jobId, clipId]);
+
   const handleExport = useCallback(() => {
     if (startTime === null || endTime === null) return;
     const body = {
@@ -631,7 +660,7 @@ export default function ClipSEO() {
         <span style={{ color: 'var(--text-primary)' }}>SEO — Clip {clipId}</span>
       </div>
 
-      <div className="clip-panel-layout" style={{ display: 'flex', gap: 20, alignItems: 'flex-start', flexWrap: 'wrap', flexDirection: isMobile ? 'column' : 'row' }}>
+      <div className="clip-panel-layout" style={{ display: 'flex', gap: 20, alignItems: 'flex-start', flexWrap: isMobile ? 'wrap' : 'nowrap', flexDirection: isMobile ? 'column' : 'row' }}>
         {/* Left column: Video preview + clip info + export settings */}
         <div className="clip-settings-sidebar" style={{ width: isMobile ? '100%' : 320, position: isMobile ? 'static' : 'sticky', top: 20, alignSelf: 'flex-start' }}>
           {/* Video Preview */}
@@ -1181,7 +1210,7 @@ export default function ClipSEO() {
         </div>
 
         {/* Right column: SEO content */}
-        <div style={{ flex: '1 1 auto', minWidth: isMobile ? 0 : 300 }}>
+        <div style={{ flex: '1 1 auto', minWidth: 0, overflowY: 'auto', maxHeight: isMobile ? 'none' : 'calc(100vh - 100px)' }}>
           {!seo ? (
             <div style={{ ...sectionStyle, textAlign: 'center', padding: '48px 24px' }}>
               {generating ? (
@@ -1367,6 +1396,149 @@ export default function ClipSEO() {
               )}
             </>
           )}
+
+          {/* ── YouTube Description Generators ─────────────────────── */}
+          <div style={{ marginTop: 24 }}>
+            <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>
+              YouTube Description Generators
+            </div>
+
+            {/* YouTube Shorts Description */}
+            <div style={sectionStyle}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  YouTube Shorts Description
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {shortsDesc && (
+                    <button
+                      onClick={() => copyToClipboard(shortsDesc, 'shorts')}
+                      style={{
+                        padding: '4px 10px', fontSize: 11, fontWeight: 600,
+                        background: copied === 'shorts' ? 'var(--accent-cyan)' : 'var(--bg-panel)',
+                        color: copied === 'shorts' ? 'var(--bg-base)' : 'var(--accent-cyan)',
+                        border: '1px solid var(--accent-cyan)', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                      }}
+                    >
+                      {copied === 'shorts' ? 'Copied!' : 'Copy'}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => generateDescription('shorts')}
+                    disabled={generatingShorts}
+                    style={{
+                      padding: '4px 10px', fontSize: 11, fontWeight: 600,
+                      background: generatingShorts ? 'var(--bg-elevated)' : 'var(--accent-cyan)',
+                      color: generatingShorts ? 'var(--text-muted)' : 'var(--bg-base)',
+                      border: 'none', borderRadius: 'var(--radius-sm)',
+                      cursor: generatingShorts ? 'default' : 'pointer',
+                    }}
+                  >
+                    {generatingShorts ? 'Generating...' : (shortsDesc ? 'Regenerate' : 'Generate')}
+                  </button>
+                </div>
+              </div>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+                Optimized for YouTube Shorts SEO — hook line, keywords, hashtags, CTA. Under 500 characters.
+              </p>
+              {shortsDesc ? (
+                <textarea
+                  value={shortsDesc}
+                  onChange={(e) => setShortsDesc(e.target.value)}
+                  style={{
+                    width: '100%', minHeight: 120, padding: 10,
+                    background: 'var(--bg-elevated)', color: 'var(--text-primary)',
+                    border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                    fontSize: 13, lineHeight: 1.5, resize: 'vertical',
+                    fontFamily: 'var(--font-sans)',
+                  }}
+                />
+              ) : !generatingShorts ? (
+                <div style={{ padding: '20px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                  Click "Generate" to create a Shorts-optimized description
+                </div>
+              ) : (
+                <div style={{ padding: '20px 0', textAlign: 'center' }}>
+                  <div style={{
+                    width: 20, height: 20, margin: '0 auto 8px',
+                    border: '2px solid var(--border)',
+                    borderTop: '2px solid var(--accent-cyan)',
+                    borderRadius: '50%',
+                    animation: 'seo-spin 1s linear infinite',
+                  }} />
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Generating Shorts description...</span>
+                </div>
+              )}
+            </div>
+
+            {/* YouTube Long-Form Description */}
+            <div style={sectionStyle}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                  YouTube Description
+                </div>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  {longFormDesc && (
+                    <button
+                      onClick={() => copyToClipboard(longFormDesc, 'longform')}
+                      style={{
+                        padding: '4px 10px', fontSize: 11, fontWeight: 600,
+                        background: copied === 'longform' ? 'var(--accent-cyan)' : 'var(--bg-panel)',
+                        color: copied === 'longform' ? 'var(--bg-base)' : 'var(--accent-cyan)',
+                        border: '1px solid var(--accent-cyan)', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                      }}
+                    >
+                      {copied === 'longform' ? 'Copied!' : 'Copy'}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => generateDescription('long_form')}
+                    disabled={generatingLongForm}
+                    style={{
+                      padding: '4px 10px', fontSize: 11, fontWeight: 600,
+                      background: generatingLongForm ? 'var(--bg-elevated)' : 'var(--accent-cyan)',
+                      color: generatingLongForm ? 'var(--text-muted)' : 'var(--bg-base)',
+                      border: 'none', borderRadius: 'var(--radius-sm)',
+                      cursor: generatingLongForm ? 'default' : 'pointer',
+                    }}
+                  >
+                    {generatingLongForm ? 'Generating...' : (longFormDesc ? 'Regenerate' : 'Generate')}
+                  </button>
+                </div>
+              </div>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+                Full YouTube description with keywords, timestamps, hashtags, and social links. 500-2000 characters.
+              </p>
+              {longFormDesc ? (
+                <textarea
+                  value={longFormDesc}
+                  onChange={(e) => setLongFormDesc(e.target.value)}
+                  style={{
+                    width: '100%', minHeight: 200, padding: 10,
+                    background: 'var(--bg-elevated)', color: 'var(--text-primary)',
+                    border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                    fontSize: 13, lineHeight: 1.5, resize: 'vertical',
+                    fontFamily: 'var(--font-sans)',
+                  }}
+                />
+              ) : !generatingLongForm ? (
+                <div style={{ padding: '20px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }}>
+                  Click "Generate" to create a full YouTube description
+                </div>
+              ) : (
+                <div style={{ padding: '20px 0', textAlign: 'center' }}>
+                  <div style={{
+                    width: 20, height: 20, margin: '0 auto 8px',
+                    border: '2px solid var(--border)',
+                    borderTop: '2px solid var(--accent-cyan)',
+                    borderRadius: '50%',
+                    animation: 'seo-spin 1s linear infinite',
+                  }} />
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Generating YouTube description...</span>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>
