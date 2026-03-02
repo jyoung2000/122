@@ -924,30 +924,47 @@ async def generate_seo_endpoint(job_id: str, clip_id: int):
 _SHORTS_DESCRIPTION_PROMPT = (
     "You are a YouTube Shorts SEO expert. Generate a YouTube Shorts description "
     "that is optimized for discoverability and engagement.\n\n"
+    "You will be given the FULL TRANSCRIPT of what is said in the clip plus KEY SCENES "
+    "describing what visually happens. Use BOTH to write a description that tells "
+    "viewers and the YouTube algorithm exactly what this video is about.\n\n"
     "Requirements:\n"
-    "- Hook line in the first sentence (attention-grabbing, keyword-rich)\n"
-    "- 2-3 sentences describing the clip content naturally with relevant keywords woven in\n"
-    "- 3-5 relevant hashtags at the bottom (mix broad and niche tags)\n"
-    "- Total visible text above '...more' fold: 100-200 characters\n"
-    "- Full description under 500 characters total\n"
+    "- Hook line in the first sentence that references the specific topic or moment in the clip\n"
+    "- 3-5 sentences that describe what actually happens in the clip — reference specific things "
+    "said, shown, or discussed. Mention key points, quotes, or moments from the transcript.\n"
+    "- Weave in relevant keywords naturally so the algorithm understands the content\n"
+    "- 5-8 relevant hashtags at the bottom (mix broad and niche tags related to the actual content)\n"
     "- Include a call-to-action (e.g., 'Follow for more', 'Like if you agree')\n"
-    "- Write naturally — not like a marketer or robot\n\n"
+    "- Total length: 400-800 characters\n"
+    "- Write naturally — not like a marketer or robot. Sound like a real creator.\n"
+    "- DO NOT be generic. Every sentence should contain specific information from the clip.\n\n"
     "Return ONLY valid JSON:\n"
     '{"description": "the full description text including hashtags"}'
 )
 
 _LONGFORM_DESCRIPTION_PROMPT = (
-    "You are a YouTube SEO expert. Generate a traditional YouTube long-form video "
-    "description optimized for search ranking and viewer engagement.\n\n"
+    "You are a YouTube SEO expert. Generate a detailed YouTube video description "
+    "optimized for search ranking and viewer engagement.\n\n"
+    "You will be given the FULL TRANSCRIPT of what is said in the clip plus KEY SCENES "
+    "describing what visually happens. Use BOTH to write a rich, contextual description "
+    "that tells viewers and the YouTube algorithm exactly what this video covers.\n\n"
     "Requirements:\n"
-    "- Strong opening paragraph (first 2-3 lines appear in search results — front-load keywords)\n"
-    "- Detailed paragraph describing the video content and what the viewer will learn/see\n"
-    "- Timestamp section with placeholders (e.g., '0:00 - Introduction')\n"
-    "- Relevant keyword-rich paragraph for search ranking\n"
-    "- 3-5 hashtags section\n"
+    "- Strong opening paragraph (first 2-3 lines appear in search results — front-load keywords). "
+    "This paragraph must reference the specific topic and key takeaway of the clip.\n"
+    "- A detailed body section (2-3 paragraphs) covering:\n"
+    "  * What the viewer will see and learn — reference specific points discussed in the transcript\n"
+    "  * Key quotes or statements from the speaker(s) that capture the main message\n"
+    "  * The context and significance of what is being discussed or shown\n"
+    "- Use the KEY SCENES provided to create a timestamp section with real timestamps "
+    "(e.g., '0:00 - Introduction', '0:15 - Main topic begins'). Base these on the scene "
+    "timestamps and descriptions given to you.\n"
+    "- A keyword-rich paragraph that naturally summarizes the topics for search ranking\n"
+    "- 5-8 hashtags section (specific to the actual content, not generic filler)\n"
     "- Social links placeholder section (e.g., 'Follow me on: [Instagram] [Twitter] [TikTok]')\n"
-    "- Total length: 500-2000 characters\n"
-    "- Write naturally and engagingly — match the tone of the video content\n\n"
+    "- Total length: 1000-3000 characters\n"
+    "- Write naturally and engagingly — match the tone of the video content\n"
+    "- DO NOT be generic or vague. Every paragraph should contain specific information from "
+    "the transcript and scenes. A viewer reading this should understand what the video is about "
+    "without watching it.\n\n"
     "Return ONLY valid JSON:\n"
     '{"description": "the full description text"}'
 )
@@ -1003,18 +1020,43 @@ async def generate_description_endpoint(
         if job.summary.content_category:
             video_summary += "\nCategory: " + job.summary.content_category
 
+    # Gather scene descriptions that fall within this clip's time range
+    clip_scenes = [
+        s for s in job.scenes
+        if s.timestamp >= clip.start_time and s.timestamp <= clip.end_time
+    ]
+    scene_context = ""
+    if clip_scenes:
+        scene_lines = []
+        for s in clip_scenes:
+            # Show timestamp relative to clip start for timestamp generation
+            rel_ts = s.timestamp - clip.start_time
+            mins, secs = divmod(int(rel_ts), 60)
+            scene_lines.append(
+                f"  [{mins}:{secs:02d}] (importance {s.importance_score}/10) {s.description}"
+            )
+        scene_context = "\n".join(scene_lines)
+
     # Select the appropriate prompt prefix
     if req.description_type == "shorts":
         desc_prompt = _SHORTS_DESCRIPTION_PROMPT
     else:
         desc_prompt = _LONGFORM_DESCRIPTION_PROMPT
 
+    # Build rich context with video summary, scene descriptions, and transcript
+    context_parts = [f"VIDEO OVERVIEW:\n{video_summary}"] if video_summary else []
+    if scene_context:
+        context_parts.append(f"KEY SCENES IN THIS CLIP (with timestamps relative to clip start):\n{scene_context}")
+    if clip_transcript:
+        context_parts.append(f"FULL CLIP TRANSCRIPT (use this to reference specific quotes and topics):\n{clip_transcript}")
+    full_context = "\n\n".join(context_parts)
+
     # Embed the specialized prompt into the video_summary field so it reaches
     # every provider's generate_seo method without modifying provider code.
     enriched_summary = (
         f"IMPORTANT: Ignore the standard SEO format. Instead follow these instructions:\n"
         f"{desc_prompt}\n\n"
-        f"VIDEO CONTEXT:\n{video_summary}"
+        f"{full_context}"
     )
 
     try:
