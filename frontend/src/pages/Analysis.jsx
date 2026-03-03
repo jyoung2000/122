@@ -224,6 +224,7 @@ export default function Analysis() {
   const [tab, setTab] = useState(0);
   const [loading, setLoading] = useState(true);
   const [clipPreview, setClipPreview] = useState(null);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [cancellingJob, setCancellingJob] = useState(false);
   const [selectedClips, setSelectedClips] = useState(new Set());
   const [filters, setFilters] = useState({ minScore: 0, platform: 'all', type: 'all', sort: 'viral_score' });
@@ -725,8 +726,8 @@ export default function Analysis() {
 
   return (
     <div>
-      {/* Video Player (sticky) */}
-      <div style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg-base)' }}>
+      {/* Video Player (sticky) — hidden on Transcript tab where we show side-by-side layout */}
+      <div style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg-base)', display: (tab === 2 && !showExportPreview) ? 'none' : 'block' }}>
         {showExportPreview ? (
           <div style={{ position: 'relative' }}>
             <ClipPreview
@@ -772,6 +773,7 @@ export default function Analysis() {
             src={videoSrc}
             clipStart={clipPreview?.start_time}
             clipEnd={clipPreview?.end_time}
+            onTimeUpdate={setVideoCurrentTime}
             aspectRatio={clipSettings.aspectRatio || null}
             sourceWidth={sourceDims.w}
             sourceHeight={sourceDims.h}
@@ -1191,62 +1193,95 @@ export default function Analysis() {
       {tab === 2 && (
         <div>
           {job.transcript?.length > 0 ? (
-            <>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-                <button
-                  onClick={async () => {
-                    await fetchJob();
-                    showToast('Transcript refreshed — subtitles updated for preview & export', 'success');
-                  }}
-                  style={{
-                    padding: '6px 14px',
-                    background: 'var(--accent-cyan-dim)',
-                    color: 'var(--accent-cyan)',
-                    border: '1px solid var(--accent-cyan)',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Update Subtitles
-                </button>
-                <a
-                  href={`/api/jobs/${jobId}/transcript.srt`}
-                  download
-                  style={{
-                    padding: '6px 14px',
-                    background: 'var(--bg-elevated)',
-                    color: 'var(--accent-cyan)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: 12,
-                    fontWeight: 600,
-                    textDecoration: 'none',
-                    fontFamily: 'var(--font-mono)',
-                  }}
-                >
-                  &#x2B07; Download SRT (with speakers)
-                </a>
-                <a
-                  href={`/api/jobs/${jobId}/transcript.srt?speakers=false`}
-                  download
-                  style={{
-                    padding: '6px 14px',
-                    background: 'var(--bg-elevated)',
-                    color: 'var(--text-secondary)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: 12,
-                    textDecoration: 'none',
-                    fontFamily: 'var(--font-mono)',
-                  }}
-                >
-                  &#x2B07; SRT (no speakers)
-                </a>
+            <div style={{
+              display: 'flex',
+              gap: 20,
+              flexDirection: isMobile ? 'column' : 'row',
+              alignItems: 'flex-start',
+            }}>
+              {/* Left: Video player (sticky on desktop) */}
+              <div style={{
+                width: isMobile ? '100%' : '45%',
+                maxWidth: isMobile ? '100%' : 560,
+                flexShrink: 0,
+                position: isMobile ? 'static' : 'sticky',
+                top: 12,
+                alignSelf: 'flex-start',
+              }}>
+                <VideoPlayer
+                  src={videoSrc}
+                  onTimeUpdate={setVideoCurrentTime}
+                  sourceWidth={sourceDims.w}
+                  sourceHeight={sourceDims.h}
+                  scenes={job.scenes || []}
+                />
               </div>
-              <TranscriptViewer transcript={job.transcript} onSeek={handleSeek} jobId={jobId} onSpeakerRenamed={fetchJob} onTranscriptUpdated={fetchJob} />
-            </>
+
+              {/* Right: Transcript actions + editable transcript */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <button
+                    onClick={async () => {
+                      await fetchJob();
+                      showToast('Transcript refreshed — subtitles updated for preview & export', 'success');
+                    }}
+                    style={{
+                      padding: '6px 14px',
+                      background: 'var(--accent-cyan-dim)',
+                      color: 'var(--accent-cyan)',
+                      border: '1px solid var(--accent-cyan)',
+                      borderRadius: 'var(--radius-sm)',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Update Subtitles
+                  </button>
+                  <a
+                    href={`/api/jobs/${jobId}/transcript.srt`}
+                    download
+                    style={{
+                      padding: '6px 14px',
+                      background: 'var(--bg-elevated)',
+                      color: 'var(--accent-cyan)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--radius-sm)',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      textDecoration: 'none',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    &#x2B07; Download SRT (with speakers)
+                  </a>
+                  <a
+                    href={`/api/jobs/${jobId}/transcript.srt?speakers=false`}
+                    download
+                    style={{
+                      padding: '6px 14px',
+                      background: 'var(--bg-elevated)',
+                      color: 'var(--text-secondary)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--radius-sm)',
+                      fontSize: 12,
+                      textDecoration: 'none',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    &#x2B07; SRT (no speakers)
+                  </a>
+                </div>
+                <TranscriptViewer
+                  transcript={job.transcript}
+                  currentTime={videoCurrentTime}
+                  onSeek={handleSeek}
+                  jobId={jobId}
+                  onSpeakerRenamed={fetchJob}
+                  onTranscriptUpdated={fetchJob}
+                />
+              </div>
+            </div>
           ) : (
             <div style={{ textAlign: 'center', padding: 48, color: 'var(--text-muted)' }}>
               {isProcessing ? 'Transcribing audio...' : 'No transcript available'}

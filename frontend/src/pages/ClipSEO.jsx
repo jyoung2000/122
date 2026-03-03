@@ -708,7 +708,7 @@ export default function ClipSEO() {
 
       <div className="clip-panel-layout" style={{ display: 'flex', gap: 20, alignItems: 'flex-start', flexWrap: isMobile ? 'wrap' : 'nowrap', flexDirection: isMobile ? 'column' : 'row' }}>
         {/* Left column: Video preview + clip info + export settings */}
-        <div className="clip-settings-sidebar" style={{ width: isMobile ? '100%' : 320, position: isMobile ? 'static' : 'sticky', top: 20, alignSelf: 'flex-start' }}>
+        <div className="clip-settings-sidebar" style={{ width: isMobile ? '100%' : 380, position: isMobile ? 'static' : 'sticky', top: 20, alignSelf: 'flex-start', maxHeight: isMobile ? 'none' : 'calc(100vh - 40px)', overflowY: isMobile ? 'visible' : 'auto' }}>
           {/* Video Preview */}
           <div ref={fullscreenRef} style={isFullscreen ? { display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--video-bg)', width: '100vw', height: '100vh' } : { ...sectionStyle, padding: 0, overflow: 'hidden', maxWidth: videoMaxWidth, margin: videoMaxWidth ? '0 auto' : undefined }}>
             <div ref={videoContainerRef} style={{ position: 'relative', background: 'var(--video-bg)', cursor: 'pointer', overflow: 'hidden', aspectRatio: `${targetRatio}`, ...(isFullscreen ? { height: '100vh', maxWidth: '100vw', width: 'auto' } : { maxHeight: '45vh' }) }} onClick={togglePlay}>
@@ -1222,6 +1222,32 @@ export default function ClipSEO() {
               )}
             </div>
           </div>
+
+          {/* ── Clip Transcript (in sidebar for side-by-side editing) ─── */}
+          {job?.transcript?.length > 0 && clipTimeRange && (
+            <div style={{ marginTop: 16 }}>
+              <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>
+                Clip Transcript
+              </div>
+              <div style={{ ...sectionStyle, padding: '8px 10px' }}>
+                <TranscriptViewer
+                  transcript={job.transcript}
+                  timeRange={clipTimeRange}
+                  currentTime={currentTime}
+                  onSeek={(time) => {
+                    const video = videoRef.current;
+                    if (video) {
+                      video.currentTime = time;
+                      setCurrentTime(time);
+                    }
+                  }}
+                  jobId={jobId}
+                  onSpeakerRenamed={fetchJob}
+                  onTranscriptUpdated={fetchJob}
+                />
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right column: SEO content */}
@@ -1603,31 +1629,6 @@ export default function ClipSEO() {
             </div>
           </div>
 
-          {/* ── Clip Transcript ─────────────────────────────────────── */}
-          {job?.transcript?.length > 0 && clipTimeRange && (
-            <div style={{ marginTop: 24 }}>
-              <div style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>
-                Clip Transcript
-              </div>
-              <div style={sectionStyle}>
-                <TranscriptViewer
-                  transcript={job.transcript}
-                  timeRange={clipTimeRange}
-                  currentTime={currentTime}
-                  onSeek={(time) => {
-                    const video = videoRef.current;
-                    if (video) {
-                      video.currentTime = time;
-                      setCurrentTime(time);
-                    }
-                  }}
-                  jobId={jobId}
-                  onSpeakerRenamed={fetchJob}
-                  onTranscriptUpdated={fetchJob}
-                />
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>
