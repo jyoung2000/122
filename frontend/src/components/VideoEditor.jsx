@@ -780,7 +780,7 @@ export default function VideoEditor({
       className={containerClass}
       style={{
         maxWidth: isFullscreen ? undefined : videoMaxWidth,
-        margin: videoMaxWidth && !isFullscreen ? '0 auto' : undefined,
+        margin: videoMaxWidth && !isFullscreen && !compact ? '0 auto' : undefined,
       }}
     >
       {/* ── Header ── */}

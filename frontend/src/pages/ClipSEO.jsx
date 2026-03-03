@@ -801,8 +801,8 @@ export default function ClipSEO() {
       {/* ── SIDE-BY-SIDE MODE: Player + Transcript side by side ── */}
       {!isMobile && layoutMode === 'sidebyside' && (
         <div style={{ display: 'flex', gap: 16, marginBottom: 20, alignItems: 'flex-start' }}>
-          {/* Left: sticky compact video editor */}
-          <div style={{ flex: '0 0 50%', maxWidth: '50%', position: 'sticky', top: 12 }}>
+          {/* Left: sticky compact video editor — flex so portrait aspect ratios size naturally */}
+          <div style={{ flex: '1 1 50%', minWidth: 0, maxWidth: '60%', position: 'sticky', top: 12 }}>
             <VideoEditor
               src={videoSrc}
               clipStart={startTime || clip.start_time}

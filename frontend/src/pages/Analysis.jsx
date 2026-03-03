@@ -812,17 +812,25 @@ export default function Analysis() {
             )}
           </div>
         ) : (
-          <VideoPlayer
-            src={videoSrc}
-            clipStart={clipPreview?.start_time}
-            clipEnd={clipPreview?.end_time}
-            onTimeUpdate={setVideoCurrentTime}
-            aspectRatio={clipSettings.aspectRatio || null}
-            sourceWidth={sourceDims.w}
-            sourceHeight={sourceDims.h}
-            subjectX={clipSubjectX}
-            scenes={job.scenes || []}
-          />
+          <div style={{ width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto' }}>
+            <VideoEditor
+              src={videoSrc}
+              clipStart={0}
+              clipEnd={job.duration || 0}
+              title={job.filename || 'Full Video'}
+              aspectRatio={clipSettings.aspectRatio || null}
+              sourceWidth={sourceDims.w}
+              sourceHeight={sourceDims.h}
+              subjectX={50}
+              scenes={job.scenes || []}
+              initialVolume={clipSettings.playbackVolume}
+              initialSpeed={clipSettings.playbackSpeed}
+              onTimeUpdate={setVideoCurrentTime}
+              onTrimChange={setEditorTrim}
+              onVolumeChange={setEditorVolume}
+              onSpeedChange={setEditorSpeed}
+            />
+          </div>
         )}
         {/* Export button — visible when a clip is loaded in the preview player */}
         {showExportPreview && clipPreview && (
