@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
-import { buildSubjectKeyframes, smoothKeyframes, interpolateSubjectX, isDynamic, safeSubjectX } from '../utils/subjectTracking';
+import { processKeyframes, interpolateSubjectX, isDynamic, safeSubjectX } from '../utils/subjectTracking';
 import useResponsive from '../hooks/useResponsive';
 
 // --- Constants replicated from backend ---
@@ -267,17 +267,16 @@ export default function ClipPreview({
         console.log('[SubjectTracking] ClipPreview: no scenes available — using static subject_x');
         return null;
       }
-      const raw = buildSubjectKeyframes(scenes, clipStart, clipEnd);
-      const smoothed = raw && raw.length > 1 ? smoothKeyframes(raw) : raw;
-      const dynamic = smoothed && isDynamic(smoothed);
+      const processed = processKeyframes(scenes, clipStart, clipEnd);
+      const dynamic = processed && isDynamic(processed);
       console.log(
-        `[SubjectTracking] ClipPreview: ${smoothed?.length || 0} keyframes built ` +
+        `[SubjectTracking] ClipPreview: ${processed?.length || 0} keyframes (pipeline: build→cuts→deadzone→smooth→holds) ` +
         `(${clipStart.toFixed(1)}s-${clipEnd.toFixed(1)}s), ` +
         `mode=${dynamic ? 'DYNAMIC' : 'STATIC'}, ` +
-        `sx range: [${Math.min(...(smoothed || []).map(k=>k.x))}-${Math.max(...(smoothed || []).map(k=>k.x))}], ` +
-        `keyframes: ${JSON.stringify(smoothed?.map(k => ({t: +k.t.toFixed(2), x: k.x})))}`
+        `sx range: [${Math.min(...(processed || []).map(k=>k.x))}-${Math.max(...(processed || []).map(k=>k.x))}], ` +
+        `keyframes: ${JSON.stringify(processed?.map(k => ({t: +k.t.toFixed(2), x: k.x})))}`
       );
-      return smoothed;
+      return processed;
     },
     [scenes, clipStart, clipEnd],
   );
@@ -448,7 +447,7 @@ export default function ClipPreview({
     return () => cancelAnimationFrame(animId);
   }, [subtitlesEnabled, clipSegments, clipStart, activeWordEnabled, speakerRates]);
 
-  // --- Dynamic subject tracking: update objectPosition during playback ---
+  // --- Dynamic subject tracking: update objectPosition via rAF for smooth ~60fps updates ---
   const srcRatio = sourceWidth / sourceHeight;
   useEffect(() => {
     if (!hasDynamicSubject) return;
@@ -456,28 +455,34 @@ export default function ClipPreview({
     if (!video) return;
     const R = srcRatio / targetRatio;
     let logCount = 0;
+    let lastPct = null;
     console.log(
-      `[SubjectTracking] DYNAMIC mode active: R=${R.toFixed(3)} (src=${srcRatio.toFixed(3)}, target=${targetRatio.toFixed(3)}), ` +
+      `[SubjectTracking] DYNAMIC mode active (rAF): R=${R.toFixed(3)} (src=${srcRatio.toFixed(3)}, target=${targetRatio.toFixed(3)}), ` +
       `${subjectKeyframes.length} keyframes`
     );
-    const onTime = () => {
+    let animId;
+    const tick = () => {
       const relTime = video.currentTime - clipStart;
       const sx = interpolateSubjectX(subjectKeyframes, relTime);
       const centerPct = subjectXToCenterPct(Math.max(0, Math.min(100, sx)), srcRatio, targetRatio);
-      video.style.objectPosition = `${centerPct}% 50%`;
-      // Log first 5 updates and then every 30th for debugging
-      if (logCount < 5 || logCount % 30 === 0) {
-        console.log(
-          `[SubjectTracking] t=${relTime.toFixed(2)}s: sx=${sx.toFixed(1)} → objectPosition=${centerPct.toFixed(2)}% 50%`
-        );
+      // Only update DOM if value actually changed (avoid layout thrashing)
+      const rounded = Math.round(centerPct * 100) / 100;
+      if (rounded !== lastPct) {
+        video.style.objectPosition = `${centerPct}% 50%`;
+        lastPct = rounded;
+        // Log first 5 updates and then every 30th for debugging
+        if (logCount < 5 || logCount % 30 === 0) {
+          console.log(
+            `[SubjectTracking] t=${relTime.toFixed(2)}s: sx=${sx.toFixed(1)} → objectPosition=${centerPct.toFixed(2)}% 50%`
+          );
+        }
+        logCount++;
       }
-      logCount++;
+      animId = requestAnimationFrame(tick);
     };
-    video.addEventListener('timeupdate', onTime);
-    // Set initial position
-    onTime();
+    animId = requestAnimationFrame(tick);
     return () => {
-      video.removeEventListener('timeupdate', onTime);
+      cancelAnimationFrame(animId);
       // Do NOT clear video.style.objectPosition here — the cleanup runs
       // after React's DOM commit, so clearing would overwrite the correct
       // static objectPosition that React just applied.

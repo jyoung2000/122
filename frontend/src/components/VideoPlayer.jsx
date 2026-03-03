@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react';
-import { buildSubjectKeyframes, smoothKeyframes, interpolateSubjectX, isDynamic } from '../utils/subjectTracking';
+import { processKeyframes, interpolateSubjectX, isDynamic } from '../utils/subjectTracking';
 import useResponsive from '../hooks/useResponsive';
 
 const ASPECT_RATIO_VALUES = {
@@ -145,16 +145,15 @@ export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, asp
     return Math.abs(srcRatio - ASPECT_RATIO_VALUES[aspectRatio]) > 0.01;
   }, [aspectRatio, srcRatio]);
 
-  // Dynamic subject tracking keyframes (with smoothing matching backend)
+  // Dynamic subject tracking keyframes (full pipeline matching backend)
   const subjectKeyframes = useMemo(
     () => {
       if (!scenes?.length || clipStart == null || clipEnd == null) return null;
-      const raw = buildSubjectKeyframes(scenes, clipStart, clipEnd);
-      const smoothed = raw && raw.length > 1 ? smoothKeyframes(raw) : raw;
-      if (smoothed && isDynamic(smoothed)) {
-        console.log(`[SubjectTracking] VideoPlayer: ${smoothed.length} keyframes built (${clipStart.toFixed(1)}s-${clipEnd.toFixed(1)}s), x range: ${Math.min(...smoothed.map(k=>k.x))}-${Math.max(...smoothed.map(k=>k.x))}`);
+      const processed = processKeyframes(scenes, clipStart, clipEnd);
+      if (processed && isDynamic(processed)) {
+        console.log(`[SubjectTracking] VideoPlayer: ${processed.length} keyframes (pipeline: build→cuts→deadzone→smooth→holds) (${clipStart.toFixed(1)}s-${clipEnd.toFixed(1)}s), x range: ${Math.min(...processed.map(k=>k.x))}-${Math.max(...processed.map(k=>k.x))}`);
       }
-      return smoothed;
+      return processed;
     },
     [scenes, clipStart, clipEnd],
   );
@@ -163,21 +162,28 @@ export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, asp
     [isCrop, subjectKeyframes],
   );
 
-  // Update objectPosition dynamically during playback
+  // Update objectPosition dynamically via rAF for smooth ~60fps updates
   useEffect(() => {
     if (!hasDynamicSubject) return;
     const video = videoRef.current;
     if (!video) return;
-    const onTime = () => {
+    let animId;
+    let lastPct = null;
+    const tick = () => {
       const relTime = video.currentTime - (clipStart || 0);
       const sx = interpolateSubjectX(subjectKeyframes, relTime);
       const centerPct = subjectXToCenterPct(sx, srcRatio, targetRatio);
-      video.style.objectPosition = `${centerPct}% 50%`;
+      // Only update DOM if value actually changed (avoid layout thrashing)
+      const rounded = Math.round(centerPct * 100) / 100;
+      if (rounded !== lastPct) {
+        video.style.objectPosition = `${centerPct}% 50%`;
+        lastPct = rounded;
+      }
+      animId = requestAnimationFrame(tick);
     };
-    video.addEventListener('timeupdate', onTime);
-    onTime();
+    animId = requestAnimationFrame(tick);
     return () => {
-      video.removeEventListener('timeupdate', onTime);
+      cancelAnimationFrame(animId);
       // Clear direct DOM style so React's declarative objectPosition takes over
       video.style.objectPosition = '';
     };

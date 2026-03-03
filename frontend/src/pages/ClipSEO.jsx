@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { showToast } from '../components/Toast';
-import { buildSubjectKeyframes, smoothKeyframes, interpolateSubjectX, isDynamic, computeClipSubjectX } from '../utils/subjectTracking';
+import { processKeyframes, interpolateSubjectX, isDynamic, computeClipSubjectX } from '../utils/subjectTracking';
 import ClipSettingsPanel from '../components/ClipSettingsPanel';
 import TranscriptViewer from '../components/TranscriptViewer';
 import useResponsive from '../hooks/useResponsive';
@@ -311,12 +311,11 @@ export default function ClipSEO() {
     return computeClipSubjectX(job.scenes, startTime, endTime);
   }, [job?.scenes, startTime, endTime]);
 
-  // Dynamic subject tracking keyframes (with smoothing matching backend)
+  // Dynamic subject tracking keyframes (full pipeline matching backend)
   const subjectKeyframes = useMemo(
     () => {
       if (!job?.scenes?.length || startTime === null || endTime === null) return null;
-      const raw = buildSubjectKeyframes(job.scenes, startTime, endTime);
-      return raw && raw.length > 1 ? smoothKeyframes(raw) : raw;
+      return processKeyframes(job.scenes, startTime, endTime);
     },
     [job?.scenes, startTime, endTime],
   );

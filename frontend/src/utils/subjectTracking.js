@@ -4,6 +4,14 @@
  * These functions build keyframes from scene analysis data and interpolate
  * the subject's horizontal position at any point in time, enabling the
  * preview player and FFmpeg export to follow the subject smoothly.
+ *
+ * Processing pipeline (applied in order):
+ *   1. buildSubjectKeyframes()     — raw (time, subject_x) pairs from scenes
+ *   2. handleSceneCuts()           — insert instant-jump keyframes at hard cuts
+ *   3. applyDeadZone()             — eliminate jittery micro-movements
+ *   4. smoothKeyframesBidirectional() — two-pass speed limiting
+ *   5. mergeHolds()                — merge similar consecutive values into rests
+ *   6. interpolateSubjectX()       — smoothstep ease-in/ease-out interpolation
  */
 
 /** Safety margin to prevent subjects being cut off at frame edges. */
@@ -100,6 +108,198 @@ export function buildSubjectKeyframes(scenes, clipStart, clipEnd) {
 }
 
 /**
+ * Detect large subject_x jumps between consecutive keyframes and insert
+ * instant-jump keyframes at likely scene cuts.
+ *
+ * When subject_x changes by more than jumpThreshold between consecutive
+ * keyframes, this is likely a scene cut — the subject didn't physically
+ * move, the camera cut to a new shot.  Human editors cut-to instantly,
+ * they never pan across a scene cut.
+ *
+ * Inserts a keyframe 1 frame (33ms at 30fps) before the cut with the OLD
+ * position, so the transition is instant (step function) instead of linear.
+ *
+ * Matches backend _handle_scene_cuts() exactly for preview-export parity.
+ *
+ * @param {Array<{t: number, x: number}>} keyframes - Sorted keyframes
+ * @param {number} jumpThreshold - Minimum subject_x delta to treat as a cut (default 15)
+ * @returns {Array<{t: number, x: number}>} Keyframes with instant-cut transitions
+ */
+export function handleSceneCuts(keyframes, jumpThreshold = 15) {
+  if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
+
+  const result = [keyframes[0]];
+  for (let i = 1; i < keyframes.length; i++) {
+    const prev = result[result.length - 1];
+    const cur = keyframes[i];
+    const delta = Math.abs(cur.x - prev.x);
+
+    if (delta >= jumpThreshold && (cur.t - prev.t) > 0.1) {
+      // Large jump detected — insert instant cut
+      // Add a keyframe 33ms (1 frame at 30fps) before the new position
+      const cutTime = Math.round((cur.t - 0.033) * 1000) / 1000;
+      if (cutTime > prev.t) {
+        result.push({ t: cutTime, x: prev.x }); // Hold old position until cut
+      }
+    }
+
+    result.push({ t: cur.t, x: cur.x });
+  }
+
+  return result;
+}
+
+/**
+ * Eliminate jittery micro-movements by snapping small changes to previous value.
+ *
+ * A human editor would hold the frame still for movements smaller than
+ * threshold (in subject_x units, where 1 unit = 1% of frame width).
+ *
+ * Matches backend _apply_dead_zone() exactly for preview-export parity.
+ *
+ * @param {Array<{t: number, x: number}>} keyframes - Sorted keyframes
+ * @param {number} threshold - Minimum delta to allow movement (default 5)
+ * @returns {Array<{t: number, x: number}>} Keyframes with micro-movements removed
+ */
+export function applyDeadZone(keyframes, threshold = 5) {
+  if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
+
+  const result = [keyframes[0]];
+  for (let i = 1; i < keyframes.length; i++) {
+    const cur = keyframes[i];
+    const prevX = result[result.length - 1].x;
+    if (Math.abs(cur.x - prevX) < threshold) {
+      // Small change — hold position (snap to previous)
+      result.push({ t: cur.t, x: prevX });
+    } else {
+      result.push({ t: cur.t, x: cur.x });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Two-pass bidirectional smoothing that eliminates trailing lag.
+ *
+ * Forward pass: clamp speed going forward (prevents anticipation overshoot)
+ * Reverse pass: clamp speed going backward (prevents trailing lag)
+ * Average: blend both passes for natural-feeling movement
+ *
+ * Matches backend _smooth_keyframes_bidirectional() exactly for preview-export parity.
+ *
+ * @param {Array<{t: number, x: number}>} keyframes - Sorted keyframes
+ * @param {number} maxSpeed - Maximum subject_x units per second (default 40)
+ * @returns {Array<{t: number, x: number}>} Smoothed keyframes
+ */
+export function smoothKeyframesBidirectional(keyframes, maxSpeed = 40) {
+  if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
+
+  // Forward pass
+  const fwd = [keyframes[0]];
+  for (let i = 1; i < keyframes.length; i++) {
+    const prev = fwd[fwd.length - 1];
+    const cur = keyframes[i];
+    const dt = cur.t - prev.t;
+    if (dt <= 0) {
+      fwd.push({ t: cur.t, x: prev.x });
+      continue;
+    }
+    const maxDelta = maxSpeed * dt;
+    const delta = cur.x - prev.x;
+    let newX = cur.x;
+    if (Math.abs(delta) > maxDelta) {
+      newX = Math.round(prev.x + maxDelta * (delta > 0 ? 1 : -1));
+      newX = Math.max(0, Math.min(100, newX));
+    }
+    fwd.push({ t: cur.t, x: newX });
+  }
+
+  // Reverse pass
+  const rev = [keyframes[keyframes.length - 1]];
+  for (let i = keyframes.length - 2; i >= 0; i--) {
+    const next = rev[rev.length - 1];
+    const cur = keyframes[i];
+    const dt = next.t - cur.t;
+    if (dt <= 0) {
+      rev.push({ t: cur.t, x: next.x });
+      continue;
+    }
+    const maxDelta = maxSpeed * dt;
+    const delta = cur.x - next.x;
+    let newX = cur.x;
+    if (Math.abs(delta) > maxDelta) {
+      newX = Math.round(next.x + maxDelta * (delta > 0 ? 1 : -1));
+      newX = Math.max(0, Math.min(100, newX));
+    }
+    rev.push({ t: cur.t, x: newX });
+  }
+  rev.reverse();
+
+  // Average both passes
+  const result = [];
+  for (let i = 0; i < keyframes.length; i++) {
+    const avgX = Math.round((fwd[i].x + rev[i].x) / 2);
+    result.push({ t: fwd[i].t, x: Math.max(0, Math.min(100, avgX)) });
+  }
+
+  return result;
+}
+
+/**
+ * Merge consecutive keyframes with similar values into holds.
+ *
+ * If several consecutive keyframes are within tolerance of each other,
+ * snap them all to the first value — creating a visible 'rest' period
+ * where the crop holds steady.
+ *
+ * Matches backend _merge_holds() exactly for preview-export parity.
+ *
+ * @param {Array<{t: number, x: number}>} keyframes - Sorted keyframes
+ * @param {number} tolerance - Maximum delta to merge (default 2)
+ * @returns {Array<{t: number, x: number}>} Keyframes with holds merged
+ */
+export function mergeHolds(keyframes, tolerance = 2) {
+  if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
+
+  const result = [keyframes[0]];
+  for (let i = 1; i < keyframes.length; i++) {
+    const cur = keyframes[i];
+    const prevX = result[result.length - 1].x;
+    if (Math.abs(cur.x - prevX) <= tolerance) {
+      result.push({ t: cur.t, x: prevX }); // Hold at previous position
+    } else {
+      result.push({ t: cur.t, x: cur.x });
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Full keyframe processing pipeline: build → scene cuts → dead zone →
+ * bidirectional smooth → merge holds.
+ *
+ * Matches the backend export_clip() pipeline exactly for preview-export parity.
+ *
+ * @param {Array} scenes - Scene objects with {timestamp, subject_x}
+ * @param {number} clipStart - Clip start time in seconds
+ * @param {number} clipEnd - Clip end time in seconds
+ * @returns {Array<{t: number, x: number}>} Fully processed keyframes
+ */
+export function processKeyframes(scenes, clipStart, clipEnd) {
+  const raw = buildSubjectKeyframes(scenes, clipStart, clipEnd);
+  if (!raw || raw.length <= 1) return raw;
+
+  const afterCuts = handleSceneCuts(raw);
+  const afterDeadZone = applyDeadZone(afterCuts);
+  const afterSmooth = smoothKeyframesBidirectional(afterDeadZone);
+  const afterHolds = mergeHolds(afterSmooth);
+
+  return afterHolds;
+}
+
+/**
  * Compute a static subject_x value for a clip using interpolation from
  * nearby scenes.  Used as the fallback when dynamic keyframes aren't
  * available.  Matches backend clip_subject_x computation.
@@ -143,7 +343,10 @@ export function computeClipSubjectX(scenes, clipStart, clipEnd) {
 
 /**
  * Interpolate subject_x at a given time using keyframes.
- * Linear interpolation between surrounding keyframes.
+ * Uses smoothstep (cubic Hermite: 3t^2 - 2t^3) easing for human-feeling
+ * ease-in/ease-out movement between keyframes.
+ *
+ * Matches backend _build_crop_x_expr() smoothstep exactly for preview-export parity.
  *
  * @param {Array<{t: number, x: number}>} keyframes - Sorted keyframes
  * @param {number} t - Time in seconds (relative to clip start)
@@ -165,43 +368,17 @@ export function interpolateSubjectX(keyframes, t) {
       const dt = k1.t - k0.t;
       if (dt <= 0) return k0.x;
       const frac = (t - k0.t) / dt;
-      return k0.x + (k1.x - k0.x) * frac;
+      // Smoothstep easing: 3t^2 - 2t^3 (zero velocity at both endpoints)
+      const easedFrac = frac * frac * (3 - 2 * frac);
+      return k0.x + (k1.x - k0.x) * easedFrac;
     }
   }
 
   return keyframes[keyframes.length - 1].x;
 }
 
-/**
- * Smooth keyframes to limit max subject_x change rate.
- * Matches backend _smooth_keyframes(max_speed=50) exactly for preview-export parity.
- *
- * @param {Array<{t: number, x: number}>} keyframes - Sorted keyframes
- * @param {number} maxSpeed - Maximum subject_x units per second (default 50)
- * @returns {Array<{t: number, x: number}>} Smoothed keyframes
- */
-export function smoothKeyframes(keyframes, maxSpeed = 50) {
-  if (!keyframes || keyframes.length <= 1) return keyframes;
-  const smoothed = [keyframes[0]];
-  for (let i = 1; i < keyframes.length; i++) {
-    const prev = smoothed[smoothed.length - 1];
-    const cur = keyframes[i];
-    const dt = cur.t - prev.t;
-    if (dt <= 0) {
-      smoothed.push({ t: cur.t, x: prev.x });
-      continue;
-    }
-    const maxDelta = maxSpeed * dt;
-    const delta = cur.x - prev.x;
-    let newX = cur.x;
-    if (Math.abs(delta) > maxDelta) {
-      newX = Math.round(prev.x + maxDelta * (delta > 0 ? 1 : -1));
-      newX = Math.max(0, Math.min(100, newX));
-    }
-    smoothed.push({ t: cur.t, x: newX });
-  }
-  return smoothed;
-}
+// Keep old smoothKeyframes export for backward compatibility (unused but safe)
+export { smoothKeyframesBidirectional as smoothKeyframes };
 
 /**
  * Check if keyframes represent dynamic motion (more than one unique x value).

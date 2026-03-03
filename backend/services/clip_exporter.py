@@ -1006,6 +1006,9 @@ def _smooth_keyframes(
     previous one doesn't exceed max_speed * dt.
 
     Returns a new list of smoothed keyframes.
+
+    DEPRECATED: Use _smooth_keyframes_bidirectional() for human-feeling movement.
+    Kept for reference only.
     """
     if len(keyframes) <= 1:
         return list(keyframes)
@@ -1041,6 +1044,188 @@ def _smooth_keyframes(
     return smoothed
 
 
+def _handle_scene_cuts(
+    keyframes: list[tuple[float, int]],
+    jump_threshold: int = 15,
+) -> list[tuple[float, int]]:
+    """Insert instant-jump keyframes at likely scene cuts.
+
+    When subject_x changes by more than jump_threshold between consecutive
+    keyframes, this is likely a scene cut — the subject didn't physically
+    move, the camera cut to a new shot.  Human editors cut-to instantly,
+    they never pan across a scene cut.
+
+    Inserts a keyframe 1 frame (33ms at 30fps) before the cut with the OLD
+    position, so the transition is instant (step function) instead of linear.
+
+    Matches frontend handleSceneCuts() exactly for preview-export parity.
+    """
+    if len(keyframes) <= 1:
+        return list(keyframes)
+
+    result = [keyframes[0]]
+    for i in range(1, len(keyframes)):
+        t_prev, sx_prev = result[-1]
+        t_cur, sx_cur = keyframes[i]
+        delta = abs(sx_cur - sx_prev)
+
+        if delta >= jump_threshold and (t_cur - t_prev) > 0.1:
+            # Large jump detected — insert instant cut
+            # Add a keyframe 33ms (1 frame at 30fps) before the new position
+            cut_time = round(t_cur - 0.033, 3)
+            if cut_time > t_prev:
+                result.append((cut_time, sx_prev))  # Hold old position until cut
+                logger.debug(
+                    "[SubjectTracking] _handle_scene_cuts: instant cut at t=%.3f (delta=%d, threshold=%d)",
+                    t_cur, delta, jump_threshold,
+                )
+
+        result.append((t_cur, sx_cur))
+
+    cuts_inserted = len(result) - len(keyframes)
+    if cuts_inserted > 0:
+        logger.info(
+            "[SubjectTracking] _handle_scene_cuts: %d instant-cut keyframes inserted (threshold=%d)",
+            cuts_inserted, jump_threshold,
+        )
+
+    return result
+
+
+def _apply_dead_zone(
+    keyframes: list[tuple[float, int]],
+    threshold: int = 5,
+) -> list[tuple[float, int]]:
+    """Eliminate jittery micro-movements by snapping small changes to previous value.
+
+    A human editor would hold the frame still for movements smaller than
+    threshold (in subject_x units, where 1 unit = 1% of frame width).
+
+    Matches frontend applyDeadZone() exactly for preview-export parity.
+    """
+    if len(keyframes) <= 1:
+        return list(keyframes)
+
+    result = [keyframes[0]]
+    snapped_count = 0
+    for i in range(1, len(keyframes)):
+        t, sx = keyframes[i]
+        _, prev_sx = result[-1]
+        if abs(sx - prev_sx) < threshold:
+            # Small change — hold position (snap to previous)
+            result.append((t, prev_sx))
+            snapped_count += 1
+        else:
+            result.append((t, sx))
+
+    if snapped_count > 0:
+        logger.info(
+            "[SubjectTracking] _apply_dead_zone: %d/%d keyframes snapped to previous (threshold=%d)",
+            snapped_count, len(keyframes) - 1, threshold,
+        )
+
+    return result
+
+
+def _smooth_keyframes_bidirectional(
+    keyframes: list[tuple[float, int]],
+    max_speed: float = 40.0,
+) -> list[tuple[float, int]]:
+    """Two-pass bidirectional smoothing that eliminates trailing lag.
+
+    Forward pass: clamp speed going forward (prevents anticipation overshoot)
+    Reverse pass: clamp speed going backward (prevents trailing lag)
+    Average: blend both passes for natural-feeling movement
+
+    Matches frontend smoothKeyframesBidirectional() exactly for preview-export parity.
+    """
+    if len(keyframes) <= 1:
+        return list(keyframes)
+
+    # Forward pass
+    fwd = [keyframes[0]]
+    for i in range(1, len(keyframes)):
+        t_prev, sx_prev = fwd[-1]
+        t_cur, sx_cur = keyframes[i]
+        dt = t_cur - t_prev
+        if dt <= 0:
+            fwd.append((t_cur, sx_prev))
+            continue
+        max_delta = max_speed * dt
+        delta = sx_cur - sx_prev
+        if abs(delta) > max_delta:
+            sx_cur = int(sx_prev + max_delta * (1 if delta > 0 else -1))
+            sx_cur = max(0, min(100, sx_cur))
+        fwd.append((t_cur, sx_cur))
+
+    # Reverse pass
+    rev = [keyframes[-1]]
+    for i in range(len(keyframes) - 2, -1, -1):
+        t_next, sx_next = rev[-1]
+        t_cur, sx_cur = keyframes[i]
+        dt = t_next - t_cur
+        if dt <= 0:
+            rev.append((t_cur, sx_next))
+            continue
+        max_delta = max_speed * dt
+        delta = sx_cur - sx_next
+        if abs(delta) > max_delta:
+            sx_cur = int(sx_next + max_delta * (1 if delta > 0 else -1))
+            sx_cur = max(0, min(100, sx_cur))
+        rev.append((t_cur, sx_cur))
+    rev.reverse()
+
+    # Average both passes
+    result = []
+    for i in range(len(keyframes)):
+        t = fwd[i][0]
+        avg_sx = int(round((fwd[i][1] + rev[i][1]) / 2))
+        avg_sx = max(0, min(100, avg_sx))
+        result.append((t, avg_sx))
+
+    logger.info(
+        "[SubjectTracking] _smooth_keyframes_bidirectional: %d keyframes processed (max_speed=%.0f/s)",
+        len(keyframes), max_speed,
+    )
+
+    return result
+
+
+def _merge_holds(
+    keyframes: list[tuple[float, int]],
+    tolerance: int = 2,
+) -> list[tuple[float, int]]:
+    """Merge consecutive keyframes with similar values into holds.
+
+    If several consecutive keyframes are within tolerance of each other,
+    snap them all to the first value — creating a visible 'rest' period
+    where the crop holds steady.
+
+    Matches frontend mergeHolds() exactly for preview-export parity.
+    """
+    if len(keyframes) <= 1:
+        return list(keyframes)
+
+    result = [keyframes[0]]
+    merged_count = 0
+    for i in range(1, len(keyframes)):
+        t, sx = keyframes[i]
+        _, prev_sx = result[-1]
+        if abs(sx - prev_sx) <= tolerance:
+            result.append((t, prev_sx))  # Hold at previous position
+            merged_count += 1
+        else:
+            result.append((t, sx))
+
+    if merged_count > 0:
+        logger.info(
+            "[SubjectTracking] _merge_holds: %d/%d keyframes merged into holds (tolerance=%d)",
+            merged_count, len(keyframes) - 1, tolerance,
+        )
+
+    return result
+
+
 def _build_crop_x_expr(
     keyframes: list[tuple[float, int]],
     max_offset: int,
@@ -1049,14 +1234,18 @@ def _build_crop_x_expr(
 ) -> str:
     """Build an FFmpeg expression for time-varying horizontal crop offset.
 
-    Uses piecewise linear interpolation between keyframes.  The FFmpeg crop
-    filter evaluates the expression per-frame using the ``t`` time variable.
+    Uses piecewise smoothstep (cubic Hermite: 3p^2 - 2p^3) interpolation
+    between keyframes for human-feeling ease-in/ease-out movement.  The
+    FFmpeg crop filter evaluates the expression per-frame using the ``t``
+    time variable.
 
     Each keyframe's subject_x is converted to a centering offset so the
     subject ends up at the horizontal center of the cropped frame.
 
     If all keyframes share the same subject_x (or there's only one), returns
     a plain integer string for a static crop — no expression overhead.
+
+    Matches frontend interpolateSubjectX() smoothstep exactly for parity.
 
     Args:
         keyframes: sorted list of (time_seconds, subject_x_0_to_100)
@@ -1089,12 +1278,15 @@ def _build_crop_x_expr(
         )
         return str(offset)
 
-    # Build piecewise linear interpolation expression
-    # For each segment [ti, ti+1], interpolate: off_i + (off_{i+1} - off_i) * (t - ti) / (ti+1 - ti)
+    # Build piecewise smoothstep interpolation expression
+    # For each segment [ti, ti+1]:
+    #   p = (t - t0) / dt   (normalized progress 0..1)
+    #   smoothstep(p) = p*p*(3-2*p)
+    #   offset = off0 + d_off * p*p*(3-2*p)
     offsets = [(t, _sx_to_offset(sx)) for t, sx in keyframes]
 
     logger.info(
-        "[SubjectTracking] _build_crop_x_expr: dynamic — %d keyframes, offsets=%s (src_w=%d, crop_w=%d, max_offset=%d)",
+        "[SubjectTracking] _build_crop_x_expr: dynamic (smoothstep) — %d keyframes, offsets=%s (src_w=%d, crop_w=%d, max_offset=%d)",
         len(offsets),
         [(f"t={t:.2f}→{off}px") for t, off in offsets],
         src_w, crop_w, max_offset,
@@ -1113,8 +1305,11 @@ def _build_crop_x_expr(
             segment = str(off0)
         else:
             d_off = off1 - off0
-            # Linear interpolation: off0 + d_off * (t - t0) / dt
-            segment = f"{off0}+{d_off}*(t-{t0:.3f})/{dt:.3f}"
+            # Smoothstep: off0 + d_off * p*p*(3-2*p) where p=(t-t0)/dt
+            # Use a let-binding via FFmpeg's ternary to compute p once
+            # FFmpeg doesn't have let, so we inline p = (t-t0)/dt
+            p_expr = f"(t-{t0:.3f})/{dt:.3f}"
+            segment = f"{off0}+{d_off}*{p_expr}*{p_expr}*(3-2*{p_expr})"
         expr = f"if(lt(t\\,{t1:.3f})\\,{segment}\\,{expr})"
 
     # Clamp to valid range
@@ -1561,8 +1756,19 @@ async def export_clip(
                     clip_id, len(raw_kf), len(subject_scenes),
                 )
                 if len(raw_kf) > 1:
-                    keyframes = _smooth_keyframes(raw_kf)
-                    # If smoothing collapsed to single value, keep as-is (static)
+                    # Full pipeline: build → scene cuts → dead zone → smooth → merge holds
+                    after_cuts = _handle_scene_cuts(raw_kf)
+                    after_dead_zone = _apply_dead_zone(after_cuts)
+                    after_smooth = _smooth_keyframes_bidirectional(after_dead_zone)
+                    keyframes = _merge_holds(after_smooth)
+
+                    logger.info(
+                        "[SubjectTracking] clip %s: pipeline stages — raw=%d → cuts=%d → deadzone=%d → smooth=%d → holds=%d",
+                        clip_id, len(raw_kf), len(after_cuts), len(after_dead_zone),
+                        len(after_smooth), len(keyframes),
+                    )
+
+                    # If pipeline collapsed to single value, keep as-is (static)
                     unique = set(kf[1] for kf in keyframes)
                     if len(unique) <= 1:
                         # Use the converged keyframe value as the static subject_x
@@ -1576,7 +1782,7 @@ async def export_clip(
                         keyframes = None
                     else:
                         logger.info(
-                            "[SubjectTracking] clip %s: DYNAMIC tracking — %d smoothed keyframes, "
+                            "[SubjectTracking] clip %s: DYNAMIC tracking — %d processed keyframes, "
                             "sx range [%d, %d], keyframes=%s",
                             clip_id, len(keyframes),
                             min(kf[1] for kf in keyframes),
