@@ -880,8 +880,8 @@ export default function VideoEditor({
         className={`ve-viewport${isFullscreen ? ' ve-viewport--fullscreen' : ''}`}
         style={isFullscreen ? {} : {
           aspectRatio: `${targetRatio}`,
-          maxHeight: compact ? '45vh' : '50vh',
-          maxWidth: `calc(${compact ? '45vh' : '50vh'} * ${targetRatio})`,
+          maxHeight: compact ? '55vh' : '50vh',
+          maxWidth: compact ? undefined : `calc(50vh * ${targetRatio})`,
           width: '100%',
           margin: '0 auto',
         }}
