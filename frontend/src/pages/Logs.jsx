@@ -54,7 +54,7 @@ const STATUS_LABELS = {
 };
 
 const selectStyle = {
-  padding: '6px 12px', borderRadius: 'var(--radius-md)', fontSize: 12,
+  padding: '8px 14px', borderRadius: 'var(--radius-md)', fontSize: 13,
   background: 'var(--bg-surface-2)', border: '1px solid var(--border)',
   color: 'var(--text-primary)', transition: 'border-color 0.2s ease',
 };
@@ -345,11 +345,11 @@ export default function Logs() {
   };
 
   return (
-    <div className="page-enter" style={{ padding: 'var(--space-4) 0' }}>
+    <div className="page-enter" style={{ padding: 'var(--space-6) 0' }}>
       <h2 style={{
-        fontSize: 20,
+        fontSize: 26,
         fontWeight: 700,
-        marginBottom: 'var(--space-4)',
+        marginBottom: 'var(--space-6)',
         letterSpacing: '-0.02em',
         color: 'var(--text-primary)',
       }}>
@@ -357,7 +357,7 @@ export default function Logs() {
       </h2>
 
       {/* Segmented Control navigation */}
-      <div style={{ marginBottom: 'var(--space-5)' }}>
+      <div style={{ marginBottom: 'var(--space-6)' }}>
         <SegmentedControl
           options={segmentedOptions}
           value={logsTab}
@@ -370,19 +370,19 @@ export default function Logs() {
         <div>
           {/* Active Exports */}
           {totalActiveCount > 0 && (
-            <div style={{ marginBottom: 'var(--space-5)' }}>
+            <div style={{ marginBottom: 'var(--space-6)' }}>
               <h3 style={{
-                fontSize: 11,
+                fontSize: 13,
                 fontFamily: 'var(--font-mono)',
                 color: 'var(--accent-amber)',
                 textTransform: 'uppercase',
                 letterSpacing: '0.08em',
                 fontWeight: 600,
-                marginBottom: 'var(--space-3)',
+                marginBottom: 'var(--space-4)',
               }}>
                 Currently Encoding ({totalActiveCount})
               </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-4)' }}>
                 {/* Frontend-tracked active exports (full progress info) */}
                 {activeTaskList.map(([id, task]) => (
                   <div
@@ -392,32 +392,32 @@ export default function Logs() {
                       backdropFilter: 'blur(20px) saturate(1.4)',
                       WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
                       border: '1px solid var(--accent-amber)',
-                      borderRadius: 'var(--radius-md)',
-                      padding: 'var(--space-3) var(--space-4)',
+                      borderRadius: 'var(--radius-lg)',
+                      padding: 'var(--space-4) var(--space-5)',
                       display: 'flex',
                       alignItems: 'center',
-                      gap: 'var(--space-3)',
+                      gap: 'var(--space-4)',
                       flexWrap: 'wrap',
                       transition: 'transform 0.2s var(--ease-spring), box-shadow 0.2s ease',
                     }}
                   >
                     <div style={{
-                      width: 8, height: 8, borderRadius: '50%',
+                      width: 10, height: 10, borderRadius: '50%',
                       background: 'var(--accent-amber)',
                       animation: 'pulse 1.5s ease-in-out infinite',
                       flexShrink: 0,
                     }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{
-                        fontSize: 14, fontWeight: 600, marginBottom: 2,
+                        fontSize: 15, fontWeight: 600, marginBottom: 4,
                         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                        display: 'flex', alignItems: 'center', gap: 6,
+                        display: 'flex', alignItems: 'center', gap: 8,
                         letterSpacing: '-0.01em',
                       }}>
                         {task.clipTitle}
                         {task.exportQuality && (
                           <span style={{
-                            fontSize: 9, fontWeight: 700, padding: '2px 8px',
+                            fontSize: 10, fontWeight: 700, padding: '3px 10px',
                             background: 'var(--accent-amber)', color: 'var(--bg-base)',
                             borderRadius: 'var(--radius-xl)', fontFamily: 'var(--font-mono)',
                           }}>
@@ -425,14 +425,14 @@ export default function Logs() {
                           </span>
                         )}
                       </div>
-                      <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.4 }}>
+                      <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
                         {task.message}
                       </div>
                       {/* Thin progress bar */}
                       {task.progress != null && (
                         <div style={{
-                          height: 2, background: 'var(--bg-surface-3)', borderRadius: 1,
-                          marginTop: 'var(--space-2)', overflow: 'hidden',
+                          height: 3, background: 'var(--bg-surface-3)', borderRadius: 2,
+                          marginTop: 'var(--space-3)', overflow: 'hidden',
                         }}>
                           <div style={{
                             height: '100%', background: 'var(--accent-amber)',
@@ -444,7 +444,7 @@ export default function Logs() {
                       )}
                     </div>
                     <div style={{
-                      fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+                      fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
                       flexShrink: 0, fontVariantNumeric: 'tabular-nums',
                     }}>
                       {elapsed(task.startedAt)}
@@ -452,12 +452,12 @@ export default function Logs() {
                     <button
                       onClick={() => cancelExport(id)}
                       style={{
-                        padding: '6px 14px',
+                        padding: '8px 18px',
                         background: 'var(--danger)',
                         color: '#fff',
                         border: 'none',
                         borderRadius: 'var(--radius-md)',
-                        fontSize: 11,
+                        fontSize: 12,
                         fontWeight: 600,
                         cursor: 'pointer',
                         flexShrink: 0,
@@ -477,29 +477,29 @@ export default function Logs() {
                       backdropFilter: 'blur(20px) saturate(1.4)',
                       WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
                       border: '1px solid var(--accent-amber)',
-                      borderRadius: 'var(--radius-md)',
-                      padding: 'var(--space-3) var(--space-4)',
+                      borderRadius: 'var(--radius-lg)',
+                      padding: 'var(--space-4) var(--space-5)',
                       display: 'flex',
                       alignItems: 'center',
-                      gap: 'var(--space-3)',
+                      gap: 'var(--space-4)',
                       flexWrap: 'wrap',
                     }}
                   >
                     <div style={{
-                      width: 8, height: 8, borderRadius: '50%',
+                      width: 10, height: 10, borderRadius: '50%',
                       background: 'var(--accent-amber)',
                       animation: 'pulse 1.5s ease-in-out infinite',
                       flexShrink: 0,
                     }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{
-                        fontSize: 14, fontWeight: 600, marginBottom: 2,
+                        fontSize: 15, fontWeight: 600, marginBottom: 4,
                         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                         letterSpacing: '-0.01em',
                       }}>
                         {exp.filename || `Export (${exp.job_id.slice(0, 8)})`}
                       </div>
-                      <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.4 }}>
+                      <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
                         {exp.progress_message || 'Encoding...'}
                       </div>
                     </div>
@@ -513,17 +513,17 @@ export default function Logs() {
           {doneTaskList.length > 0 && (
             <div>
               <h3 style={{
-                fontSize: 11,
+                fontSize: 13,
                 fontFamily: 'var(--font-mono)',
                 color: 'var(--text-secondary)',
                 textTransform: 'uppercase',
                 letterSpacing: '0.08em',
                 fontWeight: 600,
-                marginBottom: 'var(--space-3)',
+                marginBottom: 'var(--space-4)',
               }}>
                 Recent Tasks
               </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
                 {doneTaskList.map(([id, task]) => {
                   const st = STATUS_LABELS[task.status] || STATUS_LABELS.error;
                   return (
@@ -534,57 +534,57 @@ export default function Logs() {
                         backdropFilter: 'blur(16px) saturate(1.3)',
                         WebkitBackdropFilter: 'blur(16px) saturate(1.3)',
                         border: '1px solid var(--border)',
-                        borderRadius: 'var(--radius-md)',
-                        padding: 'var(--space-3) var(--space-4)',
+                        borderRadius: 'var(--radius-lg)',
+                        padding: 'var(--space-4) var(--space-5)',
                         display: 'flex',
                         alignItems: 'center',
-                        gap: 'var(--space-3)',
+                        gap: 'var(--space-4)',
                         flexWrap: 'wrap',
                         transition: 'background 0.2s ease',
                       }}
                     >
                       <span style={{
-                        fontSize: 10, fontFamily: 'var(--font-mono)', textTransform: 'uppercase',
+                        fontSize: 11, fontFamily: 'var(--font-mono)', textTransform: 'uppercase',
                         letterSpacing: '0.05em', color: st.color, fontWeight: 600,
-                        background: `${st.color}15`, padding: '3px 10px',
+                        background: `${st.color}15`, padding: '4px 12px',
                         borderRadius: 'var(--radius-xl)',
                       }}>
                         {st.label}
                       </span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <span style={{ fontSize: 13, fontWeight: 500, letterSpacing: '-0.01em' }}>{task.clipTitle}</span>
+                        <span style={{ fontSize: 14, fontWeight: 500, letterSpacing: '-0.01em' }}>{task.clipTitle}</span>
                         {task.exportQuality && (
                           <span style={{
-                            fontSize: 9, fontWeight: 700, padding: '2px 8px', marginLeft: 6,
+                            fontSize: 10, fontWeight: 700, padding: '3px 10px', marginLeft: 8,
                             background: 'var(--accent-cyan-dim)', color: 'var(--accent-cyan)',
                             borderRadius: 'var(--radius-xl)', fontFamily: 'var(--font-mono)',
                           }}>
                             {task.exportQuality.toUpperCase()}
                           </span>
                         )}
-                        <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 8 }}>{task.message}</span>
+                        <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 10 }}>{task.message}</span>
                       </div>
                       {task.downloadUrl && (
                         <a
                           href={task.downloadUrl}
                           download
                           style={{
-                            padding: '5px 14px',
+                            padding: '7px 16px',
                             background: 'var(--accent-cyan-dim)',
                             color: 'var(--accent-cyan)',
                             border: '1px solid var(--accent-cyan)',
                             borderRadius: 'var(--radius-md)',
-                            fontSize: 11,
+                            fontSize: 12,
                             fontWeight: 600,
                             textDecoration: 'none',
                             flexShrink: 0,
                             display: 'inline-flex',
                             alignItems: 'center',
-                            gap: 4,
+                            gap: 6,
                             transition: 'background 0.15s ease',
                           }}
                         >
-                          <DownloadIcon size={12} />
+                          <DownloadIcon size={13} />
                           Download
                         </a>
                       )}
@@ -593,7 +593,7 @@ export default function Logs() {
                         style={{
                           background: 'none', border: 'none',
                           color: 'var(--text-muted)', cursor: 'pointer',
-                          fontSize: 14, padding: 4,
+                          fontSize: 16, padding: 6,
                           borderRadius: 'var(--radius-md)',
                           transition: 'color 0.15s ease',
                         }}
@@ -610,15 +610,15 @@ export default function Logs() {
 
           {taskList.length === 0 && backendExports.length === 0 && (
             <div style={{
-              textAlign: 'center', padding: '60px 24px', color: 'var(--text-muted)',
+              textAlign: 'center', padding: '80px 32px', color: 'var(--text-muted)',
               background: 'var(--glass-bg)',
               backdropFilter: 'blur(16px)',
               WebkitBackdropFilter: 'blur(16px)',
-              borderRadius: 'var(--radius-md)',
+              borderRadius: 'var(--radius-lg)',
               border: '1px solid var(--border)',
             }}>
-              <div style={{ fontSize: 36, marginBottom: 12, opacity: 0.3 }}>&#x1F3AC;</div>
-              <p style={{ fontSize: 13, lineHeight: 1.5 }}>No encoding tasks. Export a clip from the Clips tab to see progress here.</p>
+              <div style={{ fontSize: 42, marginBottom: 16, opacity: 0.3 }}>&#x1F3AC;</div>
+              <p style={{ fontSize: 14, lineHeight: 1.6 }}>No encoding tasks. Export a clip from the Clips tab to see progress here.</p>
             </div>
           )}
         </div>
@@ -629,8 +629,8 @@ export default function Logs() {
         <div>
           {/* Search, Filter & Sort Bar */}
           <div style={{
-            display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)', flexWrap: 'wrap', alignItems: 'center',
-            padding: 'var(--space-3) var(--space-4)',
+            display: 'flex', gap: 'var(--space-4)', marginBottom: 'var(--space-5)', flexWrap: 'wrap', alignItems: 'center',
+            padding: 'var(--space-4) var(--space-5)',
             background: 'var(--glass-bg)',
             backdropFilter: 'blur(20px) saturate(1.4)',
             WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
@@ -652,8 +652,8 @@ export default function Logs() {
                 placeholder="Search by title, filename, source..."
                 style={{
                   width: '100%',
-                  padding: '7px 10px 7px 32px',
-                  fontSize: 12,
+                  padding: '9px 12px 9px 34px',
+                  fontSize: 13,
                   background: 'var(--bg-surface-2)',
                   border: '1px solid var(--border)',
                   borderRadius: 'var(--radius-md)',
@@ -708,7 +708,7 @@ export default function Logs() {
 
             {/* Count */}
             <span style={{
-              fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+              fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
               whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
             }}>
               {filteredExports.length} of {exportedClips.length}
@@ -718,22 +718,23 @@ export default function Logs() {
           {/* Exported clips list */}
           {loadingExports ? (
             <div style={{
-              textAlign: 'center', padding: 48, color: 'var(--text-secondary)',
+              textAlign: 'center', padding: 64, color: 'var(--text-secondary)',
               background: 'var(--glass-bg)',
               backdropFilter: 'blur(16px)',
               WebkitBackdropFilter: 'blur(16px)',
-              borderRadius: 'var(--radius-md)',
+              borderRadius: 'var(--radius-lg)',
               border: '1px solid var(--border)',
+              fontSize: 14,
             }}>
               <div style={{
-                width: 24, height: 24, border: '2px solid var(--border)', borderTopColor: 'var(--accent-cyan)',
+                width: 28, height: 28, border: '2px solid var(--border)', borderTopColor: 'var(--accent-cyan)',
                 borderRadius: '50%', animation: 'spin 0.8s linear infinite',
-                margin: '0 auto 12px',
+                margin: '0 auto 16px',
               }} />
               Loading exported clips...
             </div>
           ) : filteredExports.length > 0 ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
               {filteredExports.map((ec, i) => {
                 const dur = ec.duration ?? (ec.end != null && ec.start != null ? ec.end - ec.start : null);
                 return (
@@ -745,20 +746,20 @@ export default function Logs() {
                       backdropFilter: 'blur(16px) saturate(1.3)',
                       WebkitBackdropFilter: 'blur(16px) saturate(1.3)',
                       border: '1px solid var(--border)',
-                      borderRadius: 'var(--radius-md)',
-                      padding: 'var(--space-3) var(--space-4)',
+                      borderRadius: 'var(--radius-lg)',
+                      padding: 'var(--space-4) var(--space-5)',
                       display: 'flex',
                       alignItems: 'center',
-                      gap: 'var(--space-3)',
+                      gap: 'var(--space-4)',
                       flexWrap: 'wrap',
                       transition: 'background 0.15s ease, border-color 0.15s ease',
                     }}
                   >
                     <div style={{
-                      width: 36, height: 36, borderRadius: 'var(--radius-md)',
+                      width: 42, height: 42, borderRadius: 'var(--radius-md)',
                       background: 'var(--bg-surface-2)',
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      color: 'var(--accent-cyan)', fontSize: 10, fontWeight: 700,
+                      color: 'var(--accent-cyan)', fontSize: 11, fontWeight: 700,
                       fontFamily: 'var(--font-mono)', flexShrink: 0,
                       letterSpacing: '0.02em',
                     }}>
@@ -812,8 +813,8 @@ export default function Logs() {
                           onClick={() => { setEditingTitle(i); setEditTitleValue(ec.title || ec.filename || ''); }}
                           title="Click to edit title"
                           style={{
-                            fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis',
-                            whiteSpace: 'nowrap', marginBottom: 2, cursor: 'pointer',
+                            fontSize: 14, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap', marginBottom: 4, cursor: 'pointer',
                             borderBottom: '1px dashed transparent', transition: 'border-color 0.15s',
                             letterSpacing: '-0.01em',
                           }}
@@ -825,11 +826,11 @@ export default function Logs() {
                         </div>
                       )}
                       <div style={{
-                        fontSize: 11, color: 'var(--text-muted)',
+                        fontSize: 12, color: 'var(--text-muted)',
                         display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', alignItems: 'center',
-                        lineHeight: 1.5,
+                        lineHeight: 1.6,
                       }}>
-                        <span style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <span style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {ec.sourceFilename}
                         </span>
                         {dur != null && (
@@ -849,11 +850,11 @@ export default function Logs() {
                         )}
                       </div>
                     </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0, position: 'relative', gap: 4 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0, position: 'relative', gap: 6 }}>
                       <button
                         onClick={() => setQualityMenuOpen(qualityMenuOpen === i ? null : i)}
                         style={{
-                          fontSize: 10, fontWeight: 700, padding: '3px 10px',
+                          fontSize: 11, fontWeight: 700, padding: '5px 12px',
                           background: 'var(--bg-surface-2)', color: 'var(--accent-cyan)',
                           border: '1px solid var(--accent-cyan)', borderRadius: 'var(--radius-xl)',
                           fontFamily: 'var(--font-mono)', cursor: 'pointer',
@@ -867,22 +868,22 @@ export default function Logs() {
                         href={`/api/files/${ec.jobId}/clips/${ec.filename}`}
                         download
                         style={{
-                          padding: '6px 14px',
+                          padding: '8px 16px',
                           background: 'var(--accent-cyan)',
                           color: 'var(--bg-base)',
                           border: 'none',
                           borderRadius: 'var(--radius-md)',
-                          fontSize: 12,
+                          fontSize: 13,
                           fontWeight: 600,
                           textDecoration: 'none',
                           whiteSpace: 'nowrap',
                           display: 'inline-flex',
                           alignItems: 'center',
-                          gap: 4,
+                          gap: 6,
                           transition: 'opacity 0.15s ease',
                         }}
                       >
-                        <DownloadIcon size={12} />
+                        <DownloadIcon size={13} />
                         Export MP4
                       </a>
                       {qualityMenuOpen === i && (
@@ -927,15 +928,15 @@ export default function Logs() {
             </div>
           ) : (
             <div style={{
-              textAlign: 'center', padding: '60px 24px', color: 'var(--text-muted)',
+              textAlign: 'center', padding: '80px 32px', color: 'var(--text-muted)',
               background: 'var(--glass-bg)',
               backdropFilter: 'blur(16px)',
               WebkitBackdropFilter: 'blur(16px)',
-              borderRadius: 'var(--radius-md)',
+              borderRadius: 'var(--radius-lg)',
               border: '1px solid var(--border)',
             }}>
-              <div style={{ fontSize: 36, marginBottom: 12, opacity: 0.3 }}>&#x1F4E6;</div>
-              <p style={{ fontSize: 13, lineHeight: 1.5 }}>{exportSearch.trim()
+              <div style={{ fontSize: 42, marginBottom: 16, opacity: 0.3 }}>&#x1F4E6;</div>
+              <p style={{ fontSize: 14, lineHeight: 1.6 }}>{exportSearch.trim()
                 ? `No exported clips match "${exportSearch.trim()}"`
                 : exportSourceFilter !== 'all'
                   ? 'No exported clips from this source.'
@@ -950,8 +951,8 @@ export default function Logs() {
         <div>
           {/* Log toolbar */}
           <div style={{
-            display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-3)', flexWrap: 'wrap', alignItems: 'center',
-            padding: 'var(--space-3) var(--space-4)',
+            display: 'flex', gap: 'var(--space-4)', marginBottom: 'var(--space-5)', flexWrap: 'wrap', alignItems: 'center',
+            padding: 'var(--space-4) var(--space-5)',
             background: 'var(--glass-bg)',
             backdropFilter: 'blur(20px) saturate(1.4)',
             WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
@@ -961,10 +962,10 @@ export default function Logs() {
             {/* Search */}
             <div style={{ position: 'relative', flex: 1, minWidth: 160 }}>
               <div style={{
-                position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)',
+                position: 'absolute', left: 12, top: '50%', transform: 'translateY(-50%)',
                 color: 'var(--text-muted)', pointerEvents: 'none',
               }}>
-                <SearchIcon size={13} />
+                <SearchIcon size={14} />
               </div>
               <input
                 type="text"
@@ -973,8 +974,8 @@ export default function Logs() {
                 placeholder="Search logs..."
                 style={{
                   width: '100%',
-                  padding: '6px 8px 6px 30px',
-                  fontSize: 12,
+                  padding: '9px 12px 9px 34px',
+                  fontSize: 13,
                   background: 'var(--bg-surface-2)',
                   border: '1px solid var(--border)',
                   borderRadius: 'var(--radius-md)',
@@ -1001,33 +1002,33 @@ export default function Logs() {
             </select>
 
             <span style={{
-              fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+              fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
               fontVariantNumeric: 'tabular-nums',
             }}>
               {filteredLogs.length}{filteredLogs.length !== logs.length ? ` of ${logs.length}` : ''} entries
             </span>
 
-            <div style={{ marginLeft: 'auto', display: 'flex', gap: 'var(--space-2)' }}>
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 'var(--space-3)' }}>
               {logs.length > 0 && (
                 <button
                   onClick={exportLogsAsFile}
                   style={{
-                    padding: '5px 12px',
+                    padding: '7px 14px',
                     background: 'var(--accent-cyan-dim)',
                     border: '1px solid var(--accent-cyan)',
                     borderRadius: 'var(--radius-md)',
-                    fontSize: 11,
+                    fontSize: 12,
                     fontWeight: 600,
                     color: 'var(--accent-cyan)',
                     cursor: 'pointer',
                     display: 'flex',
                     alignItems: 'center',
-                    gap: 5,
+                    gap: 6,
                     transition: 'background 0.15s ease',
                   }}
                   title="Download activity logs as text file"
                 >
-                  <DownloadIcon size={12} />
+                  <DownloadIcon size={13} />
                   Export Activity
                 </button>
               )}
@@ -1035,34 +1036,34 @@ export default function Logs() {
                 href="/api/logs/export"
                 download
                 style={{
-                  padding: '5px 12px',
+                  padding: '7px 14px',
                   background: 'var(--bg-surface-2)',
                   border: '1px solid var(--border)',
                   borderRadius: 'var(--radius-md)',
-                  fontSize: 11,
+                  fontSize: 12,
                   fontWeight: 600,
                   color: 'var(--text-secondary)',
                   cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 5,
+                  gap: 6,
                   textDecoration: 'none',
                   transition: 'background 0.15s ease',
                 }}
                 title="Download all server logs since container started"
               >
-                <DownloadIcon size={12} />
+                <DownloadIcon size={13} />
                 Full Server Logs
               </a>
               {logs.length > 0 && (
                 <button
                   onClick={clearLogs}
                   style={{
-                    padding: '5px 12px',
+                    padding: '7px 14px',
                     background: 'none',
                     border: '1px solid var(--border)',
                     borderRadius: 'var(--radius-md)',
-                    fontSize: 11,
+                    fontSize: 12,
                     color: 'var(--text-muted)',
                     cursor: 'pointer',
                     transition: 'border-color 0.15s ease',
@@ -1080,11 +1081,11 @@ export default function Logs() {
             backdropFilter: 'blur(16px) saturate(1.3)',
             WebkitBackdropFilter: 'blur(16px) saturate(1.3)',
             border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-md)',
-            maxHeight: 600,
+            borderRadius: 'var(--radius-lg)',
+            maxHeight: 700,
             overflow: 'auto',
             fontFamily: 'var(--font-mono)',
-            fontSize: 12,
+            fontSize: 13,
           }}>
             {filteredLogs.length > 0 ? (
               filteredLogs.map((entry) => (
@@ -1092,23 +1093,23 @@ export default function Logs() {
                   key={entry.id}
                   className="logs-table-row"
                   style={{
-                    padding: '8px 14px',
+                    padding: '12px 20px',
                     borderBottom: '1px solid var(--border)',
                     display: 'flex',
-                    gap: 10,
+                    gap: 14,
                     alignItems: 'baseline',
                     transition: 'background 0.12s ease',
                   }}
                 >
                   <span style={{
-                    color: 'var(--text-muted)', fontSize: 10, flexShrink: 0, minWidth: 68,
+                    color: 'var(--text-muted)', fontSize: 12, flexShrink: 0, minWidth: 76,
                     fontVariantNumeric: 'tabular-nums', letterSpacing: '0.01em',
                   }}>
                     {formatTime(entry.timestamp)}
                   </span>
                   <span style={{
-                    fontSize: 9, fontWeight: 700, flexShrink: 0, minWidth: 42,
-                    padding: '1px 6px',
+                    fontSize: 10, fontWeight: 700, flexShrink: 0, minWidth: 48,
+                    padding: '2px 8px',
                     borderRadius: 'var(--radius-xl)',
                     background: `${LOG_LEVEL_COLORS[entry.level] || 'var(--text-muted)'}15`,
                     color: LOG_LEVEL_COLORS[entry.level] || 'var(--text-muted)',
@@ -1121,15 +1122,15 @@ export default function Logs() {
                   <span style={{
                     color: 'var(--text-primary)',
                     wordBreak: 'break-word',
-                    lineHeight: 1.5,
-                    fontSize: 12,
+                    lineHeight: 1.6,
+                    fontSize: 13,
                   }}>
                     {entry.message}
                   </span>
                 </div>
               ))
             ) : (
-              <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
+              <div style={{ padding: 48, textAlign: 'center', color: 'var(--text-muted)', fontSize: 14 }}>
                 {logs.length === 0
                   ? 'No log entries yet. Processing events will appear here as videos are analyzed and clips are exported.'
                   : 'No logs match current filters.'}
@@ -1145,8 +1146,8 @@ export default function Logs() {
           {/* Resource usage overview */}
           {allocation.resources?.cpu_percent !== undefined && (
             <div style={{
-              display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: 'var(--space-3)',
-              marginBottom: 'var(--space-5)',
+              display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: 'var(--space-4)',
+              marginBottom: 'var(--space-6)',
             }}>
               {[
                 { label: 'CPU', value: `${allocation.resources.cpu_percent}%`, color: allocation.resources.cpu_percent > 80 ? 'var(--danger)' : 'var(--accent-cyan)', percent: allocation.resources.cpu_percent },
@@ -1158,30 +1159,30 @@ export default function Logs() {
                   backdropFilter: 'blur(20px) saturate(1.4)',
                   WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
                   border: '1px solid var(--border)',
-                  borderRadius: 'var(--radius-md)', padding: 'var(--space-4)',
+                  borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)',
                 }}>
                   <div style={{
-                    fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase',
-                    letterSpacing: '0.08em', marginBottom: 'var(--space-2)', fontWeight: 600,
+                    fontSize: 12, color: 'var(--text-muted)', textTransform: 'uppercase',
+                    letterSpacing: '0.08em', marginBottom: 'var(--space-3)', fontWeight: 600,
                   }}>
                     {label}
                   </div>
                   <div style={{
-                    fontSize: 13, fontFamily: 'var(--font-mono)', color, fontWeight: 600,
-                    marginBottom: 'var(--space-2)', fontVariantNumeric: 'tabular-nums',
+                    fontSize: 15, fontFamily: 'var(--font-mono)', color, fontWeight: 600,
+                    marginBottom: 'var(--space-3)', fontVariantNumeric: 'tabular-nums',
                   }}>
                     {value}
                   </div>
                   {/* Thin progress bar for resource usage */}
                   <div style={{
-                    height: 2, background: 'var(--bg-surface-3)', borderRadius: 1,
+                    height: 3, background: 'var(--bg-surface-3)', borderRadius: 2,
                     overflow: 'hidden',
                   }}>
                     <div style={{
                       height: '100%', background: color,
                       width: `${Math.min(percent, 100)}%`,
                       transition: 'width 0.4s var(--ease-spring)',
-                      borderRadius: 1,
+                      borderRadius: 2,
                     }} />
                   </div>
                 </div>
@@ -1191,10 +1192,10 @@ export default function Logs() {
 
           <div style={{
             display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            marginBottom: 'var(--space-3)',
+            marginBottom: 'var(--space-4)',
           }}>
             <h3 style={{
-              fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)',
+              fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)',
               textTransform: 'uppercase', letterSpacing: '0.08em', margin: 0, fontWeight: 600,
             }}>
               Active Processes ({allocation.active_jobs?.length || 0})
@@ -1203,9 +1204,9 @@ export default function Logs() {
               onClick={fetchAllocation}
               disabled={allocationLoading}
               style={{
-                padding: '5px 14px', background: 'var(--bg-surface-2)',
+                padding: '7px 16px', background: 'var(--bg-surface-2)',
                 color: 'var(--accent-cyan)', border: '1px solid var(--border)',
-                borderRadius: 'var(--radius-md)', fontSize: 11, fontWeight: 500,
+                borderRadius: 'var(--radius-md)', fontSize: 12, fontWeight: 500,
                 opacity: allocationLoading ? 0.6 : 1,
                 cursor: allocationLoading ? 'default' : 'pointer',
                 transition: 'opacity 0.15s ease, background 0.15s ease',
@@ -1216,31 +1217,31 @@ export default function Logs() {
           </div>
 
           {allocation.active_jobs?.length > 0 ? (
-            <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
+            <div style={{ display: 'grid', gap: 'var(--space-4)' }}>
               {allocation.active_jobs.map((job) => (
                 <div key={`${job.job_id}-${job.type}`} style={{
                   background: 'var(--glass-bg)',
                   backdropFilter: 'blur(16px) saturate(1.3)',
                   WebkitBackdropFilter: 'blur(16px) saturate(1.3)',
                   border: '1px solid var(--border)',
-                  borderRadius: 'var(--radius-md)', padding: 'var(--space-4)',
+                  borderRadius: 'var(--radius-lg)', padding: 'var(--space-5)',
                   transition: 'border-color 0.15s ease',
                 }}>
                   <div style={{
                     display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
-                    gap: 'var(--space-3)', marginBottom: 'var(--space-2)',
+                    gap: 'var(--space-4)', marginBottom: 'var(--space-3)',
                   }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{
-                        fontSize: 13, fontWeight: 600, color: 'var(--text-primary)',
-                        marginBottom: 3, overflow: 'hidden', textOverflow: 'ellipsis',
+                        fontSize: 15, fontWeight: 600, color: 'var(--text-primary)',
+                        marginBottom: 4, overflow: 'hidden', textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap', letterSpacing: '-0.01em',
                       }}>
                         {job.filename || job.job_id}
                       </div>
                       <div style={{
-                        fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
-                        lineHeight: 1.5, fontVariantNumeric: 'tabular-nums',
+                        fontSize: 13, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
+                        lineHeight: 1.6, fontVariantNumeric: 'tabular-nums',
                       }}>
                         {job.type === 'analysis' ? 'Video Analysis' : job.type === 'export' ? 'Clip Export' : 'Clip Detection'}
                         {job.file_size_mb ? ` -- ${job.file_size_mb}MB` : ''}
@@ -1250,8 +1251,8 @@ export default function Logs() {
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
                       <span style={{
-                        fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 600,
-                        padding: '3px 10px', borderRadius: 'var(--radius-xl)',
+                        fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 600,
+                        padding: '4px 12px', borderRadius: 'var(--radius-xl)',
                         background: job.status === 'running' ? 'var(--accent-amber)' : job.status === 'encoding' ? 'var(--accent-cyan)' : 'var(--text-muted)',
                         color: 'var(--bg-base)',
                         letterSpacing: '0.03em',
@@ -1261,15 +1262,15 @@ export default function Logs() {
                     </div>
                   </div>
                   {job.progress_message && (
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 'var(--space-2)', lineHeight: 1.4 }}>
+                    <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 'var(--space-3)', lineHeight: 1.5 }}>
                       {job.progress != null && <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{job.progress}% </span>}
                       {job.progress_message}
                     </div>
                   )}
                   {job.progress != null && (
                     <div style={{
-                      height: 2, background: 'var(--bg-surface-3)', borderRadius: 1,
-                      marginBottom: 'var(--space-3)', overflow: 'hidden',
+                      height: 3, background: 'var(--bg-surface-3)', borderRadius: 2,
+                      marginBottom: 'var(--space-4)', overflow: 'hidden',
                     }}>
                       <div style={{
                         height: '100%', background: 'var(--accent-cyan)',
@@ -1279,12 +1280,12 @@ export default function Logs() {
                       }} />
                     </div>
                   )}
-                  <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
+                  <div style={{ display: 'flex', gap: 'var(--space-3)' }}>
                     <button
                       onClick={() => handleForceStop(job.job_id)}
                       disabled={!!forceActioning[job.job_id]}
                       style={{
-                        padding: '5px 14px', fontSize: 11, fontWeight: 600,
+                        padding: '7px 16px', fontSize: 12, fontWeight: 600,
                         background: 'var(--amber-dim)', border: '1px solid var(--accent-amber)',
                         color: 'var(--accent-amber)', borderRadius: 'var(--radius-md)',
                         opacity: forceActioning[job.job_id] ? 0.5 : 1,
@@ -1298,7 +1299,7 @@ export default function Logs() {
                       onClick={() => handleForceFail(job.job_id)}
                       disabled={!!forceActioning[job.job_id]}
                       style={{
-                        padding: '5px 14px', fontSize: 11, fontWeight: 600,
+                        padding: '7px 16px', fontSize: 12, fontWeight: 600,
                         background: 'var(--danger-dim)', border: '1px solid var(--danger)',
                         color: 'var(--danger)', borderRadius: 'var(--radius-md)',
                         opacity: forceActioning[job.job_id] ? 0.5 : 1,
@@ -1314,11 +1315,11 @@ export default function Logs() {
             </div>
           ) : (
             <div style={{
-              padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13,
+              padding: 48, textAlign: 'center', color: 'var(--text-muted)', fontSize: 14,
               background: 'var(--glass-bg)',
               backdropFilter: 'blur(16px)',
               WebkitBackdropFilter: 'blur(16px)',
-              borderRadius: 'var(--radius-md)',
+              borderRadius: 'var(--radius-lg)',
               border: '1px solid var(--border)',
             }}>
               No active processes. The container is idle.
