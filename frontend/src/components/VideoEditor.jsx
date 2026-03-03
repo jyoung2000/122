@@ -349,6 +349,11 @@ export default function VideoEditor({
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, rect.width, rect.height);
 
+    // Semi-transparent backdrop to dim thumbnails and make bars visible
+    const isDark = document.documentElement.dataset.theme === 'dark';
+    ctx.fillStyle = isDark ? 'rgba(0, 0, 0, 0.50)' : 'rgba(0, 0, 0, 0.30)';
+    ctx.fillRect(0, 0, rect.width, rect.height);
+
     const barWidth = rect.width / data.length;
     const midY = rect.height / 2;
 
@@ -361,13 +366,12 @@ export default function VideoEditor({
       const rightPct = 1 - trimEndOffset / (clipDur || 1);
       const playPct = clipDur > 0 ? (currentTime - clipStart) / clipDur : 0;
 
-      const isDark = document.documentElement.dataset.theme === 'dark';
       if (pct < leftPct || pct > rightPct) {
-        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.15)';
+        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.12)';
       } else if (pct <= playPct) {
-        ctx.fillStyle = 'rgba(10, 132, 255, 0.75)';
+        ctx.fillStyle = 'rgba(10, 132, 255, 0.85)';
       } else {
-        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.40)' : 'rgba(0, 0, 0, 0.35)';
+        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.55)' : 'rgba(60, 60, 60, 0.55)';
       }
       ctx.fillRect(x, midY - barH, barWidth - 0.5, barH * 2);
     }
@@ -405,10 +409,6 @@ export default function VideoEditor({
         try { ctx.drawImage(thumb, i * sw, 0, sw, rect.height); } catch {}
       }
     });
-    // Darken slightly so waveform remains readable
-    const isDark = document.documentElement.dataset.theme === 'dark';
-    ctx.fillStyle = isDark ? 'rgba(0, 0, 0, 0.30)' : 'rgba(0, 0, 0, 0.10)';
-    ctx.fillRect(0, 0, rect.width, rect.height);
   }, []);
 
   useEffect(() => {
