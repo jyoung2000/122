@@ -203,6 +203,17 @@
 }
 
 /* Waveform canvas */
+/* Keyframe thumbnails canvas */
+.ve-timeline__thumbnails {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 0;
+  border-radius: 3px;
+}
+
 .ve-timeline__waveform {
   position: absolute;
   inset: 0;
@@ -427,6 +438,51 @@
   opacity: 0.8;
 }
 
+/* Apply trim button */
+.ve-apply-trim {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  border: 1px solid var(--ve-trim-color);
+  background: rgba(10, 132, 255, 0.08);
+  color: var(--ve-trim-color);
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+.ve-apply-trim:hover {
+  background: rgba(10, 132, 255, 0.18);
+  box-shadow: 0 0 0 2px rgba(10, 132, 255, 0.15);
+}
+.ve-apply-trim:active {
+  transform: scale(0.97);
+}
+
+/* Trim applied confirmation */
+.ve-trim-applied {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 12px;
+  background: rgba(48, 209, 88, 0.10);
+  color: #30D158;
+  font-size: 11px;
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+  border-radius: 6px;
+  white-space: nowrap;
+  animation: ve-trim-confirm 0.3s ease;
+}
+@keyframes ve-trim-confirm {
+  0% { transform: scale(0.9); opacity: 0; }
+  100% { transform: scale(1); opacity: 1; }
+}
+
 /* ── Volume ────────────────────────────────────────── */
 
 .ve-volume {
@@ -612,7 +668,7 @@
     opacity: 0 !important;
   }
 
-  .ve-controls__center {
+  .ve-controls__center:empty {
     display: none;
   }
 }

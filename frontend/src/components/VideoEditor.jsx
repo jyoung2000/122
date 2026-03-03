@@ -155,6 +155,8 @@ export default function VideoEditor({
   const gainNodeRef = useRef(null);
   const sourceNodeRef = useRef(null);
   const animFrameRef = useRef(null);
+  const thumbnailCanvasRef = useRef(null);
+  const thumbnailsRef = useRef([]);
 
   // ── State ──────────────────────────────────────────
   const [playing, setPlaying] = useState(false);
@@ -178,6 +180,7 @@ export default function VideoEditor({
   const [trimEndOffset, setTrimEndOffset] = useState(0);
   const [draggingHandle, setDraggingHandle] = useState(null); // 'left' | 'right' | null
   const [draggingPlayhead, setDraggingPlayhead] = useState(false);
+  const [trimApplied, setTrimApplied] = useState(false);
   const [videoDuration, setVideoDuration] = useState(0);
 
   // Derived — use video's natural duration as fallback when clipEnd is 0
@@ -392,6 +395,84 @@ export default function VideoEditor({
     ro.observe(canvas);
     return () => ro.disconnect();
   }, [drawWaveform]);
+
+  // ── Keyframe thumbnail generation ─────────────────
+  const drawThumbnails = useCallback(() => {
+    const canvas = thumbnailCanvasRef.current;
+    const thumbs = thumbnailsRef.current;
+    if (!canvas || !thumbs.length) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    const ctx = canvas.getContext('2d');
+    ctx.scale(dpr, dpr);
+    const sw = rect.width / thumbs.length;
+    thumbs.forEach((thumb, i) => {
+      if (thumb) {
+        try { ctx.drawImage(thumb, i * sw, 0, sw, rect.height); } catch {}
+      }
+    });
+    // Darken slightly so waveform remains readable
+    const isDark = document.documentElement.dataset.theme === 'dark';
+    ctx.fillStyle = isDark ? 'rgba(0, 0, 0, 0.40)' : 'rgba(0, 0, 0, 0.20)';
+    ctx.fillRect(0, 0, rect.width, rect.height);
+  }, []);
+
+  useEffect(() => {
+    if (!src || !videoReady || clipDur <= 0) return;
+    let cancelled = false;
+    const generate = async () => {
+      try {
+        const tv = document.createElement('video');
+        tv.muted = true;
+        tv.preload = 'auto';
+        tv.src = src;
+        await new Promise((resolve, reject) => {
+          tv.onloadeddata = resolve;
+          tv.onerror = () => reject();
+          setTimeout(() => reject(), 15000);
+        });
+        if (cancelled) { tv.src = ''; return; }
+        const NUM = 15;
+        const vw = tv.videoWidth || 320;
+        const vh = tv.videoHeight || 180;
+        const tH = 60;
+        const tW = Math.round(tH * (vw / vh));
+        const canvases = [];
+        for (let i = 0; i < NUM; i++) {
+          if (cancelled) break;
+          const time = clipStart + ((i + 0.5) / NUM) * clipDur;
+          tv.currentTime = Math.min(time, (tv.duration || time) - 0.05);
+          await new Promise(r => { tv.onseeked = r; setTimeout(r, 3000); });
+          if (cancelled) break;
+          try {
+            const c = document.createElement('canvas');
+            c.width = tW; c.height = tH;
+            c.getContext('2d').drawImage(tv, 0, 0, tW, tH);
+            canvases.push(c);
+          } catch { canvases.push(null); }
+        }
+        tv.src = ''; tv.load();
+        if (!cancelled && canvases.some(Boolean)) {
+          thumbnailsRef.current = canvases;
+          drawThumbnails();
+        }
+      } catch { /* thumbnails are optional */ }
+    };
+    generate();
+    return () => { cancelled = true; thumbnailsRef.current = []; };
+  }, [src, videoReady, clipStart, clipDur, drawThumbnails]);
+
+  // Redraw thumbnails on resize
+  useEffect(() => {
+    const canvas = thumbnailCanvasRef.current;
+    if (!canvas) return;
+    const ro = new ResizeObserver(() => drawThumbnails());
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [drawThumbnails]);
 
   // ── Playback time tracking via rAF ─────────────────
   useEffect(() => {
@@ -615,6 +696,17 @@ export default function VideoEditor({
       el.requestFullscreen().catch(() => {});
     }
   }, []);
+
+  // ── Apply trim ────────────────────────────────────
+  const handleApplyTrim = useCallback(() => {
+    setTrimApplied(true);
+    onTrimChange?.({ trimStart: trimStartOffset, trimEnd: trimEndOffset });
+  }, [trimStartOffset, trimEndOffset, onTrimChange]);
+
+  // Reset applied state when trim handles change
+  useEffect(() => {
+    setTrimApplied(false);
+  }, [trimStartOffset, trimEndOffset]);
 
   // ── Timeline pointer handling ──────────────────────
   const getTimeFromPointer = useCallback((clientX) => {
@@ -845,6 +937,9 @@ export default function VideoEditor({
           className="ve-timeline__track"
           onPointerDown={onTimelinePointerDown}
         >
+          {/* Keyframe thumbnails */}
+          <canvas ref={thumbnailCanvasRef} className="ve-timeline__thumbnails" />
+
           {/* Waveform */}
           <canvas ref={waveformCanvasRef} className="ve-timeline__waveform" />
 
@@ -940,12 +1035,21 @@ export default function VideoEditor({
           </span>
         </div>
 
-        {/* Center: trim info */}
+        {/* Center: trim apply */}
         <div className="ve-controls__center">
           {hasTrim && (
-            <span className="ve-trim-info">
-              Trimmed: {formatTimeShort(trimmedDur)}
-            </span>
+            trimApplied ? (
+              <span className="ve-trim-applied" title="Trim applied to preview and export">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                Trim Applied · {formatTimeShort(trimmedDur)}
+              </span>
+            ) : (
+              <button className="ve-apply-trim" onClick={(e) => { e.stopPropagation(); handleApplyTrim(); }} title="Apply trim to preview and export">
+                Apply Trim · {formatTimeShort(trimmedDur)}
+              </button>
+            )
           )}
         </div>
 
