@@ -161,6 +161,14 @@ export default function ClipSEO() {
   const [editorVolume, setEditorVolume] = useState(1.0);
   const [editorSpeed, setEditorSpeed] = useState(1.0);
 
+  // Layout mode: 'editor' = full-width NLE above, 'sidebyside' = player left + transcript right
+  const [layoutMode, setLayoutMode] = useState(() => {
+    try { return localStorage.getItem('clipai_seo_layout') || 'editor'; } catch { return 'editor'; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('clipai_seo_layout', layoutMode); } catch {}
+  }, [layoutMode]);
+
   // Fullscreen state
   const fullscreenRef = useRef(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -710,35 +718,144 @@ export default function ClipSEO() {
         @keyframes seo-pulse { 0%,100% { opacity: 0.5; } 50% { opacity: 1; } }
       `}</style>
 
-      {/* Breadcrumb */}
-      <div style={{ marginBottom: 16, fontSize: 12, color: 'var(--text-muted)' }}>
-        <Link to="/clips" style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>Viral Clips</Link>
-        {' / '}
-        <Link to={`/analysis/${jobId}`} style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>{job.filename}</Link>
-        {' / '}
-        <span style={{ color: 'var(--text-primary)' }}>SEO — Clip {clipId}</span>
+      {/* Breadcrumb + Layout Toggle */}
+      <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8 }}>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          <Link to="/clips" style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>Viral Clips</Link>
+          {' / '}
+          <Link to={`/analysis/${jobId}`} style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>{job.filename}</Link>
+          {' / '}
+          <span style={{ color: 'var(--text-primary)' }}>SEO — Clip {clipId}</span>
+        </div>
+        {!isMobile && (
+          <div style={{ display: 'flex', gap: 2, background: 'var(--bg-elevated)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border)', padding: 2 }}>
+            <button
+              onClick={() => setLayoutMode('editor')}
+              title="Full editor — focus on trimming, speed, and volume controls"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '5px 12px', fontSize: 11, fontWeight: 500,
+                background: layoutMode === 'editor' ? 'var(--accent-cyan-dim)' : 'transparent',
+                color: layoutMode === 'editor' ? 'var(--accent-cyan)' : 'var(--text-muted)',
+                border: layoutMode === 'editor' ? '1px solid var(--accent-cyan)' : '1px solid transparent',
+                borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
+                <line x1="2" y1="20" x2="22" y2="20" />
+                <line x1="6" y1="20" x2="6" y2="17" />
+                <line x1="18" y1="20" x2="18" y2="17" />
+              </svg>
+              Editor
+            </button>
+            <button
+              onClick={() => setLayoutMode('sidebyside')}
+              title="Side-by-side — watch clip while editing transcript"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '5px 12px', fontSize: 11, fontWeight: 500,
+                background: layoutMode === 'sidebyside' ? 'var(--accent-cyan-dim)' : 'transparent',
+                color: layoutMode === 'sidebyside' ? 'var(--accent-cyan)' : 'var(--text-muted)',
+                border: layoutMode === 'sidebyside' ? '1px solid var(--accent-cyan)' : '1px solid transparent',
+                borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="2" y="3" width="20" height="18" rx="2" ry="2" />
+                <line x1="12" y1="3" x2="12" y2="21" />
+              </svg>
+              Side by Side
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Video Editor — full-width above settings panels */}
-      <div style={{ width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto 20px', position: 'relative' }}>
-        <VideoEditor
-          src={videoSrc}
-          clipStart={startTime || clip.start_time}
-          clipEnd={endTime || clip.end_time}
-          title={clip.title || `Clip ${clipId}`}
-          aspectRatio={aspectRatio}
-          sourceWidth={sourceDims.w}
-          sourceHeight={sourceDims.h}
-          subjectX={clipSubjectX}
-          scenes={job.scenes || []}
-          initialVolume={playbackVolume}
-          initialSpeed={playbackSpeed}
-          onTimeUpdate={setCurrentTime}
-          onTrimChange={setEditorTrim}
-          onVolumeChange={setEditorVolume}
-          onSpeedChange={setEditorSpeed}
-        />
-      </div>
+      {/* ── EDITOR MODE: Full-width NLE above, settings + content below ── */}
+      {(isMobile || layoutMode === 'editor') && (
+        <>
+          <div style={{ width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto 20px', position: 'relative' }}>
+            <VideoEditor
+              src={videoSrc}
+              clipStart={startTime || clip.start_time}
+              clipEnd={endTime || clip.end_time}
+              title={clip.title || `Clip ${clipId}`}
+              aspectRatio={aspectRatio}
+              sourceWidth={sourceDims.w}
+              sourceHeight={sourceDims.h}
+              subjectX={clipSubjectX}
+              scenes={job.scenes || []}
+              initialVolume={playbackVolume}
+              initialSpeed={playbackSpeed}
+              onTimeUpdate={setCurrentTime}
+              onTrimChange={setEditorTrim}
+              onVolumeChange={setEditorVolume}
+              onSpeedChange={setEditorSpeed}
+            />
+          </div>
+        </>
+      )}
+
+      {/* ── SIDE-BY-SIDE MODE: Player + Transcript side by side ── */}
+      {!isMobile && layoutMode === 'sidebyside' && (
+        <div style={{ display: 'flex', gap: 16, marginBottom: 20, alignItems: 'flex-start' }}>
+          {/* Left: sticky compact video editor */}
+          <div style={{ flex: '0 0 50%', maxWidth: '50%', position: 'sticky', top: 12 }}>
+            <VideoEditor
+              src={videoSrc}
+              clipStart={startTime || clip.start_time}
+              clipEnd={endTime || clip.end_time}
+              title={clip.title || `Clip ${clipId}`}
+              aspectRatio={aspectRatio}
+              sourceWidth={sourceDims.w}
+              sourceHeight={sourceDims.h}
+              subjectX={clipSubjectX}
+              scenes={job.scenes || []}
+              initialVolume={playbackVolume}
+              initialSpeed={playbackSpeed}
+              onTimeUpdate={setCurrentTime}
+              onTrimChange={setEditorTrim}
+              onVolumeChange={setEditorVolume}
+              onSpeedChange={setEditorSpeed}
+              compact
+            />
+          </div>
+          {/* Right: transcript */}
+          <div style={{ flex: '1 1 50%', minWidth: 0 }}>
+            {job?.transcript?.length > 0 && clipTimeRange ? (
+              <div>
+                <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>
+                  Clip Transcript
+                </div>
+                <div style={{ ...sectionStyle, padding: '8px 10px' }}>
+                  <TranscriptViewer
+                    transcript={job.transcript}
+                    timeRange={clipTimeRange}
+                    currentTime={currentTime}
+                    maxHeight={600}
+                    onSeek={(time) => {
+                      const video = videoRef.current;
+                      if (video) {
+                        video.currentTime = time;
+                        setCurrentTime(time);
+                      }
+                    }}
+                    jobId={jobId}
+                    onSpeakerRenamed={fetchJob}
+                    onTranscriptUpdated={fetchJob}
+                  />
+                </div>
+              </div>
+            ) : (
+              <div style={{ padding: '40px 20px', textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
+                No transcript available for this clip
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="clip-panel-layout" style={{ display: 'flex', gap: 20, alignItems: 'flex-start', flexWrap: isMobile ? 'wrap' : 'nowrap', flexDirection: isMobile ? 'column' : 'row' }}>
         {/* Left column: clip info + export settings */}
@@ -966,8 +1083,8 @@ export default function ClipSEO() {
 
         {/* Right column: SEO content */}
         <div style={{ flex: '1 1 auto', minWidth: 0, overflowY: 'auto', maxHeight: isMobile ? 'none' : 'calc(100vh - 100px)' }}>
-          {/* ── Clip Transcript (side-by-side with video player) ─── */}
-          {job?.transcript?.length > 0 && clipTimeRange && (
+          {/* ── Clip Transcript — hidden in sidebyside mode where it's shown above ─── */}
+          {layoutMode !== 'sidebyside' && job?.transcript?.length > 0 && clipTimeRange && (
             <div style={{ marginBottom: 16 }}>
               <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>
                 Clip Transcript
