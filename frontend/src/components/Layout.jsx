@@ -6,13 +6,17 @@ import useResponsive from '../hooks/useResponsive';
 import useTheme from '../hooks/useTheme';
 import useConnectionStatus from '../hooks/useConnectionStatus';
 import useEncodingManager from '../hooks/useEncodingManager';
+import {
+  HomeIcon, UploadIcon, FilmIcon, ListIcon, GearIcon,
+  SidebarCollapseIcon, SparkleIcon,
+} from './icons';
 
 const NAV_ITEMS = [
-  { path: '/', label: 'Dashboard', icon: 'D', mobileIcon: '\u25A3' },
-  { path: '/upload', label: 'Upload', icon: 'U', mobileIcon: '\u2B06' },
-  { path: '/clips', label: 'Clips', icon: 'V', mobileIcon: '\u25B6' },
-  { path: '/logs', label: 'Logs', icon: 'L', mobileIcon: '\u2630' },
-  { path: '/settings', label: 'Settings', icon: 'S', mobileIcon: '\u2699' },
+  { path: '/', label: 'Dashboard', Icon: HomeIcon },
+  { path: '/upload', label: 'Upload', Icon: UploadIcon },
+  { path: '/clips', label: 'Clips', Icon: FilmIcon },
+  { path: '/logs', label: 'Logs', Icon: ListIcon },
+  { path: '/settings', label: 'Settings', Icon: GearIcon },
 ];
 
 function shortModel(modelId) {
@@ -26,14 +30,19 @@ function shortModel(modelId) {
 export default function Layout({ children }) {
   const [collapsed, setCollapsed] = useState(false);
   const [activeModel, setActiveModel] = useState(null);
+  const [modelHover, setModelHover] = useState(false);
   const location = useLocation();
-  const { isMobile } = useResponsive();
+  const { isMobile, isTablet } = useResponsive();
   const { isDark, toggleTheme } = useTheme();
   const connStatus = useConnectionStatus();
   const { activeCount, latestActivity } = useEncodingManager();
 
+  // Auto-collapse sidebar on tablet
+  useEffect(() => {
+    if (isTablet && !collapsed) setCollapsed(true);
+  }, [isTablet]);
+
   // Poll /api/allocation to detect any active container activity
-  // (analysis, transcription, clip detection, exports, etc.)
   const [containerActive, setContainerActive] = useState(false);
   useEffect(() => {
     let mounted = true;
@@ -60,6 +69,12 @@ export default function Layout({ children }) {
     : location.pathname.startsWith('/seo') ? 'Clip Editor'
     : '';
 
+  const isDisconnected = connStatus.status === 'disconnected';
+  const isProcessing = activeCount > 0 || containerActive;
+  const systemDotColor = isDisconnected ? 'var(--danger)'
+    : isProcessing ? 'var(--success)' : 'var(--text-muted)';
+  const systemDotPulse = isDisconnected || isProcessing;
+
   const themeToggleBtn = (
     <button
       onClick={() => {
@@ -73,9 +88,9 @@ export default function Layout({ children }) {
         border: '1px solid var(--border)',
         borderRadius: 'var(--radius-sm)',
         color: 'var(--text-secondary)',
-        fontSize: 16,
-        width: 34,
-        height: 34,
+        fontSize: 14,
+        width: 32,
+        height: 32,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -83,23 +98,19 @@ export default function Layout({ children }) {
         flexShrink: 0,
       }}
     >
-      {isDark ? '\u2600' : '\u263D'}
+      {isDark ? '\u2600\uFE0E' : '\u263D'}
     </button>
   );
 
-  // System status: green pulsing = active/processing, grey = idle, red pulsing = stopped/disconnected
-  const isDisconnected = connStatus.status === 'disconnected';
-  const isProcessing = activeCount > 0 || containerActive;
-  const systemDotColor = isDisconnected ? 'var(--danger)'
-    : isProcessing ? 'var(--success)' : 'var(--text-muted)';
-  const systemDotPulse = isDisconnected || isProcessing;
-
-  // System status dot — green pulsing = processing, grey = idle, red pulsing = disconnected
-  const activityTicker = (
+  // Activity dot with AI shimmer when processing
+  const activityDot = (
     <span
+      title={isDisconnected ? 'Disconnected' : isProcessing ? 'Processing...' : 'Idle'}
       style={{
-        width: 8, height: 8, borderRadius: '50%',
-        background: systemDotColor,
+        width: 6, height: 6, borderRadius: '50%',
+        background: isProcessing
+          ? 'var(--ai-gradient, var(--success))'
+          : systemDotColor,
         animation: systemDotPulse ? 'pulse 1.5s ease-in-out infinite' : 'none',
         flexShrink: 0,
         transition: 'background 0.3s ease',
@@ -115,52 +126,98 @@ export default function Layout({ children }) {
         className="desktop-sidebar"
         style={{
           width: collapsed ? 64 : 240,
-          background: 'var(--bg-panel)',
-          backdropFilter: 'blur(20px) saturate(180%)',
-          WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-          borderRight: '1px solid var(--border)',
+          background: 'var(--glass-bg)',
+          backdropFilter: 'blur(24px) saturate(180%)',
+          WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+          borderRight: '1px solid var(--glass-border)',
+          boxShadow: 'inset -1px 0 0 var(--bg-surface-1)',
           display: 'flex',
           flexDirection: 'column',
-          transition: 'width 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+          transition: 'width 0.3s var(--ease-spring)',
           flexShrink: 0,
+          zIndex: 30,
         }}
       >
         {/* Logo */}
         <div
           style={{
-            padding: '16px',
+            padding: collapsed ? '16px 12px' : '16px',
             borderBottom: '1px solid var(--border)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: collapsed ? 'center' : 'space-between',
+            gap: 8,
+            minHeight: 56,
           }}
         >
-          {!collapsed && (
-            <span
+          {!collapsed ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              {/* Gradient icon */}
+              <div
+                style={{
+                  width: 28,
+                  height: 28,
+                  borderRadius: 'var(--radius-sm)',
+                  background: 'var(--ai-gradient)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: 14,
+                  color: '#fff',
+                  flexShrink: 0,
+                }}
+              >
+                <SparkleIcon size={16} />
+              </div>
+              <span
+                style={{
+                  fontFamily: 'var(--font-display)',
+                  fontWeight: 600,
+                  fontSize: 16,
+                  letterSpacing: '-0.02em',
+                  color: 'var(--text-primary)',
+                }}
+              >
+                ClipAI
+              </span>
+            </div>
+          ) : (
+            <div
               style={{
-                fontFamily: 'var(--font-mono)',
-                fontWeight: 700,
-                fontSize: 18,
-                color: 'var(--accent-cyan)',
-                letterSpacing: '0.02em',
+                width: 28,
+                height: 28,
+                borderRadius: 'var(--radius-sm)',
+                background: 'var(--ai-gradient)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 14,
+                color: '#fff',
+                flexShrink: 0,
               }}
             >
-              CLIP<span style={{ color: 'var(--text-primary)' }}>AI</span>
-            </span>
+              <SparkleIcon size={16} />
+            </div>
           )}
           <button
             onClick={() => setCollapsed(!collapsed)}
+            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
             style={{
               background: 'none',
               border: 'none',
-              color: 'var(--text-secondary)',
-              fontSize: 16,
-              padding: 6,
-              borderRadius: 'var(--radius-sm)',
-              transition: 'background 0.15s',
+              color: 'var(--text-muted)',
+              padding: 4,
+              borderRadius: 'var(--radius-xs)',
+              display: collapsed ? 'none' : 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              transition: 'color 0.15s, background 0.15s',
+              cursor: 'pointer',
             }}
+            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--text-secondary)'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'var(--text-muted)'}
           >
-            {collapsed ? '\u276F' : '\u276E'}
+            <SidebarCollapseIcon size={18} />
           </button>
         </div>
 
@@ -168,8 +225,11 @@ export default function Layout({ children }) {
         <nav style={{ flex: 1, padding: '8px 0' }}>
           {NAV_ITEMS.map((item) => {
             const isActive = location.pathname === item.path
-              || (item.path === '/clips' && location.pathname.startsWith('/clips'));
+              || (item.path === '/clips' && location.pathname.startsWith('/clips'))
+              || (item.path === '/' && location.pathname.startsWith('/analysis'))
+              || (item.path === '/clips' && location.pathname.startsWith('/seo'));
             const isLogs = item.path === '/logs';
+            const Icon = item.Icon;
             return (
               <Link
                 key={item.path}
@@ -178,16 +238,16 @@ export default function Layout({ children }) {
                   display: 'flex',
                   alignItems: 'center',
                   gap: 12,
-                  padding: collapsed ? '12px 0' : '10px 16px',
-                  margin: collapsed ? 0 : '2px 8px',
+                  padding: collapsed ? '10px 0' : '8px 12px',
+                  margin: collapsed ? '2px 0' : '2px 8px',
                   justifyContent: collapsed ? 'center' : 'flex-start',
                   color: isActive ? 'var(--accent-cyan)' : 'var(--text-secondary)',
                   background: isActive ? 'var(--accent-cyan-dim)' : 'transparent',
                   borderRadius: collapsed ? 0 : 'var(--radius-sm)',
                   textDecoration: 'none',
-                  fontSize: 14,
+                  fontSize: 13,
                   fontWeight: isActive ? 600 : 400,
-                  transition: 'all 0.2s ease',
+                  transition: 'all 0.2s var(--ease-quick)',
                   letterSpacing: '-0.01em',
                   position: 'relative',
                 }}
@@ -199,22 +259,20 @@ export default function Layout({ children }) {
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
-                    fontFamily: 'var(--font-mono)',
-                    fontWeight: 700,
-                    fontSize: 12,
-                    background: isActive ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
-                    color: isActive ? 'var(--nav-active-icon-text)' : 'var(--text-secondary)',
-                    borderRadius: 'var(--radius-xs)',
                     position: 'relative',
+                    flexShrink: 0,
                   }}
                 >
-                  {item.icon}
+                  <Icon size={18} style={{
+                    color: isActive ? 'var(--accent-cyan)' : 'var(--text-muted)',
+                    transition: 'color 0.2s ease',
+                  }} />
                   {/* Active encoding badge on Logs nav */}
                   {isLogs && activeCount > 0 && (
                     <span style={{
-                      position: 'absolute', top: -4, right: -4,
+                      position: 'absolute', top: -2, right: -4,
                       width: 14, height: 14, borderRadius: '50%',
-                      background: 'var(--accent-amber)', color: 'var(--bg-base)',
+                      background: 'var(--accent-amber)', color: '#fff',
                       fontSize: 8, fontWeight: 700, fontFamily: 'var(--font-mono)',
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
                       animation: 'pulse 1.5s ease-in-out infinite',
@@ -223,18 +281,41 @@ export default function Layout({ children }) {
                     </span>
                   )}
                 </span>
-                {!collapsed && item.label}
+                {!collapsed && <span>{item.label}</span>}
               </Link>
             );
           })}
         </nav>
 
-        {/* Theme toggle in sidebar */}
-        {!collapsed && (
-          <div style={{ padding: '8px 16px' }}>
-            {themeToggleBtn}
-          </div>
-        )}
+        {/* Theme toggle + collapse toggle (when collapsed) */}
+        <div style={{
+          padding: collapsed ? '8px 0' : '8px 16px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: collapsed ? 'center' : 'flex-start',
+          gap: 8,
+        }}>
+          {collapsed && (
+            <button
+              onClick={() => setCollapsed(false)}
+              title="Expand sidebar"
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-muted)',
+                padding: 6,
+                borderRadius: 'var(--radius-xs)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                cursor: 'pointer',
+              }}
+            >
+              <SidebarCollapseIcon size={18} />
+            </button>
+          )}
+          {!collapsed && themeToggleBtn}
+        </div>
 
         {/* Provider Status */}
         <ProviderStatus collapsed={collapsed} onActiveChange={setActiveModel} />
@@ -260,10 +341,10 @@ export default function Layout({ children }) {
           style={{
             display: 'none',
             padding: '10px var(--page-pad)',
-            background: 'var(--bg-panel)',
-            backdropFilter: 'blur(20px) saturate(180%)',
-            WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-            borderBottom: '1px solid var(--border)',
+            background: 'var(--glass-bg)',
+            backdropFilter: 'blur(24px) saturate(180%)',
+            WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+            borderBottom: '1px solid var(--glass-border)',
             flexDirection: 'column',
             gap: 6,
             position: 'sticky',
@@ -272,22 +353,28 @@ export default function Layout({ children }) {
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-            <span style={{ fontSize: 17, fontWeight: 600, letterSpacing: '-0.02em' }}>
-              {pageName}
-            </span>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {/* Connection dot */}
-              <span
-                title={connStatus.status}
+              <div
                 style={{
-                  width: 8, height: 8, borderRadius: '50%',
-                  background: connStatus.status === 'connected' ? 'var(--success)'
-                    : connStatus.status === 'reconnecting' ? 'var(--accent-amber)'
-                    : 'var(--danger)',
+                  width: 24,
+                  height: 24,
+                  borderRadius: 6,
+                  background: 'var(--ai-gradient)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: '#fff',
                   flexShrink: 0,
-                  animation: connStatus.status !== 'connected' ? 'pulse 1.5s ease-in-out infinite' : undefined,
                 }}
-              />
+              >
+                <SparkleIcon size={13} />
+              </div>
+              <span style={{ fontSize: 17, fontWeight: 600, letterSpacing: '-0.02em' }}>
+                {pageName}
+              </span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {activityDot}
               {themeToggleBtn}
             </div>
           </div>
@@ -295,7 +382,7 @@ export default function Layout({ children }) {
           {latestActivity && activeCount > 0 && (
             <div style={{
               display: 'flex', alignItems: 'center', gap: 6,
-              padding: '4px 8px', background: 'var(--bg-elevated)', borderRadius: 'var(--radius-sm)',
+              padding: '4px 8px', background: 'var(--bg-surface-2)', borderRadius: 'var(--radius-sm)',
               overflow: 'hidden',
             }}>
               <span style={{
@@ -318,9 +405,9 @@ export default function Layout({ children }) {
         <header
           className="desktop-header"
           style={{
-            padding: '12px 24px',
+            padding: '10px 24px',
             borderBottom: '1px solid var(--border)',
-            background: 'var(--bg-panel)',
+            background: 'var(--glass-bg)',
             backdropFilter: 'blur(20px) saturate(180%)',
             WebkitBackdropFilter: 'blur(20px) saturate(180%)',
             display: 'flex',
@@ -329,54 +416,112 @@ export default function Layout({ children }) {
             fontSize: 13,
             color: 'var(--text-secondary)',
             gap: 12,
+            minHeight: 48,
           }}
         >
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, textTransform: 'uppercase', letterSpacing: '0.1em', flexShrink: 0 }}>
-            {location.pathname === '/' ? 'dashboard' : location.pathname.slice(1).replace(/\//g, ' / ')}
+          <span style={{
+            fontSize: 14,
+            fontWeight: 600,
+            letterSpacing: '-0.02em',
+            color: 'var(--text-primary)',
+            flexShrink: 0,
+          }}>
+            {pageName}
           </span>
 
-          {/* Center activity ticker */}
-          <div style={{ flex: 1, display: 'flex', justifyContent: 'center', minWidth: 0 }}>
-            {activityTicker}
+          {/* Center activity */}
+          <div style={{ flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 8, minWidth: 0 }}>
+            {activityDot}
+            {isProcessing && latestActivity && (
+              <span style={{
+                fontSize: 11,
+                color: 'var(--text-muted)',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                maxWidth: 200,
+              }}>
+                {latestActivity.message}
+              </span>
+            )}
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
+            {/* Model status as compact chip with tooltip */}
             {activeModel && activeModel.provider !== 'none' && (
-              <Link
-                to="/settings"
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  padding: '4px 12px',
-                  background: 'var(--bg-elevated)',
-                  border: '1px solid var(--border)',
-                  borderRadius: 'var(--radius-sm)',
-                  textDecoration: 'none',
-                  fontSize: 10,
-                  fontFamily: 'var(--font-mono)',
-                  color: 'var(--text-secondary)',
-                  transition: 'border-color 0.2s',
-                }}
-                title="Click to change AI models"
+              <div
+                style={{ position: 'relative' }}
+                onMouseEnter={() => setModelHover(true)}
+                onMouseLeave={() => setModelHover(false)}
               >
-                <div style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--success)', flexShrink: 0 }} />
-                <span><span style={{ color: 'var(--accent-amber)' }}>T:</span> {activeModel.transcript_model || 'whisper-base'}</span>
-                <span style={{ color: 'var(--border-strong)' }}>|</span>
-                <span><span style={{ color: 'var(--accent-cyan)' }}>V:</span> {activeModel.vision_model ? shortModel(activeModel.vision_model) : '\u2014'}</span>
-                <span style={{ color: 'var(--border-strong)' }}>|</span>
-                <span><span style={{ color: 'var(--success)' }}>Tx:</span> {activeModel.text_model ? shortModel(activeModel.text_model) : '\u2014'}</span>
-              </Link>
+                <Link
+                  to="/settings"
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 6,
+                    padding: '4px 10px',
+                    background: 'var(--bg-surface-2)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-xl)',
+                    textDecoration: 'none',
+                    fontSize: 11,
+                    fontWeight: 500,
+                    color: 'var(--text-secondary)',
+                    transition: 'border-color 0.2s, background 0.2s',
+                  }}
+                >
+                  <span style={{
+                    width: 6, height: 6, borderRadius: '50%',
+                    background: 'var(--success)',
+                    flexShrink: 0,
+                  }} />
+                  <span>AI Models</span>
+                </Link>
+                {/* Tooltip with full model info */}
+                {modelHover && (
+                  <div style={{
+                    position: 'absolute',
+                    top: '100%',
+                    right: 0,
+                    marginTop: 6,
+                    padding: '10px 14px',
+                    background: 'var(--glass-bg)',
+                    backdropFilter: 'blur(20px) saturate(180%)',
+                    WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+                    border: '1px solid var(--glass-border)',
+                    borderRadius: 'var(--radius-md)',
+                    boxShadow: 'var(--shadow-lg)',
+                    fontSize: 11,
+                    fontFamily: 'var(--font-mono)',
+                    whiteSpace: 'nowrap',
+                    zIndex: 100,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
+                    minWidth: 180,
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ color: 'var(--accent-amber)', fontWeight: 600 }}>T:</span>
+                      <span style={{ color: 'var(--text-secondary)' }}>{activeModel.transcript_model || 'whisper-base'}</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>V:</span>
+                      <span style={{ color: 'var(--text-secondary)' }}>{activeModel.vision_model ? shortModel(activeModel.vision_model) : '\u2014'}</span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{ color: 'var(--success)', fontWeight: 600 }}>Tx:</span>
+                      <span style={{ color: 'var(--text-secondary)' }}>{activeModel.text_model ? shortModel(activeModel.text_model) : '\u2014'}</span>
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
-            {/* Connection status is shown by the system dot in the center ticker */}
             {themeToggleBtn}
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--accent-cyan)' }}>
-              v1.0
-            </span>
           </div>
         </header>
 
-        <div style={{ padding: 'var(--page-pad)', flex: 1 }}>
+        <div className="page-enter" style={{ padding: 'var(--page-pad)', flex: 1 }}>
           {children}
         </div>
       </main>
@@ -392,10 +537,10 @@ export default function Layout({ children }) {
           right: 0,
           height: 'calc(68px + var(--safe-bottom))',
           paddingBottom: 'var(--safe-bottom)',
-          background: 'var(--bg-panel)',
+          background: 'var(--glass-bg)',
           backdropFilter: 'blur(24px) saturate(180%)',
           WebkitBackdropFilter: 'blur(24px) saturate(180%)',
-          borderTop: '1px solid var(--border)',
+          borderTop: '1px solid var(--glass-border)',
           alignItems: 'flex-start',
           justifyContent: 'space-around',
           paddingTop: 8,
@@ -409,6 +554,7 @@ export default function Layout({ children }) {
             || (item.path === '/' && location.pathname.startsWith('/analysis'))
             || (item.path === '/clips' && location.pathname.startsWith('/seo'));
           const isLogs = item.path === '/logs';
+          const Icon = item.Icon;
           return (
             <Link
               key={item.path}
@@ -428,13 +574,26 @@ export default function Layout({ children }) {
                 position: 'relative',
               }}
             >
-              <span style={{ fontSize: 22, lineHeight: 1, position: 'relative' }}>
-                {item.mobileIcon}
+              {/* Active indicator pill */}
+              {isActive && (
+                <span style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: '50%',
+                  transform: 'translateX(-50%)',
+                  width: 32,
+                  height: 4,
+                  borderRadius: 2,
+                  background: 'var(--accent-cyan)',
+                }} />
+              )}
+              <span style={{ position: 'relative', lineHeight: 1 }}>
+                <Icon size={22} />
                 {isLogs && activeCount > 0 && (
                   <span style={{
                     position: 'absolute', top: -4, right: -8,
                     width: 14, height: 14, borderRadius: '50%',
-                    background: 'var(--accent-amber)', color: 'var(--bg-base)',
+                    background: 'var(--accent-amber)', color: '#fff',
                     fontSize: 8, fontWeight: 700, fontFamily: 'var(--font-mono)',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
                     animation: 'pulse 1.5s ease-in-out infinite',

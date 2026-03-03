@@ -52,18 +52,20 @@ export default function ToastContainer() {
         return (
           <div
             key={toast.id}
-            className="slide-in"
             style={{
-              background: c.bg,
+              background: 'var(--glass-bg)',
               border: `1px solid ${c.border}`,
               borderRadius: 'var(--radius-md)',
               padding: isMobile ? '12px 16px' : '10px 16px',
               fontSize: 13,
+              fontWeight: 500,
               color: c.text,
               maxWidth: isMobile ? '100%' : 360,
-              backdropFilter: 'blur(20px) saturate(180%)',
-              WebkitBackdropFilter: 'blur(20px) saturate(180%)',
-              boxShadow: 'var(--shadow-md)',
+              backdropFilter: 'blur(24px) saturate(180%)',
+              WebkitBackdropFilter: 'blur(24px) saturate(180%)',
+              boxShadow: 'var(--shadow-lg)',
+              animation: 'pageEnter 0.3s var(--ease-spring) forwards',
+              letterSpacing: '-0.01em',
             }}
           >
             {toast.message}

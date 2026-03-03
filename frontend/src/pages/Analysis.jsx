@@ -7,7 +7,9 @@ import SceneCard from '../components/SceneCard';
 import TranscriptViewer from '../components/TranscriptViewer';
 import ClipCard from '../components/ClipCard';
 import ClipSettingsPanel from '../components/ClipSettingsPanel';
+import SegmentedControl from '../components/SegmentedControl';
 import { showToast } from '../components/Toast';
+import { SearchIcon, SparkleIcon } from '../components/icons';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
@@ -1072,33 +1074,17 @@ export default function Analysis() {
         )}
       </div>
 
-      {/* Tabs */}
-      <div className="responsive-tabs" style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)', marginBottom: 24 }}>
-        {TABS.map((t, i) => (
-          <button
-            key={t}
-            onClick={() => setTab(i)}
-            style={{
-              padding: isMobile ? '10px 14px' : '10px 20px',
-              background: 'none',
-              border: 'none',
-              borderBottom: tab === i ? '2px solid var(--accent-cyan)' : '2px solid transparent',
-              color: tab === i ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-              fontSize: 13,
-              fontWeight: tab === i ? 600 : 400,
-              fontFamily: 'var(--font-mono)',
-              whiteSpace: 'nowrap',
-              flexShrink: 0,
-            }}
-          >
-            {t}
-            {i === 3 && job.clips?.length > 0 && (
-              <span style={{ marginLeft: 6, fontSize: 10, background: 'var(--accent-amber)', color: 'var(--bg-base)', padding: '1px 5px', borderRadius: 8, fontWeight: 700 }}>
-                {job.clips.length}
-              </span>
-            )}
-          </button>
-        ))}
+      {/* Tabs — Apple Segmented Control */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
+        <SegmentedControl
+          options={TABS.map((t, i) => ({
+            value: i,
+            label: i === 3 && job.clips?.length > 0 ? `${t} (${job.clips.length})` : t,
+          }))}
+          value={tab}
+          onChange={(v) => setTab(v)}
+          style={{ flex: isMobile ? 1 : undefined }}
+        />
       </div>
 
       {/* Tab Content */}

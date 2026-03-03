@@ -2,6 +2,7 @@ import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import ProgressBar from '../components/ProgressBar';
 import useResponsive from '../hooks/useResponsive';
+import { UploadIcon, XIcon } from '../components/icons';
 
 const ACCEPTED = '.mp4,.mov,.avi,.mkv,.webm';
 const ACCEPTED_DISPLAY = 'MP4 \u00B7 MOV \u00B7 AVI \u00B7 MKV \u00B7 WEBM';
@@ -55,6 +56,11 @@ const LANGUAGES = [
   { code: 'sv', label: 'Swedish' },
 ];
 
+function formatFileSize(bytes) {
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KB';
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
 export default function Upload() {
   const [dragOver, setDragOver] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
@@ -103,6 +109,12 @@ export default function Upload() {
     const file = e.dataTransfer?.files?.[0];
     handleFile(file);
   }, [handleFile]);
+
+  const handleDeselect = useCallback(() => {
+    setSelectedFile(null);
+    setError(null);
+    if (fileRef.current) fileRef.current.value = '';
+  }, []);
 
   const handleUpload = async () => {
     if (!selectedFile) return;
@@ -166,10 +178,40 @@ export default function Upload() {
     : 'Uploading...';
 
   return (
-    <div style={{ maxWidth: isMobile ? '100%' : 640, margin: '0 auto' }}>
-      <h2 style={{ fontSize: isMobile ? 18 : 20, marginBottom: isMobile ? 20 : 24 }}>Upload Video</h2>
+    <div className="page-enter" style={{ position: 'relative', maxWidth: isMobile ? '100%' : 640, margin: '0 auto', paddingTop: uploading ? 0 : undefined }}>
 
-      {/* Drop zone */}
+      {/* Thin Safari-style progress bar at top of component */}
+      {uploading && (
+        <div style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: 2,
+          background: 'var(--bg-surface-2)',
+          borderRadius: 1,
+          overflow: 'hidden',
+          zIndex: 10,
+        }}>
+          <div style={{
+            height: '100%',
+            width: `${progress}%`,
+            background: uploadDone ? 'var(--success)' : 'var(--accent-cyan)',
+            transition: 'width 0.3s var(--ease-spring)',
+            borderRadius: 1,
+          }} />
+        </div>
+      )}
+
+      <h2 style={{
+        fontSize: isMobile ? 18 : 20,
+        marginBottom: isMobile ? 'var(--space-lg)' : 'var(--space-xl)',
+        marginTop: uploading ? 'var(--space-sm)' : 0,
+      }}>
+        Upload Video
+      </h2>
+
+      {/* Drop zone -- larger, vertically centered, dashed border */}
       <div
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
@@ -177,12 +219,17 @@ export default function Upload() {
         onClick={() => !uploading && fileRef.current?.click()}
         style={{
           border: `2px dashed ${dragOver ? 'var(--accent-cyan)' : 'var(--border)'}`,
-          background: dragOver ? 'var(--accent-cyan-dim)' : 'var(--bg-panel)',
-          borderRadius: 'var(--radius-lg)',
-          padding: isMobile ? '36px 16px' : '48px 24px',
+          background: dragOver ? 'var(--accent-cyan-dim)' : 'var(--bg-surface-1)',
+          borderRadius: 'var(--radius-md)',
+          padding: isMobile ? '48px 20px' : '72px 32px',
           textAlign: 'center',
           cursor: uploading ? 'default' : 'pointer',
-          transition: 'all 0.2s ease',
+          transition: 'all 0.3s var(--ease-spring)',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          minHeight: isMobile ? 200 : 260,
         }}
       >
         <input
@@ -193,34 +240,108 @@ export default function Upload() {
           style={{ display: 'none' }}
         />
 
-        {!selectedFile ? (
-          <>
-            <div style={{ fontSize: 40, marginBottom: 12, opacity: 0.4 }}>&#x2B06;</div>
-            <p style={{ color: 'var(--text-secondary)', marginBottom: 8 }}>
-              Drag and drop your video here, or click to browse
-            </p>
-            <p style={{ color: 'var(--text-muted)', fontSize: 12 }}>
-              {ACCEPTED_DISPLAY}
-            </p>
-          </>
-        ) : (
-          <div>
-            <div style={{ fontSize: 14, color: 'var(--text-primary)', marginBottom: 8, fontWeight: 600 }}>
-              {selectedFile.name}
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-              {(selectedFile.size / (1024 * 1024)).toFixed(1)} MB
-            </div>
-          </div>
-        )}
+        {/* Animated upload icon -- drifts up on hover via CSS-in-JS trick */}
+        <div style={{
+          marginBottom: 'var(--space-md)',
+          color: dragOver ? 'var(--accent-cyan)' : 'var(--text-muted)',
+          transition: 'transform 0.4s var(--ease-spring), color 0.3s var(--ease-spring)',
+          transform: dragOver ? 'translateY(-6px)' : 'translateY(0)',
+        }}>
+          <UploadIcon size={isMobile ? 36 : 44} />
+        </div>
+
+        <p style={{
+          color: 'var(--text-secondary)',
+          marginBottom: 'var(--space-sm)',
+          fontSize: isMobile ? 14 : 15,
+          lineHeight: 1.5,
+        }}>
+          Drag and drop your video here, or click to browse
+        </p>
+        <p style={{
+          color: 'var(--text-muted)',
+          fontSize: 12,
+          letterSpacing: '0.04em',
+        }}>
+          {ACCEPTED_DISPLAY}
+        </p>
       </div>
 
-      {/* Language selector */}
+      {/* Selected file card -- shown below drop zone */}
+      {selectedFile && (
+        <div style={{
+          marginTop: 'var(--space-md)',
+          padding: 'var(--space-sm) var(--space-md)',
+          background: 'var(--bg-surface-2)',
+          borderRadius: 'var(--radius-md)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--space-sm)',
+          transition: 'all 0.3s var(--ease-spring)',
+        }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontSize: 13,
+              fontWeight: 600,
+              color: 'var(--text-primary)',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+            }}>
+              {selectedFile.name}
+            </div>
+            <div style={{
+              fontSize: 12,
+              color: 'var(--text-muted)',
+              marginTop: 2,
+            }}>
+              {formatFileSize(selectedFile.size)}
+            </div>
+          </div>
+          {!uploading && (
+            <button
+              onClick={(e) => { e.stopPropagation(); handleDeselect(); }}
+              aria-label="Deselect file"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                width: 28,
+                height: 28,
+                borderRadius: 'var(--radius-md)',
+                border: 'none',
+                background: 'var(--bg-surface-3)',
+                color: 'var(--text-muted)',
+                cursor: 'pointer',
+                flexShrink: 0,
+                transition: 'background 0.2s var(--ease-spring), color 0.2s var(--ease-spring)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background = 'var(--danger-dim)';
+                e.currentTarget.style.color = 'var(--danger)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background = 'var(--bg-surface-3)';
+                e.currentTarget.style.color = 'var(--text-muted)';
+              }}
+            >
+              <XIcon size={14} />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Language selector with glass treatment */}
       {selectedFile && !uploading && (
-        <div style={{ marginTop: 16 }}>
+        <div style={{ marginTop: 'var(--space-md)' }}>
           <label
             htmlFor="lang-select"
-            style={{ display: 'block', fontSize: 13, color: 'var(--text-secondary)', marginBottom: 6 }}
+            style={{
+              display: 'block',
+              fontSize: 13,
+              color: 'var(--text-secondary)',
+              marginBottom: 'var(--space-xs)',
+            }}
           >
             Video language (helps transcription accuracy)
           </label>
@@ -230,13 +351,22 @@ export default function Upload() {
             onChange={(e) => setLanguage(e.target.value)}
             style={{
               width: '100%',
-              padding: '10px 12px',
-              background: 'var(--bg-panel)',
+              padding: 'var(--space-sm) var(--space-md)',
+              background: 'var(--glass-bg)',
+              backdropFilter: 'blur(12px)',
+              WebkitBackdropFilter: 'blur(12px)',
               color: 'var(--text-primary)',
               border: '1px solid var(--border)',
               fontSize: 14,
-              borderRadius: 'var(--radius-sm)',
+              borderRadius: 'var(--radius-md)',
               outline: 'none',
+              transition: 'border-color 0.2s var(--ease-spring)',
+              appearance: 'none',
+              WebkitAppearance: 'none',
+              backgroundImage: `url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
+              backgroundRepeat: 'no-repeat',
+              backgroundPosition: 'right 12px center',
+              paddingRight: 'var(--space-xl)',
             }}
           >
             {LANGUAGES.map(({ code, label }) => (
@@ -249,23 +379,23 @@ export default function Upload() {
       {/* Upload complete banner */}
       {uploadDone && (
         <div style={{
-          marginTop: 16,
-          padding: '12px 16px',
+          marginTop: 'var(--space-md)',
+          padding: 'var(--space-sm) var(--space-md)',
           background: 'var(--success-dim)',
           border: '1px solid var(--success-border)',
           color: 'var(--success)',
           fontSize: 14,
           fontWeight: 600,
           textAlign: 'center',
-          borderRadius: 'var(--radius-sm)',
+          borderRadius: 'var(--radius-md)',
         }}>
           Upload complete — redirecting to analysis...
         </div>
       )}
 
-      {/* Progress */}
+      {/* Progress -- detailed ProgressBar component */}
       {uploading && (
-        <div style={{ marginTop: 16 }}>
+        <div style={{ marginTop: 'var(--space-md)' }}>
           <ProgressBar
             progress={progress}
             message={uploadMessage}
@@ -277,14 +407,14 @@ export default function Upload() {
       {/* Upload in-progress warning */}
       {uploading && !uploadDone && (
         <div style={{
-          marginTop: 12,
-          padding: '10px 14px',
+          marginTop: 'var(--space-sm)',
+          padding: 'var(--space-sm) var(--space-md)',
           background: 'rgba(245, 158, 11, 0.08)',
           border: '1px solid rgba(245, 158, 11, 0.3)',
-          borderRadius: 'var(--radius-sm)',
+          borderRadius: 'var(--radius-md)',
           display: 'flex',
           alignItems: 'center',
-          gap: 8,
+          gap: 'var(--space-sm)',
         }}>
           <span style={{ fontSize: 16, flexShrink: 0 }}>&#9888;</span>
           <span style={{ fontSize: 12, color: 'var(--accent-amber)', lineHeight: 1.4 }}>
@@ -295,7 +425,15 @@ export default function Upload() {
 
       {/* Error */}
       {error && (
-        <div style={{ marginTop: 16, padding: '10px 16px', background: 'var(--danger-dim)', border: '1px solid var(--danger)', color: 'var(--danger)', fontSize: 13, borderRadius: 'var(--radius-sm)' }}>
+        <div style={{
+          marginTop: 'var(--space-md)',
+          padding: 'var(--space-sm) var(--space-md)',
+          background: 'var(--danger-dim)',
+          border: '1px solid var(--danger)',
+          color: 'var(--danger)',
+          fontSize: 13,
+          borderRadius: 'var(--radius-md)',
+        }}>
           {error}
         </div>
       )}
@@ -305,16 +443,21 @@ export default function Upload() {
         <button
           onClick={handleUpload}
           style={{
-            marginTop: 16,
+            marginTop: 'var(--space-md)',
             width: '100%',
-            padding: '12px',
+            padding: 'var(--space-sm) var(--space-md)',
             background: 'var(--accent-cyan)',
             color: 'var(--bg-base)',
             border: 'none',
             fontSize: 14,
             fontWeight: 600,
-            borderRadius: 'var(--radius-sm)',
+            borderRadius: 'var(--radius-md)',
+            cursor: 'pointer',
+            transition: 'opacity 0.2s var(--ease-spring), transform 0.2s var(--ease-spring)',
+            minHeight: 44,
           }}
+          onMouseEnter={(e) => { e.currentTarget.style.opacity = '0.85'; }}
+          onMouseLeave={(e) => { e.currentTarget.style.opacity = '1'; }}
         >
           Upload & Analyze
         </button>

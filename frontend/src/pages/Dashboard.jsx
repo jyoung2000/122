@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import useResponsive from '../hooks/useResponsive';
+import { SearchIcon } from '../components/icons';
 
 function formatDuration(seconds) {
   if (!seconds) return '-';
@@ -184,102 +185,124 @@ export default function Dashboard() {
   }
 
   return (
-    <div>
+    <div className="page-enter">
       {/* Connection error banner */}
       {fetchError && (
         <div style={{
-          padding: '10px 16px', marginBottom: 16,
+          padding: '10px 16px', marginBottom: 'var(--space-md)',
           background: 'var(--amber-dim)', border: '1px solid var(--accent-amber)',
-          borderRadius: 'var(--radius-sm)', fontSize: 13, color: 'var(--accent-amber)',
-          display: 'flex', alignItems: 'center', gap: 8,
+          borderRadius: 'var(--radius-md)', fontSize: 13, color: 'var(--accent-amber)',
+          display: 'flex', alignItems: 'center', gap: 'var(--space-sm)',
         }}>
           <span style={{ fontSize: 10, animation: 'pulse 1.5s ease-in-out infinite' }}>{'\u25CF'}</span>
           Unable to reach the backend — retrying automatically...
         </div>
       )}
 
-      {/* Stats bar */}
-      <div style={{ display: 'flex', gap: isMobile ? 10 : 16, marginBottom: isMobile ? 20 : 24, flexWrap: 'wrap' }}>
+      {/* Full-width search bar */}
+      <div style={{
+        position: 'relative', width: '100%', marginBottom: 'var(--space-lg)',
+      }}>
+        <div style={{
+          position: 'absolute', left: 16, top: '50%', transform: 'translateY(-50%)',
+          color: 'var(--text-muted)', pointerEvents: 'none', lineHeight: 1,
+          display: 'flex', alignItems: 'center',
+        }}>
+          <SearchIcon size={18} />
+        </div>
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Search videos by name, ID, or status..."
+          style={{
+            width: '100%',
+            padding: '14px 44px 14px 48px',
+            fontSize: 15,
+            background: 'var(--bg-surface-1)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+            color: 'var(--text-primary)',
+            outline: 'none',
+            transition: 'border-color 0.3s var(--ease-spring), box-shadow 0.3s var(--ease-spring), background 0.3s ease',
+          }}
+          onFocus={(e) => {
+            e.target.style.borderColor = 'var(--accent-cyan)';
+            e.target.style.boxShadow = '0 0 0 3px var(--accent-cyan-dim)';
+            e.target.style.background = 'var(--bg-surface-2)';
+          }}
+          onBlur={(e) => {
+            e.target.style.borderColor = 'var(--border)';
+            e.target.style.boxShadow = 'none';
+            e.target.style.background = 'var(--bg-surface-1)';
+          }}
+        />
+        {searchQuery && (
+          <button
+            onClick={() => setSearchQuery('')}
+            style={{
+              position: 'absolute', right: 14, top: '50%', transform: 'translateY(-50%)',
+              background: 'var(--bg-surface-3)', border: 'none', borderRadius: '50%',
+              width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              color: 'var(--text-muted)', fontSize: 13, cursor: 'pointer', lineHeight: 1,
+            }}
+          >
+            &times;
+          </button>
+        )}
+      </div>
+
+      {/* Stats cards with glass treatment */}
+      <div style={{
+        display: 'flex', gap: isMobile ? 'var(--space-sm)' : 'var(--space-md)',
+        marginBottom: isMobile ? 'var(--space-lg)' : 'var(--space-xl)',
+        flexWrap: 'wrap',
+      }}>
         {[
           { label: 'Total Videos', value: jobs.length, color: 'var(--accent-cyan)' },
           { label: 'Clips Extracted', value: totalClips, color: 'var(--accent-amber)' },
           { label: 'Processing', value: processingCount, color: processingCount > 0 ? 'var(--accent-amber)' : 'var(--text-primary)' },
         ].map(({ label, value, color }) => (
           <div key={label} style={{
-            background: 'var(--bg-panel)', border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-md)', padding: isMobile ? '10px 14px' : '12px 20px',
-            flex: 1, minWidth: isMobile ? 0 : 140, boxShadow: 'var(--shadow-sm)',
+            background: 'var(--glass-bg)',
+            backdropFilter: 'blur(20px)',
+            WebkitBackdropFilter: 'blur(20px)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-md)',
+            padding: isMobile ? 'var(--space-sm) var(--space-md)' : 'var(--space-md) var(--space-lg)',
+            flex: 1, minWidth: isMobile ? 0 : 140,
+            boxShadow: 'var(--shadow-sm)',
+            transition: 'transform 0.3s var(--ease-spring), box-shadow 0.3s var(--ease-spring)',
           }}>
-            <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
+            <div style={{
+              fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+              textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 'var(--space-xs)',
+            }}>
               {label}
             </div>
-            <div style={{ fontFamily: 'var(--font-mono)', fontSize: isMobile ? 22 : 28, fontWeight: 700, color }}>
+            <div style={{
+              fontFamily: 'var(--font-mono)', fontSize: isMobile ? 22 : 28,
+              fontWeight: 700, color, lineHeight: 1.1,
+            }}>
               {value}
             </div>
           </div>
         ))}
       </div>
 
-      {/* Search & Filter Bar */}
+      {/* Filter & Sort bar */}
       {jobs.length > 0 && (
-        <div style={{ marginBottom: 16, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'stretch' }}>
-          {/* Search input */}
-          <div style={{ position: 'relative', flex: '1 1 220px', minWidth: 0 }}>
-            <div style={{
-              position: 'absolute', left: 14, top: '50%', transform: 'translateY(-50%)',
-              color: 'var(--text-muted)', fontSize: 15, pointerEvents: 'none', lineHeight: 1,
-            }}>
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
-              </svg>
-            </div>
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search videos by name..."
-              style={{
-                width: '100%',
-                padding: '10px 14px 10px 40px',
-                fontSize: 14,
-                background: 'var(--bg-panel)',
-                border: '1px solid var(--border)',
-                borderRadius: 'var(--radius-md)',
-                color: 'var(--text-primary)',
-                outline: 'none',
-                transition: 'border-color 0.2s ease, box-shadow 0.2s ease',
-              }}
-              onFocus={(e) => {
-                e.target.style.borderColor = 'var(--accent-cyan)';
-                e.target.style.boxShadow = '0 0 0 3px var(--accent-cyan-dim)';
-              }}
-              onBlur={(e) => {
-                e.target.style.borderColor = 'var(--border)';
-                e.target.style.boxShadow = 'none';
-              }}
-            />
-            {searchQuery && (
-              <button
-                onClick={() => setSearchQuery('')}
-                style={{
-                  position: 'absolute', right: 10, top: '50%', transform: 'translateY(-50%)',
-                  background: 'var(--bg-elevated)', border: 'none', borderRadius: '50%',
-                  width: 20, height: 20, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  color: 'var(--text-muted)', fontSize: 12, cursor: 'pointer', lineHeight: 1,
-                }}
-              >
-                &times;
-              </button>
-            )}
-          </div>
-
+        <div style={{
+          marginBottom: 'var(--space-md)', display: 'flex', gap: 'var(--space-sm)',
+          flexWrap: 'wrap', alignItems: 'stretch',
+        }}>
           {/* Status filter */}
           <select
             value={statusFilter}
             onChange={(e) => setStatusFilter(e.target.value)}
             style={{
               padding: '10px 12px', borderRadius: 'var(--radius-md)', fontSize: 13,
-              background: 'var(--bg-panel)', border: '1px solid var(--border)',
+              background: 'var(--bg-surface-1)', border: '1px solid var(--border)',
               color: 'var(--text-primary)', outline: 'none', cursor: 'pointer',
             }}
           >
@@ -296,7 +319,7 @@ export default function Dashboard() {
             onChange={(e) => setSortBy(e.target.value)}
             style={{
               padding: '10px 12px', borderRadius: 'var(--radius-md)', fontSize: 13,
-              background: 'var(--bg-panel)', border: '1px solid var(--border)',
+              background: 'var(--bg-surface-1)', border: '1px solid var(--border)',
               color: 'var(--text-primary)', outline: 'none', cursor: 'pointer',
             }}
           >
@@ -313,28 +336,60 @@ export default function Dashboard() {
         <div
           style={{
             textAlign: 'center',
-            padding: isMobile ? '48px 20px' : '80px 24px',
+            padding: isMobile ? 'var(--space-2xl) var(--space-lg)' : '80px var(--space-xl)',
             border: '2px dashed var(--border)',
-            borderRadius: 'var(--radius-lg)',
+            borderRadius: 'var(--radius-md)',
+            background: 'var(--bg-surface-1)',
           }}
         >
-          <div style={{ fontSize: 48, marginBottom: 16, opacity: 0.3 }}>&#x1F3AC;</div>
-          <h3 style={{ fontSize: 18, marginBottom: 8, color: 'var(--text-secondary)' }}>
-            No videos yet
+          {/* Film reel SVG illustration */}
+          <div style={{ marginBottom: 'var(--space-lg)', opacity: 0.35 }}>
+            <svg width="96" height="96" viewBox="0 0 96 96" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <circle cx="48" cy="48" r="42" stroke="currentColor" strokeWidth="3" style={{ color: 'var(--text-secondary)' }} />
+              <circle cx="48" cy="48" r="12" stroke="currentColor" strokeWidth="2.5" style={{ color: 'var(--text-secondary)' }} />
+              <circle cx="48" cy="48" r="3" fill="currentColor" style={{ color: 'var(--text-secondary)' }} />
+              {/* Sprocket holes */}
+              <circle cx="48" cy="14" r="5" stroke="currentColor" strokeWidth="2" style={{ color: 'var(--text-secondary)' }} />
+              <circle cx="48" cy="82" r="5" stroke="currentColor" strokeWidth="2" style={{ color: 'var(--text-secondary)' }} />
+              <circle cx="14" cy="48" r="5" stroke="currentColor" strokeWidth="2" style={{ color: 'var(--text-secondary)' }} />
+              <circle cx="82" cy="48" r="5" stroke="currentColor" strokeWidth="2" style={{ color: 'var(--text-secondary)' }} />
+              <circle cx="24" cy="24" r="5" stroke="currentColor" strokeWidth="2" style={{ color: 'var(--text-secondary)' }} />
+              <circle cx="72" cy="24" r="5" stroke="currentColor" strokeWidth="2" style={{ color: 'var(--text-secondary)' }} />
+              <circle cx="24" cy="72" r="5" stroke="currentColor" strokeWidth="2" style={{ color: 'var(--text-secondary)' }} />
+              <circle cx="72" cy="72" r="5" stroke="currentColor" strokeWidth="2" style={{ color: 'var(--text-secondary)' }} />
+              {/* Spokes */}
+              <line x1="48" y1="36" x2="48" y2="19" stroke="currentColor" strokeWidth="1.5" style={{ color: 'var(--text-secondary)' }} />
+              <line x1="48" y1="60" x2="48" y2="77" stroke="currentColor" strokeWidth="1.5" style={{ color: 'var(--text-secondary)' }} />
+              <line x1="36" y1="48" x2="19" y2="48" stroke="currentColor" strokeWidth="1.5" style={{ color: 'var(--text-secondary)' }} />
+              <line x1="60" y1="48" x2="77" y2="48" stroke="currentColor" strokeWidth="1.5" style={{ color: 'var(--text-secondary)' }} />
+              <line x1="39.5" y1="39.5" x2="28" y2="28" stroke="currentColor" strokeWidth="1.5" style={{ color: 'var(--text-secondary)' }} />
+              <line x1="56.5" y1="39.5" x2="68" y2="28" stroke="currentColor" strokeWidth="1.5" style={{ color: 'var(--text-secondary)' }} />
+              <line x1="39.5" y1="56.5" x2="28" y2="68" stroke="currentColor" strokeWidth="1.5" style={{ color: 'var(--text-secondary)' }} />
+              <line x1="56.5" y1="56.5" x2="68" y2="68" stroke="currentColor" strokeWidth="1.5" style={{ color: 'var(--text-secondary)' }} />
+            </svg>
+          </div>
+          <h3 style={{
+            fontSize: 20, marginBottom: 'var(--space-sm)', color: 'var(--text-secondary)',
+            fontWeight: 600, letterSpacing: '-0.01em',
+          }}>
+            No videos analyzed yet
           </h3>
-          <p style={{ color: 'var(--text-muted)', marginBottom: 24 }}>
-            Drop your first video to get started
+          <p style={{ color: 'var(--text-muted)', marginBottom: 'var(--space-xl)', fontSize: 14 }}>
+            Upload your first video to start extracting clips
           </p>
           <Link
             to="/upload"
             style={{
               display: 'inline-block',
-              padding: '10px 24px',
+              padding: '12px 32px',
               background: 'var(--accent-cyan)',
               color: 'var(--bg-base)',
               fontWeight: 600,
-              borderRadius: 'var(--radius-sm)',
+              fontSize: 15,
+              borderRadius: 'var(--radius-md)',
               textDecoration: 'none',
+              transition: 'transform 0.2s var(--ease-spring), box-shadow 0.2s var(--ease-spring)',
+              boxShadow: 'var(--shadow-sm)',
             }}
           >
             Upload Video
@@ -342,7 +397,7 @@ export default function Dashboard() {
         </div>
       ) : filteredJobs.length === 0 ? (
         <div style={{
-          textAlign: 'center', padding: '48px 24px',
+          textAlign: 'center', padding: 'var(--space-2xl) var(--space-lg)',
           color: 'var(--text-muted)', fontSize: 14,
         }}>
           {searchQuery.trim()
@@ -355,7 +410,7 @@ export default function Dashboard() {
           style={{
             display: 'grid',
             gridTemplateColumns: 'repeat(auto-fill, minmax(min(320px, 100%), 1fr))',
-            gap: isMobile ? 12 : 16,
+            gap: isMobile ? 'var(--space-sm)' : 'var(--space-md)',
           }}
         >
           {filteredJobs.map((job, i) => {
@@ -363,66 +418,101 @@ export default function Dashboard() {
             return (
               <div
                 key={job.job_id}
-                className="card-hover slide-in"
+                className="card-hover"
                 onClick={() => navigate(`/analysis/${job.job_id}`)}
                 style={{
-                  background: 'var(--bg-panel)',
+                  background: 'var(--bg-surface-1)',
                   border: '1px solid var(--border)',
                   borderRadius: 'var(--radius-md)',
                   boxShadow: 'var(--shadow-sm)',
                   cursor: 'pointer',
-                  animationDelay: `${i * 50}ms`,
+                  opacity: 0,
+                  animation: `cardAppear 0.4s var(--ease-spring) forwards`,
+                  animationDelay: `${i * 60}ms`,
+                  overflow: 'hidden',
                 }}
               >
                 {/* Progress bar for active jobs */}
                 {job.progress > 0 && job.progress < 100 && (
-                  <div style={{ height: 2, background: 'var(--bg-elevated)' }}>
+                  <div style={{ height: 3, background: 'var(--bg-surface-3)' }}>
                     <div
                       className="shimmer"
-                      style={{ height: '100%', width: `${job.progress}%`, background: 'var(--accent-cyan)' }}
+                      style={{
+                        height: '100%', width: `${job.progress}%`,
+                        background: 'var(--accent-cyan)',
+                        borderRadius: '0 2px 2px 0',
+                        transition: 'width 0.5s var(--ease-spring)',
+                      }}
                     />
                   </div>
                 )}
 
-                <div style={{ padding: 16 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
-                    <div>
-                      <h4 style={{ fontSize: 14, marginBottom: 4, wordBreak: 'break-word' }}>
+                <div style={{ padding: 'var(--space-md)' }}>
+                  {/* Top row: filename + status badge */}
+                  <div style={{
+                    display: 'flex', justifyContent: 'space-between',
+                    alignItems: 'flex-start', marginBottom: 'var(--space-sm)',
+                    gap: 'var(--space-sm)',
+                  }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <h4 style={{
+                        fontSize: 14, fontWeight: 600, marginBottom: 4,
+                        wordBreak: 'break-word', lineHeight: 1.3,
+                        color: 'var(--text-primary)',
+                      }}>
                         {job.filename}
                       </h4>
-                      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                        {formatDate(job.created_at)}
-                      </span>
                     </div>
-                    <span className={`badge ${statusInfo.className}`}>
+                    <span
+                      className={`badge ${statusInfo.className}`}
+                      style={{ borderRadius: 'var(--radius-xl)', whiteSpace: 'nowrap', flexShrink: 0 }}
+                    >
                       {statusInfo.label}
                     </span>
                   </div>
 
-                  <div style={{ display: 'flex', gap: 16, fontSize: 12, color: 'var(--text-secondary)' }}>
-                    <span style={{ fontFamily: 'var(--font-mono)' }}>
+                  {/* Upload date */}
+                  <div style={{
+                    fontSize: 12, color: 'var(--text-muted)',
+                    marginBottom: 'var(--space-sm)',
+                  }}>
+                    {formatDate(job.created_at)}
+                  </div>
+
+                  {/* Meta row: duration, size, clip count */}
+                  <div style={{
+                    display: 'flex', gap: 'var(--space-md)', fontSize: 12,
+                    color: 'var(--text-secondary)', flexWrap: 'wrap',
+                    alignItems: 'center',
+                  }}>
+                    <span style={{ fontFamily: 'var(--font-mono)', display: 'flex', alignItems: 'center', gap: 4 }}>
                       {formatDuration(job.duration)}
                     </span>
                     {job.file_size_mb > 0 && (
                       <span style={{ fontFamily: 'var(--font-mono)' }}>
-                        {job.file_size_mb.toFixed(1)}MB
+                        {job.file_size_mb.toFixed(1)} MB
                       </span>
                     )}
-                    {job.clips_count > 0 && (
-                      <span style={{ color: 'var(--accent-amber)', fontFamily: 'var(--font-mono)' }}>
-                        {job.clips_count} clips
-                      </span>
-                    )}
+                    <span style={{
+                      fontFamily: 'var(--font-mono)',
+                      color: (job.clips_count || 0) > 0 ? 'var(--accent-amber)' : 'var(--text-muted)',
+                      fontWeight: (job.clips_count || 0) > 0 ? 600 : 400,
+                    }}>
+                      {job.clips_count || 0} {(job.clips_count || 0) === 1 ? 'clip' : 'clips'}
+                    </span>
                   </div>
 
                   {job.progress_message && job.status !== 'complete' && (
-                    <div style={{ marginTop: 8, fontSize: 11, color: 'var(--accent-cyan)' }}>
+                    <div style={{
+                      marginTop: 'var(--space-sm)', fontSize: 11,
+                      color: 'var(--accent-cyan)',
+                    }}>
                       {job.progress_message}
                     </div>
                   )}
 
                   {/* Action buttons */}
-                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                  <div style={{ display: 'flex', gap: 'var(--space-sm)', marginTop: 'var(--space-sm)' }}>
                     {CANCELLABLE.includes(job.status) && (
                       <button
                         onClick={(e) => handleCancel(e, job.job_id)}

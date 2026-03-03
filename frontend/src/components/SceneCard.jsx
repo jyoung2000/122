@@ -65,6 +65,9 @@ export default function SceneCard({ scene, sceneIndex, jobId, onClick, onUpdated
         boxShadow: 'var(--shadow-sm)',
         overflow: 'hidden',
         cursor: editing ? 'default' : 'pointer',
+        animation: 'cardAppear 0.4s var(--ease-spring) forwards',
+        animationDelay: `${(sceneIndex || 0) * 60}ms`,
+        opacity: 0,
       }}
     >
       {/* Thumbnail */}
@@ -87,14 +90,16 @@ export default function SceneCard({ scene, sceneIndex, jobId, onClick, onUpdated
         <span
           style={{
             position: 'absolute',
-            bottom: 4,
-            left: 4,
-            background: 'var(--badge-overlay-bg)',
-            color: 'var(--accent-cyan)',
+            bottom: 6,
+            left: 6,
+            background: 'rgba(0,0,0,0.6)',
+            backdropFilter: 'blur(8px)',
+            color: '#fff',
             fontFamily: 'var(--font-mono)',
             fontSize: 11,
-            padding: '2px 6px',
-            borderRadius: 2,
+            fontWeight: 600,
+            padding: '2px 8px',
+            borderRadius: 'var(--radius-xl)',
           }}
         >
           {formatTime(scene.timestamp)}

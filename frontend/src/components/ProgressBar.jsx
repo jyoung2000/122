@@ -21,21 +21,21 @@ export default function ProgressBar({ progress, message, variant = 'cyan' }) {
     <div style={{ width: '100%' }}>
       <div
         style={{
-          height: 6,
-          background: 'var(--bg-elevated)',
+          height: 3,
+          background: 'var(--bg-surface-2)',
           position: 'relative',
           overflow: 'hidden',
-          borderRadius: 3,
+          borderRadius: 2,
         }}
       >
         <div
-          className={displayProgress < 100 ? 'shimmer' : ''}
+          className={displayProgress < 100 ? 'ai-shimmer' : ''}
           style={{
             height: '100%',
             width: `${displayProgress}%`,
-            background: color,
-            transition: 'width 0.3s ease',
-            borderRadius: 3,
+            background: displayProgress < 100 ? color : 'var(--success)',
+            transition: 'width 0.3s var(--ease-spring)',
+            borderRadius: 2,
           }}
         />
       </div>
@@ -45,11 +45,11 @@ export default function ProgressBar({ progress, message, variant = 'cyan' }) {
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
-            marginTop: 4,
+            marginTop: 6,
           }}
         >
-          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{message}</span>
-          <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color }}>{displayProgress}%</span>
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)', letterSpacing: '-0.01em' }}>{message}</span>
+          <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 600, color }}>{displayProgress}%</span>
         </div>
       )}
     </div>

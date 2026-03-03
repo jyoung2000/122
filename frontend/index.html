@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
@@ -10,6 +10,10 @@
     <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)" />
     <title>ClipAI — Video Intelligence</title>
     <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>C</text></svg>" />
+    <script>
+      const t = localStorage.getItem('clipai-theme');
+      if (t) document.documentElement.dataset.theme = t;
+    </script>
   </head>
   <body>
     <div id="root"></div>

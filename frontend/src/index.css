@@ -1,4 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;600;700;800&family=Lato:wght@300;400;700;900&family=Montserrat:wght@300;400;500;600;700;800&family=Nunito:wght@300;400;500;600;700;800&family=Open+Sans:wght@300;400;500;600;700;800&family=Oswald:wght@300;400;500;600;700&family=Playfair+Display:wght@400;500;600;700;800&family=Poppins:wght@300;400;500;600;700;800&family=Roboto:wght@300;400;500;700;900&family=Space+Mono:wght@400;700&display=swap');
+/* Only load fonts needed for subtitle preview on-demand via JS.
+   System font stack handles all UI text. */
 
 /* ═══════════════════════════════════════════════════════
    LIGHT THEME (DEFAULT)
@@ -36,8 +37,10 @@
   --success-border: rgba(52, 199, 89, 0.35);
 
   /* Typography */
-  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'DM Sans', 'Segoe UI', system-ui, sans-serif;
-  --font-mono: 'SF Mono', 'Space Mono', ui-monospace, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', 'DM Sans', system-ui, sans-serif;
+  --font-mono: 'SF Mono', 'JetBrains Mono', ui-monospace, 'Space Mono', monospace;
+  --font-display: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', system-ui, sans-serif;
+  --font-body: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'DM Sans', system-ui, sans-serif;
 
   /* Design tokens */
   --radius-xs: 6px;
@@ -74,6 +77,58 @@
   --page-pad: 24px;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --bottom-nav-h: 0px;
+
+  /* ━━━ Glass surfaces ━━━ */
+  --glass-bg: rgba(249, 249, 251, 0.72);
+  --glass-border: rgba(0, 0, 0, 0.06);
+  --glass-hover: rgba(0, 0, 0, 0.04);
+  --glass-blur: 20px;
+
+  /* ━━━ AI Intelligence accent ━━━ */
+  --ai-purple: #BF5AF2;
+  --ai-purple-dim: rgba(191, 90, 242, 0.10);
+  --ai-gradient: linear-gradient(135deg, #BF5AF2, #0A84FF, #5AC8FA);
+  --ai-shimmer: linear-gradient(90deg, transparent, rgba(191,90,242,0.3), rgba(10,132,255,0.3), transparent);
+
+  /* ━━━ Virality score colors ━━━ */
+  --viral-fire: #FF9F0A;
+  --viral-high: #30D158;
+  --viral-mid: #FFD60A;
+  --viral-low: #FF453A;
+
+  /* ━━━ Surface layers ━━━ */
+  --bg-surface-1: rgba(0, 0, 0, 0.02);
+  --bg-surface-2: rgba(0, 0, 0, 0.04);
+  --bg-surface-3: rgba(0, 0, 0, 0.06);
+
+  /* ━━━ Refined spacing scale ━━━ */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+
+  /* ━━━ Spring easing curves ━━━ */
+  --ease-spring: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-settle: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-quick: cubic-bezier(0.25, 0.1, 0.25, 1);
+
+  /* ━━━ Waveform colors (Adobe-style) ━━━ */
+  --waveform-video: #0A84FF;
+  --waveform-audio: #30D158;
+  --waveform-bg: rgba(0, 0, 0, 0.06);
+
+  /* ━━━ Timeline track colors ━━━ */
+  --track-video: rgba(10, 132, 255, 0.6);
+  --track-audio: rgba(48, 209, 88, 0.6);
+  --track-caption: rgba(255, 214, 10, 0.6);
+  --track-ai-region: rgba(191, 90, 242, 0.15);
+  --track-ai-border: rgba(191, 90, 242, 0.4);
+
+  /* ━━━ Sidebar dimensions ━━━ */
+  --sidebar-width: 240px;
+  --sidebar-collapsed: 64px;
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -123,6 +178,19 @@
 
   --glow-color: rgba(10, 132, 255, 0.30);
   --glow-color-strong: rgba(10, 132, 255, 0.65);
+
+  /* ━━━ Dark Glass surfaces ━━━ */
+  --glass-bg: rgba(28, 28, 30, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-hover: rgba(255, 255, 255, 0.06);
+
+  /* ━━━ Dark Surface layers ━━━ */
+  --bg-surface-1: rgba(255, 255, 255, 0.03);
+  --bg-surface-2: rgba(255, 255, 255, 0.05);
+  --bg-surface-3: rgba(255, 255, 255, 0.08);
+
+  /* ━━━ Dark Waveform ━━━ */
+  --waveform-bg: rgba(255, 255, 255, 0.04);
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -265,70 +333,108 @@ select {
 }
 
 /* ═══════════════════════════════════════════════════════
-   FUTURISTIC HOVER BORDER EFFECT
-   Animated conic-gradient that sweeps around the card edge
+   AI SHIMMER ANIMATION
+   Purple → Blue → Teal gradient sweep
    ═══════════════════════════════════════════════════════ */
-@property --border-angle {
-  syntax: "<angle>";
-  initial-value: 0deg;
-  inherits: false;
+@keyframes aiShimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.ai-shimmer {
+  background: var(--ai-shimmer);
+  background-size: 200% 100%;
+  animation: aiShimmer 2s ease-in-out infinite;
 }
 
-@keyframes borderGlow {
-  0%   { --border-angle: 0deg; }
-  100% { --border-angle: 360deg; }
+/* Sparkle icon pulse */
+@keyframes sparklePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+.sparkle-pulse { animation: sparklePulse 2s ease-in-out infinite; }
+
+/* Page enter animation */
+@keyframes pageEnter {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
+/* Score ring draw */
+@keyframes scoreRingDraw {
+  from { stroke-dashoffset: var(--ring-circumference, 251); }
+  to { stroke-dashoffset: var(--ring-offset, 0); }
+}
+
+/* Score ring pulse glow for 91+ scores */
+@keyframes scoreGlow {
+  0%, 100% { filter: drop-shadow(0 0 4px var(--viral-high)); }
+  50% { filter: drop-shadow(0 0 10px var(--viral-high)); }
+}
+
+/* Panel slide-in from right */
+@keyframes panelSlideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* Bottom sheet slide up */
+@keyframes bottomSheetUp {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+/* Card staggered appear */
+@keyframes cardAppear {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* ═══════════════════════════════════════════════════════
+   APPLE-STYLE CARD HOVER
+   Clean lift + shadow on hover, no rotating border
+   ═══════════════════════════════════════════════════════ */
 .card-hover {
   position: relative;
   overflow: visible;
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-              box-shadow 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-              border-color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-/* Rotating gradient border overlay */
-.card-hover::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1.5px;
-  background: conic-gradient(
-    from var(--border-angle),
-    transparent 20%,
-    var(--glow-color-strong) 50%,
-    transparent 80%
-  );
-  -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  opacity: 0;
-  transition: opacity 0.4s ease;
-  pointer-events: none;
-  z-index: 1;
-}
-
-.card-hover:hover::before {
-  opacity: 1;
-  animation: borderGlow 3s linear infinite;
+  transition: transform 0.3s var(--ease-spring, cubic-bezier(0.2, 0.8, 0.2, 1)),
+              box-shadow 0.3s var(--ease-spring, cubic-bezier(0.2, 0.8, 0.2, 1)),
+              border-color 0.3s ease;
 }
 
 .card-hover:hover {
-  border-color: var(--glow-color);
+  border-color: var(--accent-cyan-dim);
   transform: translateY(-2px);
-  box-shadow:
-    var(--shadow-md),
-    0 0 20px var(--glow-color),
-    0 0 40px rgba(10, 132, 255, 0.06);
+  box-shadow: var(--shadow-lg);
+}
+
+/* ═══════════════════════════════════════════════════════
+   PAGE TRANSITIONS & MOTION
+   ═══════════════════════════════════════════════════════ */
+.page-enter {
+  animation: pageEnter 0.25s var(--ease-settle) forwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-enter,
+  .slide-in,
+  .shimmer,
+  .ai-shimmer,
+  .sparkle-pulse,
+  .pulse,
+  .card-hover {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+  }
+  .card-hover:hover {
+    transform: none;
+  }
 }
 
 /* Clip settings sidebar scrollbar */
 .clip-settings-sidebar::-webkit-scrollbar { width: 4px; }
 .clip-settings-sidebar::-webkit-scrollbar-track { background: transparent; }
 .clip-settings-sidebar::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
+.clip-settings-sidebar { overscroll-behavior: contain; }
 
 /* ═══════════════════════════════════════════════════════
    RANGE SLIDER FIX
@@ -493,6 +599,11 @@ input[type="range"]:focus::-webkit-slider-thumb {
   .clip-panel-layout > * {
     min-width: 0;
   }
+}
+
+/* XL: >= 1440px — wider panels, more spacious */
+@media (min-width: 1440px) {
+  :root { --page-pad: 32px; }
 }
 
 /* Touch-friendly sizing */

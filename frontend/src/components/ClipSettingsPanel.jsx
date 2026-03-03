@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import useResponsive from '../hooks/useResponsive';
+import DisclosureGroup from './DisclosureGroup';
+import SegmentedControl from './SegmentedControl';
+import { SparkleIcon } from './icons';
 
 const STORAGE_KEY = 'clipai_clip_settings';
 
@@ -376,34 +379,53 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
 
   return (
     <div style={{
-      background: 'var(--bg-panel)',
-      border: '1px solid var(--border)',
-      borderRadius: 'var(--radius-sm)',
+      background: 'var(--glass-bg)',
+      backdropFilter: 'blur(var(--glass-blur)) saturate(180%)',
+      WebkitBackdropFilter: 'blur(var(--glass-blur)) saturate(180%)',
+      border: '1px solid var(--glass-border)',
+      borderRadius: 'var(--radius-md)',
       overflow: 'hidden',
     }}>
       {/* Header */}
       <div style={{
-        padding: '10px 16px',
+        padding: '12px 16px',
         borderBottom: '1px solid var(--border)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
       }}>
-        <span style={{
-          fontFamily: 'var(--font-mono)',
-          fontWeight: 700,
-          fontSize: 13,
-          color: 'var(--text-primary)',
-        }}>
-          Clip Settings
-        </span>
-        {(settings.aspectRatio || settings.subtitlesEnabled) && (
-          <span style={{ fontSize: 10, color: 'var(--accent-cyan)', fontWeight: 400 }}>
-            {[
-              settings.aspectRatio,
-              settings.subtitlesEnabled ? 'subtitles' : null,
-            ].filter(Boolean).join(' + ')}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <SparkleIcon size={14} style={{ color: 'var(--ai-purple)' }} />
+          <span style={{
+            fontWeight: 600,
+            fontSize: 14,
+            color: 'var(--text-primary)',
+            letterSpacing: '-0.02em',
+          }}>
+            Settings
           </span>
+        </div>
+        {(settings.aspectRatio || settings.subtitlesEnabled) && (
+          <div style={{ display: 'flex', gap: 4 }}>
+            {settings.aspectRatio && (
+              <span style={{
+                fontSize: 10, fontWeight: 600, padding: '2px 7px',
+                borderRadius: 'var(--radius-xl)', background: 'var(--accent-amber-dim)',
+                color: 'var(--accent-amber)',
+              }}>
+                {settings.aspectRatio}
+              </span>
+            )}
+            {settings.subtitlesEnabled && (
+              <span style={{
+                fontSize: 10, fontWeight: 600, padding: '2px 7px',
+                borderRadius: 'var(--radius-xl)', background: 'var(--accent-cyan-dim)',
+                color: 'var(--accent-cyan)',
+              }}>
+                Subtitles
+              </span>
+            )}
+          </div>
         )}
       </div>
 
@@ -506,40 +528,28 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
 
           {/* Settings */}
           <div>
-              {/* Aspect Ratio */}
+              {/* Format Section */}
               <div style={sectionStyle}>
-                <span style={labelStyle}>Aspect Ratio</span>
-                <div style={radioGroupStyle}>
-                  {ASPECT_RATIOS.map((ar) => (
-                    <button
-                      key={ar.label}
-                      onClick={() => update('aspectRatio', ar.value)}
-                      style={radioBtnStyle(settings.aspectRatio === ar.value)}
-                      title={ar.desc}
-                    >
-                      {ar.label}
-                    </button>
-                  ))}
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>Aspect Ratio</div>
+                  <SegmentedControl
+                    options={ASPECT_RATIOS.map((ar) => ({ value: ar.value === null ? '__original__' : ar.value, label: ar.label }))}
+                    value={settings.aspectRatio === null ? '__original__' : settings.aspectRatio}
+                    onChange={(v) => update('aspectRatio', v === '__original__' ? null : v)}
+                    style={{ width: '100%' }}
+                  />
                 </div>
-              </div>
-
-              {/* Export Quality */}
-              <div style={sectionStyle}>
-                <span style={labelStyle}>Default Export Quality</span>
-                <div style={radioGroupStyle}>
-                  {[
-                    { value: '720p', label: '720p' },
-                    { value: '1080p', label: '1080p' },
-                    { value: '4k', label: '4K' },
-                  ].map((q) => (
-                    <button
-                      key={q.value}
-                      onClick={() => update('exportQuality', q.value)}
-                      style={radioBtnStyle(settings.exportQuality === q.value)}
-                    >
-                      {q.label}
-                    </button>
-                  ))}
+                <div>
+                  <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>Export Quality</div>
+                  <SegmentedControl
+                    options={[
+                      { value: '720p', label: '720p' },
+                      { value: '1080p', label: '1080p' },
+                      { value: '4k', label: '4K' },
+                    ]}
+                    value={settings.exportQuality}
+                    onChange={(v) => update('exportQuality', v)}
+                  />
                 </div>
               </div>
 
@@ -668,33 +678,21 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                           style={numInputStyle}
                         />
                       </div>
-                      <div style={radioGroupStyle}>
-                        {SIZES.map((s) => (
-                          <button
-                            key={s.value}
-                            onClick={() => update('subtitleSize', s.value)}
-                            style={radioBtnStyle(settings.subtitleSize === s.value)}
-                          >
-                            {s.label}
-                          </button>
-                        ))}
-                      </div>
+                      <SegmentedControl
+                        options={SIZES.map((s) => ({ value: s.value, label: s.label }))}
+                        value={settings.subtitleSize}
+                        onChange={(v) => update('subtitleSize', v)}
+                      />
                     </div>
 
                     {/* Font Weight */}
                     <div>
-                      <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>Weight</div>
-                      <div style={radioGroupStyle}>
-                        {FONT_WEIGHTS.map((w) => (
-                          <button
-                            key={w.value}
-                            onClick={() => update('subtitleFontWeight', w.value)}
-                            style={radioBtnStyle(settings.subtitleFontWeight === w.value)}
-                          >
-                            {w.label}
-                          </button>
-                        ))}
-                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>Weight</div>
+                      <SegmentedControl
+                        options={FONT_WEIGHTS.map((w) => ({ value: w.value, label: w.label }))}
+                        value={settings.subtitleFontWeight}
+                        onChange={(v) => update('subtitleFontWeight', v)}
+                      />
                     </div>
 
                     {/* Font Color */}
@@ -786,25 +784,19 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
 
                     {/* Position */}
                     <div>
-                      <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>Position</div>
-                      <div style={radioGroupStyle}>
-                        {POSITIONS.map((p) => (
-                          <button
-                            key={p.value}
-                            onClick={() => {
-                              update('subtitlePosition', p.value);
-                              update('subtitleOffsetV', p.value === 'top' ? 96 : p.value === 'center' ? 50 : 4);
-                            }}
-                            style={radioBtnStyle(
-                              p.value === 'top' ? settings.subtitleOffsetV > 66
-                              : p.value === 'center' ? settings.subtitleOffsetV >= 34 && settings.subtitleOffsetV <= 66
-                              : settings.subtitleOffsetV < 34
-                            )}
-                          >
-                            {p.label}
-                          </button>
-                        ))}
-                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 6 }}>Position</div>
+                      <SegmentedControl
+                        options={POSITIONS.map((p) => ({ value: p.value, label: p.label }))}
+                        value={
+                          settings.subtitleOffsetV > 66 ? 'top'
+                          : settings.subtitleOffsetV >= 34 && settings.subtitleOffsetV <= 66 ? 'center'
+                          : 'bottom'
+                        }
+                        onChange={(v) => {
+                          update('subtitlePosition', v);
+                          update('subtitleOffsetV', v === 'top' ? 96 : v === 'center' ? 50 : 4);
+                        }}
+                      />
                     </div>
 
                     {/* Show Speaker Labels */}
@@ -1387,35 +1379,41 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
         gap: 8,
         padding: '12px 16px',
         borderTop: '1px solid var(--border)',
-        background: 'var(--bg-panel)',
       }}>
         {onApplySettings && (
           <button
             onClick={() => onApplySettings(settings)}
             style={{
               flex: 1,
-              padding: '8px 12px',
+              padding: '10px 12px',
               background: 'var(--accent-cyan)',
-              color: 'var(--bg-base)',
+              color: '#fff',
               border: 'none',
               borderRadius: 'var(--radius-sm)',
-              fontSize: 12,
-              fontWeight: 700,
+              fontSize: 13,
+              fontWeight: 600,
               cursor: 'pointer',
+              letterSpacing: '-0.01em',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 6,
             }}
           >
-            Apply Settings
+            <SparkleIcon size={13} />
+            Apply
           </button>
         )}
         <button
           onClick={handleReset}
           style={{
-            padding: '8px 12px',
-            background: 'var(--bg-elevated)',
+            padding: '10px 12px',
+            background: 'var(--bg-surface-2)',
             color: 'var(--text-secondary)',
             border: '1px solid var(--border)',
             borderRadius: 'var(--radius-sm)',
-            fontSize: 11,
+            fontSize: 12,
+            fontWeight: 500,
           }}
         >
           Reset

@@ -4,6 +4,8 @@ import ModelBrowser from '../components/ModelBrowser';
 import CostTracker from '../components/CostTracker';
 import { showToast } from '../components/Toast';
 import useResponsive from '../hooks/useResponsive';
+import SegmentedControl from '../components/SegmentedControl';
+import { GearIcon, SparkleIcon } from '../components/icons';
 
 const FONT_ACCEPT = '.ttf,.otf,.woff,.woff2,.eot,.TTF,.OTF,.WOFF,.WOFF2,.EOT';
 
@@ -508,6 +510,7 @@ export default function Settings() {
   };
 
   const SETTINGS_TABS = ['AI Provider', 'Prompts', 'Fonts', 'Presets', 'Advanced', 'Usage & Costs', 'API Access'];
+  const settingsTabOptions = SETTINGS_TABS.map((t, i) => ({ value: i, label: t }));
   const active = statuses._active || {};
 
   // Model dropdown renderer
@@ -618,26 +621,20 @@ export default function Settings() {
   };
 
   return (
-    <div>
-      <h2 style={{ fontSize: isMobile ? 18 : 20, marginBottom: isMobile ? 20 : 24 }}>Settings</h2>
+    <div className="page-enter">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: isMobile ? 20 : 24 }}>
+        <GearIcon size={20} style={{ color: 'var(--text-muted)' }} />
+        <h2 style={{ fontSize: isMobile ? 18 : 20, letterSpacing: '-0.02em', margin: 0 }}>Settings</h2>
+      </div>
 
       {/* Settings tabs */}
-      <div className="responsive-tabs" style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)', marginBottom: isMobile ? 20 : 24 }}>
-        {SETTINGS_TABS.map((t, i) => (
-          <button
-            key={t}
-            onClick={() => setSettingsTab(i)}
-            style={{
-              padding: isMobile ? '10px 14px' : '10px 20px', background: 'none', border: 'none',
-              borderBottom: settingsTab === i ? '2px solid var(--accent-cyan)' : '2px solid transparent',
-              color: settingsTab === i ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-              fontSize: 13, fontWeight: settingsTab === i ? 600 : 400, fontFamily: 'var(--font-mono)',
-              whiteSpace: 'nowrap', flexShrink: 0,
-            }}
-          >
-            {t}
-          </button>
-        ))}
+      <div style={{ marginBottom: isMobile ? 20 : 24, overflowX: 'auto' }}>
+        <SegmentedControl
+          options={settingsTabOptions}
+          value={settingsTab}
+          onChange={setSettingsTab}
+          style={{ minWidth: 'max-content' }}
+        />
       </div>
 
       {/* ═══════ Tab 0: AI Provider ═══════ */}
@@ -646,7 +643,8 @@ export default function Settings() {
 
           {/* ── Active Models Banner ── */}
           <div style={{
-            background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+            background: 'var(--glass-bg)', backdropFilter: 'blur(20px) saturate(1.4)', WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
+            border: '1px solid var(--glass-border)',
             borderRadius: 'var(--radius-md)', padding: isMobile ? '12px 14px' : '14px 18px', marginBottom: 24,
             boxShadow: 'var(--shadow-sm)',
           }}>

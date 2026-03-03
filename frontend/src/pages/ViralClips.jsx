@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom';
 import { showToast } from '../components/Toast';
 import ClipPreview from '../components/ClipPreview';
 import ClipSettingsPanel from '../components/ClipSettingsPanel';
+import ScoreRing from '../components/ScoreRing';
+import { SearchIcon, SparkleIcon } from '../components/icons';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
@@ -1303,7 +1305,7 @@ export default function ViralClips() {
 
       {/* Clip grid */}
       {filtered.length > 0 ? (
-        <div className="responsive-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(min(340px, 100%), 1fr))', gap: isMobile ? 12 : 16 }}>
+        <div className="responsive-grid" style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : 'repeat(auto-fill, minmax(min(300px, 100%), 1fr))', gap: isMobile ? 12 : 16 }}>
           {filtered.map((clip) => {
             const clipKey = getClipKey(clip);
             const isEditing = editingClip === clipKey;

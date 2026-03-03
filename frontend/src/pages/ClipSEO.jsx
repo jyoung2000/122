@@ -4,6 +4,8 @@ import { showToast } from '../components/Toast';
 import { processKeyframes, interpolateSubjectX, isDynamic, computeClipSubjectX } from '../utils/subjectTracking';
 import ClipSettingsPanel from '../components/ClipSettingsPanel';
 import TranscriptViewer from '../components/TranscriptViewer';
+import ScoreRing from '../components/ScoreRing';
+import { SparkleIcon, ChevronLeftIcon } from '../components/icons';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 

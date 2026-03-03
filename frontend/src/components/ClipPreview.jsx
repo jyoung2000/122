@@ -850,7 +850,7 @@ export default function ClipPreview({
         flexDirection: 'column',
         alignItems: 'center',
         justifyContent: 'center',
-        background: 'var(--video-bg)',
+        background: '#000',
         width: '100vw',
         height: '100vh',
       } : {
@@ -858,10 +858,13 @@ export default function ClipPreview({
         maxWidth: contentMaxWidth,
         width: '100%',
         margin: '0 auto',
-        background: 'var(--bg-panel)',
-        border: inline ? 'none' : '1px solid var(--border)',
-        borderRadius: inline ? 0 : (isMobile ? 0 : 'var(--radius-md)'),
+        background: 'var(--glass-bg)',
+        backdropFilter: 'blur(var(--glass-blur, 20px)) saturate(180%)',
+        WebkitBackdropFilter: 'blur(var(--glass-blur, 20px)) saturate(180%)',
+        border: inline ? 'none' : '1px solid var(--glass-border)',
+        borderRadius: inline ? 0 : (isMobile ? 0 : 'var(--radius-lg)'),
         overflow: 'hidden',
+        boxShadow: 'var(--shadow-md)',
       }}
     >
       {/* Header — hidden in fullscreen */}

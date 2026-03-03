@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import useEncodingManager from '../hooks/useEncodingManager';
 import useResponsive from '../hooks/useResponsive';
+import SegmentedControl from '../components/SegmentedControl';
+import { SearchIcon, DownloadIcon } from '../components/icons';
 
 function formatTime(ts) {
   if (!ts) return '';
@@ -52,9 +54,9 @@ const STATUS_LABELS = {
 };
 
 const selectStyle = {
-  padding: '6px 10px', borderRadius: 'var(--radius-sm)', fontSize: 12,
-  background: 'var(--bg-elevated)', border: '1px solid var(--border)',
-  color: 'var(--text-primary)',
+  padding: '6px 12px', borderRadius: 'var(--radius-md)', fontSize: 12,
+  background: 'var(--bg-surface-2)', border: '1px solid var(--border)',
+  color: 'var(--text-primary)', transition: 'border-color 0.2s ease',
 };
 
 export default function Logs() {
@@ -318,120 +320,133 @@ export default function Logs() {
   // Total active count includes backend-recovered exports
   const totalActiveCount = activeTaskList.length + backendExports.length;
 
-  const tabStyle = (active) => ({
-    padding: '8px 16px',
-    fontSize: 13,
-    fontWeight: active ? 600 : 400,
-    color: active ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-    background: active ? 'var(--accent-cyan-dim)' : 'transparent',
-    border: `1px solid ${active ? 'var(--accent-cyan)' : 'var(--border)'}`,
-    borderRadius: 'var(--radius-sm)',
-    cursor: 'pointer',
-  });
+  const segmentedOptions = [
+    {
+      value: 'encoding',
+      label: totalActiveCount > 0 ? `Encoding (${totalActiveCount})` : 'Encoding',
+    },
+    {
+      value: 'exports',
+      label: exportedClips.length > 0 ? `Exported Clips (${exportedClips.length})` : 'Exported Clips',
+    },
+    {
+      value: 'logs',
+      label: logs.length > 0 ? `Activity Log (${logs.length})` : 'Activity Log',
+    },
+    {
+      value: 'allocation',
+      label: allocation.active_jobs?.length > 0 ? `Allocation (${allocation.active_jobs.length})` : 'Allocation',
+    },
+  ];
+
+  const handleTabChange = (val) => {
+    setLogsTab(val);
+    if (val === 'allocation') fetchAllocation();
+  };
 
   return (
-    <div>
-      <h2 style={{ fontSize: 20, marginBottom: 16 }}>Logs & Exports</h2>
+    <div className="page-enter" style={{ padding: 'var(--space-4) 0' }}>
+      <h2 style={{
+        fontSize: 20,
+        fontWeight: 700,
+        marginBottom: 'var(--space-4)',
+        letterSpacing: '-0.02em',
+        color: 'var(--text-primary)',
+      }}>
+        Logs & Exports
+      </h2>
 
-      {/* Sub-tabs */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 20, flexWrap: 'wrap' }}>
-        <button onClick={() => setLogsTab('encoding')} style={tabStyle(logsTab === 'encoding')}>
-          Encoding
-          {totalActiveCount > 0 && (
-            <span style={{
-              marginLeft: 6, fontSize: 10, fontFamily: 'var(--font-mono)',
-              background: 'var(--accent-amber)', color: 'var(--bg-base)',
-              padding: '1px 6px', borderRadius: 8, fontWeight: 700,
-            }}>
-              {totalActiveCount}
-            </span>
-          )}
-        </button>
-        <button onClick={() => setLogsTab('exports')} style={tabStyle(logsTab === 'exports')}>
-          Exported Clips
-          {exportedClips.length > 0 && (
-            <span style={{
-              marginLeft: 6, fontSize: 10, fontFamily: 'var(--font-mono)',
-              color: 'var(--text-muted)',
-            }}>
-              ({exportedClips.length})
-            </span>
-          )}
-        </button>
-        <button onClick={() => setLogsTab('logs')} style={tabStyle(logsTab === 'logs')}>
-          Activity Log
-          {logs.length > 0 && (
-            <span style={{
-              marginLeft: 6, fontSize: 10, fontFamily: 'var(--font-mono)',
-              color: 'var(--text-muted)',
-            }}>
-              ({logs.length})
-            </span>
-          )}
-        </button>
-        <button onClick={() => { setLogsTab('allocation'); fetchAllocation(); }} style={tabStyle(logsTab === 'allocation')}>
-          Allocation
-          {allocation.active_jobs?.length > 0 && (
-            <span style={{
-              marginLeft: 6, fontSize: 10, fontFamily: 'var(--font-mono)',
-              background: 'var(--danger)', color: 'var(--bg-base)',
-              padding: '1px 6px', borderRadius: 8, fontWeight: 700,
-            }}>
-              {allocation.active_jobs.length}
-            </span>
-          )}
-        </button>
+      {/* Segmented Control navigation */}
+      <div style={{ marginBottom: 'var(--space-5)' }}>
+        <SegmentedControl
+          options={segmentedOptions}
+          value={logsTab}
+          onChange={handleTabChange}
+        />
       </div>
 
-      {/* ═══ Encoding Tab ═══ */}
+      {/* ---- Encoding Tab ---- */}
       {logsTab === 'encoding' && (
         <div>
           {/* Active Exports */}
           {totalActiveCount > 0 && (
-            <div style={{ marginBottom: 24 }}>
-              <h3 style={{ fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--accent-amber)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>
+            <div style={{ marginBottom: 'var(--space-5)' }}>
+              <h3 style={{
+                fontSize: 11,
+                fontFamily: 'var(--font-mono)',
+                color: 'var(--accent-amber)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+                fontWeight: 600,
+                marginBottom: 'var(--space-3)',
+              }}>
                 Currently Encoding ({totalActiveCount})
               </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-3)' }}>
                 {/* Frontend-tracked active exports (full progress info) */}
                 {activeTaskList.map(([id, task]) => (
                   <div
                     key={id}
                     style={{
-                      background: 'var(--bg-panel)',
+                      background: 'var(--glass-bg)',
+                      backdropFilter: 'blur(20px) saturate(1.4)',
+                      WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
                       border: '1px solid var(--accent-amber)',
                       borderRadius: 'var(--radius-md)',
-                      padding: 14,
+                      padding: 'var(--space-3) var(--space-4)',
                       display: 'flex',
                       alignItems: 'center',
-                      gap: 12,
+                      gap: 'var(--space-3)',
                       flexWrap: 'wrap',
+                      transition: 'transform 0.2s var(--ease-spring), box-shadow 0.2s ease',
                     }}
                   >
                     <div style={{
-                      width: 10, height: 10, borderRadius: '50%',
+                      width: 8, height: 8, borderRadius: '50%',
                       background: 'var(--accent-amber)',
                       animation: 'pulse 1.5s ease-in-out infinite',
                       flexShrink: 0,
                     }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <div style={{
+                        fontSize: 14, fontWeight: 600, marginBottom: 2,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        display: 'flex', alignItems: 'center', gap: 6,
+                        letterSpacing: '-0.01em',
+                      }}>
                         {task.clipTitle}
                         {task.exportQuality && (
                           <span style={{
-                            fontSize: 9, fontWeight: 700, padding: '1px 5px',
+                            fontSize: 9, fontWeight: 700, padding: '2px 8px',
                             background: 'var(--accent-amber)', color: 'var(--bg-base)',
-                            borderRadius: 3, fontFamily: 'var(--font-mono)',
+                            borderRadius: 'var(--radius-xl)', fontFamily: 'var(--font-mono)',
                           }}>
                             {task.exportQuality.toUpperCase()}
                           </span>
                         )}
                       </div>
-                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.4 }}>
                         {task.message}
                       </div>
+                      {/* Thin progress bar */}
+                      {task.progress != null && (
+                        <div style={{
+                          height: 2, background: 'var(--bg-surface-3)', borderRadius: 1,
+                          marginTop: 'var(--space-2)', overflow: 'hidden',
+                        }}>
+                          <div style={{
+                            height: '100%', background: 'var(--accent-amber)',
+                            width: `${task.progress}%`,
+                            transition: 'width 0.4s var(--ease-spring)',
+                            borderRadius: 1,
+                          }} />
+                        </div>
+                      )}
                     </div>
-                    <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', flexShrink: 0 }}>
+                    <div style={{
+                      fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+                      flexShrink: 0, fontVariantNumeric: 'tabular-nums',
+                    }}>
                       {elapsed(task.startedAt)}
                     </div>
                     <button
@@ -441,11 +456,12 @@ export default function Logs() {
                         background: 'var(--danger)',
                         color: '#fff',
                         border: 'none',
-                        borderRadius: 'var(--radius-sm)',
+                        borderRadius: 'var(--radius-md)',
                         fontSize: 11,
                         fontWeight: 600,
                         cursor: 'pointer',
                         flexShrink: 0,
+                        transition: 'opacity 0.15s ease',
                       }}
                     >
                       Cancel
@@ -457,27 +473,33 @@ export default function Logs() {
                   <div
                     key={`backend-${exp.job_id}-${exp.filename}`}
                     style={{
-                      background: 'var(--bg-panel)',
+                      background: 'var(--glass-bg)',
+                      backdropFilter: 'blur(20px) saturate(1.4)',
+                      WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
                       border: '1px solid var(--accent-amber)',
                       borderRadius: 'var(--radius-md)',
-                      padding: 14,
+                      padding: 'var(--space-3) var(--space-4)',
                       display: 'flex',
                       alignItems: 'center',
-                      gap: 12,
+                      gap: 'var(--space-3)',
                       flexWrap: 'wrap',
                     }}
                   >
                     <div style={{
-                      width: 10, height: 10, borderRadius: '50%',
+                      width: 8, height: 8, borderRadius: '50%',
                       background: 'var(--accent-amber)',
                       animation: 'pulse 1.5s ease-in-out infinite',
                       flexShrink: 0,
                     }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <div style={{
+                        fontSize: 14, fontWeight: 600, marginBottom: 2,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        letterSpacing: '-0.01em',
+                      }}>
                         {exp.filename || `Export (${exp.job_id.slice(0, 8)})`}
                       </div>
-                      <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+                      <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.4 }}>
                         {exp.progress_message || 'Encoding...'}
                       </div>
                     </div>
@@ -490,40 +512,52 @@ export default function Logs() {
           {/* Completed/Failed Tasks */}
           {doneTaskList.length > 0 && (
             <div>
-              <h3 style={{ fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 12 }}>
+              <h3 style={{
+                fontSize: 11,
+                fontFamily: 'var(--font-mono)',
+                color: 'var(--text-secondary)',
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+                fontWeight: 600,
+                marginBottom: 'var(--space-3)',
+              }}>
                 Recent Tasks
               </h3>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
                 {doneTaskList.map(([id, task]) => {
                   const st = STATUS_LABELS[task.status] || STATUS_LABELS.error;
                   return (
                     <div
                       key={id}
                       style={{
-                        background: 'var(--bg-panel)',
+                        background: 'var(--glass-bg)',
+                        backdropFilter: 'blur(16px) saturate(1.3)',
+                        WebkitBackdropFilter: 'blur(16px) saturate(1.3)',
                         border: '1px solid var(--border)',
                         borderRadius: 'var(--radius-md)',
-                        padding: '10px 14px',
+                        padding: 'var(--space-3) var(--space-4)',
                         display: 'flex',
                         alignItems: 'center',
-                        gap: 12,
+                        gap: 'var(--space-3)',
                         flexWrap: 'wrap',
+                        transition: 'background 0.2s ease',
                       }}
                     >
                       <span style={{
-                        fontSize: 9, fontFamily: 'var(--font-mono)', textTransform: 'uppercase',
-                        letterSpacing: '0.05em', color: st.color, fontWeight: 700,
-                        background: `${st.color}15`, padding: '2px 8px', borderRadius: 3,
+                        fontSize: 10, fontFamily: 'var(--font-mono)', textTransform: 'uppercase',
+                        letterSpacing: '0.05em', color: st.color, fontWeight: 600,
+                        background: `${st.color}15`, padding: '3px 10px',
+                        borderRadius: 'var(--radius-xl)',
                       }}>
                         {st.label}
                       </span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <span style={{ fontSize: 13, fontWeight: 500 }}>{task.clipTitle}</span>
+                        <span style={{ fontSize: 13, fontWeight: 500, letterSpacing: '-0.01em' }}>{task.clipTitle}</span>
                         {task.exportQuality && (
                           <span style={{
-                            fontSize: 9, fontWeight: 700, padding: '1px 5px', marginLeft: 6,
+                            fontSize: 9, fontWeight: 700, padding: '2px 8px', marginLeft: 6,
                             background: 'var(--accent-cyan-dim)', color: 'var(--accent-cyan)',
-                            borderRadius: 3, fontFamily: 'var(--font-mono)',
+                            borderRadius: 'var(--radius-xl)', fontFamily: 'var(--font-mono)',
                           }}>
                             {task.exportQuality.toUpperCase()}
                           </span>
@@ -535,17 +569,22 @@ export default function Logs() {
                           href={task.downloadUrl}
                           download
                           style={{
-                            padding: '4px 12px',
+                            padding: '5px 14px',
                             background: 'var(--accent-cyan-dim)',
                             color: 'var(--accent-cyan)',
                             border: '1px solid var(--accent-cyan)',
-                            borderRadius: 'var(--radius-sm)',
+                            borderRadius: 'var(--radius-md)',
                             fontSize: 11,
                             fontWeight: 600,
                             textDecoration: 'none',
                             flexShrink: 0,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: 4,
+                            transition: 'background 0.15s ease',
                           }}
                         >
+                          <DownloadIcon size={12} />
                           Download
                         </a>
                       )}
@@ -555,6 +594,8 @@ export default function Logs() {
                           background: 'none', border: 'none',
                           color: 'var(--text-muted)', cursor: 'pointer',
                           fontSize: 14, padding: 4,
+                          borderRadius: 'var(--radius-md)',
+                          transition: 'color 0.15s ease',
                         }}
                         title="Dismiss"
                       >
@@ -568,21 +609,32 @@ export default function Logs() {
           )}
 
           {taskList.length === 0 && backendExports.length === 0 && (
-            <div style={{ textAlign: 'center', padding: '60px 24px', color: 'var(--text-muted)' }}>
+            <div style={{
+              textAlign: 'center', padding: '60px 24px', color: 'var(--text-muted)',
+              background: 'var(--glass-bg)',
+              backdropFilter: 'blur(16px)',
+              WebkitBackdropFilter: 'blur(16px)',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--border)',
+            }}>
               <div style={{ fontSize: 36, marginBottom: 12, opacity: 0.3 }}>&#x1F3AC;</div>
-              <p>No encoding tasks. Export a clip from the Clips tab to see progress here.</p>
+              <p style={{ fontSize: 13, lineHeight: 1.5 }}>No encoding tasks. Export a clip from the Clips tab to see progress here.</p>
             </div>
           )}
         </div>
       )}
 
-      {/* ═══ Exported Clips Tab ═══ */}
+      {/* ---- Exported Clips Tab ---- */}
       {logsTab === 'exports' && (
         <div>
           {/* Search, Filter & Sort Bar */}
           <div style={{
-            display: 'flex', gap: 10, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center',
-            padding: '10px 14px', background: 'var(--bg-panel)', border: '1px solid var(--border)',
+            display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-4)', flexWrap: 'wrap', alignItems: 'center',
+            padding: 'var(--space-3) var(--space-4)',
+            background: 'var(--glass-bg)',
+            backdropFilter: 'blur(20px) saturate(1.4)',
+            WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
+            border: '1px solid var(--border)',
             borderRadius: 'var(--radius-md)',
           }}>
             {/* Search */}
@@ -591,9 +643,7 @@ export default function Logs() {
                 position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)',
                 color: 'var(--text-muted)', fontSize: 14, pointerEvents: 'none',
               }}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
-                </svg>
+                <SearchIcon size={14} />
               </div>
               <input
                 type="text"
@@ -602,13 +652,14 @@ export default function Logs() {
                 placeholder="Search by title, filename, source..."
                 style={{
                   width: '100%',
-                  padding: '6px 10px 6px 30px',
+                  padding: '7px 10px 7px 32px',
                   fontSize: 12,
-                  background: 'var(--bg-elevated)',
+                  background: 'var(--bg-surface-2)',
                   border: '1px solid var(--border)',
-                  borderRadius: 'var(--radius-sm)',
+                  borderRadius: 'var(--radius-md)',
                   color: 'var(--text-primary)',
                   outline: 'none',
+                  transition: 'border-color 0.2s ease',
                 }}
               />
               {exportSearch && (
@@ -616,7 +667,7 @@ export default function Logs() {
                   onClick={() => setExportSearch('')}
                   style={{
                     position: 'absolute', right: 6, top: '50%', transform: 'translateY(-50%)',
-                    background: 'var(--bg-elevated)', border: 'none', borderRadius: '50%',
+                    background: 'var(--bg-surface-3)', border: 'none', borderRadius: '50%',
                     width: 16, height: 16, display: 'flex', alignItems: 'center', justifyContent: 'center',
                     color: 'var(--text-muted)', fontSize: 10, cursor: 'pointer', lineHeight: 1,
                   }}
@@ -656,14 +707,24 @@ export default function Logs() {
             </select>
 
             {/* Count */}
-            <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+            <span style={{
+              fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+              whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums',
+            }}>
               {filteredExports.length} of {exportedClips.length}
             </span>
           </div>
 
           {/* Exported clips list */}
           {loadingExports ? (
-            <div style={{ textAlign: 'center', padding: 48, color: 'var(--text-secondary)' }}>
+            <div style={{
+              textAlign: 'center', padding: 48, color: 'var(--text-secondary)',
+              background: 'var(--glass-bg)',
+              backdropFilter: 'blur(16px)',
+              WebkitBackdropFilter: 'blur(16px)',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--border)',
+            }}>
               <div style={{
                 width: 24, height: 24, border: '2px solid var(--border)', borderTopColor: 'var(--accent-cyan)',
                 borderRadius: '50%', animation: 'spin 0.8s linear infinite',
@@ -672,29 +733,34 @@ export default function Logs() {
               Loading exported clips...
             </div>
           ) : filteredExports.length > 0 ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
               {filteredExports.map((ec, i) => {
                 const dur = ec.duration ?? (ec.end != null && ec.start != null ? ec.end - ec.start : null);
                 return (
                   <div
                     key={`${ec.jobId}-${ec.clip_id}-${i}`}
+                    className="logs-table-row"
                     style={{
-                      background: 'var(--bg-panel)',
+                      background: 'var(--glass-bg)',
+                      backdropFilter: 'blur(16px) saturate(1.3)',
+                      WebkitBackdropFilter: 'blur(16px) saturate(1.3)',
                       border: '1px solid var(--border)',
                       borderRadius: 'var(--radius-md)',
-                      padding: '12px 16px',
+                      padding: 'var(--space-3) var(--space-4)',
                       display: 'flex',
                       alignItems: 'center',
-                      gap: 12,
+                      gap: 'var(--space-3)',
                       flexWrap: 'wrap',
+                      transition: 'background 0.15s ease, border-color 0.15s ease',
                     }}
                   >
                     <div style={{
-                      width: 36, height: 36, borderRadius: 'var(--radius-sm)',
-                      background: 'var(--accent-cyan-dim)',
+                      width: 36, height: 36, borderRadius: 'var(--radius-md)',
+                      background: 'var(--bg-surface-2)',
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      color: 'var(--accent-cyan)', fontSize: 11, fontWeight: 700,
+                      color: 'var(--accent-cyan)', fontSize: 10, fontWeight: 700,
                       fontFamily: 'var(--font-mono)', flexShrink: 0,
+                      letterSpacing: '0.02em',
                     }}>
                       {ec.is_full_video ? 'FULL' : 'MP4'}
                     </div>
@@ -712,18 +778,19 @@ export default function Logs() {
                             }}
                             autoFocus
                             style={{
-                              flex: 1, padding: '3px 6px', fontSize: 13, fontWeight: 600,
-                              background: 'var(--bg-elevated)', color: 'var(--text-primary)',
-                              border: '1px solid var(--accent-cyan)', borderRadius: 'var(--radius-sm)',
+                              flex: 1, padding: '4px 8px', fontSize: 13, fontWeight: 600,
+                              background: 'var(--bg-surface-2)', color: 'var(--text-primary)',
+                              border: '1px solid var(--accent-cyan)', borderRadius: 'var(--radius-md)',
                               outline: 'none', lineHeight: 1.3, minWidth: 0,
+                              letterSpacing: '-0.01em',
                             }}
                           />
                           <button
                             onClick={() => handleSaveTitle(ec)}
                             style={{
-                              padding: '3px 8px', fontSize: 11, fontWeight: 600,
+                              padding: '4px 10px', fontSize: 11, fontWeight: 600,
                               background: 'var(--accent-cyan)', color: 'var(--bg-base)',
-                              border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                              border: 'none', borderRadius: 'var(--radius-md)', cursor: 'pointer',
                               whiteSpace: 'nowrap',
                             }}
                           >
@@ -732,9 +799,9 @@ export default function Logs() {
                           <button
                             onClick={() => setEditingTitle(null)}
                             style={{
-                              padding: '3px 8px', fontSize: 11,
+                              padding: '4px 10px', fontSize: 11,
                               background: 'none', color: 'var(--text-muted)',
-                              border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                              border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', cursor: 'pointer',
                             }}
                           >
                             Cancel
@@ -748,6 +815,7 @@ export default function Logs() {
                             fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis',
                             whiteSpace: 'nowrap', marginBottom: 2, cursor: 'pointer',
                             borderBottom: '1px dashed transparent', transition: 'border-color 0.15s',
+                            letterSpacing: '-0.01em',
                           }}
                           onMouseEnter={(e) => e.currentTarget.style.borderBottomColor = 'var(--accent-cyan)'}
                           onMouseLeave={(e) => e.currentTarget.style.borderBottomColor = 'transparent'}
@@ -756,17 +824,21 @@ export default function Logs() {
                           <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 6, opacity: 0.6 }}>&#x270E;</span>
                         </div>
                       )}
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                      <div style={{
+                        fontSize: 11, color: 'var(--text-muted)',
+                        display: 'flex', gap: 'var(--space-3)', flexWrap: 'wrap', alignItems: 'center',
+                        lineHeight: 1.5,
+                      }}>
                         <span style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {ec.sourceFilename}
                         </span>
                         {dur != null && (
-                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>
                             {formatDuration(dur)}
                           </span>
                         )}
                         {ec.start != null && ec.end != null && (
-                          <span style={{ fontFamily: 'var(--font-mono)' }}>
+                          <span style={{ fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' }}>
                             {formatDuration(ec.start)} &rarr; {formatDuration(ec.end)}
                           </span>
                         )}
@@ -777,18 +849,19 @@ export default function Logs() {
                         )}
                       </div>
                     </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0, position: 'relative', gap: 3 }}>
+                    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flexShrink: 0, position: 'relative', gap: 4 }}>
                       <button
                         onClick={() => setQualityMenuOpen(qualityMenuOpen === i ? null : i)}
                         style={{
-                          fontSize: 10, fontWeight: 700, padding: '1px 6px',
-                          background: 'var(--accent-cyan-dim)', color: 'var(--accent-cyan)',
-                          border: '1px solid var(--accent-cyan)', borderRadius: 3,
+                          fontSize: 10, fontWeight: 700, padding: '3px 10px',
+                          background: 'var(--bg-surface-2)', color: 'var(--accent-cyan)',
+                          border: '1px solid var(--accent-cyan)', borderRadius: 'var(--radius-xl)',
                           fontFamily: 'var(--font-mono)', cursor: 'pointer',
                           display: 'flex', alignItems: 'center', gap: 3,
+                          transition: 'background 0.15s ease',
                         }}
                       >
-                        {(ec.export_quality || '1080p').toUpperCase()} ▾
+                        {(ec.export_quality || '1080p').toUpperCase()} &#9662;
                       </button>
                       <a
                         href={`/api/files/${ec.jobId}/clips/${ec.filename}`}
@@ -798,24 +871,35 @@ export default function Logs() {
                           background: 'var(--accent-cyan)',
                           color: 'var(--bg-base)',
                           border: 'none',
-                          borderRadius: 'var(--radius-sm)',
+                          borderRadius: 'var(--radius-md)',
                           fontSize: 12,
                           fontWeight: 600,
                           textDecoration: 'none',
                           whiteSpace: 'nowrap',
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: 4,
+                          transition: 'opacity 0.15s ease',
                         }}
                       >
+                        <DownloadIcon size={12} />
                         Export MP4
                       </a>
                       {qualityMenuOpen === i && (
                         <div style={{
                           position: 'absolute', bottom: '100%', right: 0,
-                          marginBottom: 2, background: 'var(--bg-elevated)',
-                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                          marginBottom: 4, background: 'var(--bg-surface-1)',
+                          backdropFilter: 'blur(20px) saturate(1.4)',
+                          WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
                           zIndex: 20, overflow: 'hidden', minWidth: 150,
-                          boxShadow: 'var(--shadow-sm)',
+                          boxShadow: '0 8px 32px rgba(0,0,0,0.28)',
                         }}>
-                          <div style={{ padding: '6px 10px', fontSize: 10, color: 'var(--text-muted)', borderBottom: '1px solid var(--border)', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                          <div style={{
+                            padding: '8px 12px', fontSize: 10, color: 'var(--text-muted)',
+                            borderBottom: '1px solid var(--border)', textTransform: 'uppercase',
+                            letterSpacing: '0.06em', fontWeight: 600,
+                          }}>
                             Re-export at
                           </div>
                           {['720p', '1080p', '4k'].map((q) => (
@@ -823,11 +907,12 @@ export default function Logs() {
                               key={q}
                               onClick={() => handleReExport(ec, q)}
                               style={{
-                                display: 'block', width: '100%', padding: '6px 10px',
+                                display: 'block', width: '100%', padding: '8px 12px',
                                 background: q === (ec.export_quality || '1080p') ? 'var(--accent-cyan)' : 'transparent',
                                 color: q === (ec.export_quality || '1080p') ? 'var(--bg-base)' : 'var(--text-primary)',
                                 border: 'none', fontSize: 12, textAlign: 'left',
-                                cursor: 'pointer',
+                                cursor: 'pointer', fontWeight: q === (ec.export_quality || '1080p') ? 600 : 400,
+                                transition: 'background 0.12s ease',
                               }}
                             >
                               {q === '720p' ? '720p (Smaller)' : q === '1080p' ? '1080p (Default)' : '4K (Best)'}
@@ -841,9 +926,16 @@ export default function Logs() {
               })}
             </div>
           ) : (
-            <div style={{ textAlign: 'center', padding: '60px 24px', color: 'var(--text-muted)' }}>
+            <div style={{
+              textAlign: 'center', padding: '60px 24px', color: 'var(--text-muted)',
+              background: 'var(--glass-bg)',
+              backdropFilter: 'blur(16px)',
+              WebkitBackdropFilter: 'blur(16px)',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--border)',
+            }}>
               <div style={{ fontSize: 36, marginBottom: 12, opacity: 0.3 }}>&#x1F4E6;</div>
-              <p>{exportSearch.trim()
+              <p style={{ fontSize: 13, lineHeight: 1.5 }}>{exportSearch.trim()
                 ? `No exported clips match "${exportSearch.trim()}"`
                 : exportSourceFilter !== 'all'
                   ? 'No exported clips from this source.'
@@ -853,17 +945,27 @@ export default function Logs() {
         </div>
       )}
 
-      {/* ═══ Activity Log Tab ═══ */}
+      {/* ---- Activity Log Tab ---- */}
       {logsTab === 'logs' && (
         <div>
           {/* Log toolbar */}
           <div style={{
-            display: 'flex', gap: 10, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center',
-            padding: '8px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)',
+            display: 'flex', gap: 'var(--space-3)', marginBottom: 'var(--space-3)', flexWrap: 'wrap', alignItems: 'center',
+            padding: 'var(--space-3) var(--space-4)',
+            background: 'var(--glass-bg)',
+            backdropFilter: 'blur(20px) saturate(1.4)',
+            WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
+            border: '1px solid var(--border)',
             borderRadius: 'var(--radius-md)',
           }}>
             {/* Search */}
             <div style={{ position: 'relative', flex: 1, minWidth: 160 }}>
+              <div style={{
+                position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)',
+                color: 'var(--text-muted)', pointerEvents: 'none',
+              }}>
+                <SearchIcon size={13} />
+              </div>
               <input
                 type="text"
                 value={logSearch}
@@ -871,14 +973,15 @@ export default function Logs() {
                 placeholder="Search logs..."
                 style={{
                   width: '100%',
-                  padding: '5px 8px',
+                  padding: '6px 8px 6px 30px',
                   fontSize: 12,
-                  background: 'var(--bg-elevated)',
+                  background: 'var(--bg-surface-2)',
                   border: '1px solid var(--border)',
-                  borderRadius: 'var(--radius-sm)',
+                  borderRadius: 'var(--radius-md)',
                   color: 'var(--text-primary)',
                   outline: 'none',
                   fontFamily: 'var(--font-mono)',
+                  transition: 'border-color 0.2s ease',
                 }}
               />
             </div>
@@ -897,34 +1000,34 @@ export default function Logs() {
               <option value="status">Status</option>
             </select>
 
-            <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+            <span style={{
+              fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+              fontVariantNumeric: 'tabular-nums',
+            }}>
               {filteredLogs.length}{filteredLogs.length !== logs.length ? ` of ${logs.length}` : ''} entries
             </span>
 
-            <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+            <div style={{ marginLeft: 'auto', display: 'flex', gap: 'var(--space-2)' }}>
               {logs.length > 0 && (
                 <button
                   onClick={exportLogsAsFile}
                   style={{
-                    padding: '4px 10px',
+                    padding: '5px 12px',
                     background: 'var(--accent-cyan-dim)',
                     border: '1px solid var(--accent-cyan)',
-                    borderRadius: 'var(--radius-sm)',
+                    borderRadius: 'var(--radius-md)',
                     fontSize: 11,
                     fontWeight: 600,
                     color: 'var(--accent-cyan)',
                     cursor: 'pointer',
                     display: 'flex',
                     alignItems: 'center',
-                    gap: 4,
+                    gap: 5,
+                    transition: 'background 0.15s ease',
                   }}
                   title="Download activity logs as text file"
                 >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                    <polyline points="7 10 12 15 17 10" />
-                    <line x1="12" y1="15" x2="12" y2="3" />
-                  </svg>
+                  <DownloadIcon size={12} />
                   Export Activity
                 </button>
               )}
@@ -932,39 +1035,37 @@ export default function Logs() {
                 href="/api/logs/export"
                 download
                 style={{
-                  padding: '4px 10px',
-                  background: 'var(--bg-elevated)',
+                  padding: '5px 12px',
+                  background: 'var(--bg-surface-2)',
                   border: '1px solid var(--border)',
-                  borderRadius: 'var(--radius-sm)',
+                  borderRadius: 'var(--radius-md)',
                   fontSize: 11,
                   fontWeight: 600,
                   color: 'var(--text-secondary)',
                   cursor: 'pointer',
                   display: 'flex',
                   alignItems: 'center',
-                  gap: 4,
+                  gap: 5,
                   textDecoration: 'none',
+                  transition: 'background 0.15s ease',
                 }}
                 title="Download all server logs since container started"
               >
-                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-                  <line x1="8" y1="21" x2="16" y2="21" />
-                  <line x1="12" y1="17" x2="12" y2="21" />
-                </svg>
+                <DownloadIcon size={12} />
                 Full Server Logs
               </a>
               {logs.length > 0 && (
                 <button
                   onClick={clearLogs}
                   style={{
-                    padding: '4px 10px',
+                    padding: '5px 12px',
                     background: 'none',
                     border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-sm)',
+                    borderRadius: 'var(--radius-md)',
                     fontSize: 11,
                     color: 'var(--text-muted)',
                     cursor: 'pointer',
+                    transition: 'border-color 0.15s ease',
                   }}
                 >
                   Clear
@@ -975,7 +1076,9 @@ export default function Logs() {
 
           {/* Log entries */}
           <div style={{
-            background: 'var(--bg-panel)',
+            background: 'var(--glass-bg)',
+            backdropFilter: 'blur(16px) saturate(1.3)',
+            WebkitBackdropFilter: 'blur(16px) saturate(1.3)',
             border: '1px solid var(--border)',
             borderRadius: 'var(--radius-md)',
             maxHeight: 600,
@@ -987,34 +1090,46 @@ export default function Logs() {
               filteredLogs.map((entry) => (
                 <div
                   key={entry.id}
+                  className="logs-table-row"
                   style={{
-                    padding: '6px 12px',
+                    padding: '8px 14px',
                     borderBottom: '1px solid var(--border)',
                     display: 'flex',
-                    gap: 8,
+                    gap: 10,
                     alignItems: 'baseline',
+                    transition: 'background 0.12s ease',
                   }}
                 >
-                  <span style={{ color: 'var(--text-muted)', fontSize: 10, flexShrink: 0, minWidth: 68 }}>
+                  <span style={{
+                    color: 'var(--text-muted)', fontSize: 10, flexShrink: 0, minWidth: 68,
+                    fontVariantNumeric: 'tabular-nums', letterSpacing: '0.01em',
+                  }}>
                     {formatTime(entry.timestamp)}
                   </span>
                   <span style={{
                     fontSize: 9, fontWeight: 700, flexShrink: 0, minWidth: 42,
+                    padding: '1px 6px',
+                    borderRadius: 'var(--radius-xl)',
+                    background: `${LOG_LEVEL_COLORS[entry.level] || 'var(--text-muted)'}15`,
                     color: LOG_LEVEL_COLORS[entry.level] || 'var(--text-muted)',
                     textTransform: 'uppercase',
+                    textAlign: 'center',
+                    letterSpacing: '0.04em',
                   }}>
                     {LOG_LEVEL_LABELS[entry.level] || entry.level}
                   </span>
                   <span style={{
-                    color: LOG_LEVEL_COLORS[entry.level] || 'var(--text-secondary)',
+                    color: 'var(--text-primary)',
                     wordBreak: 'break-word',
+                    lineHeight: 1.5,
+                    fontSize: 12,
                   }}>
                     {entry.message}
                   </span>
                 </div>
               ))
             ) : (
-              <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-muted)' }}>
+              <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
                 {logs.length === 0
                   ? 'No log entries yet. Processing events will appear here as videos are analyzed and clips are exported.'
                   : 'No logs match current filters.'}
@@ -1024,43 +1139,76 @@ export default function Logs() {
         </div>
       )}
 
-      {/* ═══ Allocation Tab ═══ */}
+      {/* ---- Allocation Tab ---- */}
       {logsTab === 'allocation' && (
         <div>
           {/* Resource usage overview */}
           {allocation.resources?.cpu_percent !== undefined && (
             <div style={{
-              display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: 12,
-              marginBottom: 20,
+              display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr 1fr', gap: 'var(--space-3)',
+              marginBottom: 'var(--space-5)',
             }}>
               {[
-                { label: 'CPU', value: `${allocation.resources.cpu_percent}%`, color: allocation.resources.cpu_percent > 80 ? 'var(--danger)' : 'var(--accent-cyan)' },
-                { label: 'Memory', value: `${allocation.resources.memory_used_mb}MB / ${allocation.resources.memory_total_mb}MB (${allocation.resources.memory_percent}%)`, color: allocation.resources.memory_percent > 85 ? 'var(--danger)' : 'var(--accent-cyan)' },
-                { label: 'Disk', value: `${allocation.resources.disk_used_gb}GB / ${allocation.resources.disk_total_gb}GB (${allocation.resources.disk_percent}%)`, color: allocation.resources.disk_percent > 90 ? 'var(--danger)' : 'var(--accent-cyan)' },
-              ].map(({ label, value, color }) => (
+                { label: 'CPU', value: `${allocation.resources.cpu_percent}%`, color: allocation.resources.cpu_percent > 80 ? 'var(--danger)' : 'var(--accent-cyan)', percent: allocation.resources.cpu_percent },
+                { label: 'Memory', value: `${allocation.resources.memory_used_mb}MB / ${allocation.resources.memory_total_mb}MB (${allocation.resources.memory_percent}%)`, color: allocation.resources.memory_percent > 85 ? 'var(--danger)' : 'var(--accent-cyan)', percent: allocation.resources.memory_percent },
+                { label: 'Disk', value: `${allocation.resources.disk_used_gb}GB / ${allocation.resources.disk_total_gb}GB (${allocation.resources.disk_percent}%)`, color: allocation.resources.disk_percent > 90 ? 'var(--danger)' : 'var(--accent-cyan)', percent: allocation.resources.disk_percent },
+              ].map(({ label, value, color, percent }) => (
                 <div key={label} style={{
-                  background: 'var(--bg-panel)', border: '1px solid var(--border)',
-                  borderRadius: 'var(--radius-md)', padding: '12px 16px',
+                  background: 'var(--glass-bg)',
+                  backdropFilter: 'blur(20px) saturate(1.4)',
+                  WebkitBackdropFilter: 'blur(20px) saturate(1.4)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)', padding: 'var(--space-4)',
                 }}>
-                  <div style={{ fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 4 }}>{label}</div>
-                  <div style={{ fontSize: 13, fontFamily: 'var(--font-mono)', color, fontWeight: 600 }}>{value}</div>
+                  <div style={{
+                    fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase',
+                    letterSpacing: '0.08em', marginBottom: 'var(--space-2)', fontWeight: 600,
+                  }}>
+                    {label}
+                  </div>
+                  <div style={{
+                    fontSize: 13, fontFamily: 'var(--font-mono)', color, fontWeight: 600,
+                    marginBottom: 'var(--space-2)', fontVariantNumeric: 'tabular-nums',
+                  }}>
+                    {value}
+                  </div>
+                  {/* Thin progress bar for resource usage */}
+                  <div style={{
+                    height: 2, background: 'var(--bg-surface-3)', borderRadius: 1,
+                    overflow: 'hidden',
+                  }}>
+                    <div style={{
+                      height: '100%', background: color,
+                      width: `${Math.min(percent, 100)}%`,
+                      transition: 'width 0.4s var(--ease-spring)',
+                      borderRadius: 1,
+                    }} />
+                  </div>
                 </div>
               ))}
             </div>
           )}
 
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-            <h3 style={{ fontSize: 13, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.06em', margin: 0 }}>
+          <div style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+            marginBottom: 'var(--space-3)',
+          }}>
+            <h3 style={{
+              fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)',
+              textTransform: 'uppercase', letterSpacing: '0.08em', margin: 0, fontWeight: 600,
+            }}>
               Active Processes ({allocation.active_jobs?.length || 0})
             </h3>
             <button
               onClick={fetchAllocation}
               disabled={allocationLoading}
               style={{
-                padding: '5px 12px', background: 'var(--bg-elevated)',
+                padding: '5px 14px', background: 'var(--bg-surface-2)',
                 color: 'var(--accent-cyan)', border: '1px solid var(--border)',
-                borderRadius: 'var(--radius-sm)', fontSize: 11, fontWeight: 500,
+                borderRadius: 'var(--radius-md)', fontSize: 11, fontWeight: 500,
                 opacity: allocationLoading ? 0.6 : 1,
+                cursor: allocationLoading ? 'default' : 'pointer',
+                transition: 'opacity 0.15s ease, background 0.15s ease',
               }}
             >
               {allocationLoading ? 'Refreshing...' : 'Refresh'}
@@ -1068,55 +1216,80 @@ export default function Logs() {
           </div>
 
           {allocation.active_jobs?.length > 0 ? (
-            <div style={{ display: 'grid', gap: 10 }}>
+            <div style={{ display: 'grid', gap: 'var(--space-3)' }}>
               {allocation.active_jobs.map((job) => (
                 <div key={`${job.job_id}-${job.type}`} style={{
-                  background: 'var(--bg-panel)', border: '1px solid var(--border)',
-                  borderRadius: 'var(--radius-md)', padding: '12px 16px',
+                  background: 'var(--glass-bg)',
+                  backdropFilter: 'blur(16px) saturate(1.3)',
+                  WebkitBackdropFilter: 'blur(16px) saturate(1.3)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)', padding: 'var(--space-4)',
+                  transition: 'border-color 0.15s ease',
                 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 8 }}>
+                  <div style={{
+                    display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start',
+                    gap: 'var(--space-3)', marginBottom: 'var(--space-2)',
+                  }}>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <div style={{
+                        fontSize: 13, fontWeight: 600, color: 'var(--text-primary)',
+                        marginBottom: 3, overflow: 'hidden', textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap', letterSpacing: '-0.01em',
+                      }}>
                         {job.filename || job.job_id}
                       </div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                      <div style={{
+                        fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
+                        lineHeight: 1.5, fontVariantNumeric: 'tabular-nums',
+                      }}>
                         {job.type === 'analysis' ? 'Video Analysis' : job.type === 'export' ? 'Clip Export' : 'Clip Detection'}
-                        {job.file_size_mb ? ` — ${job.file_size_mb}MB` : ''}
-                        {job.duration ? ` — ${formatDuration(job.duration)}` : ''}
-                        {job.elapsed_seconds ? ` — running ${job.elapsed_seconds > 60 ? Math.floor(job.elapsed_seconds / 60) + 'm' : job.elapsed_seconds + 's'}` : ''}
+                        {job.file_size_mb ? ` -- ${job.file_size_mb}MB` : ''}
+                        {job.duration ? ` -- ${formatDuration(job.duration)}` : ''}
+                        {job.elapsed_seconds ? ` -- running ${job.elapsed_seconds > 60 ? Math.floor(job.elapsed_seconds / 60) + 'm' : job.elapsed_seconds + 's'}` : ''}
                       </div>
                     </div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
                       <span style={{
-                        fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 700,
-                        padding: '2px 8px', borderRadius: 8,
+                        fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 600,
+                        padding: '3px 10px', borderRadius: 'var(--radius-xl)',
                         background: job.status === 'running' ? 'var(--accent-amber)' : job.status === 'encoding' ? 'var(--accent-cyan)' : 'var(--text-muted)',
                         color: 'var(--bg-base)',
+                        letterSpacing: '0.03em',
                       }}>
                         {job.status?.toUpperCase()}
                       </span>
                     </div>
                   </div>
                   {job.progress_message && (
-                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 'var(--space-2)', lineHeight: 1.4 }}>
                       {job.progress != null && <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>{job.progress}% </span>}
                       {job.progress_message}
                     </div>
                   )}
                   {job.progress != null && (
-                    <div style={{ height: 3, background: 'var(--border)', borderRadius: 2, marginBottom: 10, overflow: 'hidden' }}>
-                      <div style={{ height: '100%', background: 'var(--accent-cyan)', width: `${job.progress}%`, transition: 'width 0.3s ease' }} />
+                    <div style={{
+                      height: 2, background: 'var(--bg-surface-3)', borderRadius: 1,
+                      marginBottom: 'var(--space-3)', overflow: 'hidden',
+                    }}>
+                      <div style={{
+                        height: '100%', background: 'var(--accent-cyan)',
+                        width: `${job.progress}%`,
+                        transition: 'width 0.4s var(--ease-spring)',
+                        borderRadius: 1,
+                      }} />
                     </div>
                   )}
-                  <div style={{ display: 'flex', gap: 8 }}>
+                  <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
                     <button
                       onClick={() => handleForceStop(job.job_id)}
                       disabled={!!forceActioning[job.job_id]}
                       style={{
-                        padding: '5px 12px', fontSize: 11, fontWeight: 600,
+                        padding: '5px 14px', fontSize: 11, fontWeight: 600,
                         background: 'var(--amber-dim)', border: '1px solid var(--accent-amber)',
-                        color: 'var(--accent-amber)', borderRadius: 'var(--radius-sm)',
+                        color: 'var(--accent-amber)', borderRadius: 'var(--radius-md)',
                         opacity: forceActioning[job.job_id] ? 0.5 : 1,
+                        cursor: forceActioning[job.job_id] ? 'default' : 'pointer',
+                        transition: 'opacity 0.15s ease',
                       }}
                     >
                       {forceActioning[job.job_id] === 'stopping' ? 'Stopping...' : 'Force Stop'}
@@ -1125,10 +1298,12 @@ export default function Logs() {
                       onClick={() => handleForceFail(job.job_id)}
                       disabled={!!forceActioning[job.job_id]}
                       style={{
-                        padding: '5px 12px', fontSize: 11, fontWeight: 600,
+                        padding: '5px 14px', fontSize: 11, fontWeight: 600,
                         background: 'var(--danger-dim)', border: '1px solid var(--danger)',
-                        color: 'var(--danger)', borderRadius: 'var(--radius-sm)',
+                        color: 'var(--danger)', borderRadius: 'var(--radius-md)',
                         opacity: forceActioning[job.job_id] ? 0.5 : 1,
+                        cursor: forceActioning[job.job_id] ? 'default' : 'pointer',
+                        transition: 'opacity 0.15s ease',
                       }}
                     >
                       {forceActioning[job.job_id] === 'failing' ? 'Failing...' : 'Force Fail'}
@@ -1138,7 +1313,14 @@ export default function Logs() {
               ))}
             </div>
           ) : (
-            <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>
+            <div style={{
+              padding: 32, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13,
+              background: 'var(--glass-bg)',
+              backdropFilter: 'blur(16px)',
+              WebkitBackdropFilter: 'blur(16px)',
+              borderRadius: 'var(--radius-md)',
+              border: '1px solid var(--border)',
+            }}>
               No active processes. The container is idle.
             </div>
           )}
@@ -1149,6 +1331,9 @@ export default function Logs() {
         @keyframes pulse {
           0%, 100% { opacity: 1; }
           50% { opacity: 0.4; }
+        }
+        .logs-table-row:hover {
+          background: var(--bg-surface-1) !important;
         }
       `}</style>
     </div>
