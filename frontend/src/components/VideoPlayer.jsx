@@ -270,13 +270,13 @@ export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, asp
         position: 'relative',
         background: '#000',
         borderRadius: 'var(--radius-md)',
-        overflow: 'hidden',
+        overflow: 'visible',
         maxWidth: videoMaxWidth,
         margin: videoMaxWidth ? '0 auto' : undefined,
       }}
     >
       {/* Video frame */}
-      <div style={{ position: 'relative', flex: isFullscreen ? 1 : undefined }}>
+      <div style={{ position: 'relative', flex: isFullscreen ? 1 : undefined, overflow: 'hidden', borderRadius: isFullscreen ? 0 : 'var(--radius-md) var(--radius-md) 0 0' }}>
         <video
           ref={videoRef}
           src={src}
@@ -409,14 +409,14 @@ export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, asp
             <div
               style={{
                 position: 'absolute',
-                right: -7,
+                right: -5,
                 top: '50%',
                 transform: 'translateY(-50%)',
-                width: 14,
-                height: 14,
+                width: 10,
+                height: 10,
                 borderRadius: '50%',
                 background: '#fff',
-                boxShadow: '0 0 8px var(--accent-cyan-dim), 0 1px 3px rgba(0,0,0,0.3)',
+                boxShadow: '0 0 6px var(--accent-cyan-dim), 0 1px 2px rgba(0,0,0,0.3)',
                 transition: 'transform 0.1s ease',
               }}
             />

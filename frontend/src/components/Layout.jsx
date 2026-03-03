@@ -417,6 +417,8 @@ export default function Layout({ children }) {
             color: 'var(--text-secondary)',
             gap: 12,
             minHeight: 48,
+            position: 'relative',
+            zIndex: 100,
           }}
         >
           <span style={{

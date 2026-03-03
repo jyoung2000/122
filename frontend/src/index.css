@@ -457,22 +457,23 @@ input[type="range"] {
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 16px;
-  height: 16px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: var(--accent-cyan);
   cursor: pointer;
-  border: 2px solid var(--bg-base);
+  border: 1.5px solid var(--bg-base);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+  margin-top: -4px; /* Center on 4px track: -(thumbH - trackH) / 2 */
 }
 
 input[type="range"]::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: var(--accent-cyan);
   cursor: pointer;
-  border: 2px solid var(--bg-base);
+  border: 1.5px solid var(--bg-base);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
