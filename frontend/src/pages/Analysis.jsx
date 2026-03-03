@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import VideoPlayer from '../components/VideoPlayer';
 import ClipPreview from '../components/ClipPreview';
 import VideoEditor from '../components/VideoEditor';
+import SubtitleOverlay from '../components/SubtitleOverlay';
 import ProgressBar from '../components/ProgressBar';
 import SceneCard from '../components/SceneCard';
 import TranscriptViewer from '../components/TranscriptViewer';
@@ -789,6 +790,18 @@ export default function Analysis() {
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
               onClose={() => setClipPreview(null)}
+              subtitleOverlay={
+                <SubtitleOverlay
+                  currentTime={videoCurrentTime}
+                  transcript={job.transcript || []}
+                  clipStart={clipPreview.start_time}
+                  clipEnd={clipPreview.end_time}
+                  settings={clipSettings}
+                  aspectRatio={clipSettings.aspectRatio || null}
+                  sourceWidth={sourceDims.w}
+                  sourceHeight={sourceDims.h}
+                />
+              }
             />
             {/* Auto-applied settings indicator */}
             {settingsAppliedFlash && (
@@ -830,6 +843,18 @@ export default function Analysis() {
               onTrimChange={setEditorTrim}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
+              subtitleOverlay={
+                <SubtitleOverlay
+                  currentTime={videoCurrentTime}
+                  transcript={job.transcript || []}
+                  clipStart={0}
+                  clipEnd={job.duration || 0}
+                  settings={clipSettings}
+                  aspectRatio={clipSettings.aspectRatio || null}
+                  sourceWidth={sourceDims.w}
+                  sourceHeight={sourceDims.h}
+                />
+              }
             />
 
             {/* ── Inline Editor Toolbar: Export + Subtitle Quick Settings ── */}

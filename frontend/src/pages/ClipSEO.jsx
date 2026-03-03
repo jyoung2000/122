@@ -5,6 +5,7 @@ import { processKeyframes, interpolateSubjectX, isDynamic, computeClipSubjectX }
 import ClipSettingsPanel from '../components/ClipSettingsPanel';
 import TranscriptViewer from '../components/TranscriptViewer';
 import VideoEditor from '../components/VideoEditor';
+import SubtitleOverlay from '../components/SubtitleOverlay';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 
@@ -794,6 +795,18 @@ export default function ClipSEO() {
               onTrimChange={setEditorTrim}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
+              subtitleOverlay={
+                <SubtitleOverlay
+                  currentTime={currentTime}
+                  transcript={job.transcript || []}
+                  clipStart={startTime || clip.start_time}
+                  clipEnd={endTime || clip.end_time}
+                  settings={clipSettings}
+                  aspectRatio={aspectRatio}
+                  sourceWidth={sourceDims.w}
+                  sourceHeight={sourceDims.h}
+                />
+              }
             />
 
             {/* ── Inline Editor Toolbar: Export + Subtitle Quick Settings ── */}
@@ -993,6 +1006,18 @@ export default function ClipSEO() {
               onTrimChange={setEditorTrim}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
+              subtitleOverlay={
+                <SubtitleOverlay
+                  currentTime={currentTime}
+                  transcript={job.transcript || []}
+                  clipStart={startTime || clip.start_time}
+                  clipEnd={endTime || clip.end_time}
+                  settings={clipSettings}
+                  aspectRatio={aspectRatio}
+                  sourceWidth={sourceDims.w}
+                  sourceHeight={sourceDims.h}
+                />
+              }
               compact
             />
             {/* Compact export + subtitle bar */}
