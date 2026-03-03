@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import useResponsive from '../hooks/useResponsive';
 
 const SPEAKER_COLORS_LIST = [
@@ -34,8 +34,10 @@ function toTXT(segments) {
   return segments.map((seg) => `[${formatTime(seg.start)}] ${seg.speaker}: ${seg.text}`).join('\n');
 }
 
-export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerRenamed, onTranscriptUpdated, timeRange }) {
+export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerRenamed, onTranscriptUpdated, timeRange, currentTime }) {
   const { isMobile } = useResponsive();
+  const scrollContainerRef = useRef(null);
+  const activeSegRef = useRef(null);
   const [search, setSearch] = useState('');
   const [editingSpeaker, setEditingSpeaker] = useState(null);
   const [editValue, setEditValue] = useState('');
@@ -82,6 +84,31 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
     const q = search.toLowerCase();
     return timeFiltered.filter((seg) => seg.text.toLowerCase().includes(q) || seg.speaker.toLowerCase().includes(q));
   }, [timeFiltered, search]);
+
+  // Determine which segment is currently playing (by original transcript index)
+  const activeOriginalIdx = useMemo(() => {
+    if (currentTime == null || !filtered.length) return -1;
+    for (const seg of filtered) {
+      if (seg.start <= currentTime && currentTime < seg.end) {
+        return transcript.indexOf(seg);
+      }
+    }
+    return -1;
+  }, [currentTime, filtered, transcript]);
+
+  // Auto-scroll to the active segment when it changes
+  useEffect(() => {
+    if (activeOriginalIdx < 0) return;
+    const el = activeSegRef.current;
+    const container = scrollContainerRef.current;
+    if (!el || !container) return;
+    // Only scroll if the element is outside the visible area
+    const elRect = el.getBoundingClientRect();
+    const cRect = container.getBoundingClientRect();
+    if (elRect.top < cRect.top || elRect.bottom > cRect.bottom) {
+      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [activeOriginalIdx]);
 
   const download = (content, filename) => {
     const blob = new Blob([content], { type: 'text/plain' });
@@ -484,11 +511,12 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
       )}
 
       {/* Segments */}
-      <div style={{ maxHeight: 500, overflow: 'auto' }}>
+      <div ref={scrollContainerRef} style={{ maxHeight: 500, overflow: 'auto' }}>
         {filtered.map((seg, i) => {
           const color = speakerColor(seg.speaker);
           const originalIdx = transcript.indexOf(seg);
           const isEditingSeg = editingSegIdx === originalIdx;
+          const isActiveSeg = activeOriginalIdx === originalIdx;
           const highlightedText = search.trim()
             ? seg.text.replace(
                 new RegExp(`(${search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'),
@@ -499,11 +527,21 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
           return (
             <React.Fragment key={`seg-${originalIdx}`}>
               <div
+                ref={isActiveSeg ? activeSegRef : undefined}
                 style={{
                   display: 'flex',
                   gap: isMobile ? 8 : 12,
-                  padding: '8px 0',
+                  padding: '8px 4px',
                   alignItems: 'flex-start',
+                  borderRadius: 'var(--radius-sm)',
+                  transition: 'background 0.2s, border-color 0.2s',
+                  ...(isActiveSeg ? {
+                    background: 'var(--accent-cyan-dim, rgba(0,217,255,0.08))',
+                    borderLeft: '2px solid var(--accent-cyan)',
+                    paddingLeft: 6,
+                  } : {
+                    borderLeft: '2px solid transparent',
+                  }),
                 }}
               >
                 {/* Speaker + time column */}

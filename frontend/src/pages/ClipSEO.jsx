@@ -1613,6 +1613,7 @@ export default function ClipSEO() {
                 <TranscriptViewer
                   transcript={job.transcript}
                   timeRange={clipTimeRange}
+                  currentTime={currentTime}
                   onSeek={(time) => {
                     const video = videoRef.current;
                     if (video) {
