@@ -1522,6 +1522,8 @@ async def export_clip(
     progress_callback=None,
     cancel_event: "asyncio.Event | None" = None,
     export_quality: str = "1080p",
+    volume: float = 1.0,
+    speed: float = 1.0,
 ) -> str:
     """Export a clip from video using FFmpeg.
 
@@ -1532,6 +1534,9 @@ async def export_clip(
         timestamp + subject_x).  When provided, enables dynamic crop that
         follows the subject through the clip.  Falls back to static
         subject_x if None or insufficient data.
+
+    volume: Audio gain (0.0 to 2.0, default 1.0). Applied via -af volume filter.
+    speed: Playback speed (0.25 to 4.0, default 1.0). Applied via setpts + atempo.
 
     progress_callback: optional async callable(message: str) for status updates.
     """
@@ -1574,7 +1579,9 @@ async def export_clip(
     # Determine if quality requires resolution scaling
     quality_target_h = QUALITY_MAX_HEIGHT.get(export_quality, 1080)
     needs_quality_scale = (video_height != quality_target_h)
-    needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale
+    has_speed = abs(speed - 1.0) > 0.001
+    has_volume = abs(volume - 1.0) > 0.001
+    needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume
     filter_parts = []
     if aspect_ratio:
         filter_parts.append(f"crop to {aspect_ratio}")
@@ -1582,6 +1589,10 @@ async def export_clip(
         filter_parts.append("burn subtitles")
     if needs_quality_scale:
         filter_parts.append(f"scale to {export_quality}")
+    if has_speed:
+        filter_parts.append(f"speed {speed}x")
+    if has_volume:
+        filter_parts.append(f"volume {volume:.0%}")
     filter_desc = " + ".join(filter_parts) if filter_parts else "stream copy"
 
     await _notify(f"Preparing clip {clip_id} ({clip_dur:.1f}s) — {filter_desc}")
@@ -1864,6 +1875,29 @@ async def export_clip(
             enc_crf = qp["crf"]
             enc_preset = qp["preset"]
 
+            # --- Speed filter: append setpts to video chain ---
+            if has_speed and vf:
+                vf = f"{vf},setpts={1.0/speed}*PTS"
+            elif has_speed:
+                vf = f"setpts={1.0/speed}*PTS"
+
+            # --- Audio filter chain: atempo + volume ---
+            af_parts = []
+            if has_speed:
+                # atempo only supports 0.5-2.0 range, chain for extremes
+                remaining = speed
+                while remaining > 2.0:
+                    af_parts.append("atempo=2.0")
+                    remaining /= 2.0
+                while remaining < 0.5:
+                    af_parts.append("atempo=0.5")
+                    remaining /= 0.5
+                if abs(remaining - 1.0) > 0.001:
+                    af_parts.append(f"atempo={remaining:.4f}")
+            if has_volume:
+                af_parts.append(f"volume={volume:.2f}")
+            af = ",".join(af_parts) if af_parts else None
+
             cmd = [
                 "ffmpeg", "-y",
                 "-ss", str(start),
@@ -1875,6 +1909,8 @@ async def export_clip(
                     cmd += ["-filter_complex", vf, "-map", "[out]", "-map", "0:a?"]
                 else:
                     cmd += ["-vf", vf]
+            if af:
+                cmd += ["-af", af]
             cmd += [
                 "-c:v", "libx264",
                 "-pix_fmt", "yuv420p",
@@ -1903,7 +1939,7 @@ async def export_clip(
             # Track encoding progress with ETA via FFmpeg -progress output
             import time as _time
             _enc_start = _time.monotonic()
-            _clip_dur = end - start
+            _clip_dur = (end - start) / speed if has_speed else (end - start)
             _last_notify_time = _enc_start
             _current_out_time = 0.0
             _stderr_chunks: list[bytes] = []

@@ -4,6 +4,7 @@ import { showToast } from '../components/Toast';
 import { processKeyframes, interpolateSubjectX, isDynamic, computeClipSubjectX } from '../utils/subjectTracking';
 import ClipSettingsPanel from '../components/ClipSettingsPanel';
 import TranscriptViewer from '../components/TranscriptViewer';
+import VideoEditor from '../components/VideoEditor';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 
@@ -154,6 +155,11 @@ export default function ClipSEO() {
   const [settingsAppliedFlash, setSettingsAppliedFlash] = useState(false);
   const settingsFlashTimerRef = useRef(null);
   useEffect(() => () => { if (settingsFlashTimerRef.current) clearTimeout(settingsFlashTimerRef.current); }, []);
+
+  // VideoEditor state for export params
+  const [editorTrim, setEditorTrim] = useState({ trimStart: 0, trimEnd: 0 });
+  const [editorVolume, setEditorVolume] = useState(1.0);
+  const [editorSpeed, setEditorSpeed] = useState(1.0);
 
   // Fullscreen state
   const fullscreenRef = useRef(null);
@@ -610,9 +616,14 @@ export default function ClipSEO() {
         active_word_bg_opacity: activeWordBgOpacity,
       };
     }
+    // Include VideoEditor trim/volume/speed params
+    if (editorTrim.trimStart > 0) body.trim_start_offset = editorTrim.trimStart;
+    if (editorTrim.trimEnd > 0) body.trim_end_offset = editorTrim.trimEnd;
+    if (editorVolume !== 1.0) body.volume = editorVolume;
+    if (editorSpeed !== 1.0) body.speed = editorSpeed;
     encoding.startExport(jobId, parseInt(clipId), clip?.title || `Clip ${clipId}`, body);
     showToast(`Exporting "${clip?.title || `Clip ${clipId}`}"...`, 'info');
-  }, [jobId, clipId, clip, startTime, endTime, clipSettings, encoding]);
+  }, [jobId, clipId, clip, startTime, endTime, clipSettings, encoding, editorTrim, editorVolume, editorSpeed]);
 
   const handleApplySettings = useCallback((applied) => {
     setClipSettings(applied);
@@ -709,208 +720,23 @@ export default function ClipSEO() {
       <div className="clip-panel-layout" style={{ display: 'flex', gap: 20, alignItems: 'flex-start', flexWrap: isMobile ? 'wrap' : 'nowrap', flexDirection: isMobile ? 'column' : 'row' }}>
         {/* Left column: Video preview + clip info + export settings */}
         <div className="clip-settings-sidebar" style={{ width: isMobile ? '100%' : 380, position: isMobile ? 'static' : 'sticky', top: 20, alignSelf: 'flex-start', maxHeight: isMobile ? 'none' : 'calc(100vh - 40px)', overflowY: isMobile ? 'visible' : 'auto' }}>
-          {/* Video Preview */}
-          <div ref={fullscreenRef} style={isFullscreen ? { display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--video-bg)', width: '100vw', height: '100vh' } : { ...sectionStyle, padding: 0, overflow: 'hidden', maxWidth: videoMaxWidth, margin: videoMaxWidth ? '0 auto' : undefined }}>
-            <div ref={videoContainerRef} style={{ position: 'relative', background: 'var(--video-bg)', cursor: 'pointer', overflow: 'hidden', aspectRatio: `${targetRatio}`, ...(isFullscreen ? { height: '100vh', maxWidth: '100vw', width: 'auto' } : { maxHeight: '45vh' }) }} onClick={togglePlay}>
-              <video
-                ref={videoRef}
-                src={videoSrc}
-                style={{
-                  width: '100%',
-                  height: '100%',
-                  display: 'block',
-                  objectFit: isCrop ? 'cover' : 'contain',
-                  objectPosition: isCrop ? `${Math.max(0, Math.min(100, hasDynamicSubject && subjectKeyframes?.length ? subjectKeyframes[0].x : clipSubjectX))}% 50%` : undefined,
-                }}
-              />
-              {!playing && (
-                <div style={{
-                  position: 'absolute', inset: 0,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  background: 'var(--overlay-light)',
-                }}>
-                  <div style={{
-                    width: 48, height: 48, borderRadius: '50%',
-                    background: 'var(--overlay-heavy)', border: '2px solid var(--video-controls-text)',
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 20, color: 'var(--video-controls-text)', paddingLeft: 3,
-                  }}>&#9654;</div>
-                </div>
-              )}
-
-              {/* Aspect ratio badge */}
-              {aspectRatio && (
-                <div style={{
-                  position: 'absolute',
-                  top: 6,
-                  right: 6,
-                  fontSize: 10,
-                  fontFamily: 'var(--font-mono)',
-                  color: 'var(--accent-amber)',
-                  background: 'var(--badge-overlay-bg)',
-                  padding: '2px 6px',
-                  borderRadius: 3,
-                  pointerEvents: 'none',
-                  zIndex: 2,
-                }}>
-                  {aspectRatio}
-                </div>
-              )}
-
-              {/* Subtitle preview overlay — two-step scaling matching ClipPreview.jsx & backend */}
-              {subtitlesEnabled && (() => {
-                const activeSegs = getCurrentSubtitle(splitTranscript, currentTime, startTime || 0, endTime || Infinity);
-
-                // Two-step font size: basePx * backendFontScale → backendPx, then * containerScale → displayPx
-                const basePx = typeof subtitleSize === 'number' ? subtitleSize : (FONT_SIZE_MAP[subtitleSize] || 30);
-                const backendPx = Math.max(16, Math.round(basePx * backendFontScale));
-                const fontPx = containerScale > 0 ? Math.max(8, Math.round(backendPx * containerScale)) : 14;
-
-                // Margin calculations matching backend (ass_generator.py:196-235)
-                const clampedMaxWidth = Math.max(50, Math.min(100, subtitleMaxWidth));
-                const clampedOffsetV = Math.max(0, Math.min(100, subtitleOffsetV));
-                const seoMarginH_px = Math.max(20, Math.floor(outputDims.w * (100 - clampedMaxWidth) / 100 / 2));
-                const seoMaxMarginH = Math.floor(outputDims.w * 0.25);
-                const marginHPct = Math.min(seoMarginH_px, seoMaxMarginH) / outputDims.w * 100;
-                // Vertical: direct percentage from user setting — matches backend (ass_generator.py:227-230)
-                const effectiveOffsetV = subtitlePosition === 'center' ? 0 : clampedOffsetV;
-
-                const posStyle = subtitlePosition === 'top'
-                  ? { top: `${effectiveOffsetV}%` }
-                  : subtitlePosition === 'center'
-                    ? { top: '50%', transform: 'translateY(-50%)' }
-                    : { bottom: `${effectiveOffsetV}%` };
-
-                // Two-step outline width scaling (ass_generator.py:161) — clamp values to match backend
-                const olHex = (subtitleOutlineColor || '#000000').replace('#', '');
-                const olR = parseInt(olHex.substring(0, 2), 16) || 0;
-                const olG = parseInt(olHex.substring(2, 4), 16) || 0;
-                const olB = parseInt(olHex.substring(4, 6), 16) || 0;
-                const olOpacity = Math.max(0, Math.min(100, subtitleOutlineOpacity ?? 100)) / 100;
-                const olWidth = Math.max(0, Math.min(10, subtitleOutlineWidth ?? 2));
-                const backendOlWidth = Math.max(0, Math.round(olWidth * backendFontScale));
-                const scaledOlWidth = containerScale > 0 ? Math.max(0, Math.round(backendOlWidth * containerScale)) : 0;
-                let outlineStyle;
-                if (subtitleBgEnabled) {
-                  // Background box mode — no visible outline (blends into box in ASS)
-                  outlineStyle = {};
-                } else if (scaledOlWidth > 0) {
-                  // Outline mode — shadow depth matches ASS: proportional to outline width, capped 1-4
-                  const shadowDepth = Math.max(1, Math.min(4, Math.round(backendOlWidth * 0.75)));
-                  const scaledShadow = Math.max(1, Math.round(shadowDepth * containerScale));
-                  outlineStyle = {
-                    WebkitTextStroke: `${scaledOlWidth}px rgba(${olR},${olG},${olB},${olOpacity})`,
-                    paintOrder: 'stroke fill',
-                    textShadow: `${scaledShadow}px ${scaledShadow}px 0px rgba(0,0,0,0.5)`,
-                  };
-                } else {
-                  // No outline, no background — minimal shadow for readability
-                  outlineStyle = {
-                    textShadow: '1px 1px 2px rgba(0,0,0,0.8)',
-                  };
-                }
-
-                // Show active transcript segments, or sample text when paused/no active segment
-                const hasActive = activeSegs.length > 0;
-                const displaySegs = hasActive
-                  ? activeSegs.slice(0, 2)
-                  : (speakers.length > 0
-                    ? [{ speaker: speakers[0], text: 'Subtitle preview text...' }]
-                    : [{ speaker: 'Speaker', text: 'Subtitle preview text...' }]);
-
-                return (
-                  <div style={{
-                    position: 'absolute',
-                    left: `${marginHPct}%`,
-                    right: `${marginHPct}%`,
-                    ...posStyle,
-                    textAlign: 'center',
-                    pointerEvents: 'none',
-                    zIndex: 3,
-                    opacity: hasActive ? 1 : 0.5,
-                  }}>
-                    <div style={{
-                      display: 'inline-block',
-                      ...(subtitleBgEnabled ? {
-                        background: `${subtitleBgColor}${Math.round(subtitleBgOpacity / 100 * 255).toString(16).padStart(2, '0')}`,
-                        // ASS BorderStyle=3 creates a rectangular box (no border-radius
-                        // support).  Omit border-radius to match the exported video.
-                        padding: `${Math.max(2, Math.round(4 * backendFontScale * containerScale))}px ${Math.max(4, Math.round(8 * backendFontScale * containerScale))}px`,
-                      } : {}),
-                    }}>
-                      {displaySegs.map((seg, i) => {
-                        const speakerColor = speakerColors[seg.speaker] || DEFAULT_PALETTE[speakers.indexOf(seg.speaker) % DEFAULT_PALETTE.length] || '#FFFFFF';
-                        const color = useSpeakerColors ? speakerColor : subtitleFontColor;
-                        return (
-                          <div key={i} style={{
-                            fontFamily: subtitleFont,
-                            fontSize: fontPx,
-                            fontWeight: subtitleFontWeight === 'bold' ? 700 : 400,
-                            color,
-                            lineHeight: 1.4,
-                            ...outlineStyle,
-                            wordWrap: 'break-word',
-                            overflowWrap: 'break-word',
-                            whiteSpace: 'pre-wrap',
-                            marginTop: i > 0 ? 2 : 0,
-                          }}>
-                            {showSpeakerLabels ? `${seg.speaker}: ` : ''}{(() => {
-                              if (activeWordEnabled && hasActive && currentWordIdx >= 0 && i === 0) {
-                                const words = seg.text.split(/\s+/).filter(Boolean);
-                                const awOlHex = activeWordOutlineColor.replace('#', '');
-                                const awOlR = parseInt(awOlHex.substring(0, 2), 16) || 0;
-                                const awOlG = parseInt(awOlHex.substring(2, 4), 16) || 0;
-                                const awOlB = parseInt(awOlHex.substring(4, 6), 16) || 0;
-                                const scaledOl = scaledOlWidth;
-                                return words.map((w, wi) => {
-                                  const isActive = wi === currentWordIdx;
-                                  const wStyle = isActive ? {
-                                    color: activeWordColor,
-                                    ...(scaledOl > 0 ? {
-                                      WebkitTextStroke: `${scaledOl}px rgba(${awOlR},${awOlG},${awOlB},${(subtitleOutlineOpacity ?? 100) / 100})`,
-                                      paintOrder: 'stroke fill',
-                                    } : {}),
-                                    ...(activeWordBgOpacity > 0 ? {
-                                      backgroundColor: `${activeWordBgColor}${Math.round(activeWordBgOpacity / 100 * 255).toString(16).padStart(2, '0')}`,
-                                      borderRadius: 2,
-                                      padding: '0 2px',
-                                    } : {}),
-                                  } : {};
-                                  return <span key={wi} style={wStyle}>{w}{wi < words.length - 1 ? ' ' : ''}</span>;
-                                });
-                              }
-                              return seg.text;
-                            })()}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-            <div style={{ padding: '6px 12px', background: 'var(--bg-elevated)' }}>
-              <div style={{ height: 4, background: 'var(--border)', borderRadius: 2, marginBottom: 6 }}>
-                <div style={{ height: '100%', width: `${progress}%`, background: 'var(--accent-cyan)', borderRadius: 2 }} />
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
-                <span>{formatDuration(elapsed)} / {formatDuration(clipDur)}</span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span>{formatDuration(startTime)} &rarr; {formatDuration(endTime)}</span>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
-                    style={{
-                      background: 'none', border: 'none', color: 'var(--text-muted)',
-                      fontSize: 14, cursor: 'pointer', padding: '0 2px', lineHeight: 1,
-                    }}
-                    title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-                  >
-                    {isFullscreen ? '\u2715' : '\u26F6'}
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
+          {/* Video Preview — Professional NLE-style editor */}
+          <VideoEditor
+            src={videoSrc}
+            clipStart={startTime || clip.start_time}
+            clipEnd={endTime || clip.end_time}
+            title={clip.title || `Clip ${clipId}`}
+            aspectRatio={aspectRatio}
+            sourceWidth={sourceDims.w}
+            sourceHeight={sourceDims.h}
+            subjectX={clipSubjectX}
+            scenes={job.scenes || []}
+            onTimeUpdate={setCurrentTime}
+            onTrimChange={setEditorTrim}
+            onVolumeChange={setEditorVolume}
+            onSpeedChange={setEditorSpeed}
+            compact
+          />
 
           {/* Clip info */}
           <div style={sectionStyle}>

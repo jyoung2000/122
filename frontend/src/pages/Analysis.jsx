@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import VideoPlayer from '../components/VideoPlayer';
 import ClipPreview from '../components/ClipPreview';
+import VideoEditor from '../components/VideoEditor';
 import ProgressBar from '../components/ProgressBar';
 import SceneCard from '../components/SceneCard';
 import TranscriptViewer from '../components/TranscriptViewer';
@@ -264,6 +265,10 @@ export default function Analysis() {
     activeWordBgOpacity: 0,
     useSpeakerColors: true,
   });
+  // VideoEditor state for export params
+  const [editorTrim, setEditorTrim] = useState({ trimStart: 0, trimEnd: 0 });
+  const [editorVolume, setEditorVolume] = useState(1.0);
+  const [editorSpeed, setEditorSpeed] = useState(1.0);
   const [isGeneratingClips, setIsGeneratingClips] = useState(false);
   const [stuckSeconds, setStuckSeconds] = useState(0);
   const lastProgressRef = useRef({ message: '', time: Date.now() });
@@ -535,6 +540,11 @@ export default function Analysis() {
         };
       }
     }
+    // Include VideoEditor trim/volume/speed params
+    if (editorTrim.trimStart > 0) exportBody.trim_start_offset = editorTrim.trimStart;
+    if (editorTrim.trimEnd > 0) exportBody.trim_end_offset = editorTrim.trimEnd;
+    if (editorVolume !== 1.0) exportBody.volume = editorVolume;
+    if (editorSpeed !== 1.0) exportBody.speed = editorSpeed;
     encoding.startExport(jobId, clip.id, clip.title || `Clip ${clip.id}`, exportBody);
     showToast(`Exporting "${clip.title || `Clip ${clip.id}`}" at ${quality}...`, 'info');
   };
@@ -759,7 +769,7 @@ export default function Analysis() {
       <div ref={stickyPlayerRef} style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg-base)', display: (tab === 2 && !showExportPreview) ? 'none' : 'block' }}>
         {showExportPreview ? (
           <div style={{ position: 'relative' }}>
-            <ClipPreview
+            <VideoEditor
               src={videoSrc}
               clipStart={clipPreview.start_time}
               clipEnd={clipPreview.end_time}
@@ -769,11 +779,11 @@ export default function Analysis() {
               sourceHeight={sourceDims.h}
               subjectX={clipSubjectX}
               scenes={job.scenes || []}
-              subtitlesEnabled={clipSettings.subtitlesEnabled || false}
-              subtitleSettings={clipSettings}
-              transcript={job.transcript || []}
+              onTimeUpdate={setVideoCurrentTime}
+              onTrimChange={setEditorTrim}
+              onVolumeChange={setEditorVolume}
+              onSpeedChange={setEditorSpeed}
               onClose={() => setClipPreview(null)}
-              inline
             />
             {/* Auto-applied settings indicator */}
             {settingsAppliedFlash && (

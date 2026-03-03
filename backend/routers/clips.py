@@ -128,10 +128,14 @@ async def export_clip_endpoint(
     cancel_event = asyncio.Event()
     _export_cancel_events[export_key] = cancel_event
 
+    # Apply VideoEditor trim offsets
+    actual_start = req.start + req.trim_start_offset
+    actual_end = req.end - req.trim_end_offset
+
     async def _do_export():
         try:
             export_start = time.monotonic()
-            clip_dur = req.end - req.start
+            clip_dur = actual_end - actual_start
 
             await broadcast_ws(job_id, {
                 "type": "status",
@@ -180,8 +184,8 @@ async def export_clip_endpoint(
             output_path = await export_clip(
                 job_id=job_id,
                 video_path=job.file_path,
-                start=req.start,
-                end=req.end,
+                start=actual_start,
+                end=actual_end,
                 clip_id=req.clip_id,
                 clip_title=req.clip_title,
                 aspect_ratio=req.aspect_ratio,
@@ -195,6 +199,8 @@ async def export_clip_endpoint(
                 progress_callback=_export_progress,
                 cancel_event=cancel_event,
                 export_quality=req.export_quality or "1080p",
+                volume=req.volume,
+                speed=req.speed,
             )
 
             elapsed = int(time.monotonic() - export_start)
@@ -208,14 +214,16 @@ async def export_clip_endpoint(
                     "path": output_path,
                     "filename": os.path.basename(output_path),
                     "title": req.clip_title or f"Clip {req.clip_id}",
-                    "start": req.start,
-                    "end": req.end,
+                    "start": actual_start,
+                    "end": actual_end,
                     "exported_at": datetime.now(timezone.utc).isoformat(),
-                    "duration": round(req.end - req.start, 2),
+                    "duration": round((actual_end - actual_start) / req.speed, 2),
                     "export_quality": req.export_quality or "1080p",
                     "aspect_ratio": req.aspect_ratio,
                     "subtitles_enabled": req.subtitles_enabled,
                     "subtitle_settings": req.subtitle_settings.model_dump() if req.subtitle_settings else None,
+                    "volume": req.volume,
+                    "speed": req.speed,
                 })
                 await database.save_job(j)
 

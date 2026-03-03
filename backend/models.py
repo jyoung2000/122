@@ -145,6 +145,11 @@ class ExportRequest(BaseModel):
     subtitles_enabled: bool = False
     subtitle_settings: Optional[SubtitleSettings] = None
     export_quality: str = "1080p"  # "720p" | "1080p" | "4k"
+    # VideoEditor params — applied during FFmpeg export
+    volume: float = 1.0              # 0.0 to 2.0 gain
+    speed: float = 1.0               # 0.25 to 4.0 playback speed
+    trim_start_offset: float = 0.0   # Seconds trimmed from clip start
+    trim_end_offset: float = 0.0     # Seconds trimmed from clip end
 
 
 class FullVideoExportRequest(BaseModel):
