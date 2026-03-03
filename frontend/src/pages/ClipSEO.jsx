@@ -5,7 +5,8 @@ import { processKeyframes, interpolateSubjectX, isDynamic, computeClipSubjectX }
 import ClipSettingsPanel from '../components/ClipSettingsPanel';
 import TranscriptViewer from '../components/TranscriptViewer';
 import ScoreRing from '../components/ScoreRing';
-import { SparkleIcon, ChevronLeftIcon } from '../components/icons';
+import AudioWaveform from '../components/AudioWaveform';
+import { SparkleIcon, ChevronLeftIcon, PlayIcon, PauseIcon, SkipBackIcon, SkipForwardIcon, FullscreenIcon, ExitFullscreenIcon, VolumeIcon, VolumeOffIcon } from '../components/icons';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 
@@ -712,8 +713,8 @@ export default function ClipSEO() {
         {/* Left column: Video preview + clip info + export settings */}
         <div className="clip-settings-sidebar" style={{ width: isMobile ? '100%' : 380, position: isMobile ? 'static' : 'sticky', top: 20, alignSelf: 'flex-start', maxHeight: isMobile ? 'none' : 'calc(100vh - 40px)', overflowY: isMobile ? 'visible' : 'auto' }}>
           {/* Video Preview */}
-          <div ref={fullscreenRef} style={isFullscreen ? { display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--video-bg)', width: '100vw', height: '100vh' } : { ...sectionStyle, padding: 0, overflow: 'hidden', maxWidth: videoMaxWidth, margin: videoMaxWidth ? '0 auto' : undefined }}>
-            <div ref={videoContainerRef} style={{ position: 'relative', background: 'var(--video-bg)', cursor: 'pointer', overflow: 'hidden', aspectRatio: `${targetRatio}`, ...(isFullscreen ? { height: '100vh', maxWidth: '100vw', width: 'auto' } : { maxHeight: '45vh' }) }} onClick={togglePlay}>
+          <div ref={fullscreenRef} style={isFullscreen ? { display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#000', width: '100vw', height: '100vh' } : { ...sectionStyle, padding: 0, overflow: 'visible', maxWidth: videoMaxWidth, margin: videoMaxWidth ? '0 auto' : undefined, background: '#000', borderRadius: 'var(--radius-md)' }}>
+            <div ref={videoContainerRef} style={{ position: 'relative', background: '#000', cursor: 'pointer', overflow: 'hidden', borderRadius: isFullscreen ? 0 : 'var(--radius-md) var(--radius-md) 0 0', aspectRatio: `${targetRatio}`, ...(isFullscreen ? { height: '100vh', maxWidth: '100vw', width: 'auto' } : { maxHeight: '45vh' }) }} onClick={togglePlay}>
               <video
                 ref={videoRef}
                 src={videoSrc}
@@ -729,14 +730,17 @@ export default function ClipSEO() {
                 <div style={{
                   position: 'absolute', inset: 0,
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  background: 'var(--overlay-light)',
+                  cursor: 'pointer', zIndex: 3,
                 }}>
                   <div style={{
                     width: 48, height: 48, borderRadius: '50%',
-                    background: 'var(--overlay-heavy)', border: '2px solid var(--video-controls-text)',
+                    background: 'rgba(0,0,0,0.45)',
+                    backdropFilter: 'blur(12px)',
                     display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    fontSize: 20, color: 'var(--video-controls-text)', paddingLeft: 3,
-                  }}>&#9654;</div>
+                    color: '#fff',
+                  }}>
+                    <PlayIcon size={22} />
+                  </div>
                 </div>
               )}
 
@@ -744,14 +748,16 @@ export default function ClipSEO() {
               {aspectRatio && (
                 <div style={{
                   position: 'absolute',
-                  top: 6,
-                  right: 6,
+                  top: 8,
+                  right: 8,
                   fontSize: 10,
                   fontFamily: 'var(--font-mono)',
-                  color: 'var(--accent-amber)',
-                  background: 'var(--badge-overlay-bg)',
-                  padding: '2px 6px',
-                  borderRadius: 3,
+                  fontWeight: 600,
+                  color: '#fff',
+                  background: 'rgba(0,0,0,0.5)',
+                  backdropFilter: 'blur(8px)',
+                  padding: '3px 8px',
+                  borderRadius: 'var(--radius-xl)',
                   pointerEvents: 'none',
                   zIndex: 2,
                 }}>
@@ -891,27 +897,97 @@ export default function ClipSEO() {
                 );
               })()}
             </div>
-            <div style={{ padding: '6px 12px', background: 'var(--bg-elevated)' }}>
-              <div style={{ height: 4, background: 'var(--border)', borderRadius: 2, marginBottom: 6 }}>
-                <div style={{ height: '100%', width: `${progress}%`, background: 'var(--accent-cyan)', borderRadius: 2 }} />
-              </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
-                <span>{formatDuration(elapsed)} / {formatDuration(clipDur)}</span>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span>{formatDuration(startTime)} &rarr; {formatDuration(endTime)}</span>
-                  <button
-                    onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
-                    style={{
-                      background: 'none', border: 'none', color: 'var(--text-muted)',
-                      fontSize: 14, cursor: 'pointer', padding: '0 2px', lineHeight: 1,
-                    }}
-                    title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-                  >
-                    {isFullscreen ? '\u2715' : '\u26F6'}
-                  </button>
+            {/* ═══ Transport Bar (Glass, matching VideoPlayer) ═══ */}
+            <div style={{
+              background: 'rgba(0,0,0,0.6)',
+              backdropFilter: 'blur(20px) saturate(180%)',
+              WebkitBackdropFilter: 'blur(20px) saturate(180%)',
+              padding: '6px 12px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+            }}>
+              {/* Seek scrubber */}
+              <div
+                onClick={(e) => {
+                  const video = videoRef.current;
+                  if (!video || !clipDur) return;
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  const pct = (e.clientX - rect.left) / rect.width;
+                  video.currentTime = (startTime || 0) + pct * clipDur;
+                }}
+                style={{
+                  height: 6,
+                  background: 'rgba(255,255,255,0.15)',
+                  cursor: 'pointer',
+                  position: 'relative',
+                  borderRadius: 4,
+                }}
+              >
+                <div style={{
+                  height: '100%',
+                  width: `${progress}%`,
+                  background: 'var(--accent-cyan)',
+                  borderRadius: 4,
+                  position: 'relative',
+                }}>
+                  <div style={{
+                    position: 'absolute', right: -5, top: '50%', transform: 'translateY(-50%)',
+                    width: 10, height: 10, borderRadius: '50%', background: '#fff',
+                    boxShadow: '0 0 6px var(--accent-cyan-dim), 0 1px 2px rgba(0,0,0,0.3)',
+                  }} />
                 </div>
               </div>
+
+              {/* Controls row */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <button onClick={(e) => { e.stopPropagation(); const v = videoRef.current; if (v) v.currentTime = Math.max(startTime || 0, v.currentTime - 5); }} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.8)', padding: 4, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <SkipBackIcon size={14} />
+                </button>
+                <button onClick={(e) => { e.stopPropagation(); togglePlay(); }} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.9)', padding: 4, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  {playing ? <PauseIcon size={16} /> : <PlayIcon size={16} />}
+                </button>
+                <button onClick={(e) => { e.stopPropagation(); const v = videoRef.current; if (v) v.currentTime = Math.min(endTime || v.duration, v.currentTime + 5); }} style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.8)', padding: 4, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <SkipForwardIcon size={14} />
+                </button>
+
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'rgba(255,255,255,0.7)', marginLeft: 4, whiteSpace: 'nowrap' }}>
+                  {formatDuration(elapsed)}
+                </span>
+
+                <div style={{ flex: 1 }} />
+
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'rgba(255,255,255,0.5)', whiteSpace: 'nowrap' }}>
+                  {formatDuration(clipDur)}
+                </span>
+
+                <button
+                  onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }}
+                  style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.7)', padding: 4, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                  title={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+                >
+                  {isFullscreen ? <ExitFullscreenIcon size={14} /> : <FullscreenIcon size={14} />}
+                </button>
+              </div>
             </div>
+
+            {/* ═══ Audio Waveform Timeline ═══ */}
+            {!isFullscreen && (
+              <AudioWaveform
+                videoSrc={videoSrc}
+                currentTime={currentTime}
+                duration={endTime || clip.end_time}
+                onSeek={(time) => {
+                  const video = videoRef.current;
+                  if (video) { video.currentTime = time; setCurrentTime(time); }
+                }}
+                clipRegions={[{ start: startTime || clip.start_time, end: endTime || clip.end_time }]}
+                speakerSegments={(job?.transcript || []).filter(
+                  s => s.start < (endTime || clip.end_time) && s.end > (startTime || clip.start_time)
+                ).map(s => ({ start: s.start, end: s.end, speaker: s.speaker || 'Speaker' }))}
+                height={36}
+              />
+            )}
           </div>
 
           {/* Clip info */}
@@ -1225,13 +1301,32 @@ export default function ClipSEO() {
             </div>
           </div>
 
-          {/* ── Clip Transcript (in sidebar for side-by-side editing) ─── */}
+        </div>
+
+        {/* Right column: Transcript + SEO content */}
+        <div style={{ flex: '1 1 auto', minWidth: 0, overflowY: 'auto', maxHeight: isMobile ? 'none' : 'calc(100vh - 100px)' }}>
+          {/* ── Clip Transcript ─── */}
           {job?.transcript?.length > 0 && clipTimeRange && (
-            <div style={{ marginTop: 16 }}>
-              <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>
-                Clip Transcript
+            <div style={{
+              ...sectionStyle,
+              padding: 0,
+              overflow: 'hidden',
+            }}>
+              <div style={{
+                padding: '10px 14px',
+                borderBottom: '1px solid var(--border)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}>
+                <span style={{ fontSize: 12, fontWeight: 600, letterSpacing: '-0.01em', color: 'var(--text-primary)' }}>
+                  Clip Transcript
+                </span>
+                <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                  {formatDuration(startTime)} &rarr; {formatDuration(endTime)}
+                </span>
               </div>
-              <div style={{ ...sectionStyle, padding: '8px 10px' }}>
+              <div style={{ padding: '8px 12px', maxHeight: 240, overflowY: 'auto' }}>
                 <TranscriptViewer
                   transcript={job.transcript}
                   timeRange={clipTimeRange}
@@ -1250,10 +1345,6 @@ export default function ClipSEO() {
               </div>
             </div>
           )}
-        </div>
-
-        {/* Right column: SEO content */}
-        <div style={{ flex: '1 1 auto', minWidth: 0, overflowY: 'auto', maxHeight: isMobile ? 'none' : 'calc(100vh - 100px)' }}>
           {!seo ? (
             <div style={{ ...sectionStyle, textAlign: 'center', padding: '48px 24px' }}>
               {generating ? (
