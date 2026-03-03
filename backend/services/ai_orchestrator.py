@@ -236,25 +236,52 @@ class AIOrchestrator:
         max_duration: Optional[float] = None,
         clip_focus: Optional[str] = None,
         video_summary: Optional[str] = None,
+        existing_clips: Optional[str] = None,
     ) -> tuple[list[ClipCandidate], str]:
         """Returns (clips, provider_name_used)."""
         clip_prompt = self._custom_prompts.viral_clip_detection if self._custom_prompts else None
-        # If clip_focus is provided, override the viral algorithm with a focus-based prompt
+        # If clip_focus is provided, build an augmented focus prompt that
+        # BUILDS ON the viral detection infrastructure rather than replacing it
         if clip_focus and clip_focus.strip():
             focus_text = clip_focus.strip()
             clip_prompt = (
-                f"You are finding clips in a video that focus specifically on: {focus_text}\n\n"
-                f"IMPORTANT: Only select segments that are directly related to '{focus_text}'. "
-                f"Cross-reference the transcript text with visual scene descriptions to find moments "
-                f"where both the spoken content AND visual content relate to '{focus_text}'. "
-                f"Use the video summary to understand overall context. "
-                f"Prioritize clips that contain high-importance scenes (score 7+).\n\n"
+                f"You are finding clips in a video that focus on a specific user-requested topic.\n\n"
+                f"USER'S FOCUS QUERY: \"{focus_text}\"\n\n"
+                f"SEMANTIC EXPANSION — Before searching, expand this query into related concepts:\n"
+                f"Think about synonyms, related terms, sub-topics, and adjacent concepts that someone "
+                f"searching for \"{focus_text}\" would also want to see. For example, if the focus is "
+                f"'fighting', also look for: combat, battle, argument, confrontation, sparring, conflict, "
+                f"physical altercation, self-defense, martial arts, etc.\n\n"
+                f"RELEVANCE TIERS:\n"
+                f"  Tier 1 (STRONG — score 80-100): The segment IS ABOUT '{focus_text}'. "
+                f"The topic is the main subject of discussion or the primary visual action.\n"
+                f"  Tier 2 (MODERATE — score 50-79): The segment discusses '{focus_text}' as a "
+                f"significant part of a broader conversation. Multiple sentences or visual moments relate to it.\n"
+                f"  Tier 3 (WEAK — score 20-49): The topic is mentioned briefly or tangentially. "
+                f"Only include Tier 3 clips if fewer than 3 Tier 1/2 clips exist.\n"
+                f"  EXCLUDE: Segments that merely mention a word related to '{focus_text}' in passing, "
+                f"negations ('I don't like {focus_text}'), or purely metaphorical usage.\n\n"
+                f"COMPOUND QUERIES: If the focus contains both a topic and a mood/quality "
+                f"(e.g., 'funny cooking moments'), prioritize segments matching BOTH aspects. "
+                f"Score clips higher when they combine the topic with the specified mood.\n\n"
+                f"SCORING: Use 'viral_score' to represent RELEVANCE to '{focus_text}' (not virality). "
+                f"A clip with 90 relevance means the segment is deeply, directly about the focus topic. "
+                f"In 'viral_score_reasoning', explain WHY this clip matches the focus query and which "
+                f"relevance tier it falls into.\n\n"
+                f"Additionally include 'focus_relevance' (1-100) and 'focus_tier' (\"strong\", \"moderate\", "
+                f"or \"weak\") in each clip's JSON.\n\n"
                 f"SCENE & SUBJECT COHERENCE (CRITICAL):\n"
                 f"- The main subject or speaker MUST stay in focus throughout the entire clip\n"
                 f"- NEVER cut across unrelated scenes or topics — the clip must feel like ONE moment\n"
-                f"- If a clip covers a conversation, keep it within the same exchange\n"
-                f"- The visual setting should remain consistent\n"
-                f"- Prefer segments where the camera stays on the main action without jarring cuts"
+                f"- If a clip covers a conversation, keep it within the same exchange between the same speakers\n"
+                f"- The visual setting should remain consistent — don't span across location changes\n"
+                f"- Prefer segments where the camera stays on the main action without jarring cuts\n"
+                f"- If scene descriptions show different settings at different timestamps, do NOT combine them into one clip\n\n"
+                f"BOUNDARY RULES:\n"
+                f"- Start at natural speech boundaries — beginning of a sentence, after a pause, at a speaker change\n"
+                f"- End at natural conclusions — even if focus content extends further, find a clean exit point\n"
+                f"- Must work standalone without context from the full video\n"
+                f"- Prefer clips where the focus topic is introduced within the first 5 seconds"
             )
             logger.info("Clip focus mode active for job %s: '%s'", job_id, focus_text)
         # Per-provider timeout prevents any single provider from blocking the
@@ -277,6 +304,7 @@ class AIOrchestrator:
                         clip_count=clip_count, min_duration=min_duration,
                         max_duration=max_duration,
                         video_summary=video_summary,
+                        existing_clips=existing_clips,
                     ),
                     timeout=timeout,
                 )

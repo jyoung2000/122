@@ -569,6 +569,14 @@ async def generate_clips_endpoint(
             parts.append(f"Audience: {job.summary.estimated_audience}")
         summary_text = "\n".join(parts)
 
+    # Build existing clip info so the AI avoids duplicating already-found clips
+    existing_clips_info = None
+    if job.clips:
+        existing_clips_info = "\n".join(
+            f"  \u2022 [{c.start_time:.0f}-{c.end_time:.0f}s] \"{c.title}\""
+            for c in job.clips
+        )
+
     async def _do_generate():
         try:
             from backend.services.ai_orchestrator import AIOrchestrator
@@ -684,6 +692,7 @@ async def generate_clips_endpoint(
                         max_duration=req.max_duration,
                         clip_focus=req.clip_focus,
                         video_summary=summary_text,
+                        existing_clips=existing_clips_info,
                     ),
                     timeout=_CLIP_DETECTION_TIMEOUT,
                 )

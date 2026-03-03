@@ -57,6 +57,8 @@ class ClipCandidate(BaseModel):
     hook_text: str
     why_this_works: str
     clip_focus: Optional[str] = None  # The focus topic used to generate this clip, if any
+    focus_relevance: Optional[int] = None  # 1-100, how relevant to the focus query
+    focus_tier: Optional[str] = None  # "strong", "moderate", "weak"
     # Persisted SEO data (populated by generation endpoints)
     seo_title: Optional[str] = None
     seo_description: Optional[str] = None

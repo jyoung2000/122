@@ -1376,10 +1376,10 @@ export default function ViralClips() {
                   </span>
                   <div style={{ textAlign: 'right' }}>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: clip.clip_focus ? 'var(--success)' : scoreColor }}>
-                      {clip.viral_score}
+                      {clip.focus_relevance || clip.viral_score}
                     </div>
                     <div style={{ fontSize: 10, color: clip.clip_focus ? 'var(--success)' : 'var(--text-secondary)', textTransform: 'uppercase' }}>
-                      {clip.clip_focus ? 'FOCUS' : '/100'}
+                      {clip.clip_focus ? (clip.focus_tier || 'FOCUS') : '/100'}
                     </div>
                   </div>
                 </div>
@@ -1460,6 +1460,15 @@ export default function ViralClips() {
                       border: '1px solid var(--success)',
                     }}>
                       Focus: {clip.clip_focus}
+                    </span>
+                  )}
+                  {clip.focus_relevance != null && (
+                    <span className="badge" style={{
+                      background: clip.focus_tier === 'strong' ? 'rgba(52,199,89,0.15)' : clip.focus_tier === 'moderate' ? 'rgba(255,214,0,0.15)' : 'rgba(142,142,147,0.15)',
+                      color: clip.focus_tier === 'strong' ? 'var(--success)' : clip.focus_tier === 'moderate' ? 'var(--accent-amber)' : 'var(--text-secondary)',
+                      border: `1px solid ${clip.focus_tier === 'strong' ? 'var(--success)' : clip.focus_tier === 'moderate' ? 'var(--accent-amber)' : 'var(--text-secondary)'}`,
+                    }}>
+                      Relevance: {clip.focus_relevance}/100
                     </span>
                   )}
                 </div>

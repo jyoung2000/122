@@ -13,6 +13,7 @@ from backend.models import (
 )
 from backend.services.providers.base import AIProvider, ProviderError, ProviderRateLimitError, extract_json, extract_description_fallback, normalize_seo_data
 from backend.services.prompts import DEFAULT_FRAME_ANALYSIS_PROMPT, DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT
+from backend.services.transcript_utils import analyze_transcript_energy, correlate_scenes_with_transcript, derive_content_guidance
 
 logger = logging.getLogger(__name__)
 
@@ -192,8 +193,19 @@ class GeminiProvider(AIProvider):
         min_duration: Optional[float] = None,
         max_duration: Optional[float] = None,
         video_summary: Optional[str] = None,
+        existing_clips: Optional[str] = None,
     ) -> list[ClipCandidate]:
         instruction = custom_prompt if custom_prompt else DEFAULT_VIRAL_CLIP_PROMPT
+
+        # Derive content-type guidance from video summary
+        content_guidance = derive_content_guidance(video_summary)
+
+        # Pre-process transcript for energy signals
+        energy_text = analyze_transcript_energy(transcript)
+
+        # Correlate scenes with transcript for audio-visual peaks
+        av_correlation = correlate_scenes_with_transcript(transcript, scenes)
+
         # Gemini has large context but cap for response speed
         max_transcript = 40000
         max_scenes = 12000
@@ -202,33 +214,55 @@ class GeminiProvider(AIProvider):
         )
         if len(transcript_text) > max_transcript:
             transcript_text = transcript_text[:max_transcript] + f"\n... (truncated, {len(transcript)} total segments)"
-        scene_text = "\n".join(
-            f"[{s.timestamp:.1f}s] (importance: {s.importance_score}/10) {s.description}"
-            for s in scenes
-        )
+
+        # Build scene text maintaining chronological order with importance flags
+        scene_lines: list[str] = []
+        for s in scenes:
+            importance_flag = " ★" if s.importance_score >= 7 else ""
+            desc_limit = 180 if s.importance_score >= 7 else 100
+            desc = s.description[:desc_limit] if len(s.description) > desc_limit else s.description
+            scene_lines.append(f"[{s.timestamp:.1f}s] ({s.importance_score}/10{importance_flag}) {desc}")
+        scene_text = "\n".join(scene_lines)
         if len(scene_text) > max_scenes:
             scene_text = scene_text[:max_scenes] + f"\n... (truncated, {len(scenes)} total scenes)"
+
         dur_min = int(min_duration) if min_duration else 30
         dur_max = int(max_duration) if max_duration else 300
         num_clips = clip_count or settings.MAX_CLIP_CANDIDATES
         summary_section = ""
         if video_summary:
             summary_section = f"VIDEO SUMMARY:\n{video_summary}\n\n"
+
+        existing_clips_section = ""
+        if existing_clips:
+            existing_clips_section = (
+                f"\n\nALREADY IDENTIFIED CLIPS (find DIFFERENT moments, do not overlap):\n"
+                f"{existing_clips}\n"
+                f"Find clips that cover DIFFERENT timestamps and topics from the above."
+            )
+
         prompt = (
             instruction + "\n\n"
+            f"{content_guidance}"
             "STRICT REQUIREMENTS:\n"
             f"- Each clip duration MUST be between {dur_min} and {dur_max} seconds\n"
-            "- Natural start/end points\n"
-            "- Must work standalone\n"
+            "- Start at natural speech boundaries — beginning of a sentence, after a pause, at a speaker change\n"
+            "- End at natural conclusions — punchlines, resolved thoughts, scene transitions\n"
+            "- Must work standalone without context from the full video\n"
             "- The main subject/speaker MUST remain in focus for the entire clip\n"
-            "- Do NOT combine scenes from different settings or unrelated topics\n\n"
+            "- Do NOT combine scenes from different settings or unrelated topics\n"
+            "- When a visual peak (★ scene) coincides with strong transcript content, score that clip higher\n\n"
             f"Video duration: {video_duration:.1f}s\n\n"
             f"{summary_section}"
             f"TRANSCRIPT:\n{transcript_text}\n\n"
-            f"SCENES:\n{scene_text}\n\n"
-            f"You MUST return exactly {num_clips} viral clip candidates, ranked by viral potential from highest to lowest. "
-            f"Do NOT return fewer than {num_clips} clips — find {num_clips} distinct moments even if some score lower. "
-            f"Prioritize the most share-worthy, attention-grabbing, emotionally impactful moments. "
+            f"SCENES:\n{scene_text}"
+            f"{energy_text}"
+            f"{av_correlation}"
+            f"{existing_clips_section}\n\n"
+            f"Return UP TO {num_clips} viral clip candidates, ranked by viral potential from highest to lowest. "
+            f"Only return clips that genuinely score 40+ on viral potential. "
+            f"It is better to return fewer high-quality clips than to pad with weak filler clips. "
+            f"If the video has fewer than {num_clips} genuinely strong moments, return only the strong ones. "
             f"Each clip must be between {dur_min} and {dur_max} seconds long.\n\n"
             "Return ONLY valid JSON:\n"
             '{"clips": [{"id": 1, "title": "...", "start_time": 0.0, "end_time": 0.0, '
@@ -251,6 +285,13 @@ class GeminiProvider(AIProvider):
                     duration = c.get("duration", c.get("end_time", 0) - c.get("start_time", 0))
                     if duration < (min_duration or 15) or duration > (max_duration or 600):
                         continue
+                    # Parse optional focus relevance fields
+                    focus_relevance = c.get("focus_relevance")
+                    if focus_relevance is not None:
+                        focus_relevance = max(1, min(100, int(float(focus_relevance))))
+                    focus_tier = c.get("focus_tier")
+                    if focus_tier and focus_tier not in ("strong", "moderate", "weak"):
+                        focus_tier = None
                     clips.append(ClipCandidate(
                         id=c["id"],
                         title=c.get("title", "Untitled"),
@@ -264,6 +305,8 @@ class GeminiProvider(AIProvider):
                         suggested_caption=c.get("suggested_caption", ""),
                         hook_text=c.get("hook_text", ""),
                         why_this_works=c.get("why_this_works", ""),
+                        focus_relevance=focus_relevance,
+                        focus_tier=focus_tier,
                     ))
                 return clips
             except (json.JSONDecodeError, KeyError) as e:

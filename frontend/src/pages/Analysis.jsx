@@ -1538,7 +1538,7 @@ export default function Analysis() {
                   </div>
                   {clipFocusEnabled && (
                     <textarea
-                      placeholder="e.g. fighting, cooking tips, funny moments..."
+                      placeholder={"Try compound queries for best results:\n• \"funny cooking moments\"\n• \"emotional reveals\"\n• \"fighting scenes\""}
                       value={clipFocusText}
                       onChange={(e) => setClipFocusText(e.target.value)}
                       rows={3}
@@ -1556,7 +1556,7 @@ export default function Analysis() {
                   )}
                   {clipFocusEnabled && (
                     <span style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.3 }}>
-                      Finds clips matching your topic instead of using the viral algorithm
+                      AI finds clips matching your topic with semantic expansion and relevance scoring. Try compound queries like &quot;funny cooking moments&quot; or &quot;emotional reveals&quot;
                     </span>
                   )}
                 </div>

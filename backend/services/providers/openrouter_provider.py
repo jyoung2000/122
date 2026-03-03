@@ -13,6 +13,7 @@ from backend.models import (
 )
 from backend.services.providers.base import AIProvider, ProviderError, ProviderRateLimitError, extract_json, extract_description_fallback, normalize_seo_data
 from backend.services.prompts import DEFAULT_FRAME_ANALYSIS_PROMPT, DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT
+from backend.services.transcript_utils import analyze_transcript_energy, correlate_scenes_with_transcript, derive_content_guidance
 
 logger = logging.getLogger(__name__)
 
@@ -583,29 +584,32 @@ class OpenRouterProvider(AIProvider):
 
     @staticmethod
     def _condense_scenes(scenes: list[SceneDescription], max_chars: int = 4000) -> str:
-        """Build a compact scene description that fits within max_chars.
+        """Build scene descriptions maintaining chronological order with importance flags.
 
-        Prioritizes high-importance scenes and truncates descriptions.
+        Keeps scenes in chronological order (never re-sorts by importance) and
+        flags high-importance scenes with a ★ marker.  High-importance scenes
+        get longer description allowances to preserve critical context.
         """
         if not scenes:
             return "(no scene descriptions)"
 
-        # Sort by importance so high-scoring scenes come first
-        sorted_scenes = sorted(scenes, key=lambda s: s.importance_score, reverse=True)
-        lines = []
+        # Keep chronological order — DO NOT sort by importance.
+        # Instead, flag high-importance scenes with a marker.
+        lines: list[str] = []
         total = 0
-        for s in sorted_scenes:
-            desc = s.description[:120] if len(s.description) > 120 else s.description
-            line = f"[{s.timestamp:.0f}s] ({s.importance_score}/10) {desc}"
+        for s in scenes:
+            importance_flag = " ★" if s.importance_score >= 7 else ""
+            # Allow longer descriptions for high-importance scenes
+            desc_limit = 180 if s.importance_score >= 7 else 100
+            desc = s.description[:desc_limit] if len(s.description) > desc_limit else s.description
+            line = f"[{s.timestamp:.0f}s] ({s.importance_score}/10{importance_flag}) {desc}"
             total += len(line) + 1
             if total > max_chars:
-                remaining = len(sorted_scenes) - len(lines)
+                remaining = len(scenes) - len(lines)
                 lines.append(f"... ({remaining} more scenes omitted)")
                 break
             lines.append(line)
 
-        # Re-sort by timestamp for chronological order
-        lines.sort()
         return "\n".join(lines)
 
     async def detect_viral_clips(
@@ -619,45 +623,49 @@ class OpenRouterProvider(AIProvider):
         min_duration: Optional[float] = None,
         max_duration: Optional[float] = None,
         video_summary: Optional[str] = None,
+        existing_clips: Optional[str] = None,
     ) -> list[ClipCandidate]:
         instruction = custom_prompt if custom_prompt else DEFAULT_VIRAL_CLIP_PROMPT
 
+        # Derive content-type guidance from video summary
+        content_guidance = derive_content_guidance(video_summary)
+        logger.info("Content guidance derived: %s", content_guidance.split("\n")[0])
+
+        # Pre-process transcript for energy signals
+        energy_text = analyze_transcript_energy(transcript)
+        if energy_text:
+            logger.info("Transcript energy map generated (%d chars)", len(energy_text))
+
+        # Correlate scenes with transcript for audio-visual peaks
+        av_correlation = correlate_scenes_with_transcript(transcript, scenes)
+        if av_correlation:
+            logger.info("Audio-visual correlation generated (%d chars)", len(av_correlation))
+
         # Scale prompt size to the model's context window.
         # The system prompt + JSON schema + instructions take ~2000 chars,
-        # so the remaining budget goes to transcript + scenes + hot moments.
+        # so the remaining budget goes to transcript + scenes + enrichments.
         context_budget = self._get_context_budget(self._text_model)
         # Account for video summary in overhead if present
         summary_overhead = len(video_summary) + 50 if video_summary else 0
-        overhead = 2500 + summary_overhead  # system prompt + JSON format + instructions + summary
+        energy_overhead = len(energy_text) if energy_text else 0
+        av_overhead = len(av_correlation) if av_correlation else 0
+        existing_overhead = (len(existing_clips) + 100) if existing_clips else 0
+        overhead = 3000 + summary_overhead + energy_overhead + av_overhead + existing_overhead
         content_budget = max(3000, context_budget - overhead)
-        # Allocate: 65% transcript, 25% scenes, 10% hot moments
+        # Allocate: 65% transcript, 35% scenes (hot scenes now flagged inline with ★)
         transcript_budget = int(content_budget * 0.65)
-        scene_budget = int(content_budget * 0.25)
-        hot_budget = int(content_budget * 0.10)
+        scene_budget = int(content_budget * 0.35)
 
         logger.info(
             "Clip detection context budget for model '%s': %d chars "
-            "(transcript=%d, scenes=%d, hot=%d, summary=%d)",
+            "(transcript=%d, scenes=%d, energy=%d, av_peaks=%d, summary=%d, existing=%d)",
             self._text_model, context_budget,
-            transcript_budget, scene_budget, hot_budget, summary_overhead,
+            transcript_budget, scene_budget, energy_overhead, av_overhead,
+            summary_overhead, existing_overhead,
         )
 
         transcript_text = self._condense_transcript(transcript, max_chars=transcript_budget)
         scene_text = self._condense_scenes(scenes, max_chars=scene_budget)
-
-        # Highlight the high-importance scenes for the model
-        hot_scenes = [s for s in scenes if s.importance_score >= 7]
-        hot_text = ""
-        if hot_scenes:
-            hot_text = "\n\nHIGH-IMPACT VISUAL MOMENTS (prioritize clips containing these):\n"
-            hot_lines = []
-            for s in hot_scenes[:15]:  # Cap at 15 hot scenes
-                desc_limit = min(100, hot_budget // max(len(hot_scenes[:15]), 1))
-                desc = s.description[:desc_limit] if len(s.description) > desc_limit else s.description
-                hot_lines.append(f"  * [{s.timestamp:.0f}s] score={s.importance_score}/10 — {desc}")
-            hot_text += "\n".join(hot_lines)
-            if len(hot_text) > hot_budget:
-                hot_text = hot_text[:hot_budget]
 
         # Use user-specified duration range or defaults
         dur_min = int(min_duration) if min_duration else 30
@@ -668,13 +676,15 @@ class OpenRouterProvider(AIProvider):
 
         system_prompt = (
             instruction + "\n\n"
+            f"{content_guidance}"
             "STRICT REQUIREMENTS:\n"
             f"- Each clip duration MUST be between {dur_min} and {dur_max} seconds ({dur_min_fmt} to {dur_max_fmt})\n"
-            "- Natural start point — never mid-sentence or mid-thought\n"
-            "- Natural end point — conclusion, punchline, or resolution\n"
+            "- Start at natural speech boundaries — beginning of a sentence, after a pause, at a speaker change\n"
+            "- End at natural conclusions — punchlines, resolved thoughts, scene transitions\n"
             "- Must work standalone without context from the full video\n"
             "- The main subject/speaker MUST remain in focus for the entire clip\n"
-            "- Do NOT combine scenes from different settings or unrelated topics into one clip\n\n"
+            "- Do NOT combine scenes from different settings or unrelated topics into one clip\n"
+            "- When a visual peak (★ scene) coincides with strong transcript content, score that clip higher\n\n"
             "Return ONLY valid JSON, no other text:\n"
             '{"clips": [{"id": 1, "title": "Hook-driven title under 60 chars", '
             '"start_time": 45.2, "end_time": 112.8, "duration": 67.6, '
@@ -689,14 +699,27 @@ class OpenRouterProvider(AIProvider):
         summary_section = ""
         if video_summary:
             summary_section = f"VIDEO SUMMARY:\n{video_summary}\n\n"
+
+        existing_clips_section = ""
+        if existing_clips:
+            existing_clips_section = (
+                f"\n\nALREADY IDENTIFIED CLIPS (find DIFFERENT moments, do not overlap):\n"
+                f"{existing_clips}\n"
+                f"Find clips that cover DIFFERENT timestamps and topics from the above."
+            )
+
         user_prompt = (
             f"Video duration: {video_duration:.1f} seconds\n\n"
             f"{summary_section}"
             f"TRANSCRIPT:\n{transcript_text}\n\n"
             f"SCENE DESCRIPTIONS:\n{scene_text}"
-            f"{hot_text}\n\n"
-            f"You MUST return exactly {num_clips} viral clip candidates, ranked by viral potential from highest to lowest. "
-            f"Do NOT return fewer than {num_clips} clips — find {num_clips} distinct moments even if some score lower. "
+            f"{energy_text}"
+            f"{av_correlation}"
+            f"{existing_clips_section}\n\n"
+            f"Return UP TO {num_clips} viral clip candidates, ranked by viral potential from highest to lowest. "
+            f"Only return clips that genuinely score 40+ on viral potential. "
+            f"It is better to return fewer high-quality clips than to pad with weak filler clips. "
+            f"If the video has fewer than {num_clips} genuinely strong moments, return only the strong ones. "
             f"Prioritize the most share-worthy, attention-grabbing, emotionally impactful moments. "
             f"Each clip must be between {dur_min} and {dur_max} seconds long. "
             "Prioritize clips that contain visually striking moments alongside strong dialogue."
@@ -753,6 +776,14 @@ class OpenRouterProvider(AIProvider):
                             filtered_reasons.append(
                                 f"  #{c.get('id', '?')} '{clip_title}': too long ({duration:.1f}s)")
                             continue
+                        # Parse optional focus relevance fields
+                        focus_relevance = c.get("focus_relevance")
+                        if focus_relevance is not None:
+                            focus_relevance = max(1, min(100, int(float(focus_relevance))))
+                        focus_tier = c.get("focus_tier")
+                        if focus_tier and focus_tier not in ("strong", "moderate", "weak"):
+                            focus_tier = None
+
                         clips.append(ClipCandidate(
                             id=int(c.get("id", len(clips) + 1)),
                             title=clip_title,
@@ -766,6 +797,8 @@ class OpenRouterProvider(AIProvider):
                             suggested_caption=str(c.get("suggested_caption", "")),
                             hook_text=str(c.get("hook_text", "")),
                             why_this_works=str(c.get("why_this_works", "")),
+                            focus_relevance=focus_relevance,
+                            focus_tier=focus_tier,
                         ))
                     except (TypeError, ValueError, KeyError) as clip_err:
                         logger.warning(f"Skipping malformed clip: {clip_err} — data: {c}")
