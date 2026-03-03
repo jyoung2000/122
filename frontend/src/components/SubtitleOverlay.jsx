@@ -266,6 +266,30 @@ export default function SubtitleOverlay({
     return Math.max(8, backendPx * subtitleScale);
   }, [subtitlesEnabled, settings.subtitleSize, subtitleScale, backendFontScale]);
 
+  // Compute the actual video content area within the viewport
+  // (accounts for letterboxing when viewport ratio doesn't match output ratio)
+  const videoContentRect = useMemo(() => {
+    if (containerSize.w === 0 || containerSize.h === 0) {
+      return { left: 0, top: 0, width: containerSize.w, height: containerSize.h };
+    }
+    const videoAR = outputDims.w / outputDims.h;
+    const containerAR = containerSize.w / containerSize.h;
+
+    if (Math.abs(videoAR - containerAR) < 0.02) {
+      return { left: 0, top: 0, width: containerSize.w, height: containerSize.h };
+    }
+
+    if (videoAR > containerAR) {
+      // Width-constrained (pillarbox top/bottom)
+      const h = containerSize.w / videoAR;
+      return { left: 0, top: (containerSize.h - h) / 2, width: containerSize.w, height: h };
+    } else {
+      // Height-constrained (letterbox left/right)
+      const w = containerSize.h * videoAR;
+      return { left: (containerSize.w - w) / 2, top: 0, width: w, height: containerSize.h };
+    }
+  }, [containerSize, outputDims]);
+
   // Container wrapper — fills parent, used for ResizeObserver
   if (!subtitlesEnabled) {
     return <div ref={containerRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />;
@@ -369,32 +393,43 @@ export default function SubtitleOverlay({
 
   return (
     <div ref={containerRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5 }}>
+      {/* Constrain subtitles to the actual video content area (handles letterboxing) */}
       <div style={{
         position: 'absolute',
-        left: `${effectiveMarginH}%`,
-        right: `${effectiveMarginH}%`,
-        textAlign: 'center',
+        left: videoContentRect.left,
+        top: videoContentRect.top,
+        width: videoContentRect.width,
+        height: videoContentRect.height,
+        overflow: 'hidden',
         pointerEvents: 'none',
-        ...positionStyle,
       }}>
-        <span style={{
-          display: 'inline-block',
-          fontFamily,
-          fontSize: subtitleFontSize,
-          fontWeight,
-          color,
-          lineHeight: 1.4,
-          wordWrap: 'break-word',
-          overflowWrap: 'break-word',
-          whiteSpace: 'pre-wrap',
-          ...outlineStyle,
-          ...(bgEnabled ? {
-            background: hexToRgba(bgColor, bgOpacity / 100),
-            padding: `${Math.max(1, Math.max(Math.floor(4 * backendFontScale), 2) * subtitleScale)}px`,
-          } : {}),
+        <div style={{
+          position: 'absolute',
+          left: `${effectiveMarginH}%`,
+          right: `${effectiveMarginH}%`,
+          textAlign: 'center',
+          pointerEvents: 'none',
+          ...positionStyle,
         }}>
-          {textContent}
-        </span>
+          <span style={{
+            display: 'inline-block',
+            fontFamily,
+            fontSize: subtitleFontSize,
+            fontWeight,
+            color,
+            lineHeight: 1.4,
+            wordWrap: 'break-word',
+            overflowWrap: 'break-word',
+            whiteSpace: 'pre-wrap',
+            ...outlineStyle,
+            ...(bgEnabled ? {
+              background: hexToRgba(bgColor, bgOpacity / 100),
+              padding: `${Math.max(1, Math.max(Math.floor(4 * backendFontScale), 2) * subtitleScale)}px`,
+            } : {}),
+          }}>
+            {textContent}
+          </span>
+        </div>
       </div>
     </div>
   );
