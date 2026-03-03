@@ -36,16 +36,26 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
   const [savingTitle, setSavingTitle] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
-  // Find the most important scene description within this clip's time range
-  const clipSubject = useMemo(() => {
+  // Find the most important scene within this clip's time range
+  const bestScene = useMemo(() => {
     if (!scenes?.length) return null;
     const inRange = scenes.filter(
       (s) => s.timestamp >= clip.start_time && s.timestamp <= clip.end_time
     );
     if (!inRange.length) return null;
-    const best = inRange.reduce((a, b) => (b.importance_score > a.importance_score ? b : a), inRange[0]);
-    return best.description;
+    return inRange.reduce((a, b) => (b.importance_score > a.importance_score ? b : a), inRange[0]);
   }, [scenes, clip.start_time, clip.end_time]);
+
+  const clipSubject = bestScene?.description || null;
+
+  // Build thumbnail URL from scene frame (the /thumb endpoint doesn't exist)
+  const thumbnailUrl = useMemo(() => {
+    if (bestScene?.thumbnail_path) {
+      const filename = bestScene.thumbnail_path.split('/').pop();
+      return `/api/files/${jobId}/frames/${filename}`;
+    }
+    return null;
+  }, [bestScene, jobId]);
 
   const handleExport = async (qualityOverride) => {
     setExporting(true);
@@ -150,10 +160,10 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
         }}
         onClick={() => onPreview(clip)}
       >
-        {/* Thumbnail image (try to load from API) */}
-        {jobId && (
+        {/* Thumbnail image from scene frame */}
+        {thumbnailUrl && (
           <img
-            src={`/api/jobs/${jobId}/clips/${clip.id}/thumb`}
+            src={thumbnailUrl}
             alt=""
             style={{
               width: '100%',
@@ -500,8 +510,7 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
           <button
             onClick={() => onPreview(clip)}
             style={{
-              flex: '1 1 0%',
-              padding: '8px 8px',
+              padding: '8px 12px',
               background: 'var(--bg-surface-2)',
               color: 'var(--text-primary)',
               border: '1px solid var(--border)',
@@ -509,10 +518,8 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
               fontSize: 12,
               fontWeight: 500,
               whiteSpace: 'nowrap',
-              minWidth: 0,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
               transition: 'all 0.15s ease',
+              flexShrink: 0,
             }}
           >
             Preview
@@ -524,25 +531,22 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
                 disabled={exporting}
                 style={{
                   flex: 1,
-                  padding: '8px 8px',
+                  padding: '8px 6px',
                   background: exporting ? 'var(--bg-elevated)' : 'var(--accent-cyan)',
                   color: exporting ? 'var(--text-secondary)' : '#fff',
                   border: 'none',
                   borderRadius: 'var(--radius-sm) 0 0 var(--radius-sm)',
-                  fontSize: 12,
+                  fontSize: 11,
                   fontWeight: 600,
                   whiteSpace: 'nowrap',
-                  minWidth: 0,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: 4,
                 }}
               >
-                <SparkleIcon size={12} />
-                {exporting ? 'Exporting...' : 'Export'}
+                <SparkleIcon size={11} />
+                {exporting ? 'Exporting...' : `Export ${exportQuality}`}
               </button>
               <button
                 onClick={() => setQualityMenuOpen(!qualityMenuOpen)}

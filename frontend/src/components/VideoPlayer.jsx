@@ -75,6 +75,33 @@ export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, asp
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
 
+  // Pause all other video elements on the page when this one plays
+  const pauseOtherVideos = useCallback(() => {
+    const allVideos = document.querySelectorAll('video');
+    allVideos.forEach((v) => {
+      if (v !== videoRef.current && !v.paused) {
+        v.pause();
+      }
+    });
+  }, []);
+
+  // Listen for other videos playing to update our playing state
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const onPlay = () => {
+      setPlaying(true);
+      pauseOtherVideos();
+    };
+    const onPause = () => setPlaying(false);
+    video.addEventListener('play', onPlay);
+    video.addEventListener('pause', onPause);
+    return () => {
+      video.removeEventListener('play', onPlay);
+      video.removeEventListener('pause', onPause);
+    };
+  }, [pauseOtherVideos]);
+
   const togglePlay = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
