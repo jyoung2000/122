@@ -367,12 +367,13 @@ export default function VideoEditor({
       const rightPct = 1 - trimEndOffset / (clipDur || 1);
       const playPct = clipDur > 0 ? (currentTime - clipStart) / clipDur : 0;
 
+      const isDark = document.documentElement.dataset.theme === 'dark';
       if (pct < leftPct || pct > rightPct) {
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
+        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.06)';
       } else if (pct <= playPct) {
         ctx.fillStyle = 'rgba(10, 132, 255, 0.5)';
       } else {
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.12)';
       }
       ctx.fillRect(x, midY - barH, barWidth - 0.5, barH * 2);
     }
@@ -970,8 +971,8 @@ export default function VideoEditor({
                 }}
                 style={{
                   background: `linear-gradient(to right, ${
-                    volume > 100 ? '#FFD60A' : '#0A84FF'
-                  } ${(isMuted ? 0 : volume) / 2}%, rgba(255,255,255,0.15) ${(isMuted ? 0 : volume) / 2}%)`,
+                    volume > 100 ? 'var(--accent-amber, #FF9F0A)' : 'var(--accent-cyan, #0A84FF)'
+                  } ${(isMuted ? 0 : volume) / 2}%, var(--ve-slider-track, rgba(0,0,0,0.12)) ${(isMuted ? 0 : volume) / 2}%)`,
                 }}
               />
               <span className={`ve-volume__label${volume > 150 ? ' ve-volume__label--warn' : ''}`}>

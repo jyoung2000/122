@@ -528,7 +528,7 @@ input[type="range"]:focus::-webkit-slider-thumb {
 
 /* Touch-friendly sizing */
 @media (pointer: coarse) {
-  input, select, textarea {
+  input:not([type="range"]), select, textarea {
     min-height: 44px;
     font-size: 16px !important;
   }

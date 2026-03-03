@@ -5,24 +5,48 @@
    ═══════════════════════════════════════════════════════ */
 
 .ve-container {
-  --ve-chrome-bg: rgba(26, 26, 30, 0.92);
-  --ve-chrome-border: rgba(255, 255, 255, 0.06);
-  --ve-accent: #0A84FF;
+  --ve-chrome-bg: var(--bg-panel, rgba(249, 249, 251, 0.92));
+  --ve-chrome-border: var(--border, rgba(0, 0, 0, 0.08));
+  --ve-accent: var(--accent-cyan, #0A84FF);
   --ve-accent-hover: #409CFF;
-  --ve-trim-color: #FFD60A;
-  --ve-trim-dimmed: rgba(0, 0, 0, 0.55);
-  --ve-text: #E5E5EA;
-  --ve-text-muted: rgba(255, 255, 255, 0.45);
-  --ve-btn-hover: rgba(255, 255, 255, 0.08);
-  --ve-btn-active: rgba(255, 255, 255, 0.12);
+  --ve-trim-color: var(--accent-cyan, #0A84FF);
+  --ve-trim-dimmed: rgba(0, 0, 0, 0.40);
+  --ve-text: var(--text-primary, #1D1D1F);
+  --ve-text-muted: var(--text-muted, rgba(60, 60, 67, 0.55));
+  --ve-btn-hover: rgba(0, 0, 0, 0.05);
+  --ve-btn-active: rgba(0, 0, 0, 0.09);
+  --ve-track-bg: rgba(0, 0, 0, 0.05);
+  --ve-track-border: var(--border, rgba(0, 0, 0, 0.08));
+  --ve-kbd-bg: rgba(0, 0, 0, 0.05);
+  --ve-kbd-border: rgba(0, 0, 0, 0.10);
+  --ve-slider-track: rgba(0, 0, 0, 0.12);
+  --ve-dropdown-bg: rgba(255, 255, 255, 0.95);
+  --ve-dropdown-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
 
   position: relative;
-  background: #0d0d0f;
+  background: var(--bg-elevated, #f0f0f4);
   border-radius: var(--radius-md, 12px);
   overflow: hidden;
   font-family: var(--font-sans);
   user-select: none;
   -webkit-user-select: none;
+}
+
+/* ── Dark theme overrides ─────────────────────────── */
+[data-theme="dark"] .ve-container {
+  --ve-chrome-bg: rgba(28, 28, 30, 0.88);
+  --ve-chrome-border: rgba(255, 255, 255, 0.06);
+  --ve-trim-dimmed: rgba(0, 0, 0, 0.55);
+  --ve-btn-hover: rgba(255, 255, 255, 0.08);
+  --ve-btn-active: rgba(255, 255, 255, 0.12);
+  --ve-track-bg: rgba(255, 255, 255, 0.06);
+  --ve-track-border: rgba(255, 255, 255, 0.08);
+  --ve-kbd-bg: rgba(255, 255, 255, 0.08);
+  --ve-kbd-border: rgba(255, 255, 255, 0.12);
+  --ve-slider-track: rgba(255, 255, 255, 0.15);
+  --ve-dropdown-bg: rgba(30, 30, 32, 0.95);
+  --ve-dropdown-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  background: #0d0d0f;
 }
 
 .ve-container--compact {
@@ -138,8 +162,8 @@
   right: 8px;
   font-size: 10px;
   font-family: var(--font-mono, monospace);
-  color: var(--ve-trim-color);
-  background: rgba(0, 0, 0, 0.65);
+  color: #FFFFFF;
+  background: rgba(0, 0, 0, 0.55);
   padding: 2px 8px;
   border-radius: 4px;
   pointer-events: none;
@@ -171,8 +195,8 @@
 .ve-timeline__track {
   position: relative;
   height: 40px;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--ve-track-bg);
+  border: 1px solid var(--ve-track-border);
   border-radius: 4px;
   cursor: pointer;
   touch-action: none;
@@ -210,9 +234,9 @@
   position: absolute;
   top: 0;
   height: 100%;
-  background: rgba(255, 255, 255, 0.02);
-  border-top: 2px solid rgba(255, 214, 10, 0.35);
-  border-bottom: 2px solid rgba(255, 214, 10, 0.35);
+  background: rgba(10, 132, 255, 0.04);
+  border-top: 2px solid rgba(10, 132, 255, 0.35);
+  border-bottom: 2px solid rgba(10, 132, 255, 0.35);
   z-index: 1;
   pointer-events: none;
 }
@@ -271,7 +295,7 @@
 }
 .ve-trim-handle:hover,
 .ve-trim-handle--active {
-  box-shadow: 0 0 10px rgba(255, 214, 10, 0.5);
+  box-shadow: 0 0 10px rgba(10, 132, 255, 0.5);
 }
 
 /* Grip texture */
@@ -295,7 +319,7 @@
   top: -22px;
   padding: 2px 6px;
   background: var(--ve-trim-color);
-  color: #000;
+  color: #FFFFFF;
   font-size: 9px;
   font-family: var(--font-mono, monospace);
   font-weight: 600;
@@ -398,7 +422,7 @@
   color: var(--ve-trim-color);
   white-space: nowrap;
   padding: 2px 8px;
-  background: rgba(255, 214, 10, 0.08);
+  background: rgba(10, 132, 255, 0.08);
   border-radius: 4px;
   opacity: 0.8;
 }
@@ -432,7 +456,7 @@
   appearance: none;
   width: 64px;
   height: 3px;
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--ve-slider-track);
   border-radius: 2px;
   outline: none;
   border: none;
@@ -466,7 +490,7 @@
 .ve-volume__slider::-moz-range-track {
   height: 3px;
   border-radius: 2px;
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--ve-slider-track);
 }
 
 .ve-volume__label {
@@ -477,7 +501,7 @@
   text-align: right;
 }
 .ve-volume__label--warn {
-  color: var(--ve-trim-color);
+  color: var(--accent-amber, #FF9F0A);
 }
 
 /* ── Speed dropdown ────────────────────────────────── */
@@ -491,8 +515,8 @@
   align-items: center;
   gap: 2px;
   padding: 4px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--ve-track-border);
+  background: var(--ve-track-bg);
   color: var(--ve-text);
   font-size: 11px;
   font-family: var(--font-mono, monospace);
@@ -507,21 +531,23 @@
   color: var(--ve-text);
 }
 .ve-speed__btn--active {
-  color: var(--ve-trim-color);
-  border-color: rgba(255, 214, 10, 0.2);
+  color: var(--ve-accent);
+  border-color: rgba(10, 132, 255, 0.25);
 }
 
 .ve-speed__dropdown {
   position: absolute;
   bottom: calc(100% + 4px);
   right: 0;
-  background: #1a1a1e;
+  background: var(--ve-dropdown-bg);
   border: 1px solid var(--ve-chrome-border);
   border-radius: 6px;
   padding: 4px;
   z-index: 20;
   min-width: 100px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--ve-dropdown-shadow);
+  backdrop-filter: blur(20px) saturate(1.8);
+  -webkit-backdrop-filter: blur(20px) saturate(1.8);
 }
 
 .ve-speed__option {
@@ -606,7 +632,7 @@
   justify-content: center;
   gap: 12px;
   padding: 4px 12px;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--ve-chrome-bg);
   border-top: 1px solid var(--ve-chrome-border);
   font-size: 10px;
   color: var(--ve-text-muted);
@@ -616,8 +642,8 @@
 .ve-shortcuts kbd {
   display: inline-block;
   padding: 1px 4px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: var(--ve-kbd-bg);
+  border: 1px solid var(--ve-kbd-border);
   border-radius: 3px;
   font-family: var(--font-mono, monospace);
   font-size: 9px;
@@ -642,14 +668,14 @@
   align-items: center;
   justify-content: center;
   min-height: 200px;
-  background: #0d0d0f;
+  background: var(--bg-elevated, #f0f0f4);
   border-radius: var(--radius-md, 12px);
 }
 
 .ve-loading__spinner {
   width: 24px;
   height: 24px;
-  border: 2px solid rgba(255, 255, 255, 0.1);
+  border: 2px solid var(--ve-track-bg, rgba(0, 0, 0, 0.08));
   border-top-color: var(--ve-accent);
   border-radius: 50%;
   animation: ve-spin 0.8s linear infinite;
@@ -666,7 +692,7 @@
   justify-content: center;
   gap: 12px;
   min-height: 200px;
-  background: #0d0d0f;
+  background: var(--bg-elevated, #f0f0f4);
   border-radius: var(--radius-md, 12px);
   color: var(--ve-text-muted);
   font-size: 13px;
