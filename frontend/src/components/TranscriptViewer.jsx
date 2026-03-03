@@ -96,17 +96,24 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
     return -1;
   }, [currentTime, filtered, transcript]);
 
-  // Auto-scroll to the active segment when it changes
+  // Auto-scroll to keep the active segment centered in the transcript view
   useEffect(() => {
     if (activeOriginalIdx < 0) return;
     const el = activeSegRef.current;
     const container = scrollContainerRef.current;
     if (!el || !container) return;
-    // Only scroll if the element is outside the visible area
+    // Scroll so the active segment is centered in the container
     const elRect = el.getBoundingClientRect();
     const cRect = container.getBoundingClientRect();
-    if (elRect.top < cRect.top || elRect.bottom > cRect.bottom) {
-      el.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    const elCenter = elRect.top + elRect.height / 2;
+    const cCenter = cRect.top + cRect.height / 2;
+    const offset = elCenter - cCenter;
+    // Scroll if the element is not near the center (within 20% of container height)
+    if (Math.abs(offset) > cRect.height * 0.2) {
+      container.scrollTo({
+        top: container.scrollTop + offset,
+        behavior: 'smooth',
+      });
     }
   }, [activeOriginalIdx]);
 
