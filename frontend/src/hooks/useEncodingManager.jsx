@@ -129,7 +129,11 @@ export function EncodingProvider({ children }) {
           setTasks((prev) => {
             const task = prev[exportId];
             if (!task) return prev;
-            return { ...prev, [exportId]: { ...task, message: msg.message || 'Encoding...' } };
+            return { ...prev, [exportId]: {
+              ...task,
+              message: msg.message || 'Encoding...',
+              progress: msg.progress ?? task.progress ?? 0,
+            } };
           });
           pushLog('info', msg.message || 'Encoding...');
         } else if (msg.type === 'export_complete') {

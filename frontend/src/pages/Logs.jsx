@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import useEncodingManager from '../hooks/useEncodingManager';
 import useResponsive from '../hooks/useResponsive';
+import ProgressBar from '../components/ProgressBar';
 
 function formatTime(ts) {
   if (!ts) return '';
@@ -430,6 +431,11 @@ export default function Logs() {
                       <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
                         {task.message}
                       </div>
+                      {task.progress != null && task.status === 'encoding' && (
+                        <div style={{ marginTop: 4 }}>
+                          <ProgressBar progress={task.progress} variant="amber" />
+                        </div>
+                      )}
                     </div>
                     <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', flexShrink: 0 }}>
                       {elapsed(task.startedAt)}
@@ -529,6 +535,11 @@ export default function Logs() {
                           </span>
                         )}
                         <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 8 }}>{task.message}</span>
+                        {task.progress != null && task.status === 'encoding' && (
+                          <div style={{ marginTop: 4 }}>
+                            <ProgressBar progress={task.progress} variant="amber" />
+                          </div>
+                        )}
                       </div>
                       {task.downloadUrl && (
                         <a

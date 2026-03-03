@@ -159,11 +159,15 @@ async def run_analysis(job_id: str):
             })
         except Exception as e:
             logger.exception(f"Analysis pipeline failed for {job_id}")
+            # Preserve last known progress so the frontend can show where it
+            # failed instead of the bar collapsing to 0%.
+            current = await database.load_job(job_id)
+            last_pct = current.progress if current and current.progress else 0
             await database.update_job_status(
                 job_id,
                 status=JobStatus.FAILED,
-                progress=0,
-                progress_message="",
+                progress=last_pct,
+                progress_message=f"Failed at {last_pct}%: {str(e)[:120]}",
                 error=str(e),
             )
             await broadcast_ws(job_id, {
