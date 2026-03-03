@@ -1223,9 +1223,13 @@ export default function ClipSEO() {
             </div>
           </div>
 
-          {/* ── Clip Transcript (in sidebar for side-by-side editing) ─── */}
+        </div>
+
+        {/* Right column: SEO content */}
+        <div style={{ flex: '1 1 auto', minWidth: 0, overflowY: 'auto', maxHeight: isMobile ? 'none' : 'calc(100vh - 100px)' }}>
+          {/* ── Clip Transcript (side-by-side with video player) ─── */}
           {job?.transcript?.length > 0 && clipTimeRange && (
-            <div style={{ marginTop: 16 }}>
+            <div style={{ marginBottom: 16 }}>
               <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>
                 Clip Transcript
               </div>
@@ -1234,7 +1238,7 @@ export default function ClipSEO() {
                   transcript={job.transcript}
                   timeRange={clipTimeRange}
                   currentTime={currentTime}
-                  maxHeight={600}
+                  maxHeight={400}
                   onSeek={(time) => {
                     const video = videoRef.current;
                     if (video) {
@@ -1249,10 +1253,6 @@ export default function ClipSEO() {
               </div>
             </div>
           )}
-        </div>
-
-        {/* Right column: SEO content */}
-        <div style={{ flex: '1 1 auto', minWidth: 0, overflowY: 'auto', maxHeight: isMobile ? 'none' : 'calc(100vh - 100px)' }}>
           {!seo ? (
             <div style={{ ...sectionStyle, textAlign: 'center', padding: '48px 24px' }}>
               {generating ? (
