@@ -214,6 +214,8 @@ export default function ClipSEO() {
     activeWordOutlineColor = '#000000',
     activeWordBgColor = '#000000',
     activeWordBgOpacity = 0,
+    playbackVolume = 100,
+    playbackSpeed = 1.0,
   } = clipSettings;
 
   // Load job data
@@ -729,6 +731,8 @@ export default function ClipSEO() {
           sourceHeight={sourceDims.h}
           subjectX={clipSubjectX}
           scenes={job.scenes || []}
+          initialVolume={playbackVolume}
+          initialSpeed={playbackSpeed}
           onTimeUpdate={setCurrentTime}
           onTrimChange={setEditorTrim}
           onVolumeChange={setEditorVolume}

@@ -138,6 +138,8 @@ export default function VideoEditor({
   subjectX = 50,
   scenes,
   initialTime,
+  initialVolume,
+  initialSpeed,
   title,
   onClose,
   subtitleOverlay,
@@ -176,11 +178,13 @@ export default function VideoEditor({
   const [trimEndOffset, setTrimEndOffset] = useState(0);
   const [draggingHandle, setDraggingHandle] = useState(null); // 'left' | 'right' | null
   const [draggingPlayhead, setDraggingPlayhead] = useState(false);
+  const [videoDuration, setVideoDuration] = useState(0);
 
-  // Derived
-  const clipDur = clipEnd - clipStart;
+  // Derived — use video's natural duration as fallback when clipEnd is 0
+  const effectiveClipEnd = clipEnd > clipStart ? clipEnd : (videoDuration || clipEnd);
+  const clipDur = effectiveClipEnd - clipStart;
   const trimmedStart = clipStart + trimStartOffset;
-  const trimmedEnd = clipEnd - trimEndOffset;
+  const trimmedEnd = effectiveClipEnd - trimEndOffset;
   const trimmedDur = trimmedEnd - trimmedStart;
   const elapsed = Math.max(0, Math.min(trimmedDur, currentTime - trimmedStart));
 
@@ -217,33 +221,69 @@ export default function VideoEditor({
 
   // ── Reset on new clip ──────────────────────────────
   useEffect(() => {
+    const vol = (initialVolume != null && initialVolume >= 0) ? initialVolume : 100;
+    const spd = (initialSpeed != null && initialSpeed > 0) ? initialSpeed : 1.0;
     setTrimStartOffset(0);
     setTrimEndOffset(0);
-    setVolume(100);
-    setPrevVolume(100);
+    setVolume(vol);
+    setPrevVolume(vol);
     setIsMuted(false);
-    setSpeed(1.0);
+    setSpeed(spd);
     setShowSpeedMenu(false);
     setVideoError(false);
     if (videoRef.current) {
-      videoRef.current.playbackRate = 1.0;
+      videoRef.current.playbackRate = spd;
     }
     onTrimChange?.({ trimStart: 0, trimEnd: 0 });
-    onVolumeChange?.(1.0);
-    onSpeedChange?.(1.0);
+    onVolumeChange?.(vol / 100);
+    onSpeedChange?.(spd);
   }, [clipStart, clipEnd, src]);
+
+  // ── Sync volume/speed from settings panel ──────────
+  useEffect(() => {
+    if (initialVolume == null || initialVolume < 0) return;
+    setVolume(initialVolume);
+    setPrevVolume(initialVolume);
+    if (initialVolume === 0) setIsMuted(true);
+    else setIsMuted(false);
+  }, [initialVolume]);
+
+  useEffect(() => {
+    if (initialSpeed == null || initialSpeed <= 0) return;
+    setSpeed(initialSpeed);
+    if (videoRef.current) {
+      videoRef.current.playbackRate = initialSpeed;
+    }
+  }, [initialSpeed]);
 
   // ── Video metadata & error ─────────────────────────
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const onReady = () => setVideoReady(true);
+    const onReady = () => {
+      setVideoReady(true);
+      if (video.duration && isFinite(video.duration)) {
+        setVideoDuration(video.duration);
+      }
+    };
     const onError = () => setVideoError(true);
+    const onDuration = () => {
+      if (video.duration && isFinite(video.duration)) {
+        setVideoDuration(video.duration);
+      }
+    };
     video.addEventListener('loadedmetadata', onReady);
+    video.addEventListener('durationchange', onDuration);
     video.addEventListener('error', onError);
-    if (video.readyState >= 1) setVideoReady(true);
+    if (video.readyState >= 1) {
+      setVideoReady(true);
+      if (video.duration && isFinite(video.duration)) {
+        setVideoDuration(video.duration);
+      }
+    }
     return () => {
       video.removeEventListener('loadedmetadata', onReady);
+      video.removeEventListener('durationchange', onDuration);
       video.removeEventListener('error', onError);
     };
   }, [src]);
@@ -640,11 +680,11 @@ export default function VideoEditor({
         if (video) video.currentTime = clipStart + newOffset;
       } else {
         const maxOffset = clipDur - trimStartOffset - 1;
-        const fromEnd = clipEnd - time;
+        const fromEnd = effectiveClipEnd - time;
         const newOffset = Math.max(0, Math.min(maxOffset, fromEnd));
         setTrimEndOffset(newOffset);
         const video = videoRef.current;
-        if (video) video.currentTime = clipEnd - newOffset;
+        if (video) video.currentTime = effectiveClipEnd - newOffset;
       }
     };
     const onUp = () => {
@@ -654,7 +694,7 @@ export default function VideoEditor({
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-  }, [clipStart, clipEnd, clipDur, trimStartOffset, trimEndOffset, getTimeFromPointer]);
+  }, [clipStart, effectiveClipEnd, clipDur, trimStartOffset, trimEndOffset, getTimeFromPointer]);
 
   // Trim handle direct pointer down
   const onTrimHandlePointerDown = useCallback((e, handle) => {
@@ -839,7 +879,7 @@ export default function VideoEditor({
           {/* Left trim handle */}
           <div
             className={`ve-trim-handle ve-trim-handle--left${draggingHandle === 'left' ? ' ve-trim-handle--active' : ''}`}
-            style={{ left: `calc(${leftTrimPct}% - 10px)` }}
+            style={{ left: `${leftTrimPct}%` }}
             onPointerDown={(e) => onTrimHandlePointerDown(e, 'left')}
           >
             <div className="ve-trim-handle__grip">
@@ -855,7 +895,7 @@ export default function VideoEditor({
           {/* Right trim handle */}
           <div
             className={`ve-trim-handle ve-trim-handle--right${draggingHandle === 'right' ? ' ve-trim-handle--active' : ''}`}
-            style={{ left: `${100 - rightTrimPct}%` }}
+            style={{ left: `calc(${100 - rightTrimPct}% - 10px)` }}
             onPointerDown={(e) => onTrimHandlePointerDown(e, 'right')}
           >
             <div className="ve-trim-handle__grip">
@@ -971,6 +1011,17 @@ export default function VideoEditor({
           </button>
         </div>
       </div>
+
+      {/* ── Keyboard shortcuts hint ── */}
+      {!compact && (
+        <div className="ve-shortcuts">
+          <span><kbd>Space</kbd> Play/Pause</span>
+          <span><kbd>J</kbd>/<kbd>L</kbd> -/+5s</span>
+          <span><kbd>{'\u2190'}</kbd>/<kbd>{'\u2192'}</kbd> Frame</span>
+          <span><kbd>M</kbd> Mute</span>
+          <span>Drag trim handles to trim</span>
+        </div>
+      )}
     </div>
   );
 }

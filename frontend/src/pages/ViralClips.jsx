@@ -104,6 +104,8 @@ const DEFAULT_SETTINGS = {
   activeWordBgColor: '#000000',
   activeWordBgOpacity: 0,
   exportQuality: '1080p',
+  playbackVolume: 100,
+  playbackSpeed: 1.0,
 };
 
 function loadExportSettings() {
@@ -837,6 +839,9 @@ export default function ViralClips() {
         active_word_bg_opacity: cs.activeWordBgOpacity ?? 0,
       };
     }
+    // Include playback volume/speed if non-default
+    if (cs.playbackVolume != null && cs.playbackVolume !== 100) body.volume = cs.playbackVolume / 100;
+    if (cs.playbackSpeed != null && cs.playbackSpeed !== 1.0) body.speed = cs.playbackSpeed;
     encoding.startExport(jobId, clip.id, clip.title || `Clip ${clip.id}`, body);
     showToast(`Exporting "${clip.title || `Clip ${clip.id}`}" at ${quality}...`, 'info');
   };
@@ -1792,6 +1797,8 @@ export default function ViralClips() {
             subtitlesEnabled={previewClipSettings.subtitlesEnabled || false}
             subtitleSettings={previewClipSettings}
             transcript={previewTranscript}
+            initialVolume={previewClipSettings.playbackVolume}
+            initialSpeed={previewClipSettings.playbackSpeed}
             onClose={() => { setPreviewClip(null); setCenterSubjectState('idle'); setTrackingApplied(false); }}
           />
           {/* Tracking-applied indicator — flashes when subject tracking updates */}

@@ -254,6 +254,8 @@ export default function ClipPreview({
   onClose,
   title,
   inline = false,
+  initialVolume,
+  initialSpeed,
 }) {
   const { isMobile } = useResponsive();
   const fgVideoRef = useRef(null);
@@ -285,9 +287,12 @@ export default function ClipPreview({
     [subjectKeyframes],
   );
 
+  const SPEED_OPTIONS = [0.5, 1.0, 1.5, 2.0];
+
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(clipStart);
-  const [volume, setVolume] = useState(1);
+  const [volume, setVolume] = useState(initialVolume != null ? initialVolume / 100 : 1);
+  const [speed, setSpeed] = useState(initialSpeed != null && initialSpeed > 0 ? initialSpeed : 1.0);
   const [hovered, setHovered] = useState(false);
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
   const [currentSubtitle, setCurrentSubtitle] = useState(null);
@@ -401,6 +406,26 @@ export default function ClipPreview({
       video.removeEventListener('timeupdate', onTimeUpdate);
     };
   }, [clipStart, clipEnd]);
+
+  // --- Sync volume from settings ---
+  useEffect(() => {
+    if (initialVolume == null) return;
+    const v = Math.max(0, Math.min(1, initialVolume / 100));
+    setVolume(v);
+    if (fgVideoRef.current) fgVideoRef.current.volume = v;
+  }, [initialVolume]);
+
+  // --- Sync speed from settings ---
+  useEffect(() => {
+    if (initialSpeed == null || initialSpeed <= 0) return;
+    setSpeed(initialSpeed);
+    if (fgVideoRef.current) fgVideoRef.current.playbackRate = initialSpeed;
+  }, [initialSpeed]);
+
+  // --- Apply speed to video element ---
+  useEffect(() => {
+    if (fgVideoRef.current) fgVideoRef.current.playbackRate = speed;
+  }, [speed]);
 
   // --- Eagerly preload the selected subtitle font so the browser downloads
   //     it before the subtitle text first renders (avoids FOUT / stuck fallback).
@@ -996,6 +1021,29 @@ export default function ClipPreview({
             }}
             style={{ width: isMobile ? 40 : 50, accentColor: 'var(--accent-cyan)' }}
           />
+
+          <button
+            onClick={() => {
+              const idx = SPEED_OPTIONS.indexOf(speed);
+              const next = SPEED_OPTIONS[(idx + 1) % SPEED_OPTIONS.length];
+              setSpeed(next);
+            }}
+            style={{
+              background: speed !== 1.0 ? 'rgba(255, 214, 10, 0.12)' : 'none',
+              border: speed !== 1.0 ? '1px solid rgba(255, 214, 10, 0.25)' : '1px solid rgba(255,255,255,0.1)',
+              color: speed !== 1.0 ? '#FFD60A' : 'var(--text-secondary)',
+              fontSize: 11,
+              fontFamily: 'var(--font-mono)',
+              fontWeight: 500,
+              cursor: 'pointer',
+              padding: '2px 6px',
+              borderRadius: 4,
+              lineHeight: 1.2,
+            }}
+            title="Playback speed (click to cycle)"
+          >
+            {speed}x
+          </button>
 
           <button
             onClick={toggleFullscreen}

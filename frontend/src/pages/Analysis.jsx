@@ -264,6 +264,8 @@ export default function Analysis() {
     activeWordBgColor: '#000000',
     activeWordBgOpacity: 0,
     useSpeakerColors: true,
+    playbackVolume: 100,
+    playbackSpeed: 1.0,
   });
   // VideoEditor state for export params
   const [editorTrim, setEditorTrim] = useState({ trimStart: 0, trimEnd: 0 });
@@ -779,6 +781,8 @@ export default function Analysis() {
               sourceHeight={sourceDims.h}
               subjectX={clipSubjectX}
               scenes={job.scenes || []}
+              initialVolume={clipSettings.playbackVolume}
+              initialSpeed={clipSettings.playbackSpeed}
               onTimeUpdate={setVideoCurrentTime}
               onTrimChange={setEditorTrim}
               onVolumeChange={setEditorVolume}

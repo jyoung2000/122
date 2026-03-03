@@ -33,6 +33,8 @@ const DEFAULT_SETTINGS = {
   activeWordBgOpacity: 0,
   useSpeakerColors: true,
   exportQuality: '1080p',
+  playbackVolume: 100,
+  playbackSpeed: 1.0,
 };
 
 const ASPECT_RATIOS = [
@@ -538,6 +540,86 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                       style={radioBtnStyle(settings.exportQuality === q.value)}
                     >
                       {q.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Playback Volume */}
+              <div style={sectionStyle}>
+                <span style={labelStyle}>Playback Volume</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <button
+                    onClick={() => update('playbackVolume', settings.playbackVolume > 0 ? 0 : 100)}
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      width: 32, height: 32, border: 'none', borderRadius: 'var(--radius-sm)',
+                      background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                      cursor: 'pointer',
+                    }}
+                    title={settings.playbackVolume > 0 ? 'Mute' : 'Unmute'}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M11 5L6 9H2v6h4l5 4V5z" fill="currentColor" opacity="0.5" stroke="none" />
+                      {settings.playbackVolume === 0 ? (
+                        <>
+                          <line x1="23" y1="9" x2="17" y2="15" />
+                          <line x1="17" y1="9" x2="23" y2="15" />
+                        </>
+                      ) : settings.playbackVolume <= 100 ? (
+                        <path d="M15.54 8.46a5 5 0 010 7.07" />
+                      ) : (
+                        <>
+                          <path d="M15.54 8.46a5 5 0 010 7.07" />
+                          <path d="M19.07 4.93a10 10 0 010 14.14" />
+                        </>
+                      )}
+                    </svg>
+                  </button>
+                  <input
+                    type="range"
+                    min="0"
+                    max="200"
+                    step="1"
+                    value={settings.playbackVolume ?? 100}
+                    onChange={(e) => update('playbackVolume', parseInt(e.target.value))}
+                    style={{
+                      flex: 1,
+                      accentColor: (settings.playbackVolume ?? 100) > 100 ? '#FFD60A' : 'var(--accent-cyan)',
+                    }}
+                  />
+                  <span style={{
+                    fontSize: 11,
+                    fontFamily: 'var(--font-mono)',
+                    color: (settings.playbackVolume ?? 100) > 150 ? '#FFD60A' : 'var(--text-secondary)',
+                    minWidth: 36,
+                    textAlign: 'right',
+                  }}>
+                    {settings.playbackVolume ?? 100}%
+                  </span>
+                </div>
+              </div>
+
+              {/* Playback Speed */}
+              <div style={sectionStyle}>
+                <span style={labelStyle}>Playback Speed</span>
+                <div style={radioGroupStyle}>
+                  {[
+                    { value: 0.25, label: '0.25x' },
+                    { value: 0.5, label: '0.5x' },
+                    { value: 0.75, label: '0.75x' },
+                    { value: 1.0, label: '1x' },
+                    { value: 1.25, label: '1.25x' },
+                    { value: 1.5, label: '1.5x' },
+                    { value: 2.0, label: '2x' },
+                    { value: 4.0, label: '4x' },
+                  ].map((s) => (
+                    <button
+                      key={s.value}
+                      onClick={() => update('playbackSpeed', s.value)}
+                      style={radioBtnStyle((settings.playbackSpeed ?? 1.0) === s.value)}
+                    >
+                      {s.label}
                     </button>
                   ))}
                 </div>
