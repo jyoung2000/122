@@ -147,6 +147,8 @@ export default function VideoEditor({
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const timelineRef = useRef(null);
+  const waveformCanvasRef = useRef(null);
+  const waveformDataRef = useRef(null);
   const audioCtxRef = useRef(null);
   const gainNodeRef = useRef(null);
   const sourceNodeRef = useRef(null);
@@ -204,14 +206,14 @@ export default function VideoEditor({
     [isCrop, subjectKeyframes],
   );
 
-  // Portrait containers: constrain width
+  // Portrait containers: constrain width so tall videos don't stretch
   const videoMaxWidth = useMemo(() => {
     if (targetRatio < 1) {
-      const maxHpx = (typeof window !== 'undefined' ? window.innerHeight : 900) * (compact ? 0.35 : 0.4);
-      return Math.min(Math.round(maxHpx * targetRatio), compact ? 340 : 400);
+      const maxHpx = (typeof window !== 'undefined' ? window.innerHeight : 900) * 0.5;
+      return Math.min(Math.round(maxHpx * targetRatio), 500);
     }
     return undefined;
-  }, [targetRatio, compact]);
+  }, [targetRatio]);
 
   // ── Reset on new clip ──────────────────────────────
   useEffect(() => {
@@ -261,6 +263,94 @@ export default function VideoEditor({
     document.addEventListener('fullscreenchange', onFsChange);
     return () => document.removeEventListener('fullscreenchange', onFsChange);
   }, []);
+
+  // ── Waveform generation ────────────────────────────
+  useEffect(() => {
+    if (!src) return;
+    let cancelled = false;
+    const generateWaveform = async () => {
+      try {
+        const response = await fetch(src);
+        if (cancelled) return;
+        const arrayBuffer = await response.arrayBuffer();
+        if (cancelled) return;
+        const offlineCtx = new (window.OfflineAudioContext || window.webkitOfflineAudioContext)(1, 1, 44100);
+        const audioBuffer = await offlineCtx.decodeAudioData(arrayBuffer);
+        if (cancelled) return;
+        const rawData = audioBuffer.getChannelData(0);
+        // Downsample to ~200 bars
+        const barCount = 200;
+        const samplesPerBar = Math.floor(rawData.length / barCount);
+        const bars = [];
+        for (let i = 0; i < barCount; i++) {
+          let sum = 0;
+          const start = i * samplesPerBar;
+          for (let j = start; j < start + samplesPerBar && j < rawData.length; j++) {
+            sum += Math.abs(rawData[j]);
+          }
+          bars.push(sum / samplesPerBar);
+        }
+        // Normalize
+        const max = Math.max(...bars, 0.01);
+        waveformDataRef.current = bars.map(v => v / max);
+        drawWaveform();
+      } catch {
+        // Waveform is optional - silently fail
+      }
+    };
+    generateWaveform();
+    return () => { cancelled = true; };
+  }, [src]);
+
+  // Draw waveform on canvas
+  const drawWaveform = useCallback(() => {
+    const canvas = waveformCanvasRef.current;
+    const data = waveformDataRef.current;
+    if (!canvas || !data) return;
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = rect.width * dpr;
+    canvas.height = rect.height * dpr;
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+
+    const barWidth = rect.width / data.length;
+    const midY = rect.height / 2;
+
+    for (let i = 0; i < data.length; i++) {
+      const x = i * barWidth;
+      const barH = Math.max(1, data[i] * midY * 0.9);
+      // Color based on trim region
+      const pct = i / data.length;
+      const leftPct = trimStartOffset / (clipDur || 1);
+      const rightPct = 1 - trimEndOffset / (clipDur || 1);
+      const playPct = clipDur > 0 ? (currentTime - clipStart) / clipDur : 0;
+
+      if (pct < leftPct || pct > rightPct) {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
+      } else if (pct <= playPct) {
+        ctx.fillStyle = 'rgba(10, 132, 255, 0.5)';
+      } else {
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.15)';
+      }
+      ctx.fillRect(x, midY - barH, barWidth - 0.5, barH * 2);
+    }
+  }, [trimStartOffset, trimEndOffset, clipDur, currentTime, clipStart]);
+
+  // Redraw waveform when state changes
+  useEffect(() => {
+    drawWaveform();
+  }, [drawWaveform]);
+
+  // Redraw waveform on resize
+  useEffect(() => {
+    const canvas = waveformCanvasRef.current;
+    if (!canvas) return;
+    const ro = new ResizeObserver(() => drawWaveform());
+    ro.observe(canvas);
+    return () => ro.disconnect();
+  }, [drawWaveform]);
 
   // ── Playback time tracking via rAF ─────────────────
   useEffect(() => {
@@ -714,6 +804,9 @@ export default function VideoEditor({
           className="ve-timeline__track"
           onPointerDown={onTimelinePointerDown}
         >
+          {/* Waveform */}
+          <canvas ref={waveformCanvasRef} className="ve-timeline__waveform" />
+
           {/* Dimmed regions */}
           {leftTrimPct > 0 && (
             <div className="ve-timeline__dimmed-left" style={{ width: `${leftTrimPct}%` }} />
@@ -746,7 +839,7 @@ export default function VideoEditor({
           {/* Left trim handle */}
           <div
             className={`ve-trim-handle ve-trim-handle--left${draggingHandle === 'left' ? ' ve-trim-handle--active' : ''}`}
-            style={{ left: `calc(${leftTrimPct}% - 12px)` }}
+            style={{ left: `calc(${leftTrimPct}% - 10px)` }}
             onPointerDown={(e) => onTrimHandlePointerDown(e, 'left')}
           >
             <div className="ve-trim-handle__grip">
@@ -762,7 +855,7 @@ export default function VideoEditor({
           {/* Right trim handle */}
           <div
             className={`ve-trim-handle ve-trim-handle--right${draggingHandle === 'right' ? ' ve-trim-handle--active' : ''}`}
-            style={{ left: `calc(${100 - rightTrimPct}%)` }}
+            style={{ left: `${100 - rightTrimPct}%` }}
             onPointerDown={(e) => onTrimHandlePointerDown(e, 'right')}
           >
             <div className="ve-trim-handle__grip">

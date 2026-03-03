@@ -717,26 +717,28 @@ export default function ClipSEO() {
         <span style={{ color: 'var(--text-primary)' }}>SEO — Clip {clipId}</span>
       </div>
 
+      {/* Video Editor — full-width above settings panels */}
+      <div style={{ width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto 20px', position: 'relative' }}>
+        <VideoEditor
+          src={videoSrc}
+          clipStart={startTime || clip.start_time}
+          clipEnd={endTime || clip.end_time}
+          title={clip.title || `Clip ${clipId}`}
+          aspectRatio={aspectRatio}
+          sourceWidth={sourceDims.w}
+          sourceHeight={sourceDims.h}
+          subjectX={clipSubjectX}
+          scenes={job.scenes || []}
+          onTimeUpdate={setCurrentTime}
+          onTrimChange={setEditorTrim}
+          onVolumeChange={setEditorVolume}
+          onSpeedChange={setEditorSpeed}
+        />
+      </div>
+
       <div className="clip-panel-layout" style={{ display: 'flex', gap: 20, alignItems: 'flex-start', flexWrap: isMobile ? 'wrap' : 'nowrap', flexDirection: isMobile ? 'column' : 'row' }}>
-        {/* Left column: Video preview + clip info + export settings */}
+        {/* Left column: clip info + export settings */}
         <div className="clip-settings-sidebar" style={{ width: isMobile ? '100%' : 380, position: isMobile ? 'static' : 'sticky', top: 20, alignSelf: 'flex-start', maxHeight: isMobile ? 'none' : 'calc(100vh - 40px)', overflowY: isMobile ? 'visible' : 'auto' }}>
-          {/* Video Preview — Professional NLE-style editor */}
-          <VideoEditor
-            src={videoSrc}
-            clipStart={startTime || clip.start_time}
-            clipEnd={endTime || clip.end_time}
-            title={clip.title || `Clip ${clipId}`}
-            aspectRatio={aspectRatio}
-            sourceWidth={sourceDims.w}
-            sourceHeight={sourceDims.h}
-            subjectX={clipSubjectX}
-            scenes={job.scenes || []}
-            onTimeUpdate={setCurrentTime}
-            onTrimChange={setEditorTrim}
-            onVolumeChange={setEditorVolume}
-            onSpeedChange={setEditorSpeed}
-            compact
-          />
 
           {/* Clip info */}
           <div style={sectionStyle}>

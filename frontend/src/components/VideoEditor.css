@@ -152,7 +152,7 @@
 .ve-timeline {
   position: relative;
   background: var(--ve-chrome-bg);
-  padding: 8px 12px 4px;
+  padding: 6px 12px 4px;
   border-top: 1px solid var(--ve-chrome-border);
   backdrop-filter: blur(20px) saturate(1.8);
   -webkit-backdrop-filter: blur(20px) saturate(1.8);
@@ -170,23 +170,22 @@
 
 .ve-timeline__track {
   position: relative;
-  height: 6px;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 3px;
+  height: 40px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 4px;
   cursor: pointer;
   touch-action: none;
-  transition: height 0.15s ease;
-}
-.ve-timeline__track:hover {
-  height: 10px;
+  overflow: hidden;
 }
 
-.ve-timeline__trim-region {
+/* Waveform canvas */
+.ve-timeline__waveform {
   position: absolute;
-  top: 0;
+  inset: 0;
+  width: 100%;
   height: 100%;
-  background: rgba(255, 255, 255, 0.06);
-  border-radius: 3px;
+  pointer-events: none;
+  z-index: 0;
 }
 
 .ve-timeline__dimmed-left,
@@ -195,14 +194,27 @@
   top: 0;
   height: 100%;
   background: var(--ve-trim-dimmed);
-  border-radius: 3px;
   pointer-events: none;
+  z-index: 1;
 }
 .ve-timeline__dimmed-left {
   left: 0;
+  border-radius: 4px 0 0 4px;
 }
 .ve-timeline__dimmed-right {
   right: 0;
+  border-radius: 0 4px 4px 0;
+}
+
+.ve-timeline__trim-region {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: transparent;
+  border-top: 1px solid rgba(255, 214, 10, 0.25);
+  border-bottom: 1px solid rgba(255, 214, 10, 0.25);
+  z-index: 1;
+  pointer-events: none;
 }
 
 .ve-timeline__progress {
@@ -210,17 +222,16 @@
   top: 0;
   left: 0;
   height: 100%;
-  background: var(--ve-accent);
-  border-radius: 3px 0 0 3px;
+  background: rgba(10, 132, 255, 0.12);
   pointer-events: none;
-  opacity: 0.7;
+  z-index: 1;
 }
 
 .ve-timeline__playhead {
   position: absolute;
-  top: -4px;
+  top: -2px;
   width: 2px;
-  height: calc(100% + 8px);
+  height: calc(100% + 4px);
   background: var(--ve-accent);
   pointer-events: none;
   z-index: 3;
@@ -228,61 +239,60 @@
 .ve-timeline__playhead::before {
   content: '';
   position: absolute;
-  top: -3px;
-  left: -4px;
+  top: -4px;
+  left: -5px;
   width: 0;
   height: 0;
-  border-left: 5px solid transparent;
-  border-right: 5px solid transparent;
-  border-top: 5px solid var(--ve-accent);
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-top: 6px solid var(--ve-accent);
 }
 
 /* ── Trim handles ──────────────────────────────────── */
 
 .ve-trim-handle {
   position: absolute;
-  top: -2px;
-  width: 12px;
-  height: calc(100% + 4px);
+  top: 0;
+  width: 10px;
+  height: 100%;
   background: var(--ve-trim-color);
   cursor: ew-resize;
   z-index: 4;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform 0.1s ease, box-shadow 0.1s ease;
+  transition: box-shadow 0.1s ease;
 }
 .ve-trim-handle--left {
-  border-radius: 3px 0 0 3px;
+  border-radius: 4px 0 0 4px;
 }
 .ve-trim-handle--right {
-  border-radius: 0 3px 3px 0;
+  border-radius: 0 4px 4px 0;
 }
 .ve-trim-handle:hover,
 .ve-trim-handle--active {
-  transform: scaleX(1.2);
-  box-shadow: 0 0 8px rgba(255, 214, 10, 0.4);
+  box-shadow: 0 0 10px rgba(255, 214, 10, 0.5);
 }
 
 /* Grip texture */
 .ve-trim-handle__grip {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   align-items: center;
 }
 .ve-trim-handle__grip span {
   display: block;
-  width: 6px;
-  height: 1px;
+  width: 5px;
+  height: 1.5px;
   background: rgba(0, 0, 0, 0.5);
-  border-radius: 0.5px;
+  border-radius: 1px;
 }
 
 /* Trim tooltip */
 .ve-trim-tooltip {
   position: absolute;
-  top: -24px;
+  top: -22px;
   padding: 2px 6px;
   background: var(--ve-trim-color);
   color: #000;
@@ -558,11 +568,11 @@
   }
 
   .ve-timeline__track {
-    height: 12px;
+    height: 48px;
   }
 
   .ve-trim-handle {
-    width: 18px;
+    width: 14px;
   }
 
   .ve-timecode {
