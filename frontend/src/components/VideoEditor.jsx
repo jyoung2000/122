@@ -213,15 +213,6 @@ export default function VideoEditor({
     [isCrop, subjectKeyframes],
   );
 
-  // Portrait containers: constrain width so tall videos don't stretch
-  const videoMaxWidth = useMemo(() => {
-    if (targetRatio < 1) {
-      const maxHpx = (typeof window !== 'undefined' ? window.innerHeight : 900) * 0.5;
-      return Math.min(Math.round(maxHpx * targetRatio), 500);
-    }
-    return undefined;
-  }, [targetRatio]);
-
   // ── Reset on new clip ──────────────────────────────
   useEffect(() => {
     const vol = (initialVolume != null && initialVolume >= 0) ? initialVolume : 100;
@@ -372,11 +363,11 @@ export default function VideoEditor({
 
       const isDark = document.documentElement.dataset.theme === 'dark';
       if (pct < leftPct || pct > rightPct) {
-        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.06)' : 'rgba(0, 0, 0, 0.06)';
+        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.15)';
       } else if (pct <= playPct) {
-        ctx.fillStyle = 'rgba(10, 132, 255, 0.5)';
+        ctx.fillStyle = 'rgba(10, 132, 255, 0.75)';
       } else {
-        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.12)';
+        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.40)' : 'rgba(0, 0, 0, 0.35)';
       }
       ctx.fillRect(x, midY - barH, barWidth - 0.5, barH * 2);
     }
@@ -416,7 +407,7 @@ export default function VideoEditor({
     });
     // Darken slightly so waveform remains readable
     const isDark = document.documentElement.dataset.theme === 'dark';
-    ctx.fillStyle = isDark ? 'rgba(0, 0, 0, 0.40)' : 'rgba(0, 0, 0, 0.20)';
+    ctx.fillStyle = isDark ? 'rgba(0, 0, 0, 0.30)' : 'rgba(0, 0, 0, 0.10)';
     ctx.fillRect(0, 0, rect.width, rect.height);
   }, []);
 
@@ -871,10 +862,6 @@ export default function VideoEditor({
     <div
       ref={containerRef}
       className={containerClass}
-      style={{
-        maxWidth: isFullscreen ? undefined : videoMaxWidth,
-        margin: videoMaxWidth && !isFullscreen && !compact ? '0 auto' : undefined,
-      }}
     >
       {/* ── Header ── */}
       {(title || onClose) && !isFullscreen && (
@@ -894,6 +881,9 @@ export default function VideoEditor({
         style={isFullscreen ? {} : {
           aspectRatio: `${targetRatio}`,
           maxHeight: compact ? '45vh' : '50vh',
+          maxWidth: `calc(${compact ? '45vh' : '50vh'} * ${targetRatio})`,
+          width: '100%',
+          margin: '0 auto',
         }}
         onClick={togglePlay}
       >
