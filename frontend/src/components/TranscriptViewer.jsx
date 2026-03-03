@@ -34,7 +34,7 @@ function toTXT(segments) {
   return segments.map((seg) => `[${formatTime(seg.start)}] ${seg.speaker}: ${seg.text}`).join('\n');
 }
 
-export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerRenamed, onTranscriptUpdated, timeRange, currentTime }) {
+export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerRenamed, onTranscriptUpdated, timeRange, currentTime, maxHeight }) {
   const { isMobile } = useResponsive();
   const scrollContainerRef = useRef(null);
   const activeSegRef = useRef(null);
@@ -511,7 +511,7 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
       )}
 
       {/* Segments */}
-      <div ref={scrollContainerRef} style={{ maxHeight: 500, overflow: 'auto' }}>
+      <div ref={scrollContainerRef} style={{ maxHeight: maxHeight || 500, overflow: 'auto' }}>
         {filtered.map((seg, i) => {
           const color = speakerColor(seg.speaker);
           const originalIdx = transcript.indexOf(seg);

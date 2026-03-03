@@ -222,6 +222,9 @@ export default function Analysis() {
   const navigate = useNavigate();
   const [job, setJob] = useState(null);
   const [tab, setTab] = useState(0);
+  const prevTabRef = useRef(0);
+  const [transcriptInitTime, setTranscriptInitTime] = useState(null);
+  const stickyPlayerRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [clipPreview, setClipPreview] = useState(null);
   const [videoCurrentTime, setVideoCurrentTime] = useState(0);
@@ -448,6 +451,32 @@ export default function Analysis() {
   const handleSeek = (time) => {
     if (window.__clipai_seekTo) window.__clipai_seekTo(time);
   };
+
+  // Sync players when switching to/from the Transcript tab (tab 2).
+  // Entering tab 2: pause the sticky player and capture its time so the
+  // transcript tab's inline player can pick up where it left off.
+  // Leaving tab 2: seek the sticky player to where the transcript player was.
+  useEffect(() => {
+    const prev = prevTabRef.current;
+    prevTabRef.current = tab;
+
+    if (tab === 2 && prev !== 2) {
+      // Entering transcript tab — pause sticky player and capture time
+      const stickyVideo = stickyPlayerRef.current?.querySelector('video');
+      const stickyTime = stickyVideo ? stickyVideo.currentTime : videoCurrentTime;
+      if (stickyVideo && !stickyVideo.paused) {
+        stickyVideo.pause();
+      }
+      setTranscriptInitTime(stickyTime);
+    } else if (prev === 2 && tab !== 2) {
+      // Leaving transcript tab — sync sticky player to transcript's current time
+      const stickyVideo = stickyPlayerRef.current?.querySelector('video');
+      if (stickyVideo) {
+        stickyVideo.currentTime = videoCurrentTime;
+      }
+      setTranscriptInitTime(null);
+    }
+  }, [tab]);
 
   const handleClipPreview = (clip) => {
     setClipPreview(clip);
@@ -727,7 +756,7 @@ export default function Analysis() {
   return (
     <div>
       {/* Video Player (sticky) — hidden on Transcript tab where we show side-by-side layout */}
-      <div style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg-base)', display: (tab === 2 && !showExportPreview) ? 'none' : 'block' }}>
+      <div ref={stickyPlayerRef} style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg-base)', display: (tab === 2 && !showExportPreview) ? 'none' : 'block' }}>
         {showExportPreview ? (
           <div style={{ position: 'relative' }}>
             <ClipPreview
@@ -1214,6 +1243,7 @@ export default function Analysis() {
                   sourceWidth={sourceDims.w}
                   sourceHeight={sourceDims.h}
                   scenes={job.scenes || []}
+                  initialTime={transcriptInitTime}
                 />
               </div>
 

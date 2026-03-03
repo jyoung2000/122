@@ -1234,6 +1234,7 @@ export default function ClipSEO() {
                   transcript={job.transcript}
                   timeRange={clipTimeRange}
                   currentTime={currentTime}
+                  maxHeight={600}
                   onSeek={(time) => {
                     const video = videoRef.current;
                     if (video) {

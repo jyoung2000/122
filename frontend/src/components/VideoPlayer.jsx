@@ -30,7 +30,7 @@ function formatTime(seconds) {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, aspectRatio, sourceWidth = 1920, sourceHeight = 1080, subjectX = 50, scenes }) {
+export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, aspectRatio, sourceWidth = 1920, sourceHeight = 1080, subjectX = 50, scenes, initialTime }) {
   const { isMobile } = useResponsive();
   const videoRef = useRef(null);
   const containerRef = useRef(null);
@@ -97,11 +97,44 @@ export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, asp
     setCurrentTime(time);
   };
 
-  // Expose seekTo via ref callback
+  // Expose seekTo and pause/getTime via window for cross-component control.
+  // Only clean up globals if this instance still owns them (prevents one
+  // VideoPlayer from deleting another's registration on unmount).
   useEffect(() => {
     window.__clipai_seekTo = seekTo;
-    return () => { delete window.__clipai_seekTo; };
+    window.__clipai_pausePlayer = () => {
+      const video = videoRef.current;
+      if (video && !video.paused) {
+        video.pause();
+        setPlaying(false);
+      }
+    };
+    window.__clipai_getPlayerTime = () => {
+      return videoRef.current?.currentTime ?? 0;
+    };
+    const mySeekTo = seekTo;
+    return () => {
+      if (window.__clipai_seekTo === mySeekTo) {
+        delete window.__clipai_seekTo;
+        delete window.__clipai_pausePlayer;
+        delete window.__clipai_getPlayerTime;
+      }
+    };
   }, []);
+
+  // Seek to initialTime once when the player mounts (no auto-play)
+  const initialTimeApplied = useRef(false);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || initialTime == null || initialTimeApplied.current) return;
+    initialTimeApplied.current = true;
+    const doSeek = () => {
+      video.currentTime = initialTime;
+      setCurrentTime(initialTime);
+    };
+    if (video.readyState >= 1) doSeek();
+    else video.addEventListener('loadedmetadata', doSeek, { once: true });
+  }, [initialTime]);
 
   // Auto-seek and auto-play when clip preview changes
   useEffect(() => {
