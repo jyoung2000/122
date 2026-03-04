@@ -123,6 +123,26 @@ function formatTimeShort(seconds) {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+/** Parse user-typed timecodes: "3:20", "3:20.5", "200" (raw seconds), "1:05:30" */
+function parseTimecodeInput(str) {
+  if (!str || !str.trim()) return null;
+  const s = str.trim();
+  // h:mm:ss or h:mm:ss.cc
+  const hms = s.match(/^(\d+):(\d{1,2}):(\d{1,2})(?:\.(\d+))?$/);
+  if (hms) {
+    return parseInt(hms[1]) * 3600 + parseInt(hms[2]) * 60 + parseInt(hms[3]) + (hms[4] ? parseFloat('0.' + hms[4]) : 0);
+  }
+  // m:ss or m:ss.cc
+  const ms = s.match(/^(\d+):(\d{1,2})(?:\.(\d+))?$/);
+  if (ms) {
+    return parseInt(ms[1]) * 60 + parseInt(ms[2]) + (ms[3] ? parseFloat('0.' + ms[3]) : 0);
+  }
+  // Raw number (seconds)
+  const num = parseFloat(s);
+  if (!isNaN(num) && num >= 0) return num;
+  return null;
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 export default function VideoEditor({
   src,
@@ -163,6 +183,9 @@ export default function VideoEditor({
   const [currentTime, setCurrentTime] = useState(clipStart);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showTimecodeRemaining, setShowTimecodeRemaining] = useState(false);
+  const [editingTimecode, setEditingTimecode] = useState(false);
+  const [timecodeInput, setTimecodeInput] = useState('');
+  const timecodeInputRef = useRef(null);
   const [videoReady, setVideoReady] = useState(false);
   const [videoError, setVideoError] = useState(false);
 
@@ -1010,17 +1033,51 @@ export default function VideoEditor({
             <Icon.SkipForward />
           </button>
 
-          <span
-            className="ve-timecode"
-            onClick={(e) => { e.stopPropagation(); setShowTimecodeRemaining((v) => !v); }}
-            title="Click to toggle elapsed/remaining"
-          >
-            {showTimecodeRemaining
-              ? `-${formatTimecode(Math.max(0, trimmedDur - elapsed))}`
-              : formatTimecode(elapsed)}
-            {' / '}
-            {formatTimecode(trimmedDur)}
-          </span>
+          {editingTimecode ? (
+            <input
+              ref={timecodeInputRef}
+              className="ve-timecode ve-timecode--input"
+              type="text"
+              inputMode="numeric"
+              value={timecodeInput}
+              onChange={(e) => setTimecodeInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  const parsed = parseTimecodeInput(timecodeInput);
+                  if (parsed != null) seekTo(trimmedStart + parsed);
+                  setEditingTimecode(false);
+                } else if (e.key === 'Escape') {
+                  setEditingTimecode(false);
+                }
+                e.stopPropagation();
+              }}
+              onBlur={() => {
+                const parsed = parseTimecodeInput(timecodeInput);
+                if (parsed != null) seekTo(trimmedStart + parsed);
+                setEditingTimecode(false);
+              }}
+              onClick={(e) => e.stopPropagation()}
+              placeholder="0:00"
+              autoFocus
+            />
+          ) : (
+            <span
+              className="ve-timecode"
+              onClick={(e) => {
+                e.stopPropagation();
+                setTimecodeInput(formatTimecode(elapsed).replace(/\..*$/, ''));
+                setEditingTimecode(true);
+                setTimeout(() => timecodeInputRef.current?.select(), 0);
+              }}
+              title="Click to type a time"
+            >
+              {showTimecodeRemaining
+                ? `-${formatTimecode(Math.max(0, trimmedDur - elapsed))}`
+                : formatTimecode(elapsed)}
+              {' / '}
+              {formatTimecode(trimmedDur)}
+            </span>
+          )}
         </div>
 
         {/* Center: trim apply */}

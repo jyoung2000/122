@@ -1141,7 +1141,7 @@ export default function Analysis() {
                 <ProgressBar
                   progress={t.progress || 0}
                   message={t.message || `Encoding ${t.clipTitle || 'clip'}...`}
-                  variant="amber"
+                  variant="cyan"
                 />
               </div>
             ))}
