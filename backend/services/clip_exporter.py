@@ -1436,6 +1436,43 @@ def _extract_force_style_from_ass(ass_content: str) -> str:
     return ""
 
 
+def _filter_ass_by_segments(ass_content: str, subs_off_ranges: list[tuple[float, float]]) -> str:
+    """Remove ASS Dialogue lines that overlap with subtitle-off time ranges.
+
+    subs_off_ranges: list of (start, end) in clip-relative seconds where subs should be hidden.
+    """
+    import re
+
+    def _ass_time_to_sec(t: str) -> float:
+        """Parse ASS timestamp 'H:MM:SS.cc' to seconds."""
+        parts = t.strip().split(":")
+        h = int(parts[0])
+        m = int(parts[1])
+        s_cc = parts[2].split(".")
+        s = int(s_cc[0])
+        cs = int(s_cc[1]) if len(s_cc) > 1 else 0
+        return h * 3600 + m * 60 + s + cs / 100.0
+
+    lines = ass_content.split("\n")
+    result = []
+    dialogue_re = re.compile(r"^Dialogue:\s*\d+,\s*(\d+:\d+:\d+\.\d+),\s*(\d+:\d+:\d+\.\d+),")
+    for line in lines:
+        match = dialogue_re.match(line)
+        if match:
+            d_start = _ass_time_to_sec(match.group(1))
+            d_end = _ass_time_to_sec(match.group(2))
+            # Check if this dialogue overlaps with any subs-off range
+            skip = False
+            for off_start, off_end in subs_off_ranges:
+                if d_start < off_end and d_end > off_start:
+                    skip = True
+                    break
+            if skip:
+                continue
+        result.append(line)
+    return "\n".join(result)
+
+
 def _subtitle_filter(ass_path: str, force_style: str = "") -> str:
     """Return the FFmpeg subtitle filter string for a given .ass path.
 
@@ -1608,6 +1645,7 @@ async def export_clip(
     export_quality: str = "1080p",
     volume: float = 1.0,
     speed: float = 1.0,
+    segments: list | None = None,
 ) -> str:
     """Export a clip from video using FFmpeg.
 
@@ -1665,7 +1703,8 @@ async def export_clip(
     needs_quality_scale = (video_height != quality_target_h)
     has_speed = abs(speed - 1.0) > 0.001
     has_volume = abs(volume - 1.0) > 0.001
-    needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume
+    has_segments = bool(segments) and len(segments) > 0
+    needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments
     filter_parts = []
     if aspect_ratio:
         filter_parts.append(f"crop to {aspect_ratio}")
@@ -1677,6 +1716,8 @@ async def export_clip(
         filter_parts.append(f"speed {speed}x")
     if has_volume:
         filter_parts.append(f"volume {volume:.0%}")
+    if has_segments:
+        filter_parts.append(f"{len(segments)} segment overrides")
     filter_desc = " + ".join(filter_parts) if filter_parts else "stream copy"
 
     await _notify(f"Preparing clip {clip_id} ({clip_dur:.1f}s) — {filter_desc}")
@@ -1773,6 +1814,16 @@ async def export_clip(
             )
 
             if ass_content:
+                # Filter out subtitle dialogue lines for segments with subtitles_enabled=false
+                if has_segments:
+                    subs_off_ranges = [
+                        (seg["start"] - start, seg["end"] - start)
+                        for seg in segments
+                        if not seg.get("subtitles_enabled", True)
+                    ]
+                    if subs_off_ranges:
+                        ass_content = _filter_ass_by_segments(ass_content, subs_off_ranges)
+
                 ass_path = os.path.join(output_dir, f"clip_{clip_id}_sub.ass")
                 with open(ass_path, "w", encoding="utf-8") as f:
                     f.write(ass_content)
@@ -1985,6 +2036,21 @@ async def export_clip(
                     af_parts.append(f"atempo={remaining:.4f}")
             if has_volume:
                 af_parts.append(f"volume={volume:.2f}")
+            # Per-segment volume overrides: apply volume=X with enable='between(t,s,e)'
+            if has_segments:
+                for seg in segments:
+                    seg_start = seg["start"] - start  # Convert to clip-relative time
+                    seg_end = seg["end"] - start
+                    if seg_start < 0:
+                        seg_start = 0
+                    clip_dur_local = end - start
+                    if seg_end > clip_dur_local:
+                        seg_end = clip_dur_local
+                    seg_vol = 0.0 if seg.get("muted", False) else seg.get("volume", 1.0)
+                    if abs(seg_vol - volume) > 0.001:  # Only add if different from global
+                        af_parts.append(
+                            f"volume={seg_vol:.2f}:enable='between(t,{seg_start:.3f},{seg_end:.3f})'"
+                        )
             af = ",".join(af_parts) if af_parts else None
 
             cmd = [

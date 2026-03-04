@@ -163,6 +163,7 @@ export default function VideoEditor({
   onApplyTrim,
   onVolumeChange,
   onSpeedChange,
+  onSegmentsChange,
   aspectRatio,
   sourceWidth = 1920,
   sourceHeight = 1080,
@@ -171,6 +172,7 @@ export default function VideoEditor({
   initialTime,
   initialVolume,
   initialSpeed,
+  initialSegments,
   title,
   onClose,
   subtitleOverlay,
@@ -217,6 +219,12 @@ export default function VideoEditor({
   const [trimApplied, setTrimApplied] = useState(false);
   const [videoDuration, setVideoDuration] = useState(0);
 
+  // Segments: per-region settings overrides
+  // Each segment: { id, start, end, volume, muted, subtitlesEnabled }
+  // start/end are absolute times (same coordinate system as clipStart/clipEnd)
+  const [segments, setSegments] = useState(initialSegments || []);
+  const segmentIdRef = useRef(1);
+
   // Derived — use video's natural duration as fallback when clipEnd is 0
   const effectiveClipEnd = clipEnd > clipStart ? clipEnd : (videoDuration || clipEnd);
   const clipDur = effectiveClipEnd - clipStart;
@@ -247,12 +255,54 @@ export default function VideoEditor({
     [isCrop, subjectKeyframes],
   );
 
+  // ── Segment helpers ────────────────────────────────
+  const getActiveSegment = useCallback((t) => {
+    return segments.find(s => t >= s.start && t < s.end) || null;
+  }, [segments]);
+
+  const addSegment = useCallback(() => {
+    if (trimStartOffset < 0.1 && trimEndOffset < 0.1) return; // no selection
+    const segStart = clipStart + trimStartOffset;
+    const segEnd = effectiveClipEnd - trimEndOffset;
+    if (segEnd - segStart < 0.5) return; // too short
+    const newSeg = {
+      id: `seg_${segmentIdRef.current++}`,
+      start: segStart,
+      end: segEnd,
+      volume: isMuted ? 0 : volume,
+      muted: isMuted,
+      subtitlesEnabled: true,
+    };
+    const next = [...segments, newSeg].sort((a, b) => a.start - b.start);
+    setSegments(next);
+    onSegmentsChange?.(next);
+  }, [trimStartOffset, trimEndOffset, clipStart, effectiveClipEnd, volume, isMuted, segments, onSegmentsChange]);
+
+  const removeSegment = useCallback((segId) => {
+    const next = segments.filter(s => s.id !== segId);
+    setSegments(next);
+    onSegmentsChange?.(next);
+  }, [segments, onSegmentsChange]);
+
+  const toggleSegmentMute = useCallback((segId) => {
+    const next = segments.map(s => s.id === segId ? { ...s, muted: !s.muted, volume: s.muted ? 100 : 0 } : s);
+    setSegments(next);
+    onSegmentsChange?.(next);
+  }, [segments, onSegmentsChange]);
+
+  const toggleSegmentSubs = useCallback((segId) => {
+    const next = segments.map(s => s.id === segId ? { ...s, subtitlesEnabled: !s.subtitlesEnabled } : s);
+    setSegments(next);
+    onSegmentsChange?.(next);
+  }, [segments, onSegmentsChange]);
+
   // ── Reset on new clip ──────────────────────────────
   useEffect(() => {
     const vol = (initialVolume != null && initialVolume >= 0) ? initialVolume : 100;
     const spd = (initialSpeed != null && initialSpeed > 0) ? initialSpeed : 1.0;
     setTrimStartOffset(0);
     setTrimEndOffset(0);
+    setSegments(initialSegments || []);
     setVolume(vol);
     setPrevVolume(vol);
     setIsMuted(false);
@@ -502,6 +552,9 @@ export default function VideoEditor({
     onTimeUpdate?.(t);
   }, [onTimeUpdate]);
 
+  // Track which segment is active for volume override
+  const activeSegIdRef = useRef(null);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -513,6 +566,31 @@ export default function VideoEditor({
       if (trimmedEnd && t >= trimmedEnd) {
         video.pause();
         setPlaying(false);
+      }
+      // Apply per-segment volume overrides during playback
+      if (segments.length > 0) {
+        const seg = segments.find(s => t >= s.start && t < s.end);
+        const segId = seg ? seg.id : null;
+        if (segId !== activeSegIdRef.current) {
+          activeSegIdRef.current = segId;
+          if (seg) {
+            // Apply segment volume
+            const segVol = seg.muted ? 0 : seg.volume;
+            if (gainNodeRef.current) {
+              gainNodeRef.current.gain.value = segVol / 100;
+            } else {
+              video.volume = Math.min(1, segVol / 100);
+            }
+          } else {
+            // Restore global volume
+            const effectiveVol = isMuted ? 0 : volume;
+            if (gainNodeRef.current) {
+              gainNodeRef.current.gain.value = effectiveVol / 100;
+            } else {
+              video.volume = Math.min(1, effectiveVol / 100);
+            }
+          }
+        }
       }
       rafId = requestAnimationFrame(tick);
     };
@@ -526,10 +604,11 @@ export default function VideoEditor({
 
     return () => {
       cancelAnimationFrame(rafId);
+      activeSegIdRef.current = null;
       video.removeEventListener('timeupdate', onNativeTime);
       video.removeEventListener('seeked', onNativeTime);
     };
-  }, [trimmedEnd, syncTime]);
+  }, [trimmedEnd, syncTime, segments, volume, isMuted]);
 
   // ── Dynamic subject tracking via rAF ───────────────
   useEffect(() => {
@@ -1043,6 +1122,40 @@ export default function VideoEditor({
               </div>
             )}
           </div>
+
+          {/* ── Segment overlays on timeline ── */}
+          {segments.map(seg => {
+          const segLeftPct = clipDur > 0 ? ((seg.start - clipStart) / clipDur) * 100 : 0;
+          const segWidthPct = clipDur > 0 ? ((seg.end - seg.start) / clipDur) * 100 : 0;
+          return (
+            <div
+              key={seg.id}
+              className="ve-timeline__segment-overlay"
+              style={{
+                position: 'absolute',
+                left: `${segLeftPct}%`,
+                width: `${segWidthPct}%`,
+                top: 0, bottom: 0,
+                background: seg.muted
+                  ? 'rgba(255, 59, 48, 0.18)'
+                  : 'rgba(10, 132, 255, 0.15)',
+                borderLeft: `2px solid ${seg.muted ? 'rgba(255, 59, 48, 0.6)' : 'rgba(10, 132, 255, 0.5)'}`,
+                borderRight: `2px solid ${seg.muted ? 'rgba(255, 59, 48, 0.6)' : 'rgba(10, 132, 255, 0.5)'}`,
+                pointerEvents: 'none',
+                zIndex: 3,
+              }}
+            >
+              <span style={{
+                position: 'absolute', top: 2, left: 4,
+                fontSize: 8, fontWeight: 700, letterSpacing: '0.05em',
+                color: seg.muted ? 'rgba(255, 59, 48, 0.9)' : 'rgba(10, 132, 255, 0.9)',
+                textTransform: 'uppercase', lineHeight: 1, pointerEvents: 'none',
+              }}>
+                {seg.muted ? 'MUTED' : !seg.subtitlesEnabled ? 'NO SUBS' : `${seg.volume}%`}
+              </span>
+            </div>
+          );
+        })}
         </div>
 
         {/* ── Waveform audio track (separate row) ── */}
@@ -1050,6 +1163,81 @@ export default function VideoEditor({
           <canvas ref={waveformCanvasRef} className="ve-timeline__waveform" />
           <div className="ve-timeline__playhead" style={{ left: `${playheadPct}%` }} />
         </div>
+
+        {/* ── Segment controls ── */}
+        {(segments.length > 0 || hasTrim) && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0',
+            flexWrap: 'wrap', fontSize: 10,
+          }}>
+            {hasTrim && (
+              <button
+                onClick={(e) => { e.stopPropagation(); addSegment(); }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 3,
+                  padding: '3px 8px', fontSize: 10, fontWeight: 600,
+                  background: 'var(--accent-cyan-dim, rgba(10,132,255,0.1))',
+                  color: 'var(--accent-cyan, #0A84FF)',
+                  border: '1px solid var(--accent-cyan, #0A84FF)',
+                  borderRadius: 'var(--radius-xs, 4px)', cursor: 'pointer',
+                  whiteSpace: 'nowrap',
+                }}
+                title="Save current selection as a segment with current volume/mute settings"
+              >
+                + Add Segment
+              </button>
+            )}
+            {segments.map(seg => (
+              <div key={seg.id} style={{
+                display: 'flex', alignItems: 'center', gap: 3,
+                padding: '2px 6px',
+                background: seg.muted ? 'rgba(255,59,48,0.08)' : 'var(--bg-elevated, #f5f5f5)',
+                border: `1px solid ${seg.muted ? 'rgba(255,59,48,0.3)' : 'var(--border, #ddd)'}`,
+                borderRadius: 'var(--radius-xs, 4px)',
+                fontSize: 9, color: 'var(--text-secondary, #666)',
+              }}>
+                <span style={{ fontFamily: 'var(--font-mono, monospace)' }}>
+                  {formatTimeShort(seg.start - clipStart)}–{formatTimeShort(seg.end - clipStart)}
+                </span>
+                <button
+                  onClick={(e) => { e.stopPropagation(); toggleSegmentMute(seg.id); }}
+                  style={{
+                    padding: '1px 4px', fontSize: 9, fontWeight: 600,
+                    background: seg.muted ? 'rgba(255,59,48,0.15)' : 'transparent',
+                    color: seg.muted ? '#FF3B30' : 'var(--text-muted, #999)',
+                    border: 'none', borderRadius: 2, cursor: 'pointer',
+                  }}
+                  title={seg.muted ? 'Unmute segment' : 'Mute segment'}
+                >
+                  {seg.muted ? 'MUTED' : 'MUTE'}
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); toggleSegmentSubs(seg.id); }}
+                  style={{
+                    padding: '1px 4px', fontSize: 9, fontWeight: 600,
+                    background: !seg.subtitlesEnabled ? 'rgba(255,149,0,0.15)' : 'transparent',
+                    color: !seg.subtitlesEnabled ? '#FF9500' : 'var(--text-muted, #999)',
+                    border: 'none', borderRadius: 2, cursor: 'pointer',
+                  }}
+                  title={seg.subtitlesEnabled ? 'Disable subtitles for segment' : 'Enable subtitles for segment'}
+                >
+                  {seg.subtitlesEnabled ? 'SUBS' : 'NO SUBS'}
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); removeSegment(seg.id); }}
+                  style={{
+                    padding: '0 3px', fontSize: 11, fontWeight: 700, lineHeight: 1,
+                    background: 'transparent', color: 'var(--text-muted, #999)',
+                    border: 'none', borderRadius: 2, cursor: 'pointer',
+                  }}
+                  title="Remove segment"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* ── Controls bar ── */}

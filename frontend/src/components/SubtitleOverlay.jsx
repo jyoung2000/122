@@ -185,12 +185,28 @@ export default function SubtitleOverlay({
   aspectRatio,
   sourceWidth = 1920,
   sourceHeight = 1080,
+  segments = [],
 }) {
   const containerRef = useRef(null);
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
   const [currentWordIdx, setCurrentWordIdx] = useState(-1);
 
-  const subtitlesEnabled = settings.subtitlesEnabled || false;
+  const subtitlesEnabledGlobal = settings.subtitlesEnabled || false;
+
+  // Check per-segment subtitle override: if current time falls in a segment
+  // with subtitlesEnabled=false, hide subtitles for that region
+  const segmentSubsDisabled = useMemo(() => {
+    if (!segments || segments.length === 0) return false;
+    const absTime = currentTime;
+    for (const seg of segments) {
+      if (absTime >= seg.start && absTime < seg.end) {
+        return seg.subtitlesEnabled === false;
+      }
+    }
+    return false;
+  }, [segments, currentTime]);
+
+  const subtitlesEnabled = subtitlesEnabledGlobal && !segmentSubsDisabled;
 
   // Track container size for font scaling
   useEffect(() => {

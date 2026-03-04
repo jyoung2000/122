@@ -205,6 +205,7 @@ async def export_clip_endpoint(
                 export_quality=req.export_quality or "1080p",
                 volume=req.volume,
                 speed=req.speed,
+                segments=[s.model_dump() for s in req.segments] if req.segments else None,
             )
 
             elapsed = int(time.monotonic() - export_start)
@@ -341,11 +342,15 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                     "message": msg,
                 })
 
+            # Apply VideoEditor trim offsets for full video
+            fv_start = 0 + req.trim_start_offset
+            fv_end = job.duration - req.trim_end_offset
+
             output_path = await export_clip(
                 job_id=job_id,
                 video_path=job.file_path,
-                start=0,
-                end=job.duration,
+                start=fv_start,
+                end=fv_end,
                 clip_id=0,
                 clip_title=os.path.splitext(job.filename or "full_video")[0],
                 aspect_ratio=req.aspect_ratio,
@@ -359,6 +364,9 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                 progress_callback=_export_progress,
                 cancel_event=cancel_event,
                 export_quality=req.export_quality or "1080p",
+                volume=req.volume,
+                speed=req.speed,
+                segments=[s.model_dump() for s in req.segments] if req.segments else None,
             )
 
             elapsed = int(time.monotonic() - export_start)

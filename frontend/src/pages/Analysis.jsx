@@ -272,6 +272,7 @@ export default function Analysis() {
   const [editorTrim, setEditorTrim] = useState({ trimStart: 0, trimEnd: 0 });
   const [editorVolume, setEditorVolume] = useState(1.0);
   const [editorSpeed, setEditorSpeed] = useState(1.0);
+  const [editorSegments, setEditorSegments] = useState([]);
   // Track applied trim ranges so the trimmed region becomes the full video
   const [fullVideoRange, setFullVideoRange] = useState(null); // { start, end } for full video editor
   const [showInlineSubSettings, setShowInlineSubSettings] = useState(false);
@@ -555,11 +556,19 @@ export default function Analysis() {
         };
       }
     }
-    // Include VideoEditor trim/volume/speed params
+    // Include VideoEditor trim/volume/speed/segments params
     if (editorTrim.trimStart > 0) exportBody.trim_start_offset = editorTrim.trimStart;
     if (editorTrim.trimEnd > 0) exportBody.trim_end_offset = editorTrim.trimEnd;
     if (editorVolume !== 1.0) exportBody.volume = editorVolume;
     if (editorSpeed !== 1.0) exportBody.speed = editorSpeed;
+    if (editorSegments.length > 0) {
+      exportBody.segments = editorSegments.map(s => ({
+        start: s.start, end: s.end,
+        volume: (s.muted ? 0 : s.volume) / 100, // Convert to 0-2.0 gain
+        muted: s.muted,
+        subtitles_enabled: s.subtitlesEnabled,
+      }));
+    }
     encoding.startExport(jobId, clip.id, clip.title || `Clip ${clip.id}`, exportBody);
     showToast(`Exporting "${clip.title || `Clip ${clip.id}`}" at ${quality}...`, 'info');
   };
@@ -607,6 +616,14 @@ export default function Analysis() {
     if (editorTrim.trimEnd > 0) body.trim_end_offset = (body.trim_end_offset || 0) + editorTrim.trimEnd;
     if (editorVolume !== 1.0) body.volume = editorVolume;
     if (editorSpeed !== 1.0) body.speed = editorSpeed;
+    if (editorSegments.length > 0) {
+      body.segments = editorSegments.map(s => ({
+        start: s.start, end: s.end,
+        volume: (s.muted ? 0 : s.volume) / 100,
+        muted: s.muted,
+        subtitles_enabled: s.subtitlesEnabled,
+      }));
+    }
     encoding.startExport(jobId, 0, job.filename || 'Full Video', body, {
       endpoint: `/api/jobs/${jobId}/export-full-video`,
     });
@@ -1042,6 +1059,8 @@ export default function Analysis() {
               }}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
+              onSegmentsChange={setEditorSegments}
+              initialSegments={editorSegments}
               onClose={() => setClipPreview(null)}
               subtitleOverlay={
                 <SubtitleOverlay
@@ -1053,6 +1072,7 @@ export default function Analysis() {
                   aspectRatio={clipSettings.aspectRatio || null}
                   sourceWidth={sourceDims.w}
                   sourceHeight={sourceDims.h}
+                  segments={editorSegments}
                 />
               }
             />
@@ -1104,6 +1124,8 @@ export default function Analysis() {
               }}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
+              onSegmentsChange={setEditorSegments}
+              initialSegments={editorSegments}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={videoCurrentTime}
@@ -1114,6 +1136,7 @@ export default function Analysis() {
                   aspectRatio={clipSettings.aspectRatio || null}
                   sourceWidth={sourceDims.w}
                   sourceHeight={sourceDims.h}
+                  segments={editorSegments}
                 />
               }
             />
