@@ -425,7 +425,7 @@ input[type="range"]:focus::-webkit-slider-thumb {
 @media (max-width: 767px) {
   :root {
     --page-pad: 12px;
-    --bottom-nav-h: calc(68px + env(safe-area-inset-bottom, 0px));
+    --bottom-nav-h: calc(56px + env(safe-area-inset-bottom, 0px));
   }
 
   .main-content {
@@ -528,13 +528,14 @@ input[type="range"]:focus::-webkit-slider-thumb {
 
 /* Touch-friendly sizing */
 @media (pointer: coarse) {
-  input:not([type="range"]), select, textarea {
-    min-height: 44px;
+  input:not([type="range"]):not([type="color"]):not([type="number"]), select, textarea {
+    min-height: 40px;
     font-size: 16px !important;
   }
 
-  button {
-    min-height: 36px;
+  /* Number inputs and color pickers stay compact */
+  input[type="number"], input[type="color"] {
+    min-height: 32px;
   }
 
   /* Larger tap targets for links in nav */

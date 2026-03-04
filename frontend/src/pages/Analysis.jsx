@@ -1365,34 +1365,78 @@ export default function Analysis() {
         )}
       </div>
 
-      {/* Tabs */}
-      <div className="responsive-tabs" style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)', marginBottom: 24 }}>
-        {TABS.map((t, i) => (
-          <button
-            key={t}
-            onClick={() => setTab(i)}
-            style={{
-              padding: isMobile ? '10px 14px' : '10px 20px',
-              background: 'none',
-              border: 'none',
-              borderBottom: tab === i ? '2px solid var(--accent-cyan)' : '2px solid transparent',
-              color: tab === i ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-              fontSize: 13,
-              fontWeight: tab === i ? 600 : 400,
-              fontFamily: 'var(--font-mono)',
-              whiteSpace: 'nowrap',
-              flexShrink: 0,
-            }}
-          >
-            {t}
-            {i === 3 && job.clips?.length > 0 && (
-              <span style={{ marginLeft: 6, fontSize: 10, background: 'var(--accent-amber)', color: 'var(--bg-base)', padding: '1px 5px', borderRadius: 8, fontWeight: 700 }}>
-                {job.clips.length}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
+      {/* Tabs — iOS segmented control on mobile, standard tabs on desktop */}
+      {isMobile ? (
+        <div style={{
+          display: 'flex', gap: 2,
+          margin: '0 0 16px',
+          padding: 3,
+          background: 'var(--bg-elevated)',
+          borderRadius: 10,
+          overflow: 'hidden',
+        }}>
+          {TABS.map((t, i) => (
+            <button
+              key={t}
+              onClick={() => setTab(i)}
+              style={{
+                flex: 1,
+                padding: '8px 4px',
+                background: tab === i ? 'var(--bg-panel)' : 'transparent',
+                border: 'none',
+                borderRadius: 8,
+                color: tab === i ? 'var(--text-primary)' : 'var(--text-muted)',
+                fontSize: 11,
+                fontWeight: tab === i ? 600 : 400,
+                whiteSpace: 'nowrap',
+                transition: 'all 0.2s ease',
+                boxShadow: tab === i ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                position: 'relative',
+              }}
+            >
+              {i === 3 ? 'Clips' : t}
+              {i === 3 && job.clips?.length > 0 && (
+                <span style={{
+                  marginLeft: 3, fontSize: 9, fontWeight: 700,
+                  background: tab === i ? 'var(--accent-cyan)' : 'var(--accent-amber)',
+                  color: 'var(--bg-base)',
+                  padding: '1px 4px', borderRadius: 6,
+                }}>
+                  {job.clips.length}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="responsive-tabs" style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)', marginBottom: 24 }}>
+          {TABS.map((t, i) => (
+            <button
+              key={t}
+              onClick={() => setTab(i)}
+              style={{
+                padding: '10px 20px',
+                background: 'none',
+                border: 'none',
+                borderBottom: tab === i ? '2px solid var(--accent-cyan)' : '2px solid transparent',
+                color: tab === i ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+                fontSize: 13,
+                fontWeight: tab === i ? 600 : 400,
+                fontFamily: 'var(--font-mono)',
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+              }}
+            >
+              {t}
+              {i === 3 && job.clips?.length > 0 && (
+                <span style={{ marginLeft: 6, fontSize: 10, background: 'var(--accent-amber)', color: 'var(--bg-base)', padding: '1px 5px', borderRadius: 8, fontWeight: 700 }}>
+                  {job.clips.length}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Tab Content */}
       {tab === 0 && (
@@ -1597,26 +1641,28 @@ export default function Analysis() {
           {job.transcript?.length > 0 && job.scenes?.length > 0 && job.summary && (
             <div style={{
               display: 'flex',
-              gap: isMobile ? 10 : 16,
+              gap: isMobile ? 8 : 16,
               marginBottom: 16,
-              padding: isMobile ? '12px 14px' : '14px 18px',
+              padding: isMobile ? '12px' : '14px 18px',
               background: 'var(--bg-panel)',
               border: '1px solid var(--border)',
-              borderRadius: 'var(--radius-md)',
+              borderRadius: isMobile ? 14 : 'var(--radius-md)',
               alignItems: 'flex-end',
               flexWrap: 'wrap',
             }}>
               <div style={{ flex: isMobile ? '1 1 100%' : '0 0 auto', opacity: isGeneratingClips ? 0.5 : 1, pointerEvents: isGeneratingClips ? 'none' : 'auto', transition: 'opacity 0.3s' }}>
-                <div style={{
-                  fontSize: 11,
-                  fontFamily: 'var(--font-mono)',
-                  color: 'var(--text-primary)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em',
-                  marginBottom: 8,
-                }}>
-                  Find Viral Moments
-                </div>
+                {!isMobile && (
+                  <div style={{
+                    fontSize: 11,
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--text-primary)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    marginBottom: 8,
+                  }}>
+                    Find Viral Moments
+                  </div>
+                )}
                 <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
                     Clips
@@ -1808,49 +1854,50 @@ export default function Analysis() {
                   </div>
                 )}
                 {/* Clip Focus toggle */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10, width: '100%' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10, width: '100%' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Clip Focus</span>
                     <button
                       onClick={() => { if (!isGeneratingClips) setClipFocusEnabled(!clipFocusEnabled); }}
                       disabled={isGeneratingClips}
                       style={{
-                        width: 36, height: 20, borderRadius: 10, border: 'none',
+                        width: 42, height: 26, borderRadius: 13, border: 'none',
                         cursor: isGeneratingClips ? 'not-allowed' : 'pointer',
                         background: clipFocusEnabled ? 'var(--success)' : 'var(--border)',
-                        position: 'relative', transition: 'background 0.2s', flexShrink: 0,
+                        position: 'relative', transition: 'background 0.25s ease', flexShrink: 0,
                         opacity: isGeneratingClips ? 0.5 : 1,
                       }}
                     >
                       <div style={{
-                        width: 14, height: 14, borderRadius: '50%', background: 'white',
+                        width: 20, height: 20, borderRadius: '50%', background: 'white',
                         position: 'absolute', top: 3,
                         left: clipFocusEnabled ? 19 : 3,
-                        transition: 'left 0.2s',
+                        transition: 'left 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
                       }} />
                     </button>
                   </div>
                   {clipFocusEnabled && (
                     <textarea
-                      placeholder={"Try compound queries for best results:\n• \"funny cooking moments\"\n• \"emotional reveals\"\n• \"fighting scenes\""}
+                      placeholder={isMobile ? 'e.g. "funny cooking moments"' : "Try compound queries for best results:\n• \"funny cooking moments\"\n• \"emotional reveals\"\n• \"fighting scenes\""}
                       value={clipFocusText}
                       onChange={(e) => setClipFocusText(e.target.value)}
-                      rows={3}
+                      rows={isMobile ? 2 : 3}
                       disabled={isGeneratingClips}
                       style={{
-                        width: '100%', padding: '8px 10px', fontSize: 12,
-                        fontFamily: 'var(--font-mono)', background: 'var(--bg-elevated)',
+                        width: '100%', padding: '8px 10px', fontSize: 13,
+                        background: 'var(--bg-elevated)',
                         color: isGeneratingClips ? 'var(--text-muted)' : 'var(--text-primary)',
                         border: `1px solid ${isGeneratingClips ? 'var(--border)' : 'var(--success)'}`,
-                        borderRadius: 'var(--radius-sm)', outline: 'none',
-                        resize: 'vertical', minHeight: 60, lineHeight: 1.5,
+                        borderRadius: 'var(--radius-md)', outline: 'none',
+                        resize: 'none', minHeight: isMobile ? 44 : 60, lineHeight: 1.4,
                         opacity: isGeneratingClips ? 0.5 : 1,
                       }}
                     />
                   )}
-                  {clipFocusEnabled && (
+                  {clipFocusEnabled && !isMobile && (
                     <span style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.3 }}>
-                      AI finds clips matching your topic with semantic expansion and relevance scoring. Try compound queries like &quot;funny cooking moments&quot; or &quot;emotional reveals&quot;
+                      AI finds clips matching your topic with semantic expansion and relevance scoring.
                     </span>
                   )}
                 </div>
