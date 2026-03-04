@@ -150,6 +150,7 @@ export default function VideoEditor({
   clipEnd = 0,
   onTimeUpdate,
   onTrimChange,
+  onApplyTrim,
   onVolumeChange,
   onSpeedChange,
   aspectRatio,
@@ -727,7 +728,14 @@ export default function VideoEditor({
   const handleApplyTrim = useCallback(() => {
     setTrimApplied(true);
     onTrimChange?.({ trimStart: trimStartOffset, trimEnd: trimEndOffset });
-  }, [trimStartOffset, trimEndOffset, onTrimChange]);
+    // Notify parent to update clip boundaries so the trimmed range becomes the full video
+    if (onApplyTrim) {
+      onApplyTrim({ start: trimmedStart, end: trimmedEnd });
+      // Reset trim offsets since the clip boundaries are now narrower
+      setTrimStartOffset(0);
+      setTrimEndOffset(0);
+    }
+  }, [trimStartOffset, trimEndOffset, trimmedStart, trimmedEnd, onTrimChange, onApplyTrim]);
 
   // Reset applied state when trim handles change
   useEffect(() => {
@@ -1089,10 +1097,10 @@ export default function VideoEditor({
               title="Click to type a time"
             >
               {showTimecodeRemaining
-                ? `-${formatTimecode(Math.max(0, trimmedDur - elapsed))}`
-                : formatTimecode(elapsed)}
+                ? `-${formatTimecode(Math.max(0, (trimmedDur - elapsed) / speed))}`
+                : formatTimecode(elapsed / speed)}
               {' / '}
-              {formatTimecode(trimmedDur)}
+              {formatTimecode(trimmedDur / speed)}
             </span>
           )}
         </div>
@@ -1105,11 +1113,11 @@ export default function VideoEditor({
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="20 6 9 17 4 12" />
                 </svg>
-                Trim Applied · {formatTimeShort(trimmedDur)}
+                Trim Applied · {formatTimeShort(trimmedDur / speed)}
               </span>
             ) : (
               <button className="ve-apply-trim" onClick={(e) => { e.stopPropagation(); handleApplyTrim(); }} title="Apply trim to preview and export">
-                Apply Trim · {formatTimeShort(trimmedDur)}
+                Apply Trim · {formatTimeShort(trimmedDur / speed)}
               </button>
             )
           )}

@@ -952,7 +952,12 @@ export default function ClipPreview({
             </div>
             <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', marginTop: 2 }}>
               {formatTime(clipStart)} &rarr; {formatTime(clipEnd)}
-              <span style={{ marginLeft: 8, color: 'var(--text-secondary)' }}>({formatTime(clipDur)})</span>
+              <span style={{ marginLeft: 8, color: 'var(--text-secondary)' }}>({formatTime(clipDur / speed)})</span>
+              {speed !== 1.0 && (
+                <span style={{ marginLeft: 8, color: '#FFD60A', fontSize: 10 }}>
+                  {speed}x speed
+                </span>
+              )}
               {aspectRatio && (
                 <span style={{ marginLeft: 8, color: 'var(--accent-amber)', fontSize: 10 }}>
                   {aspectRatio}{isCrop ? ' (crop)' : ''}
@@ -1056,7 +1061,7 @@ export default function ClipPreview({
             fontFamily: 'var(--font-mono)', fontSize: 11,
             color: 'var(--text-secondary)', marginLeft: 2,
           }}>
-            {formatTime(elapsed)} / {formatTime(clipDur)}
+            {formatTime(elapsed / speed)} / {formatTime(clipDur / speed)}
           </span>
 
           <div style={{ flex: 1 }} />

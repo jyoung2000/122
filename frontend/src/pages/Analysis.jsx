@@ -272,6 +272,8 @@ export default function Analysis() {
   const [editorTrim, setEditorTrim] = useState({ trimStart: 0, trimEnd: 0 });
   const [editorVolume, setEditorVolume] = useState(1.0);
   const [editorSpeed, setEditorSpeed] = useState(1.0);
+  // Track applied trim ranges so the trimmed region becomes the full video
+  const [fullVideoRange, setFullVideoRange] = useState(null); // { start, end } for full video editor
   const [showInlineSubSettings, setShowInlineSubSettings] = useState(false);
   const [inlineCustomFonts, setInlineCustomFonts] = useState([]);
 
@@ -596,6 +598,15 @@ export default function Analysis() {
         active_word_bg_opacity: cs.activeWordBgOpacity ?? 0,
       };
     }
+    // Include trim/volume/speed from VideoEditor
+    if (fullVideoRange) {
+      body.trim_start_offset = fullVideoRange.start;
+      body.trim_end_offset = (job.duration || 0) - fullVideoRange.end;
+    }
+    if (editorTrim.trimStart > 0) body.trim_start_offset = (body.trim_start_offset || 0) + editorTrim.trimStart;
+    if (editorTrim.trimEnd > 0) body.trim_end_offset = (body.trim_end_offset || 0) + editorTrim.trimEnd;
+    if (editorVolume !== 1.0) body.volume = editorVolume;
+    if (editorSpeed !== 1.0) body.speed = editorSpeed;
     encoding.startExport(jobId, 0, job.filename || 'Full Video', body, {
       endpoint: `/api/jobs/${jobId}/export-full-video`,
     });
@@ -1023,6 +1034,11 @@ export default function Analysis() {
               initialSpeed={clipSettings.playbackSpeed}
               onTimeUpdate={setVideoCurrentTime}
               onTrimChange={setEditorTrim}
+              onApplyTrim={({ start, end }) => {
+                setClipPreview((prev) => prev ? { ...prev, start_time: start, end_time: end } : prev);
+                setEditorTrim({ trimStart: 0, trimEnd: 0 });
+                showToast('Trim applied — clip range updated', 'info');
+              }}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
               onClose={() => setClipPreview(null)}
@@ -1068,8 +1084,8 @@ export default function Analysis() {
           <div style={{ width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto' }}>
             <VideoEditor
               src={videoSrc}
-              clipStart={0}
-              clipEnd={job.duration || 0}
+              clipStart={fullVideoRange ? fullVideoRange.start : 0}
+              clipEnd={fullVideoRange ? fullVideoRange.end : (job.duration || 0)}
               title={job.filename || 'Full Video'}
               aspectRatio={clipSettings.aspectRatio || null}
               sourceWidth={sourceDims.w}
@@ -1080,14 +1096,19 @@ export default function Analysis() {
               initialSpeed={clipSettings.playbackSpeed}
               onTimeUpdate={setVideoCurrentTime}
               onTrimChange={setEditorTrim}
+              onApplyTrim={({ start, end }) => {
+                setFullVideoRange({ start, end });
+                setEditorTrim({ trimStart: 0, trimEnd: 0 });
+                showToast('Trim applied — video range updated', 'info');
+              }}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={videoCurrentTime}
                   transcript={job.transcript || []}
-                  clipStart={0}
-                  clipEnd={job.duration || 0}
+                  clipStart={fullVideoRange ? fullVideoRange.start : 0}
+                  clipEnd={fullVideoRange ? fullVideoRange.end : (job.duration || 0)}
                   settings={clipSettings}
                   aspectRatio={clipSettings.aspectRatio || null}
                   sourceWidth={sourceDims.w}
