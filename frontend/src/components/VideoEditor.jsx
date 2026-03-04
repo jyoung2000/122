@@ -293,7 +293,7 @@ export default function VideoEditor({
     const next = [...segments, newSeg].sort((a, b) => a.start - b.start);
     setSegments(next);
     onSegmentsChange?.(next);
-  }, [trimStartOffset, trimEndOffset, clipStart, effectiveClipEnd, volume, isMuted, segments, onSegmentsChange]);
+  }, [trimStartOffset, trimEndOffset, clipStart, effectiveClipEnd, volume, isMuted, speed, segments, onSegmentsChange]);
 
   const removeSegment = useCallback((segId) => {
     const next = segments.filter(s => s.id !== segId);

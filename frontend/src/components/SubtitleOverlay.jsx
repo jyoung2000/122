@@ -193,20 +193,22 @@ export default function SubtitleOverlay({
 
   const subtitlesEnabledGlobal = settings.subtitlesEnabled || false;
 
-  // Check per-segment subtitle override: if current time falls in a segment
-  // with subtitlesEnabled=false, hide subtitles for that region
-  const segmentSubsDisabled = useMemo(() => {
-    if (!segments || segments.length === 0) return false;
+  // Per-segment subtitle override: segment's subtitlesEnabled takes precedence
+  // over the global toggle when the playhead is inside a segment.
+  // This allows segments to ENABLE subtitles even when global is off, and
+  // vice versa — each segment controls its own subtitle visibility.
+  const subtitlesEnabled = useMemo(() => {
+    if (!segments || segments.length === 0) return subtitlesEnabledGlobal;
     const absTime = currentTime;
     for (const seg of segments) {
       if (absTime >= seg.start && absTime < seg.end) {
-        return seg.subtitlesEnabled === false;
+        // Segment has explicit subtitlesEnabled — use it directly
+        return seg.subtitlesEnabled !== false;
       }
     }
-    return false;
-  }, [segments, currentTime]);
-
-  const subtitlesEnabled = subtitlesEnabledGlobal && !segmentSubsDisabled;
+    // Not inside any segment — use global setting
+    return subtitlesEnabledGlobal;
+  }, [segments, currentTime, subtitlesEnabledGlobal]);
 
   // Track container size for font scaling
   useEffect(() => {

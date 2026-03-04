@@ -151,7 +151,8 @@ class ExportRequest(BaseModel):
     clip_id: int
     clip_title: Optional[str] = None  # optional title — used as export filename
     aspect_ratio: Optional[str] = None  # "16:9" | "9:16" | "1:1" | "4:5" | None=source
-    subtitles_enabled: bool = False
+    subtitles_enabled: bool = False    # True if ANY subtitles needed (global or per-segment)
+    global_subtitles_enabled: Optional[bool] = None  # Original global toggle (before segment overrides)
     subtitle_settings: Optional[SubtitleSettings] = None
     export_quality: str = "1080p"  # "720p" | "1080p" | "4k"
     # VideoEditor params — applied during FFmpeg export
@@ -164,7 +165,8 @@ class ExportRequest(BaseModel):
 
 class FullVideoExportRequest(BaseModel):
     aspect_ratio: Optional[str] = None  # "16:9" | "9:16" | "1:1" | "4:5" | None=source
-    subtitles_enabled: bool = False
+    subtitles_enabled: bool = False    # True if ANY subtitles needed (global or per-segment)
+    global_subtitles_enabled: Optional[bool] = None  # Original global toggle (before segment overrides)
     subtitle_settings: Optional[SubtitleSettings] = None
     export_quality: str = "1080p"  # "720p" | "1080p" | "4k"
     # VideoEditor params — applied during FFmpeg export

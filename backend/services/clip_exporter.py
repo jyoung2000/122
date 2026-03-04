@@ -1436,22 +1436,23 @@ def _extract_force_style_from_ass(ass_content: str) -> str:
     return ""
 
 
+def _ass_time_to_sec(t: str) -> float:
+    """Parse ASS timestamp 'H:MM:SS.cc' to seconds."""
+    parts = t.strip().split(":")
+    h = int(parts[0])
+    m = int(parts[1])
+    s_cc = parts[2].split(".")
+    s = int(s_cc[0])
+    cs = int(s_cc[1]) if len(s_cc) > 1 else 0
+    return h * 3600 + m * 60 + s + cs / 100.0
+
+
 def _filter_ass_by_segments(ass_content: str, subs_off_ranges: list[tuple[float, float]]) -> str:
     """Remove ASS Dialogue lines that overlap with subtitle-off time ranges.
 
     subs_off_ranges: list of (start, end) in clip-relative seconds where subs should be hidden.
     """
     import re
-
-    def _ass_time_to_sec(t: str) -> float:
-        """Parse ASS timestamp 'H:MM:SS.cc' to seconds."""
-        parts = t.strip().split(":")
-        h = int(parts[0])
-        m = int(parts[1])
-        s_cc = parts[2].split(".")
-        s = int(s_cc[0])
-        cs = int(s_cc[1]) if len(s_cc) > 1 else 0
-        return h * 3600 + m * 60 + s + cs / 100.0
 
     lines = ass_content.split("\n")
     result = []
@@ -1468,6 +1469,34 @@ def _filter_ass_by_segments(ass_content: str, subs_off_ranges: list[tuple[float,
                     skip = True
                     break
             if skip:
+                continue
+        result.append(line)
+    return "\n".join(result)
+
+
+def _filter_ass_keep_only_ranges(ass_content: str, subs_on_ranges: list[tuple[float, float]]) -> str:
+    """Keep only ASS Dialogue lines that overlap with subtitle-on time ranges.
+
+    Used when global subtitles are off but specific segments have subtitles enabled.
+    subs_on_ranges: list of (start, end) in clip-relative seconds where subs should be shown.
+    """
+    import re
+
+    lines = ass_content.split("\n")
+    result = []
+    dialogue_re = re.compile(r"^Dialogue:\s*\d+,\s*(\d+:\d+:\d+\.\d+),\s*(\d+:\d+:\d+\.\d+),")
+    for line in lines:
+        match = dialogue_re.match(line)
+        if match:
+            d_start = _ass_time_to_sec(match.group(1))
+            d_end = _ass_time_to_sec(match.group(2))
+            # Only keep if this dialogue overlaps with a subs-on range
+            keep = False
+            for on_start, on_end in subs_on_ranges:
+                if d_start < on_end and d_end > on_start:
+                    keep = True
+                    break
+            if not keep:
                 continue
         result.append(line)
     return "\n".join(result)
@@ -1646,6 +1675,7 @@ async def export_clip(
     volume: float = 1.0,
     speed: float = 1.0,
     segments: list | None = None,
+    global_subtitles_enabled: bool | None = None,
 ) -> str:
     """Export a clip from video using FFmpeg.
 
@@ -1814,14 +1844,32 @@ async def export_clip(
             )
 
             if ass_content:
-                # Filter out subtitle dialogue lines for segments with subtitles_enabled=false
+                # Filter ASS dialogue lines based on per-segment subtitle overrides.
+                # Two modes:
+                # 1. Global subs ON: remove dialogue in segments with subtitles_enabled=false
+                # 2. Global subs OFF (enabled by segment overrides): keep ONLY dialogue
+                #    in segments with subtitles_enabled=true
                 if has_segments:
-                    subs_off_ranges = [
-                        (seg["start"] - start, seg["end"] - start)
-                        for seg in segments
-                        if not seg.get("subtitles_enabled", True)
-                    ]
-                    if subs_off_ranges:
+                    # Use the original global toggle to determine base behavior.
+                    # Falls back to subtitles_enabled if not provided (backwards compat).
+                    global_subs = global_subtitles_enabled if global_subtitles_enabled is not None else subtitles_enabled
+                    subs_on_segs = [seg for seg in segments if seg.get("subtitles_enabled", True)]
+                    subs_off_segs = [seg for seg in segments if not seg.get("subtitles_enabled", True)]
+
+                    if not global_subs and subs_on_segs:
+                        # Global subs off but some segments have subs on —
+                        # keep only dialogue within subs-on segment ranges
+                        subs_on_ranges = [
+                            (max(0, seg["start"] - start), min(end - start, seg["end"] - start))
+                            for seg in subs_on_segs
+                        ]
+                        ass_content = _filter_ass_keep_only_ranges(ass_content, subs_on_ranges)
+                    elif subs_off_segs:
+                        # Global subs on — remove dialogue in subs-off segment ranges
+                        subs_off_ranges = [
+                            (seg["start"] - start, seg["end"] - start)
+                            for seg in subs_off_segs
+                        ]
                         ass_content = _filter_ass_by_segments(ass_content, subs_off_ranges)
 
                 ass_path = os.path.join(output_dir, f"clip_{clip_id}_sub.ass")

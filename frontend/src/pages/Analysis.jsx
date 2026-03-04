@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import VideoPlayer from '../components/VideoPlayer';
 import ClipPreview from '../components/ClipPreview';
@@ -273,6 +273,8 @@ export default function Analysis() {
   const [editorVolume, setEditorVolume] = useState(1.0);
   const [editorSpeed, setEditorSpeed] = useState(1.0);
   const [editorSegments, setEditorSegments] = useState([]);
+  // Persist segments per clip ID so switching clips doesn't lose segments
+  const clipSegmentsMapRef = useRef({});
   // Track applied trim ranges so the trimmed region becomes the full video
   const [fullVideoRange, setFullVideoRange] = useState(null); // { start, end } for full video editor
   const [showInlineSubSettings, setShowInlineSubSettings] = useState(false);
@@ -500,6 +502,13 @@ export default function Analysis() {
   }, [tab]);
 
   const handleClipPreview = (clip) => {
+    // Save current clip's segments before switching
+    if (clipPreview) {
+      clipSegmentsMapRef.current[clipPreview.id] = editorSegments;
+    }
+    // Restore segments for the new clip (if any were previously saved)
+    const savedSegments = clipSegmentsMapRef.current[clip.id] || [];
+    setEditorSegments(savedSegments);
     setClipPreview(clip);
     handleSeek(clip.start_time);
     setTab(3);
@@ -527,8 +536,13 @@ export default function Analysis() {
       if (cs.aspectRatio) {
         exportBody.aspect_ratio = cs.aspectRatio;
       }
-      exportBody.subtitles_enabled = cs.subtitlesEnabled || false;
-      if (cs.subtitlesEnabled) {
+      // Enable subtitles if global is on OR any segment has subtitles enabled
+      const globalSubsOn = cs.subtitlesEnabled || false;
+      const anySegmentSubsOn = editorSegments.some(s => s.subtitlesEnabled !== false);
+      const needsSubtitles = globalSubsOn || anySegmentSubsOn;
+      exportBody.subtitles_enabled = needsSubtitles;
+      exportBody.global_subtitles_enabled = globalSubsOn;
+      if (needsSubtitles) {
         exportBody.subtitle_settings = {
           font: cs.subtitleFont || 'DM Sans',
           size: cs.subtitleSize ?? 30,
@@ -580,8 +594,12 @@ export default function Analysis() {
     const quality = cs?.exportQuality || '1080p';
     const body = { export_quality: quality };
     if (cs?.aspectRatio) body.aspect_ratio = cs.aspectRatio;
-    body.subtitles_enabled = cs?.subtitlesEnabled || false;
-    if (cs?.subtitlesEnabled) {
+    const fvGlobalSubsOn = cs?.subtitlesEnabled || false;
+    const fvAnySegmentSubsOn = editorSegments.some(s => s.subtitlesEnabled !== false);
+    const fvNeedsSubtitles = fvGlobalSubsOn || fvAnySegmentSubsOn;
+    body.subtitles_enabled = fvNeedsSubtitles;
+    body.global_subtitles_enabled = fvGlobalSubsOn;
+    if (fvNeedsSubtitles) {
       body.subtitle_settings = {
         font: cs.subtitleFont || 'DM Sans',
         size: cs.subtitleSize ?? 30,
@@ -818,6 +836,28 @@ export default function Analysis() {
   });
   const updateCS = (key, val) => setClipSettings(prev => ({ ...prev, [key]: val }));
 
+  // Determine if playhead is inside a segment — used for segment-aware subs toggle
+  const activeSegment = useMemo(() => {
+    if (!editorSegments || editorSegments.length === 0) return null;
+    return editorSegments.find(s => videoCurrentTime >= s.start && videoCurrentTime < s.end) || null;
+  }, [editorSegments, videoCurrentTime]);
+
+  // Effective subs state: active segment's subtitlesEnabled takes precedence over global
+  const effectiveSubsEnabled = activeSegment ? (activeSegment.subtitlesEnabled !== false) : clipSettings.subtitlesEnabled;
+
+  const handleSubsToggle = () => {
+    if (activeSegment) {
+      // Toggle the active segment's subtitlesEnabled
+      const newVal = activeSegment.subtitlesEnabled === false; // flip: false→true, true/undefined→false
+      setEditorSegments(prev =>
+        prev.map(s => s.id === activeSegment.id ? { ...s, subtitlesEnabled: newVal } : s)
+      );
+    } else {
+      // Toggle global subtitles
+      updateCS('subtitlesEnabled', !clipSettings.subtitlesEnabled);
+    }
+  };
+
   const renderInlineSubToolbar = (extraLeft) => (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
@@ -827,19 +867,19 @@ export default function Analysis() {
     }}>
       {extraLeft}
       <button
-        onClick={() => updateCS('subtitlesEnabled', !clipSettings.subtitlesEnabled)}
+        onClick={handleSubsToggle}
         style={{
           display: 'flex', alignItems: 'center', gap: 4,
           padding: '5px 10px', fontSize: 11, fontWeight: 600,
-          background: clipSettings.subtitlesEnabled ? 'var(--accent-cyan-dim)' : 'var(--bg-elevated)',
-          color: clipSettings.subtitlesEnabled ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-          border: `1px solid ${clipSettings.subtitlesEnabled ? 'var(--accent-cyan)' : 'var(--border)'}`,
+          background: effectiveSubsEnabled ? 'var(--accent-cyan-dim)' : 'var(--bg-elevated)',
+          color: effectiveSubsEnabled ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+          border: `1px solid ${effectiveSubsEnabled ? 'var(--accent-cyan)' : 'var(--border)'}`,
           borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
         }}>
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
           <rect x="1" y="4" width="22" height="16" rx="2" /><line x1="1" y1="14" x2="23" y2="14" />
         </svg>
-        Subs {clipSettings.subtitlesEnabled ? 'On' : 'Off'}
+        {activeSegment ? 'Segment ' : ''}Subs {effectiveSubsEnabled ? 'On' : 'Off'}
       </button>
       {!isMobile && (
         <button
@@ -1062,9 +1102,17 @@ export default function Analysis() {
               onAspectRatioChange={(ar) => setClipSettings((prev) => ({ ...prev, aspectRatio: ar }))}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
-              onSegmentsChange={setEditorSegments}
+              onSegmentsChange={(segs) => {
+                setEditorSegments(segs);
+                if (clipPreview) clipSegmentsMapRef.current[clipPreview.id] = segs;
+              }}
               initialSegments={editorSegments}
-              onClose={() => setClipPreview(null)}
+              onClose={() => {
+                if (clipPreview) {
+                  clipSegmentsMapRef.current[clipPreview.id] = editorSegments;
+                }
+                setClipPreview(null);
+              }}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={videoCurrentTime}
