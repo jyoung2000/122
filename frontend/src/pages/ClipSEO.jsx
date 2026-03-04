@@ -161,6 +161,7 @@ export default function ClipSEO() {
   const [editorTrim, setEditorTrim] = useState({ trimStart: 0, trimEnd: 0 });
   const [editorVolume, setEditorVolume] = useState(1.0);
   const [editorSpeed, setEditorSpeed] = useState(1.0);
+  const [editorSegments, setEditorSegments] = useState([]);
   const [showInlineSubSettings, setShowInlineSubSettings] = useState(false);
 
   // Layout mode: 'editor' = full-width NLE above, 'sidebyside' = player left + transcript right
@@ -592,6 +593,10 @@ export default function ClipSEO() {
 
   const handleExport = useCallback(() => {
     if (startTime === null || endTime === null) return;
+    // Enable subtitles if global is on OR any segment has subtitles enabled
+    const globalSubsOn = subtitlesEnabled || false;
+    const anySegmentSubsOn = editorSegments.some(s => s.subtitlesEnabled !== false);
+    const needsSubtitles = globalSubsOn || anySegmentSubsOn;
     const body = {
       start: startTime,
       end: endTime,
@@ -599,9 +604,10 @@ export default function ClipSEO() {
       clip_title: clip?.title || `Clip ${clipId}`,
       aspect_ratio: aspectRatio,
       export_quality: exportQuality || '1080p',
-      subtitles_enabled: subtitlesEnabled,
+      subtitles_enabled: needsSubtitles,
+      global_subtitles_enabled: globalSubsOn,
     };
-    if (subtitlesEnabled) {
+    if (needsSubtitles) {
       body.subtitle_settings = {
         font: subtitleFont,
         size: subtitleSize,
@@ -628,14 +634,23 @@ export default function ClipSEO() {
         active_word_bg_opacity: activeWordBgOpacity,
       };
     }
-    // Include VideoEditor trim/volume/speed params
+    // Include VideoEditor trim/volume/speed/segments params
     if (editorTrim.trimStart > 0) body.trim_start_offset = editorTrim.trimStart;
     if (editorTrim.trimEnd > 0) body.trim_end_offset = editorTrim.trimEnd;
     if (editorVolume !== 1.0) body.volume = editorVolume;
     if (editorSpeed !== 1.0) body.speed = editorSpeed;
+    if (editorSegments.length > 0) {
+      body.segments = editorSegments.map(s => ({
+        start: s.start, end: s.end,
+        volume: (s.muted ? 0 : s.volume) / 100,
+        muted: s.muted,
+        subtitles_enabled: s.subtitlesEnabled,
+        speed: s.speed || 1.0,
+      }));
+    }
     encoding.startExport(jobId, parseInt(clipId), clip?.title || `Clip ${clipId}`, body);
     showToast(`Exporting "${clip?.title || `Clip ${clipId}`}"...`, 'info');
-  }, [jobId, clipId, clip, startTime, endTime, clipSettings, encoding, editorTrim, editorVolume, editorSpeed]);
+  }, [jobId, clipId, clip, startTime, endTime, clipSettings, encoding, editorTrim, editorVolume, editorSpeed, editorSegments]);
 
   const handleApplySettings = useCallback((applied) => {
     setClipSettings(applied);
@@ -644,6 +659,26 @@ export default function ClipSEO() {
     settingsFlashTimerRef.current = setTimeout(() => setSettingsAppliedFlash(false), 1800);
     showToast('Settings applied to preview & export', 'success');
   }, []);
+
+  // Determine if playhead is inside a segment — used for segment-aware subs toggle.
+  // MUST be before early returns to satisfy Rules of Hooks.
+  const activeSegment = useMemo(() => {
+    if (!editorSegments || editorSegments.length === 0) return null;
+    return editorSegments.find(s => currentTime >= s.start && currentTime < s.end) || null;
+  }, [editorSegments, currentTime]);
+
+  const effectiveSubsEnabled = activeSegment ? (activeSegment.subtitlesEnabled !== false) : subtitlesEnabled;
+
+  const handleSubsToggle = useCallback(() => {
+    if (activeSegment) {
+      const newVal = activeSegment.subtitlesEnabled === false;
+      setEditorSegments(prev =>
+        prev.map(s => s.id === activeSegment.id ? { ...s, subtitlesEnabled: newVal } : s)
+      );
+    } else {
+      setClipSettings(prev => ({ ...prev, subtitlesEnabled: !prev.subtitlesEnabled }));
+    }
+  }, [activeSegment]);
 
   const copyToClipboard = (text, label) => {
     navigator.clipboard.writeText(text).then(() => {
@@ -795,6 +830,8 @@ export default function ClipSEO() {
               onTrimChange={setEditorTrim}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
+              onSegmentsChange={setEditorSegments}
+              initialSegments={editorSegments}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={currentTime}
@@ -805,6 +842,7 @@ export default function ClipSEO() {
                   aspectRatio={aspectRatio}
                   sourceWidth={sourceDims.w}
                   sourceHeight={sourceDims.h}
+                  segments={editorSegments}
                 />
               }
             />
@@ -858,22 +896,22 @@ export default function ClipSEO() {
 
               <div style={{ width: 1, height: 20, background: 'var(--border)', margin: '0 4px' }} />
 
-              {/* Subtitles toggle */}
+              {/* Subtitles toggle — segment-aware */}
               <button
-                onClick={() => setClipSettings(prev => ({ ...prev, subtitlesEnabled: !prev.subtitlesEnabled }))}
+                onClick={handleSubsToggle}
                 style={{
                   display: 'flex', alignItems: 'center', gap: 4,
                   padding: '5px 10px', fontSize: 11, fontWeight: 600,
-                  background: subtitlesEnabled ? 'var(--accent-cyan-dim)' : 'var(--bg-elevated)',
-                  color: subtitlesEnabled ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-                  border: `1px solid ${subtitlesEnabled ? 'var(--accent-cyan)' : 'var(--border)'}`,
+                  background: effectiveSubsEnabled ? 'var(--accent-cyan-dim)' : 'var(--bg-elevated)',
+                  color: effectiveSubsEnabled ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+                  border: `1px solid ${effectiveSubsEnabled ? 'var(--accent-cyan)' : 'var(--border)'}`,
                   borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
                 }}
               >
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <rect x="1" y="4" width="22" height="16" rx="2" /><line x1="1" y1="14" x2="23" y2="14" />
                 </svg>
-                Subs {subtitlesEnabled ? 'On' : 'Off'}
+                {activeSegment ? 'Segment ' : ''}Subs {effectiveSubsEnabled ? 'On' : 'Off'}
               </button>
 
               {/* Subtitle settings expand */}
@@ -1006,6 +1044,8 @@ export default function ClipSEO() {
               onTrimChange={setEditorTrim}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
+              onSegmentsChange={setEditorSegments}
+              initialSegments={editorSegments}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={currentTime}
@@ -1016,6 +1056,7 @@ export default function ClipSEO() {
                   aspectRatio={aspectRatio}
                   sourceWidth={sourceDims.w}
                   sourceHeight={sourceDims.h}
+                  segments={editorSegments}
                 />
               }
               compact
@@ -1036,14 +1077,14 @@ export default function ClipSEO() {
                 }}>Export {exportQuality || '1080p'}</button>
               )}
               <button
-                onClick={() => setClipSettings(prev => ({ ...prev, subtitlesEnabled: !prev.subtitlesEnabled }))}
+                onClick={handleSubsToggle}
                 style={{
                   padding: '4px 8px', fontSize: 10, fontWeight: 600,
-                  background: subtitlesEnabled ? 'var(--accent-cyan-dim)' : 'var(--bg-elevated)',
-                  color: subtitlesEnabled ? 'var(--accent-cyan)' : 'var(--text-muted)',
-                  border: `1px solid ${subtitlesEnabled ? 'var(--accent-cyan)' : 'var(--border)'}`,
+                  background: effectiveSubsEnabled ? 'var(--accent-cyan-dim)' : 'var(--bg-elevated)',
+                  color: effectiveSubsEnabled ? 'var(--accent-cyan)' : 'var(--text-muted)',
+                  border: `1px solid ${effectiveSubsEnabled ? 'var(--accent-cyan)' : 'var(--border)'}`,
                   borderRadius: 'var(--radius-xs)', cursor: 'pointer',
-                }}>Subs {subtitlesEnabled ? 'On' : 'Off'}</button>
+                }}>{activeSegment ? 'Seg ' : ''}Subs {effectiveSubsEnabled ? 'On' : 'Off'}</button>
             </div>
           </div>
           {/* Right: transcript */}
