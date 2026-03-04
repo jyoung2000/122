@@ -142,6 +142,7 @@ class SegmentSettings(BaseModel):
     volume: float = 1.0   # 0.0 to 2.0 gain
     muted: bool = False
     subtitles_enabled: bool = True
+    speed: float = 1.0    # 0.25 to 4.0 playback speed
 
 
 class ExportRequest(BaseModel):

@@ -567,6 +567,7 @@ export default function Analysis() {
         volume: (s.muted ? 0 : s.volume) / 100, // Convert to 0-2.0 gain
         muted: s.muted,
         subtitles_enabled: s.subtitlesEnabled,
+        speed: s.speed || 1.0,
       }));
     }
     encoding.startExport(jobId, clip.id, clip.title || `Clip ${clip.id}`, exportBody);
@@ -622,6 +623,7 @@ export default function Analysis() {
         volume: (s.muted ? 0 : s.volume) / 100,
         muted: s.muted,
         subtitles_enabled: s.subtitlesEnabled,
+        speed: s.speed || 1.0,
       }));
     }
     encoding.startExport(jobId, 0, job.filename || 'Full Video', body, {
