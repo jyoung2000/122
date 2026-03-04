@@ -242,6 +242,11 @@ export default function VideoEditor({
   const [hoverTime, setHoverTime] = useState(null);
   const [hoverX, setHoverX] = useState(0);
 
+  // Segment time editing state — which segment field is being edited
+  const [editingSegTime, setEditingSegTime] = useState(null); // { segId, field: 'start'|'end' }
+  const [segTimeInput, setSegTimeInput] = useState('');
+  const segTimeInputRef = useRef(null);
+
   // Derived: the currently selected segment object (or null)
   const selectedSegment = useMemo(
     () => segments.find(s => s.id === selectedSegmentId) || null,
@@ -329,6 +334,28 @@ export default function VideoEditor({
   const deselectSegment = useCallback(() => {
     setSelectedSegmentId(null);
   }, []);
+
+  // Commit an inline segment time edit
+  const commitSegTimeEdit = useCallback(() => {
+    if (!editingSegTime) return;
+    const parsed = parseTimecodeInput(segTimeInput);
+    if (parsed == null) { setEditingSegTime(null); return; }
+    const absTime = clipStart + parsed; // user types relative time
+    const seg = segments.find(s => s.id === editingSegTime.segId);
+    if (!seg) { setEditingSegTime(null); return; }
+    const field = editingSegTime.field;
+    let newStart = field === 'start' ? absTime : seg.start;
+    let newEnd = field === 'end' ? absTime : seg.end;
+    // Validate: clamp to clip range, ensure min 0.5s duration
+    newStart = Math.max(clipStart, Math.min(effectiveClipEnd - 0.5, newStart));
+    newEnd = Math.max(clipStart + 0.5, Math.min(effectiveClipEnd, newEnd));
+    if (newEnd - newStart < 0.5) {
+      if (field === 'start') newStart = newEnd - 0.5;
+      else newEnd = newStart + 0.5;
+    }
+    updateSegment(editingSegTime.segId, { start: newStart, end: newEnd });
+    setEditingSegTime(null);
+  }, [editingSegTime, segTimeInput, clipStart, effectiveClipEnd, segments, updateSegment]);
 
   // ── Reset on new clip ──────────────────────────────
   useEffect(() => {
@@ -1597,10 +1624,10 @@ export default function VideoEditor({
         </div>
         </div>{/* close AUDIO track-label wrapper */}
 
-        {/* ── Segment controls ── */}
+        {/* ── Segment controls with editable time inputs ── */}
         {(segments.length > 0 || hasTrim) && (
           <div style={{
-            display: 'flex', alignItems: 'center', gap: 6, padding: '4px 0',
+            display: 'flex', alignItems: 'flex-start', gap: 6, padding: '4px 0',
             flexWrap: 'wrap', fontSize: 10,
           }}>
             {hasTrim && (
@@ -1613,7 +1640,7 @@ export default function VideoEditor({
                   color: 'var(--accent-cyan, #0A84FF)',
                   border: '1px solid var(--accent-cyan, #0A84FF)',
                   borderRadius: 'var(--radius-xs, 4px)', cursor: 'pointer',
-                  whiteSpace: 'nowrap',
+                  whiteSpace: 'nowrap', alignSelf: 'center',
                 }}
                 title="Save current selection as a segment with current volume/mute settings"
               >
@@ -1622,90 +1649,219 @@ export default function VideoEditor({
             )}
             {segments.map(seg => {
               const isSelected = selectedSegmentId === seg.id;
+              const isEditingStart = editingSegTime?.segId === seg.id && editingSegTime?.field === 'start';
+              const isEditingEnd = editingSegTime?.segId === seg.id && editingSegTime?.field === 'end';
+              const segDur = seg.end - seg.start;
               return (
               <div
                 key={seg.id}
                 onClick={(e) => { e.stopPropagation(); setSelectedSegmentId(isSelected ? null : seg.id); }}
                 style={{
-                  display: 'flex', alignItems: 'center', gap: 3,
-                  padding: '2px 6px', cursor: 'pointer',
-                  background: isSelected ? 'rgba(10,132,255,0.12)' : seg.muted ? 'rgba(255,59,48,0.08)' : 'var(--bg-elevated, #f5f5f5)',
+                  display: 'flex', flexDirection: 'column', gap: 2,
+                  padding: isSelected ? '4px 8px' : '2px 6px', cursor: 'pointer',
+                  background: isSelected ? 'rgba(10,132,255,0.08)' : seg.muted ? 'rgba(255,59,48,0.05)' : 'var(--bg-elevated, #f5f5f5)',
                   border: `1.5px solid ${isSelected ? 'var(--accent-cyan, #0A84FF)' : seg.muted ? 'rgba(255,59,48,0.3)' : 'var(--border, #ddd)'}`,
                   borderRadius: 'var(--radius-xs, 4px)',
                   fontSize: 9, color: 'var(--text-secondary, #666)',
-                  outline: isSelected ? '1px solid rgba(10,132,255,0.3)' : 'none',
+                  outline: isSelected ? '2px solid rgba(10,132,255,0.2)' : 'none',
                   transition: 'all 0.15s ease',
+                  minWidth: isSelected ? 150 : undefined,
                 }}
-                title={isSelected ? 'Click to deselect — controls apply to this segment' : 'Click to select — controls will apply to this segment'}
+                title={isSelected ? 'Editing — controls apply to this segment' : 'Click to select and edit this segment'}
               >
-                {isSelected && <span style={{ fontSize: 8, fontWeight: 700, color: 'var(--accent-cyan, #0A84FF)', marginRight: 1 }}>EDITING</span>}
-                <span style={{ fontFamily: 'var(--font-mono, monospace)' }}>
-                  {formatTimeShort(seg.start - clipStart)}–{formatTimeShort(seg.end - clipStart)}
-                </span>
-                <span style={{ fontSize: 8, color: 'var(--text-muted, #999)' }}>
-                  {seg.muted ? 'muted' : `${seg.volume}%`}
-                  {seg.speed && Math.abs(seg.speed - 1.0) > 0.001 ? ` · ${seg.speed}x` : ''}
-                  {!seg.subtitlesEnabled ? ' · no subs' : ''}
-                </span>
-                <button
-                  onClick={(e) => { e.stopPropagation(); removeSegment(seg.id); if (isSelected) setSelectedSegmentId(null); }}
-                  style={{
-                    padding: '0 3px', fontSize: 11, fontWeight: 700, lineHeight: 1,
-                    background: 'transparent', color: 'var(--text-muted, #999)',
-                    border: 'none', borderRadius: 2, cursor: 'pointer',
-                  }}
-                  title="Remove segment"
-                >
-                  ×
-                </button>
+                {/* Row 1: time range (editable when selected) + remove button */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
+                  {isSelected && <span style={{ fontSize: 7, fontWeight: 700, color: 'var(--accent-cyan, #0A84FF)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>SEG</span>}
+                  {/* Start time */}
+                  {isSelected && !isEditingStart ? (
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSegTimeInput(formatTimeShort(seg.start - clipStart));
+                        setEditingSegTime({ segId: seg.id, field: 'start' });
+                        setTimeout(() => segTimeInputRef.current?.select(), 0);
+                      }}
+                      style={{
+                        fontFamily: 'var(--font-mono, monospace)', cursor: 'text',
+                        padding: '1px 3px', borderRadius: 2,
+                        background: 'rgba(10,132,255,0.08)', border: '1px solid rgba(10,132,255,0.2)',
+                      }}
+                      title="Click to type start time"
+                    >
+                      {formatTimeShort(seg.start - clipStart)}
+                    </span>
+                  ) : isEditingStart ? (
+                    <input
+                      ref={segTimeInputRef}
+                      type="text"
+                      value={segTimeInput}
+                      onChange={(e) => setSegTimeInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitSegTimeEdit();
+                        else if (e.key === 'Escape') setEditingSegTime(null);
+                        e.stopPropagation();
+                      }}
+                      onBlur={commitSegTimeEdit}
+                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        width: 42, padding: '1px 3px', fontSize: 9,
+                        fontFamily: 'var(--font-mono, monospace)', textAlign: 'center',
+                        border: '1px solid var(--accent-cyan, #0A84FF)',
+                        borderRadius: 2, outline: 'none',
+                        background: 'var(--bg-elevated, rgba(0,0,0,0.1))',
+                        color: 'var(--text-primary, #333)',
+                      }}
+                      autoFocus
+                    />
+                  ) : (
+                    <span style={{ fontFamily: 'var(--font-mono, monospace)' }}>
+                      {formatTimeShort(seg.start - clipStart)}
+                    </span>
+                  )}
+                  <span style={{ color: 'var(--text-muted, #999)' }}>–</span>
+                  {/* End time */}
+                  {isSelected && !isEditingEnd ? (
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSegTimeInput(formatTimeShort(seg.end - clipStart));
+                        setEditingSegTime({ segId: seg.id, field: 'end' });
+                        setTimeout(() => segTimeInputRef.current?.select(), 0);
+                      }}
+                      style={{
+                        fontFamily: 'var(--font-mono, monospace)', cursor: 'text',
+                        padding: '1px 3px', borderRadius: 2,
+                        background: 'rgba(10,132,255,0.08)', border: '1px solid rgba(10,132,255,0.2)',
+                      }}
+                      title="Click to type end time"
+                    >
+                      {formatTimeShort(seg.end - clipStart)}
+                    </span>
+                  ) : isEditingEnd ? (
+                    <input
+                      ref={segTimeInputRef}
+                      type="text"
+                      value={segTimeInput}
+                      onChange={(e) => setSegTimeInput(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') commitSegTimeEdit();
+                        else if (e.key === 'Escape') setEditingSegTime(null);
+                        e.stopPropagation();
+                      }}
+                      onBlur={commitSegTimeEdit}
+                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        width: 42, padding: '1px 3px', fontSize: 9,
+                        fontFamily: 'var(--font-mono, monospace)', textAlign: 'center',
+                        border: '1px solid var(--accent-cyan, #0A84FF)',
+                        borderRadius: 2, outline: 'none',
+                        background: 'var(--bg-elevated, rgba(0,0,0,0.1))',
+                        color: 'var(--text-primary, #333)',
+                      }}
+                      autoFocus
+                    />
+                  ) : (
+                    <span style={{ fontFamily: 'var(--font-mono, monospace)' }}>
+                      {formatTimeShort(seg.end - clipStart)}
+                    </span>
+                  )}
+                  {isSelected && (
+                    <span style={{ fontSize: 8, color: 'var(--text-muted, #999)', marginLeft: 2 }}>
+                      ({formatTimeShort(segDur)})
+                    </span>
+                  )}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); removeSegment(seg.id); if (isSelected) setSelectedSegmentId(null); }}
+                    style={{
+                      padding: '0 3px', fontSize: 11, fontWeight: 700, lineHeight: 1,
+                      background: 'transparent', color: 'var(--text-muted, #999)',
+                      border: 'none', borderRadius: 2, cursor: 'pointer', marginLeft: 'auto',
+                    }}
+                    title="Remove segment"
+                  >
+                    ×
+                  </button>
+                </div>
+                {/* Row 2 (selected only): settings applied to this segment */}
+                {isSelected && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', marginTop: 1 }}>
+                    {/* Volume badge */}
+                    <span style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 2,
+                      padding: '1px 5px', fontSize: 8, fontWeight: 600, borderRadius: 2,
+                      background: seg.muted ? 'rgba(255,59,48,0.1)' : 'rgba(10,132,255,0.08)',
+                      color: seg.muted ? '#FF3B30' : 'var(--accent-cyan, #0A84FF)',
+                      border: `1px solid ${seg.muted ? 'rgba(255,59,48,0.25)' : 'rgba(10,132,255,0.2)'}`,
+                    }}>
+                      <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                        <path d="M11 5L6 9H2v6h4l5 4V5z" />
+                        {seg.muted && <><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></>}
+                      </svg>
+                      {seg.muted ? 'Muted' : `Vol ${seg.volume}%`}
+                    </span>
+                    {/* Speed badge */}
+                    <span style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 2,
+                      padding: '1px 5px', fontSize: 8, fontWeight: 600, borderRadius: 2,
+                      background: Math.abs((seg.speed || 1) - 1.0) > 0.001 ? 'rgba(175,82,222,0.08)' : 'rgba(0,0,0,0.04)',
+                      color: Math.abs((seg.speed || 1) - 1.0) > 0.001 ? '#AF52DE' : 'var(--text-muted, #999)',
+                      border: `1px solid ${Math.abs((seg.speed || 1) - 1.0) > 0.001 ? 'rgba(175,82,222,0.25)' : 'rgba(0,0,0,0.08)'}`,
+                    }}>
+                      {(seg.speed || 1)}x
+                    </span>
+                    {/* Subtitles badge */}
+                    <span
+                      onClick={(e) => { e.stopPropagation(); toggleSegmentSubs(seg.id); }}
+                      style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 2,
+                        padding: '1px 5px', fontSize: 8, fontWeight: 600, borderRadius: 2, cursor: 'pointer',
+                        background: !seg.subtitlesEnabled ? 'rgba(255,149,0,0.1)' : 'rgba(48,209,88,0.06)',
+                        color: !seg.subtitlesEnabled ? '#FF9500' : '#30D158',
+                        border: `1px solid ${!seg.subtitlesEnabled ? 'rgba(255,149,0,0.25)' : 'rgba(48,209,88,0.2)'}`,
+                      }}
+                      title="Toggle subtitles for this segment"
+                    >
+                      <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                        <rect x="2" y="6" width="20" height="12" rx="2" />
+                        {!seg.subtitlesEnabled && <line x1="2" y1="2" x2="22" y2="22" />}
+                      </svg>
+                      {seg.subtitlesEnabled ? 'Subs' : 'No Subs'}
+                    </span>
+                    {/* Done button */}
+                    <button
+                      onClick={(e) => { e.stopPropagation(); deselectSegment(); }}
+                      style={{
+                        padding: '1px 6px', fontSize: 8, fontWeight: 600,
+                        background: 'var(--bg-elevated, #f5f5f5)',
+                        color: 'var(--text-secondary, #666)',
+                        border: '1px solid var(--border, #ddd)',
+                        borderRadius: 2, cursor: 'pointer', marginLeft: 'auto',
+                      }}
+                    >
+                      Done
+                    </button>
+                  </div>
+                )}
+                {/* Row 3 (selected): reminder that controls bar edits this segment */}
+                {isSelected && (
+                  <div style={{ fontSize: 8, color: 'var(--text-muted, #999)', fontStyle: 'italic', lineHeight: 1.2 }}>
+                    Volume/speed/mute controls below apply to this segment
+                  </div>
+                )}
+                {/* Compact summary when NOT selected */}
+                {!isSelected && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 8, color: 'var(--text-muted, #999)' }}>
+                    {seg.muted ? 'muted' : `${seg.volume}%`}
+                    {seg.speed && Math.abs(seg.speed - 1.0) > 0.001 ? ` · ${seg.speed}x` : ''}
+                    {!seg.subtitlesEnabled ? ' · no subs' : ''}
+                  </div>
+                )}
               </div>
               );
             })}
           </div>
         )}
       </div>
-
-      {/* ── Segment editing indicator ── */}
-      {selectedSegment && (
-        <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-          padding: '4px 10px',
-          background: 'rgba(10, 132, 255, 0.06)',
-          borderTop: '1px solid rgba(10, 132, 255, 0.15)',
-          borderBottom: '1px solid rgba(10, 132, 255, 0.15)',
-        }}>
-          <span style={{ fontSize: 10, fontWeight: 600, color: 'var(--accent-cyan, #0A84FF)' }}>
-            Editing Segment {formatTimeShort(selectedSegment.start - clipStart)}–{formatTimeShort(selectedSegment.end - clipStart)}
-          </span>
-          <span style={{ fontSize: 9, color: 'var(--text-muted, #888)' }}>
-            Volume/speed/mute controls apply to this segment
-          </span>
-          <button
-            onClick={(e) => { e.stopPropagation(); toggleSegmentSubs(selectedSegment.id); }}
-            style={{
-              padding: '2px 6px', fontSize: 9, fontWeight: 600,
-              background: !selectedSegment.subtitlesEnabled ? 'rgba(255,149,0,0.12)' : 'rgba(48,209,88,0.08)',
-              color: !selectedSegment.subtitlesEnabled ? '#FF9500' : '#30D158',
-              border: `1px solid ${!selectedSegment.subtitlesEnabled ? 'rgba(255,149,0,0.3)' : 'rgba(48,209,88,0.2)'}`,
-              borderRadius: 3, cursor: 'pointer',
-            }}
-          >
-            {selectedSegment.subtitlesEnabled ? 'Subs On' : 'Subs Off'}
-          </button>
-          <button
-            onClick={(e) => { e.stopPropagation(); deselectSegment(); }}
-            style={{
-              padding: '2px 8px', fontSize: 9, fontWeight: 600,
-              background: 'var(--bg-elevated, #f5f5f5)',
-              color: 'var(--text-secondary, #666)',
-              border: '1px solid var(--border, #ddd)',
-              borderRadius: 3, cursor: 'pointer',
-            }}
-          >
-            Done
-          </button>
-        </div>
-      )}
 
       {/* ── Controls bar ── */}
       <div className={`ve-controls${compact ? ' ve-controls--compact' : ''}${selectedSegment ? ' ve-controls--segment-mode' : ''}`}>
