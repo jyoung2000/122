@@ -2035,22 +2035,22 @@ async def export_clip(
                 if abs(remaining - 1.0) > 0.001:
                     af_parts.append(f"atempo={remaining:.4f}")
             if has_volume:
-                af_parts.append(f"volume={volume:.2f}")
-            # Per-segment volume overrides: apply volume=X with enable='between(t,s,e)'
+                if not has_segments:
+                    af_parts.append(f"volume={volume:.2f}")
+            # Per-segment volume overrides using FFmpeg volume expression.
+            # When segments exist, we build a single volume filter with an
+            # if(between()) expression that picks the right gain for each
+            # time range, falling back to the global volume for gaps.
             if has_segments:
-                for seg in segments:
-                    seg_start = seg["start"] - start  # Convert to clip-relative time
-                    seg_end = seg["end"] - start
-                    if seg_start < 0:
-                        seg_start = 0
-                    clip_dur_local = end - start
-                    if seg_end > clip_dur_local:
-                        seg_end = clip_dur_local
+                clip_dur_local = end - start
+                # Build expression: if(between(t,s1,e1),vol1,if(between(t,s2,e2),vol2,...,global))
+                expr = f"{volume:.4f}"  # fallback = global volume
+                for seg in reversed(segments):  # reversed so first segment is outermost if()
+                    seg_start = max(0, seg["start"] - start)
+                    seg_end = min(clip_dur_local, seg["end"] - start)
                     seg_vol = 0.0 if seg.get("muted", False) else seg.get("volume", 1.0)
-                    if abs(seg_vol - volume) > 0.001:  # Only add if different from global
-                        af_parts.append(
-                            f"volume={seg_vol:.2f}:enable='between(t,{seg_start:.3f},{seg_end:.3f})'"
-                        )
+                    expr = f"if(between(t\\,{seg_start:.3f}\\,{seg_end:.3f})\\,{seg_vol:.4f}\\,{expr})"
+                af_parts.append(f"volume='{expr}':eval=frame")
             af = ",".join(af_parts) if af_parts else None
 
             cmd = [

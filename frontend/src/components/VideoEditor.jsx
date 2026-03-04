@@ -579,13 +579,18 @@ export default function VideoEditor({
     onTimeUpdate?.(t);
   }, [onTimeUpdate]);
 
-  // Track which segment is active for volume override
-  const activeSegIdRef = useRef(null);
+  // Track which segment is active for volume override — store id + a hash
+  // of the segment's settings so we re-apply when properties change.
+  const activeSegRef = useRef({ id: null, hash: null });
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     let rafId;
+
+    // Simple hash of segment settings to detect property changes
+    const segHash = (seg) => seg ? `${seg.id}_${seg.muted}_${seg.volume}_${seg.speed}` : null;
+
     const tick = () => {
       const t = video.currentTime;
       syncTime(t);
@@ -594,37 +599,40 @@ export default function VideoEditor({
         video.pause();
         setPlaying(false);
       }
-      // Apply per-segment volume + speed overrides during playback
-      if (segments.length > 0) {
-        const seg = segments.find(s => t >= s.start && t < s.end);
-        const segId = seg ? seg.id : null;
-        if (segId !== activeSegIdRef.current) {
-          activeSegIdRef.current = segId;
-          if (seg) {
-            // Apply segment volume
-            const segVol = seg.muted ? 0 : seg.volume;
-            if (gainNodeRef.current) {
-              gainNodeRef.current.gain.value = segVol / 100;
-            } else {
-              video.volume = Math.min(1, segVol / 100);
-            }
-            // Apply segment speed
-            const segSpeed = seg.speed || speed;
-            if (Math.abs(video.playbackRate - segSpeed) > 0.001) {
-              video.playbackRate = segSpeed;
-            }
+      // Apply per-segment volume + speed overrides during playback.
+      // Re-apply whenever the active segment changes OR its properties change
+      // (e.g. user adjusts volume slider while playhead is inside the segment).
+      const seg = segments.length > 0 ? segments.find(s => t >= s.start && t < s.end) : null;
+      const curId = seg ? seg.id : null;
+      const curHash = segHash(seg);
+      const prev = activeSegRef.current;
+
+      if (curId !== prev.id || curHash !== prev.hash) {
+        activeSegRef.current = { id: curId, hash: curHash };
+        if (seg) {
+          // Apply segment volume
+          const segVol = seg.muted ? 0 : seg.volume;
+          if (gainNodeRef.current) {
+            gainNodeRef.current.gain.value = segVol / 100;
           } else {
-            // Restore global volume
-            const effectiveVol = isMuted ? 0 : volume;
-            if (gainNodeRef.current) {
-              gainNodeRef.current.gain.value = effectiveVol / 100;
-            } else {
-              video.volume = Math.min(1, effectiveVol / 100);
-            }
-            // Restore global speed
-            if (Math.abs(video.playbackRate - speed) > 0.001) {
-              video.playbackRate = speed;
-            }
+            video.volume = Math.min(1, segVol / 100);
+          }
+          // Apply segment speed
+          const segSpeed = seg.speed || speed;
+          if (Math.abs(video.playbackRate - segSpeed) > 0.001) {
+            video.playbackRate = segSpeed;
+          }
+        } else {
+          // Restore global volume
+          const effectiveVol = isMuted ? 0 : volume;
+          if (gainNodeRef.current) {
+            gainNodeRef.current.gain.value = effectiveVol / 100;
+          } else {
+            video.volume = Math.min(1, effectiveVol / 100);
+          }
+          // Restore global speed
+          if (Math.abs(video.playbackRate - speed) > 0.001) {
+            video.playbackRate = speed;
           }
         }
       }
@@ -640,11 +648,11 @@ export default function VideoEditor({
 
     return () => {
       cancelAnimationFrame(rafId);
-      activeSegIdRef.current = null;
+      activeSegRef.current = { id: null, hash: null };
       video.removeEventListener('timeupdate', onNativeTime);
       video.removeEventListener('seeked', onNativeTime);
     };
-  }, [trimmedEnd, syncTime, segments, volume, isMuted]);
+  }, [trimmedEnd, syncTime, segments, volume, isMuted, speed]);
 
   // ── Dynamic subject tracking via rAF ───────────────
   useEffect(() => {
@@ -721,32 +729,44 @@ export default function VideoEditor({
   }, []);
 
   // ── Apply volume changes ───────────────────────────
+  // Skip direct video manipulation when playhead is inside a segment —
+  // the rAF loop handles per-segment volume to avoid conflicts.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const effectiveVol = isMuted ? 0 : volume;
-    if (gainNodeRef.current) {
-      // Web Audio path: set GainNode, video.volume = 1
-      video.volume = 1;
-      gainNodeRef.current.gain.value = effectiveVol / 100;
-      // Resume AudioContext if suspended (autoplay policy)
-      if (audioCtxRef.current?.state === 'suspended') {
-        audioCtxRef.current.resume().catch(() => {});
+    // Check if playhead is inside a segment — if so, rAF handles it
+    const t = video.currentTime;
+    const inSegment = segments.length > 0 && segments.some(s => t >= s.start && t < s.end);
+    if (!inSegment) {
+      const effectiveVol = isMuted ? 0 : volume;
+      if (gainNodeRef.current) {
+        // Web Audio path: set GainNode, video.volume = 1
+        video.volume = 1;
+        gainNodeRef.current.gain.value = effectiveVol / 100;
+        // Resume AudioContext if suspended (autoplay policy)
+        if (audioCtxRef.current?.state === 'suspended') {
+          audioCtxRef.current.resume().catch(() => {});
+        }
+      } else {
+        // Fallback path: native volume 0-1
+        video.volume = Math.min(1, effectiveVol / 100);
       }
-    } else {
-      // Fallback path: native volume 0-1
-      video.volume = Math.min(1, effectiveVol / 100);
     }
-    onVolumeChange?.(effectiveVol / 100);
-  }, [volume, isMuted, onVolumeChange]);
+    onVolumeChange?.(isMuted ? 0 : volume / 100);
+  }, [volume, isMuted, onVolumeChange, segments]);
 
   // ── Apply speed changes ────────────────────────────
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    video.playbackRate = speed;
+    // Skip when playhead is inside a segment — rAF handles per-segment speed
+    const t = video.currentTime;
+    const inSegment = segments.length > 0 && segments.some(s => t >= s.start && t < s.end);
+    if (!inSegment) {
+      video.playbackRate = speed;
+    }
     onSpeedChange?.(speed);
-  }, [speed, onSpeedChange]);
+  }, [speed, onSpeedChange, segments]);
 
   // ── Trim change callback ───────────────────────────
   useEffect(() => {
