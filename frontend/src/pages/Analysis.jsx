@@ -827,6 +827,32 @@ export default function Analysis() {
           {showInlineSubSettings ? 'Hide Settings' : 'Subtitle Settings'}
         </button>
       )}
+      {/* Apply Settings — confirms to user that current settings will be used for export */}
+      <button
+        onClick={() => {
+          setSettingsAppliedFlash(true);
+          if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current);
+          settingsAppliedTimerRef.current = setTimeout(() => setSettingsAppliedFlash(false), 2500);
+          showToast('Settings applied — your exported video will use these subtitle settings', 'info');
+        }}
+        style={{
+          marginLeft: 'auto',
+          display: 'flex', alignItems: 'center', gap: 4,
+          padding: '5px 12px', fontSize: 11, fontWeight: 600,
+          background: settingsAppliedFlash ? 'var(--success)' : 'var(--bg-elevated)',
+          color: settingsAppliedFlash ? '#fff' : 'var(--text-secondary)',
+          border: `1px solid ${settingsAppliedFlash ? 'var(--success)' : 'var(--border)'}`,
+          borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
+          transition: 'all 0.2s ease',
+        }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          {settingsAppliedFlash
+            ? <polyline points="20 6 9 17 4 12" />
+            : <><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></>
+          }
+        </svg>
+        {settingsAppliedFlash ? 'Settings Applied' : 'Apply Settings'}
+      </button>
     </div>
   );
 
