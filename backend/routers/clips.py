@@ -174,10 +174,14 @@ async def export_clip_endpoint(
                 })
 
             async def _export_progress(msg: str):
+                # Extract real encoding percentage from message text
+                import re as _re
+                _m = _re.search(r'(\d+)%', msg)
+                _pct = int(_m.group(1)) if _m else 50
                 await broadcast_ws(job_id, {
                     "type": "status",
                     "status": "exporting",
-                    "progress": 50,
+                    "progress": _pct,
                     "message": msg,
                 })
 
@@ -326,10 +330,14 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                 })
 
             async def _export_progress(msg: str):
+                # Extract real encoding percentage from message text
+                import re as _re
+                _m = _re.search(r'(\d+)%', msg)
+                _pct = int(_m.group(1)) if _m else 50
                 await broadcast_ws(job_id, {
                     "type": "status",
                     "status": "exporting",
-                    "progress": 50,
+                    "progress": _pct,
                     "message": msg,
                 })
 
