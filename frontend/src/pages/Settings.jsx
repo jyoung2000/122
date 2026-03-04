@@ -24,7 +24,7 @@ const dropdownStyle = {
   paddingRight: 28,
 };
 
-const TAB_NAME_TO_INDEX = { 'ai-provider': 0, prompts: 1, fonts: 2, presets: 3, advanced: 4, 'usage-costs': 5, 'api-access': 6 };
+const TAB_NAME_TO_INDEX = { 'ai-provider': 0, prompts: 1, fonts: 2, presets: 3, advanced: 4, 'usage-costs': 5, 'api-access': 6, 'about': 7 };
 
 export default function Settings() {
   const { isMobile } = useResponsive();
@@ -96,11 +96,31 @@ export default function Settings() {
   const [apiTestResult, setApiTestResult] = useState(null);
   const [apiTesting, setApiTesting] = useState(false);
 
+  // Site customisation state
+  const [siteTitle, setSiteTitle] = useState('');
+  const [siteFavicon, setSiteFavicon] = useState(null); // filename from server
+  const [siteLogo, setSiteLogo] = useState(null);       // filename from server
+  const [siteSaving, setSiteSaving] = useState(false);
+  const faviconInputRef = useRef(null);
+  const logoInputRef = useRef(null);
+
   // Load provider statuses
   useEffect(() => {
     fetch('/api/providers/status')
       .then((r) => r.json())
       .then(setStatuses)
+      .catch(() => {});
+  }, []);
+
+  // Load site customisation
+  useEffect(() => {
+    fetch('/api/site-config')
+      .then((r) => r.json())
+      .then((cfg) => {
+        if (cfg.title) setSiteTitle(cfg.title);
+        if (cfg.favicon) setSiteFavicon(cfg.favicon);
+        if (cfg.logo) setSiteLogo(cfg.logo);
+      })
       .catch(() => {});
   }, []);
 
@@ -507,7 +527,7 @@ export default function Settings() {
     URL.revokeObjectURL(url);
   };
 
-  const SETTINGS_TABS = ['AI Provider', 'Prompts', 'Fonts', 'Presets', 'Advanced', 'Usage & Costs', 'API Access'];
+  const SETTINGS_TABS = ['AI Provider', 'Prompts', 'Fonts', 'Presets', 'Advanced', 'Usage & Costs', 'API Access', 'Developed By'];
   const active = statuses._active || {};
 
   // Model dropdown renderer
@@ -1750,6 +1770,234 @@ print(resp.json())`.trim()}</pre>
             </div>
           </div>
 
+        </div>
+      )}
+
+      {/* ═══════ Tab 7: Developed By ═══════ */}
+      {settingsTab === 7 && (
+        <div style={{ maxWidth: isMobile ? '100%' : 640 }}>
+
+          {/* Developer credit */}
+          <div style={{
+            padding: 24, borderRadius: 'var(--radius-md)', marginBottom: 28,
+            background: 'var(--bg-panel)', border: '1px solid var(--border)',
+            textAlign: 'center',
+          }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 6 }}>
+              Developed by Jalon Young
+            </div>
+            <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 14px', lineHeight: 1.6 }}>
+              Full-stack engineer &amp; creator of ClipAI.
+            </p>
+            <a
+              href="https://jalonyoung.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                display: 'inline-block', padding: '8px 20px', fontSize: 12, fontWeight: 600,
+                fontFamily: 'var(--font-mono)', color: '#fff', background: 'var(--accent-cyan)',
+                borderRadius: 'var(--radius-sm)', textDecoration: 'none',
+              }}
+            >
+              jalonyoung.com
+            </a>
+          </div>
+
+          {/* Site Customisation */}
+          <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, color: 'var(--text-primary)' }}>
+            Site Customisation
+          </h3>
+
+          {/* Title */}
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--text-primary)' }}>
+              Site Title
+            </label>
+            <input
+              type="text"
+              value={siteTitle}
+              onChange={(e) => setSiteTitle(e.target.value)}
+              placeholder="ClipAI — Video Intelligence"
+              style={{
+                width: '100%', padding: '8px 12px', fontSize: 12, fontFamily: 'var(--font-mono)',
+                background: 'var(--bg-panel)', border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)', boxSizing: 'border-box',
+              }}
+            />
+          </div>
+
+          {/* Favicon */}
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--text-primary)' }}>
+              Favicon
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              {siteFavicon && (
+                <img
+                  src={`/api/site-uploads/${siteFavicon}`}
+                  alt="favicon"
+                  style={{ width: 28, height: 28, objectFit: 'contain', borderRadius: 4, border: '1px solid var(--border)' }}
+                />
+              )}
+              <input
+                ref={faviconInputRef}
+                type="file"
+                accept=".ico,.png,.svg,.jpg,.jpeg,.gif,.webp"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  setSiteSaving(true);
+                  const fd = new FormData();
+                  fd.append('favicon', file);
+                  fetch('/api/site-config', { method: 'POST', body: fd })
+                    .then((r) => r.json())
+                    .then((res) => {
+                      if (res.favicon) {
+                        setSiteFavicon(res.favicon);
+                        let link = document.querySelector("link[rel~='icon']");
+                        if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.head.appendChild(link); }
+                        link.href = `/api/site-uploads/${res.favicon}`;
+                      }
+                      showToast('Favicon updated', 'success');
+                    })
+                    .catch(() => showToast('Upload failed', 'error'))
+                    .finally(() => setSiteSaving(false));
+                  e.target.value = '';
+                }}
+              />
+              <button
+                onClick={() => faviconInputRef.current?.click()}
+                disabled={siteSaving}
+                style={{
+                  padding: '6px 14px', fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-mono)',
+                  background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)', cursor: 'pointer',
+                }}
+              >
+                {siteFavicon ? 'Replace' : 'Upload'}
+              </button>
+              {siteFavicon && (
+                <button
+                  onClick={() => {
+                    setSiteSaving(true);
+                    const fd = new FormData();
+                    fd.append('remove_favicon', 'true');
+                    fetch('/api/site-config', { method: 'POST', body: fd })
+                      .then((r) => r.json())
+                      .then(() => { setSiteFavicon(null); showToast('Favicon removed', 'success'); })
+                      .catch(() => showToast('Failed', 'error'))
+                      .finally(() => setSiteSaving(false));
+                  }}
+                  disabled={siteSaving}
+                  style={{
+                    padding: '6px 14px', fontSize: 11, fontFamily: 'var(--font-mono)',
+                    background: 'none', border: '1px solid var(--danger, #ff453a)',
+                    borderRadius: 'var(--radius-sm)', color: 'var(--danger, #ff453a)', cursor: 'pointer',
+                  }}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Logo */}
+          <div style={{ marginBottom: 28 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--text-primary)' }}>
+              Logo
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              {siteLogo && (
+                <img
+                  src={`/api/site-uploads/${siteLogo}`}
+                  alt="logo"
+                  style={{ height: 36, maxWidth: 120, objectFit: 'contain', borderRadius: 4, border: '1px solid var(--border)' }}
+                />
+              )}
+              <input
+                ref={logoInputRef}
+                type="file"
+                accept=".png,.svg,.jpg,.jpeg,.gif,.webp"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  setSiteSaving(true);
+                  const fd = new FormData();
+                  fd.append('logo', file);
+                  fetch('/api/site-config', { method: 'POST', body: fd })
+                    .then((r) => r.json())
+                    .then((res) => {
+                      if (res.logo) setSiteLogo(res.logo);
+                      showToast('Logo updated', 'success');
+                    })
+                    .catch(() => showToast('Upload failed', 'error'))
+                    .finally(() => setSiteSaving(false));
+                  e.target.value = '';
+                }}
+              />
+              <button
+                onClick={() => logoInputRef.current?.click()}
+                disabled={siteSaving}
+                style={{
+                  padding: '6px 14px', fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-mono)',
+                  background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)', cursor: 'pointer',
+                }}
+              >
+                {siteLogo ? 'Replace' : 'Upload'}
+              </button>
+              {siteLogo && (
+                <button
+                  onClick={() => {
+                    setSiteSaving(true);
+                    const fd = new FormData();
+                    fd.append('remove_logo', 'true');
+                    fetch('/api/site-config', { method: 'POST', body: fd })
+                      .then((r) => r.json())
+                      .then(() => { setSiteLogo(null); showToast('Logo removed', 'success'); })
+                      .catch(() => showToast('Failed', 'error'))
+                      .finally(() => setSiteSaving(false));
+                  }}
+                  disabled={siteSaving}
+                  style={{
+                    padding: '6px 14px', fontSize: 11, fontFamily: 'var(--font-mono)',
+                    background: 'none', border: '1px solid var(--danger, #ff453a)',
+                    borderRadius: 'var(--radius-sm)', color: 'var(--danger, #ff453a)', cursor: 'pointer',
+                  }}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Save title button */}
+          <button
+            onClick={() => {
+              setSiteSaving(true);
+              const fd = new FormData();
+              fd.append('title', siteTitle);
+              fetch('/api/site-config', { method: 'POST', body: fd })
+                .then((r) => r.json())
+                .then((res) => {
+                  if (res.title !== undefined) document.title = res.title || 'ClipAI — Video Intelligence';
+                  showToast('Site settings saved', 'success');
+                })
+                .catch(() => showToast('Save failed', 'error'))
+                .finally(() => setSiteSaving(false));
+            }}
+            disabled={siteSaving}
+            style={{
+              padding: '10px 28px', fontSize: 13, fontWeight: 600, fontFamily: 'var(--font-mono)',
+              background: 'var(--accent-cyan)', color: '#fff', border: 'none',
+              borderRadius: 'var(--radius-sm)', cursor: siteSaving ? 'wait' : 'pointer',
+              opacity: siteSaving ? 0.6 : 1,
+            }}
+          >
+            {siteSaving ? 'Saving...' : 'Save Title'}
+          </button>
         </div>
       )}
     </div>

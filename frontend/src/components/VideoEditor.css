@@ -202,7 +202,6 @@
   touch-action: none;
 }
 
-/* Waveform canvas */
 /* Keyframe thumbnails canvas */
 .ve-timeline__thumbnails {
   position: absolute;
@@ -212,6 +211,22 @@
   pointer-events: none;
   z-index: 0;
   border-radius: 3px;
+}
+
+/* Waveform audio track — separate row beneath keyframes */
+.ve-timeline__waveform-track {
+  position: relative;
+  height: 28px;
+  margin-top: 3px;
+  background: #ffffff;
+  border: 1px solid var(--ve-track-border);
+  border-radius: 4px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+[data-theme="dark"] .ve-timeline__waveform-track {
+  background: #1a1a1c;
 }
 
 .ve-timeline__waveform {
@@ -652,6 +667,10 @@
 
   .ve-timeline__track {
     height: 48px;
+  }
+
+  .ve-timeline__waveform-track {
+    height: 32px;
   }
 
   .ve-trim-handle {

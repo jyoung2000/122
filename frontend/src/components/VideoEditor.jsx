@@ -349,29 +349,24 @@ export default function VideoEditor({
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, rect.width, rect.height);
 
-    // Semi-transparent backdrop to dim thumbnails and make bars visible
     const isDark = document.documentElement.dataset.theme === 'dark';
-    ctx.fillStyle = isDark ? 'rgba(0, 0, 0, 0.50)' : 'rgba(0, 0, 0, 0.30)';
-    ctx.fillRect(0, 0, rect.width, rect.height);
-
     const barWidth = rect.width / data.length;
     const midY = rect.height / 2;
 
     for (let i = 0; i < data.length; i++) {
       const x = i * barWidth;
       const barH = Math.max(1, data[i] * midY * 0.9);
-      // Color based on trim region
       const pct = i / data.length;
       const leftPct = trimStartOffset / (clipDur || 1);
       const rightPct = 1 - trimEndOffset / (clipDur || 1);
       const playPct = clipDur > 0 ? (currentTime - clipStart) / clipDur : 0;
 
       if (pct < leftPct || pct > rightPct) {
-        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.15)' : 'rgba(0, 0, 0, 0.12)';
+        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.10)';
       } else if (pct <= playPct) {
-        ctx.fillStyle = 'rgba(10, 132, 255, 0.85)';
+        ctx.fillStyle = 'rgba(10, 132, 255, 0.9)';
       } else {
-        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.55)' : 'rgba(60, 60, 60, 0.55)';
+        ctx.fillStyle = isDark ? 'rgba(255, 255, 255, 0.5)' : 'rgba(0, 0, 0, 0.4)';
       }
       ctx.fillRect(x, midY - barH, barWidth - 0.5, barH * 2);
     }
@@ -930,9 +925,6 @@ export default function VideoEditor({
           {/* Keyframe thumbnails */}
           <canvas ref={thumbnailCanvasRef} className="ve-timeline__thumbnails" />
 
-          {/* Waveform */}
-          <canvas ref={waveformCanvasRef} className="ve-timeline__waveform" />
-
           {/* Dimmed regions */}
           {leftTrimPct > 0 && (
             <div className="ve-timeline__dimmed-left" style={{ width: `${leftTrimPct}%` }} />
@@ -993,6 +985,12 @@ export default function VideoEditor({
               </div>
             )}
           </div>
+        </div>
+
+        {/* ── Waveform audio track (separate row) ── */}
+        <div className="ve-timeline__waveform-track" onPointerDown={onTimelinePointerDown}>
+          <canvas ref={waveformCanvasRef} className="ve-timeline__waveform" />
+          <div className="ve-timeline__playhead" style={{ left: `${playheadPct}%` }} />
         </div>
       </div>
 

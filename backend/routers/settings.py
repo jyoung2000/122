@@ -1,11 +1,13 @@
+import base64
 import json
 import logging
 import os
 import re
 import time
+import uuid
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, File, UploadFile, Form
 from pydantic import BaseModel
 
 from typing import Optional
@@ -1451,3 +1453,94 @@ async def reset_prompts():
     defaults = get_defaults()
     save_prompts(defaults)
     return {"status": "reset", "prompts": defaults.model_dump()}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Site Customisation — title, favicon, logo
+# ═══════════════════════════════════════════════════════════════
+
+SITE_CONFIG_PATH = os.path.join(_DATA_DIR, "site_config.json")
+SITE_UPLOADS_DIR = os.path.join(_DATA_DIR, "site_uploads")
+
+
+def _load_site_config() -> dict:
+    if os.path.exists(SITE_CONFIG_PATH):
+        try:
+            with open(SITE_CONFIG_PATH, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_site_config(cfg: dict):
+    os.makedirs(os.path.dirname(SITE_CONFIG_PATH), exist_ok=True)
+    with open(SITE_CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+@router.get("/site-config")
+async def get_site_config():
+    """Return site customisation (title, favicon URL, logo URL)."""
+    return _load_site_config()
+
+
+@router.post("/site-config")
+async def update_site_config(
+    title: Optional[str] = Form(None),
+    favicon: Optional[UploadFile] = File(None),
+    logo: Optional[UploadFile] = File(None),
+    remove_favicon: Optional[str] = Form(None),
+    remove_logo: Optional[str] = Form(None),
+):
+    """Update site title, favicon, and/or logo."""
+    cfg = _load_site_config()
+    os.makedirs(SITE_UPLOADS_DIR, exist_ok=True)
+
+    if title is not None:
+        cfg["title"] = title.strip()
+
+    if remove_favicon == "true":
+        old = cfg.pop("favicon", None)
+        if old:
+            old_path = os.path.join(SITE_UPLOADS_DIR, os.path.basename(old))
+            if os.path.isfile(old_path):
+                os.remove(old_path)
+    elif favicon and favicon.filename:
+        ext = os.path.splitext(favicon.filename)[1].lower() or ".ico"
+        fname = f"favicon-{uuid.uuid4().hex[:8]}{ext}"
+        fpath = os.path.join(SITE_UPLOADS_DIR, fname)
+        content = await favicon.read()
+        with open(fpath, "wb") as f:
+            f.write(content)
+        cfg["favicon"] = fname
+
+    if remove_logo == "true":
+        old = cfg.pop("logo", None)
+        if old:
+            old_path = os.path.join(SITE_UPLOADS_DIR, os.path.basename(old))
+            if os.path.isfile(old_path):
+                os.remove(old_path)
+    elif logo and logo.filename:
+        ext = os.path.splitext(logo.filename)[1].lower() or ".png"
+        fname = f"logo-{uuid.uuid4().hex[:8]}{ext}"
+        fpath = os.path.join(SITE_UPLOADS_DIR, fname)
+        content = await logo.read()
+        with open(fpath, "wb") as f:
+            f.write(content)
+        cfg["logo"] = fname
+
+    _save_site_config(cfg)
+    return {"status": "saved", **cfg}
+
+
+@router.get("/site-uploads/{filename}")
+async def serve_site_upload(filename: str):
+    """Serve uploaded site assets (favicon, logo)."""
+    safe = os.path.basename(filename)
+    fpath = os.path.join(SITE_UPLOADS_DIR, safe)
+    if not os.path.isfile(fpath):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=404, content={"error": "not found"})
+    from fastapi.responses import FileResponse
+    return FileResponse(fpath)
