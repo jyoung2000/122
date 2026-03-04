@@ -1885,7 +1885,12 @@ print(resp.json())`.trim()}</pre>
                     fd.append('remove_favicon', 'true');
                     fetch('/api/site-config', { method: 'POST', body: fd })
                       .then((r) => r.json())
-                      .then(() => { setSiteFavicon(null); showToast('Favicon removed', 'success'); })
+                      .then(() => {
+                        setSiteFavicon(null);
+                        const link = document.querySelector("link[rel~='icon']");
+                        if (link) link.href = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>C</text></svg>";
+                        showToast('Favicon removed', 'success');
+                      })
                       .catch(() => showToast('Failed', 'error'))
                       .finally(() => setSiteSaving(false));
                   }}

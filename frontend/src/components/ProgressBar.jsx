@@ -19,13 +19,27 @@ export default function ProgressBar({ progress, message, variant = 'cyan' }) {
 
   return (
     <div style={{ width: '100%' }}>
+      {message && (
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            marginBottom: 6,
+          }}
+        >
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{message}</span>
+          <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'var(--font-mono)', color }}>{displayProgress}%</span>
+        </div>
+      )}
       <div
         style={{
-          height: 6,
+          height: 10,
           background: 'var(--bg-elevated)',
           position: 'relative',
           overflow: 'hidden',
-          borderRadius: 3,
+          borderRadius: 5,
+          border: '1px solid var(--border)',
         }}
       >
         <div
@@ -35,23 +49,10 @@ export default function ProgressBar({ progress, message, variant = 'cyan' }) {
             width: `${displayProgress}%`,
             background: color,
             transition: 'width 0.3s ease',
-            borderRadius: 3,
+            borderRadius: 5,
           }}
         />
       </div>
-      {message && (
-        <div
-          style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginTop: 4,
-          }}
-        >
-          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{message}</span>
-          <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color }}>{displayProgress}%</span>
-        </div>
-      )}
     </div>
   );
 }

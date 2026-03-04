@@ -214,7 +214,32 @@ if os.path.isdir(static_dir):
         file_path = os.path.join(static_dir, path)
         if path and os.path.isfile(file_path):
             return FileResponse(file_path)
-        return FileResponse(os.path.join(static_dir, "index.html"))
+
+        # Inject site customisation (title, favicon) into index.html so
+        # user settings persist visually across restarts without a flash.
+        index_path = os.path.join(static_dir, "index.html")
+        try:
+            from backend.routers.settings import _load_site_config
+            cfg = _load_site_config()
+            if cfg.get("title") or cfg.get("favicon"):
+                with open(index_path, "r") as f:
+                    html = f.read()
+                if cfg.get("title"):
+                    html = html.replace(
+                        "<title>ClipAI \u2014 Video Intelligence</title>",
+                        f"<title>{cfg['title']}</title>",
+                    )
+                if cfg.get("favicon"):
+                    import re
+                    html = re.sub(
+                        r'<link rel="icon"[^>]*/>',
+                        f'<link rel="icon" href="/api/site-uploads/{cfg["favicon"]}" />',
+                        html,
+                    )
+                return Response(content=html, media_type="text/html")
+        except Exception:
+            pass
+        return FileResponse(index_path)
 else:
     @app.get("/")
     async def root():

@@ -1125,6 +1125,29 @@ export default function Analysis() {
         </div>
       )}
 
+      {/* Encoding progress bars — shown for any active exports on this job */}
+      {Object.entries(encoding.tasks).filter(([key, t]) => key.startsWith(`${jobId}_`) && t.status === 'encoding').length > 0 && (
+        <div style={{
+          padding: '10px 0',
+          display: 'flex', flexDirection: 'column', gap: 8,
+        }}>
+          {Object.entries(encoding.tasks)
+            .filter(([key, t]) => key.startsWith(`${jobId}_`) && t.status === 'encoding')
+            .map(([key, t]) => (
+              <div key={key} style={{
+                padding: '10px 14px', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+              }}>
+                <ProgressBar
+                  progress={t.progress || 0}
+                  message={t.message || `Encoding ${t.clipTitle || 'clip'}...`}
+                  variant="amber"
+                />
+              </div>
+            ))}
+        </div>
+      )}
+
       {/* Activity Log */}
       {activityLog.length > 0 && (isProcessing || job.status === 'complete' || job.status === 'failed' || job.status === 'cancelled') && (
         <div style={{
