@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import subprocess
 
@@ -844,12 +845,37 @@ ASPECT_RATIO_VALUES = {
     "4:5": 4 / 5,
 }
 
-def _safe_subject_x(sx: int, margin: int = 10) -> int:
-    """Clamp subject_x to a safe range to prevent edge-cutting during crop.
+def _compute_safe_range(src_ratio: float, target_ratio: float, edge_buffer: int = 5) -> tuple[int, int]:
+    """Compute safe subject_x range for a given aspect ratio conversion.
 
-    Maps [0, 100] → [margin, 100-margin] so the crop window never goes
-    to the absolute edge of the source frame, keeping the subject visible.
+    Ensures that any subject_x within this range will produce a non-clamped
+    objectPosition value — meaning the subject can actually be centered.
+
+    Matches frontend computeSafeRange() exactly for preview-export parity.
     """
+    R = src_ratio / target_ratio
+    if R <= 1.01:
+        return (5, 95)
+    sx_at_min = (edge_buffer * (R - 1) + 50) / R
+    sx_at_max = ((100 - edge_buffer) * (R - 1) + 50) / R
+    return (
+        max(5, math.ceil(sx_at_min)),
+        min(95, math.floor(sx_at_max)),
+    )
+
+
+def _safe_subject_x(sx: int, margin: int = 10, src_ratio: float = 0, target_ratio: float = 0) -> int:
+    """Clamp subject_x to safe range, dynamically if aspect ratios provided.
+
+    When src_ratio and target_ratio are provided, computes the safe range
+    based on the actual aspect ratio conversion. Otherwise falls back to
+    static margin.
+
+    Matches frontend safeSubjectX() exactly for preview-export parity.
+    """
+    if src_ratio > 0 and target_ratio > 0:
+        lo, hi = _compute_safe_range(src_ratio, target_ratio)
+        return max(lo, min(hi, round(sx)))
     return max(margin, min(100 - margin, round(sx)))
 
 
@@ -877,6 +903,8 @@ def _build_subject_keyframes(
     scenes: list,
     clip_start: float,
     clip_end: float,
+    src_ratio: float = 0,
+    target_ratio: float = 0,
 ) -> list[tuple[float, int]]:
     """Build sorted (relative_time, subject_x) keyframes from scenes for a clip.
 
@@ -884,6 +912,9 @@ def _build_subject_keyframes(
     the clip boundaries are used to interpolate accurate subject_x values
     at the clip start/end rather than falling back to center (50).  This
     ensures short clips between scene timestamps still get proper tracking.
+
+    When src_ratio and target_ratio are provided, uses dynamic safe margin
+    based on the aspect ratio conversion instead of the static margin.
 
     Returns at least one keyframe.  If no scenes are provided, returns [(0.0, 50)].
     """
@@ -895,7 +926,7 @@ def _build_subject_keyframes(
         ts = float(s.timestamp if hasattr(s, "timestamp") else s.get("timestamp", 0))
         sx = s.subject_x if hasattr(s, "subject_x") else s.get("subject_x", 50)
         raw_sx = int(sx)
-        safe_sx = _safe_subject_x(raw_sx)
+        safe_sx = _safe_subject_x(raw_sx, src_ratio=src_ratio, target_ratio=target_ratio)
         all_data.append((ts, safe_sx))
 
     if not all_data:
@@ -933,7 +964,7 @@ def _build_subject_keyframes(
         if dt <= 0:
             return sx1
         frac = min(1.0, max(0.0, (t_abs - t1) / dt))
-        result = _safe_subject_x(int(round(sx1 + (sx2 - sx1) * frac)))
+        result = _safe_subject_x(int(round(sx1 + (sx2 - sx1) * frac)), src_ratio=src_ratio, target_ratio=target_ratio)
         logger.debug(
             "[SubjectTracking] interpolate t=%.2f between (%.1f,sx=%d) and (%.1f,sx=%d): frac=%.3f → sx=%d",
             t_abs, t1, sx1, t2, sx2, frac, result,
@@ -1046,7 +1077,7 @@ def _smooth_keyframes(
 
 def _handle_scene_cuts(
     keyframes: list[tuple[float, int]],
-    jump_threshold: int = 15,
+    jump_threshold: int = 12,
 ) -> list[tuple[float, int]]:
     """Insert instant-jump keyframes at likely scene cuts.
 
@@ -1055,8 +1086,8 @@ def _handle_scene_cuts(
     move, the camera cut to a new shot.  Human editors cut-to instantly,
     they never pan across a scene cut.
 
-    Inserts a keyframe 1 frame (33ms at 30fps) before the cut with the OLD
-    position, so the transition is instant (step function) instead of linear.
+    Inserts a keyframe 1ms before the cut with the OLD position, so the
+    transition is truly instant — below one frame at any display rate.
 
     Matches frontend handleSceneCuts() exactly for preview-export parity.
     """
@@ -1071,8 +1102,8 @@ def _handle_scene_cuts(
 
         if delta >= jump_threshold and (t_cur - t_prev) > 0.1:
             # Large jump detected — insert instant cut
-            # Add a keyframe 33ms (1 frame at 30fps) before the new position
-            cut_time = round(t_cur - 0.033, 3)
+            # 1ms gap: below one frame at any frame rate, so smoothstep can't catch it
+            cut_time = round(t_cur - 0.001, 3)
             if cut_time > t_prev:
                 result.append((cut_time, sx_prev))  # Hold old position until cut
                 logger.debug(
@@ -1095,23 +1126,35 @@ def _handle_scene_cuts(
 def _apply_dead_zone(
     keyframes: list[tuple[float, int]],
     threshold: int = 5,
+    src_ratio: float = 0,
+    target_ratio: float = 0,
 ) -> list[tuple[float, int]]:
     """Eliminate jittery micro-movements by snapping small changes to previous value.
 
-    A human editor would hold the frame still for movements smaller than
-    threshold (in subject_x units, where 1 unit = 1% of frame width).
+    When aspect ratio info is provided, the threshold is computed dynamically
+    so it operates on VISIBLE crop movement (~3% of crop width) rather than
+    raw source-frame movement.
 
     Matches frontend applyDeadZone() exactly for preview-export parity.
     """
     if len(keyframes) <= 1:
         return list(keyframes)
 
+    # Compute effective threshold: we want ~3% of VISIBLE crop width as the dead zone
+    VISIBLE_THRESHOLD = 3  # % of visible crop width
+    effective_threshold = threshold
+    if src_ratio > 0 and target_ratio > 0:
+        R = src_ratio / target_ratio
+        if R > 1.01:
+            # Convert visible threshold back to source-frame units
+            effective_threshold = max(2, round(VISIBLE_THRESHOLD * (R - 1) / R))
+
     result = [keyframes[0]]
     snapped_count = 0
     for i in range(1, len(keyframes)):
         t, sx = keyframes[i]
         _, prev_sx = result[-1]
-        if abs(sx - prev_sx) < threshold:
+        if abs(sx - prev_sx) < effective_threshold:
             # Small change — hold position (snap to previous)
             result.append((t, prev_sx))
             snapped_count += 1
@@ -1120,8 +1163,8 @@ def _apply_dead_zone(
 
     if snapped_count > 0:
         logger.info(
-            "[SubjectTracking] _apply_dead_zone: %d/%d keyframes snapped to previous (threshold=%d)",
-            snapped_count, len(keyframes) - 1, threshold,
+            "[SubjectTracking] _apply_dead_zone: %d/%d keyframes snapped to previous (effective_threshold=%d, base=%d)",
+            snapped_count, len(keyframes) - 1, effective_threshold, threshold,
         )
 
     return result
@@ -1129,7 +1172,7 @@ def _apply_dead_zone(
 
 def _smooth_keyframes_bidirectional(
     keyframes: list[tuple[float, int]],
-    max_speed: float = 40.0,
+    max_speed: float = 25.0,
 ) -> list[tuple[float, int]]:
     """Two-pass bidirectional smoothing that eliminates trailing lag.
 
@@ -1193,7 +1236,7 @@ def _smooth_keyframes_bidirectional(
 
 def _merge_holds(
     keyframes: list[tuple[float, int]],
-    tolerance: int = 2,
+    tolerance: int = 3,
 ) -> list[tuple[float, int]]:
     """Merge consecutive keyframes with similar values into holds.
 
@@ -1222,6 +1265,47 @@ def _merge_holds(
             "[SubjectTracking] _merge_holds: %d/%d keyframes merged into holds (tolerance=%d)",
             merged_count, len(keyframes) - 1, tolerance,
         )
+
+    return result
+
+
+def _compress_range(
+    keyframes: list[tuple[float, int]],
+    max_range: int = 25,
+) -> list[tuple[float, int]]:
+    """Compress the range of subject_x values to prevent erratic swinging.
+
+    If the full range of sx values exceeds max_range, compress toward the
+    median so total motion stays within bounds.  Preserves relative timing
+    and direction of motion — just reduces amplitude.
+
+    Matches frontend compressRange() exactly for preview-export parity.
+    """
+    if len(keyframes) <= 1:
+        return list(keyframes)
+
+    xs = [kf[1] for kf in keyframes]
+    min_x = min(xs)
+    max_x = max(xs)
+    current_range = max_x - min_x
+
+    if current_range <= max_range:
+        return list(keyframes)
+
+    # Compress toward median
+    sorted_xs = sorted(xs)
+    median = sorted_xs[len(sorted_xs) // 2]
+    scale = max_range / current_range
+
+    result = []
+    for t, sx in keyframes:
+        new_sx = round(max(0, min(100, median + (sx - median) * scale)))
+        result.append((t, new_sx))
+
+    logger.info(
+        "[SubjectTracking] _compress_range: range %d→%d (max=%d), median=%d, compressed %d keyframes",
+        current_range, max_range, max_range, median, len(keyframes),
+    )
 
     return result
 
@@ -1306,10 +1390,10 @@ def _build_crop_x_expr(
         else:
             d_off = off1 - off0
             # Smoothstep: off0 + d_off * p*p*(3-2*p) where p=(t-t0)/dt
-            # Use a let-binding via FFmpeg's ternary to compute p once
-            # FFmpeg doesn't have let, so we inline p = (t-t0)/dt
+            # Use st(0,p)/ld(0) to compute p once and avoid floating-point
+            # rounding differences from multiple evaluations of the same expr.
             p_expr = f"(t-{t0:.3f})/{dt:.3f}"
-            segment = f"{off0}+{d_off}*{p_expr}*{p_expr}*(3-2*{p_expr})"
+            segment = f"{off0}+{d_off}*st(0\\,{p_expr})*ld(0)*(3-2*ld(0))"
         expr = f"if(lt(t\\,{t1:.3f})\\,{segment}\\,{expr})"
 
     # Clamp to valid range
@@ -1760,22 +1844,27 @@ async def export_clip(
                 aspect_ratio or "original", video_width, video_height,
                 subject_x, len(subject_scenes or []),
             )
+            # Compute aspect ratios for dynamic safe margin
+            _src_ratio = video_width / video_height if video_height else 1
+            _target_ratio = ASPECT_RATIO_VALUES.get(aspect_ratio, _src_ratio) if aspect_ratio else _src_ratio
+
             if subject_scenes and aspect_ratio:
-                raw_kf = _build_subject_keyframes(subject_scenes, start, end)
+                raw_kf = _build_subject_keyframes(subject_scenes, start, end, src_ratio=_src_ratio, target_ratio=_target_ratio)
                 logger.info(
                     "[SubjectTracking] clip %s: %d raw keyframes from %d scenes",
                     clip_id, len(raw_kf), len(subject_scenes),
                 )
                 if len(raw_kf) > 1:
-                    # Full pipeline: build → scene cuts → dead zone → smooth → merge holds
+                    # Full pipeline: build → scene cuts → compress range → dead zone → smooth → merge holds
                     after_cuts = _handle_scene_cuts(raw_kf)
-                    after_dead_zone = _apply_dead_zone(after_cuts)
+                    after_compress = _compress_range(after_cuts)
+                    after_dead_zone = _apply_dead_zone(after_compress, src_ratio=_src_ratio, target_ratio=_target_ratio)
                     after_smooth = _smooth_keyframes_bidirectional(after_dead_zone)
                     keyframes = _merge_holds(after_smooth)
 
                     logger.info(
-                        "[SubjectTracking] clip %s: pipeline stages — raw=%d → cuts=%d → deadzone=%d → smooth=%d → holds=%d",
-                        clip_id, len(raw_kf), len(after_cuts), len(after_dead_zone),
+                        "[SubjectTracking] clip %s: pipeline stages — raw=%d → cuts=%d → compress=%d → deadzone=%d → smooth=%d → holds=%d",
+                        clip_id, len(raw_kf), len(after_cuts), len(after_compress), len(after_dead_zone),
                         len(after_smooth), len(keyframes),
                     )
 

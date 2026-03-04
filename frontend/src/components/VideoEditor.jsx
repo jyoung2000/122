@@ -105,7 +105,17 @@ function subjectXToCenterPct(sx, srcRatio, targetRatio) {
   const R = srcRatio / targetRatio;
   if (R <= 1.01) return Math.max(0, Math.min(100, sx));
   const pct = (R * sx - 50) / (R - 1);
-  return Math.max(0, Math.min(100, pct));
+
+  // Soft clamp: if pct is outside [0, 100], ease toward the edge
+  // instead of hard-clamping. This prevents the "slam to edge" visual.
+  if (pct < 0) {
+    return Math.max(0, 5 * (1 - Math.min(1, Math.abs(pct) / 50)));
+  }
+  if (pct > 100) {
+    return Math.min(100, 100 - 5 * (1 - Math.min(1, (pct - 100) / 50)));
+  }
+
+  return pct;
 }
 
 function formatTimecode(seconds) {
@@ -229,8 +239,8 @@ export default function VideoEditor({
 
   const subjectKeyframes = useMemo(() => {
     if (!scenes?.length || clipStart == null || clipEnd == null) return null;
-    return processKeyframes(scenes, clipStart, clipEnd);
-  }, [scenes, clipStart, clipEnd]);
+    return processKeyframes(scenes, clipStart, clipEnd, isCrop ? srcRatio : null, isCrop ? targetRatio : null);
+  }, [scenes, clipStart, clipEnd, isCrop, srcRatio, targetRatio]);
 
   const hasDynamicSubject = useMemo(
     () => isCrop && subjectKeyframes && isDynamic(subjectKeyframes),

@@ -20,7 +20,17 @@ function subjectXToCenterPct(sx, srcRatio, targetRatio) {
   const R = srcRatio / targetRatio;
   if (R <= 1.01) return Math.max(0, Math.min(100, sx));
   const pct = (R * sx - 50) / (R - 1);
-  return Math.max(0, Math.min(100, pct));
+
+  // Soft clamp: if pct is outside [0, 100], ease toward the edge
+  // instead of hard-clamping. This prevents the "slam to edge" visual.
+  if (pct < 0) {
+    return Math.max(0, 5 * (1 - Math.min(1, Math.abs(pct) / 50)));
+  }
+  if (pct > 100) {
+    return Math.min(100, 100 - 5 * (1 - Math.min(1, (pct - 100) / 50)));
+  }
+
+  return pct;
 }
 
 function formatTime(seconds) {
@@ -182,13 +192,14 @@ export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, asp
   const subjectKeyframes = useMemo(
     () => {
       if (!scenes?.length || clipStart == null || clipEnd == null) return null;
-      const processed = processKeyframes(scenes, clipStart, clipEnd);
+      const _isCrop = isCrop;
+      const processed = processKeyframes(scenes, clipStart, clipEnd, _isCrop ? srcRatio : null, _isCrop ? targetRatio : null);
       if (processed && isDynamic(processed)) {
-        console.log(`[SubjectTracking] VideoPlayer: ${processed.length} keyframes (pipeline: build→cuts→deadzone→smooth→holds) (${clipStart.toFixed(1)}s-${clipEnd.toFixed(1)}s), x range: ${Math.min(...processed.map(k=>k.x))}-${Math.max(...processed.map(k=>k.x))}`);
+        console.log(`[SubjectTracking] VideoPlayer: ${processed.length} keyframes (pipeline: build→cuts→compress→deadzone→smooth→holds) (${clipStart.toFixed(1)}s-${clipEnd.toFixed(1)}s), x range: ${Math.min(...processed.map(k=>k.x))}-${Math.max(...processed.map(k=>k.x))}`);
       }
       return processed;
     },
-    [scenes, clipStart, clipEnd],
+    [scenes, clipStart, clipEnd, isCrop, srcRatio, targetRatio],
   );
   const hasDynamicSubject = useMemo(
     () => isCrop && subjectKeyframes && isDynamic(subjectKeyframes),

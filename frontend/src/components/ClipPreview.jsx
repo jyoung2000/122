@@ -95,10 +95,19 @@ function subjectXToCenterPct(sx, srcRatio, targetRatio) {
   const R = srcRatio / targetRatio;
   if (R <= 1.01) return Math.max(0, Math.min(100, sx)); // no horizontal overflow
   const pct = (R * sx - 50) / (R - 1);
-  // Use full precision — CSS objectPosition handles decimals fine,
-  // and rounding at high R values (e.g. 3.16 for 16:9→9:16) causes
-  // visible ~2% offset from center.
-  return Math.max(0, Math.min(100, pct));
+
+  // Soft clamp: if pct is outside [0, 100], ease toward the edge
+  // instead of hard-clamping. This prevents the "slam to edge" visual.
+  if (pct < 0) {
+    // Subject is too far left to center — ease toward 0%
+    return Math.max(0, 5 * (1 - Math.min(1, Math.abs(pct) / 50)));
+  }
+  if (pct > 100) {
+    // Subject is too far right to center — ease toward 100%
+    return Math.min(100, 100 - 5 * (1 - Math.min(1, (pct - 100) / 50)));
+  }
+
+  return pct;
 }
 
 function formatTime(seconds) {
@@ -300,10 +309,14 @@ export default function ClipPreview({
         console.log('[SubjectTracking] ClipPreview: no scenes available — using static subject_x');
         return null;
       }
-      const processed = processKeyframes(scenes, clipStart, clipEnd);
+      // Compute aspect ratios for dynamic safe margin in pipeline
+      const _srcRatio = sourceWidth / sourceHeight;
+      const _targetRatio = (aspectRatio && ASPECT_RATIO_VALUES[aspectRatio]) ? ASPECT_RATIO_VALUES[aspectRatio] : _srcRatio;
+      const _isCrop = Math.abs(_srcRatio - _targetRatio) > 0.01;
+      const processed = processKeyframes(scenes, clipStart, clipEnd, _isCrop ? _srcRatio : null, _isCrop ? _targetRatio : null);
       const dynamic = processed && isDynamic(processed);
       console.log(
-        `[SubjectTracking] ClipPreview: ${processed?.length || 0} keyframes (pipeline: build→cuts→deadzone→smooth→holds) ` +
+        `[SubjectTracking] ClipPreview: ${processed?.length || 0} keyframes (pipeline: build→cuts→compress→deadzone→smooth→holds) ` +
         `(${clipStart.toFixed(1)}s-${clipEnd.toFixed(1)}s), ` +
         `mode=${dynamic ? 'DYNAMIC' : 'STATIC'}, ` +
         `sx range: [${Math.min(...(processed || []).map(k=>k.x))}-${Math.max(...(processed || []).map(k=>k.x))}], ` +
@@ -311,7 +324,7 @@ export default function ClipPreview({
       );
       return processed;
     },
-    [scenes, clipStart, clipEnd],
+    [scenes, clipStart, clipEnd, aspectRatio, sourceWidth, sourceHeight],
   );
   const hasDynamicSubject = useMemo(
     () => subjectKeyframes && isDynamic(subjectKeyframes),

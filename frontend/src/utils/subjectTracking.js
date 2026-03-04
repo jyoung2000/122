@@ -6,26 +6,59 @@
  * preview player and FFmpeg export to follow the subject smoothly.
  *
  * Processing pipeline (applied in order):
- *   1. buildSubjectKeyframes()     — raw (time, subject_x) pairs from scenes
- *   2. handleSceneCuts()           — insert instant-jump keyframes at hard cuts
- *   3. applyDeadZone()             — eliminate jittery micro-movements
- *   4. smoothKeyframesBidirectional() — two-pass speed limiting
- *   5. mergeHolds()                — merge similar consecutive values into rests
- *   6. interpolateSubjectX()       — smoothstep ease-in/ease-out interpolation
+ *   1. buildSubjectKeyframes()        — raw (time, subject_x) pairs with DYNAMIC safe margin
+ *   2. handleSceneCuts()              — insert 1ms instant-jump keyframes at hard cuts
+ *   3. compressRange()                — limit total sx swing per clip toward median
+ *   4. applyDeadZone()                — eliminate micro-movements based on VISIBLE crop delta
+ *   5. smoothKeyframesBidirectional() — two-pass speed limiting (maxSpeed=25)
+ *   6. mergeHolds()                   — merge similar consecutive values into rests (tolerance=3)
+ *   7. interpolateSubjectX()          — smoothstep ease-in/ease-out interpolation
  */
 
-/** Safety margin to prevent subjects being cut off at frame edges. */
+/** Legacy safety margin — used when no aspect ratio info is provided. */
 const SAFE_MARGIN = 10;
 
 /**
- * Clamp subject_x to a safe range to prevent edge-cutting during crop.
- * Maps [0, 100] → [SAFE_MARGIN, 100-SAFE_MARGIN].
+ * Compute the safe subject_x range for a given aspect ratio conversion.
+ * Ensures that any subject_x within this range will produce a non-clamped
+ * objectPosition value — meaning the subject can actually be centered.
+ *
+ * @param {number} srcRatio - Source video aspect ratio (e.g., 16/9)
+ * @param {number} targetRatio - Target crop aspect ratio (e.g., 9/16)
+ * @param {number} edgeBuffer - Buffer from objectPosition 0%/100% (default 5)
+ * @returns {{ min: number, max: number }} Safe subject_x range
+ */
+export function computeSafeRange(srcRatio, targetRatio, edgeBuffer = 5) {
+  const R = srcRatio / targetRatio;
+  if (R <= 1.01) {
+    // No horizontal overflow — any subject_x is fine
+    return { min: 5, max: 95 };
+  }
+  // Invert the centerPct formula: sx = (pct * (R - 1) + 50) / R
+  const sxAtMin = (edgeBuffer * (R - 1) + 50) / R;
+  const sxAtMax = ((100 - edgeBuffer) * (R - 1) + 50) / R;
+  return {
+    min: Math.ceil(Math.max(5, sxAtMin)),
+    max: Math.floor(Math.min(95, sxAtMax)),
+  };
+}
+
+/**
+ * Clamp subject_x to the safe range for a given aspect ratio.
+ * Falls back to static margin if no aspect ratio info provided.
  * Matches backend _safe_subject_x() exactly for preview-export parity.
  *
  * @param {number} sx - Raw subject_x value (0-100)
+ * @param {number|null} srcRatio - Source video aspect ratio (optional)
+ * @param {number|null} targetRatio - Target crop aspect ratio (optional)
  * @returns {number} Clamped subject_x
  */
-export function safeSubjectX(sx) {
+export function safeSubjectX(sx, srcRatio = null, targetRatio = null) {
+  if (srcRatio && targetRatio) {
+    const range = computeSafeRange(srcRatio, targetRatio);
+    return Math.max(range.min, Math.min(range.max, Math.round(sx)));
+  }
+  // Fallback: static margin (legacy behavior)
   return Math.max(SAFE_MARGIN, Math.min(100 - SAFE_MARGIN, Math.round(sx)));
 }
 
@@ -40,9 +73,11 @@ export function safeSubjectX(sx) {
  * @param {Array} scenes - Scene objects with {timestamp, subject_x}
  * @param {number} clipStart - Clip start time in seconds
  * @param {number} clipEnd - Clip end time in seconds
+ * @param {number|null} srcRatio - Source video aspect ratio (optional)
+ * @param {number|null} targetRatio - Target crop aspect ratio (optional)
  * @returns {Array<{t: number, x: number}>} Sorted keyframes (t = seconds from clip start)
  */
-export function buildSubjectKeyframes(scenes, clipStart, clipEnd) {
+export function buildSubjectKeyframes(scenes, clipStart, clipEnd, srcRatio = null, targetRatio = null) {
   if (!scenes?.length) return [{ t: 0, x: 50 }];
 
   const sorted = [...scenes].sort((a, b) => a.timestamp - b.timestamp);
@@ -52,16 +87,16 @@ export function buildSubjectKeyframes(scenes, clipStart, clipEnd) {
 
   const raw = within.map((s) => ({
     t: s.timestamp - clipStart,
-    x: safeSubjectX(s.subject_x ?? 50),
+    x: safeSubjectX(s.subject_x ?? 50, srcRatio, targetRatio),
   }));
 
   const interp = (tAbs, s1, s2) => {
     const dt = s2.timestamp - s1.timestamp;
-    if (dt <= 0) return safeSubjectX(s1.subject_x ?? 50);
+    if (dt <= 0) return safeSubjectX(s1.subject_x ?? 50, srcRatio, targetRatio);
     const frac = Math.min(1, Math.max(0, (tAbs - s1.timestamp) / dt));
     return safeSubjectX(Math.round(
       (s1.subject_x ?? 50) + ((s2.subject_x ?? 50) - (s1.subject_x ?? 50)) * frac
-    ));
+    ), srcRatio, targetRatio);
   };
 
   const clipDur = clipEnd - clipStart;
@@ -74,11 +109,11 @@ export function buildSubjectKeyframes(scenes, clipStart, clipEnd) {
     } else if (before.length && after.length && !within.length) {
       sx0 = interp(clipStart, before[before.length - 1], after[0]);
     } else if (before.length) {
-      sx0 = safeSubjectX(before[before.length - 1].subject_x ?? 50);
+      sx0 = safeSubjectX(before[before.length - 1].subject_x ?? 50, srcRatio, targetRatio);
     } else if (within.length) {
-      sx0 = safeSubjectX(within[0].subject_x ?? 50);
+      sx0 = safeSubjectX(within[0].subject_x ?? 50, srcRatio, targetRatio);
     } else if (after.length) {
-      sx0 = safeSubjectX(after[0].subject_x ?? 50);
+      sx0 = safeSubjectX(after[0].subject_x ?? 50, srcRatio, targetRatio);
     } else {
       sx0 = 50;
     }
@@ -93,11 +128,11 @@ export function buildSubjectKeyframes(scenes, clipStart, clipEnd) {
     } else if (before.length && after.length && !within.length) {
       sxEnd = interp(clipEnd, before[before.length - 1], after[0]);
     } else if (after.length) {
-      sxEnd = safeSubjectX(after[0].subject_x ?? 50);
+      sxEnd = safeSubjectX(after[0].subject_x ?? 50, srcRatio, targetRatio);
     } else if (within.length) {
-      sxEnd = safeSubjectX(within[within.length - 1].subject_x ?? 50);
+      sxEnd = safeSubjectX(within[within.length - 1].subject_x ?? 50, srcRatio, targetRatio);
     } else if (before.length) {
-      sxEnd = safeSubjectX(before[before.length - 1].subject_x ?? 50);
+      sxEnd = safeSubjectX(before[before.length - 1].subject_x ?? 50, srcRatio, targetRatio);
     } else {
       sxEnd = 50;
     }
@@ -116,16 +151,16 @@ export function buildSubjectKeyframes(scenes, clipStart, clipEnd) {
  * move, the camera cut to a new shot.  Human editors cut-to instantly,
  * they never pan across a scene cut.
  *
- * Inserts a keyframe 1 frame (33ms at 30fps) before the cut with the OLD
- * position, so the transition is instant (step function) instead of linear.
+ * Inserts a keyframe 1ms before the cut with the OLD position, so the
+ * transition is truly instant — below one frame at any display rate.
  *
  * Matches backend _handle_scene_cuts() exactly for preview-export parity.
  *
  * @param {Array<{t: number, x: number}>} keyframes - Sorted keyframes
- * @param {number} jumpThreshold - Minimum subject_x delta to treat as a cut (default 15)
+ * @param {number} jumpThreshold - Minimum subject_x delta to treat as a cut (default 12)
  * @returns {Array<{t: number, x: number}>} Keyframes with instant-cut transitions
  */
-export function handleSceneCuts(keyframes, jumpThreshold = 15) {
+export function handleSceneCuts(keyframes, jumpThreshold = 12) {
   if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
 
   const result = [keyframes[0]];
@@ -136,8 +171,8 @@ export function handleSceneCuts(keyframes, jumpThreshold = 15) {
 
     if (delta >= jumpThreshold && (cur.t - prev.t) > 0.1) {
       // Large jump detected — insert instant cut
-      // Add a keyframe 33ms (1 frame at 30fps) before the new position
-      const cutTime = Math.round((cur.t - 0.033) * 1000) / 1000;
+      // 1ms gap: below one frame at any frame rate, so smoothstep can't catch it
+      const cutTime = Math.round((cur.t - 0.001) * 1000) / 1000;
       if (cutTime > prev.t) {
         result.push({ t: cutTime, x: prev.x }); // Hold old position until cut
       }
@@ -150,25 +185,77 @@ export function handleSceneCuts(keyframes, jumpThreshold = 15) {
 }
 
 /**
+ * Compress the range of subject_x values to prevent erratic swinging.
+ *
+ * If the full range of sx values exceeds maxRange, compress toward the
+ * median so total motion stays within bounds. Preserves relative timing
+ * and direction of motion — just reduces amplitude.
+ *
+ * A human editor typically keeps the crop within a narrow band for a
+ * single clip, only making large reframes at clear shot changes.
+ *
+ * Matches backend _compress_range() exactly for preview-export parity.
+ *
+ * @param {Array<{t: number, x: number}>} keyframes
+ * @param {number} maxRange - Maximum allowed range of sx values (default 25)
+ * @returns {Array<{t: number, x: number}>}
+ */
+export function compressRange(keyframes, maxRange = 25) {
+  if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
+
+  const xs = keyframes.map(k => k.x);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const currentRange = maxX - minX;
+
+  if (currentRange <= maxRange) return [...keyframes.map(k => ({ ...k }))];
+
+  // Compress toward median
+  const sorted = xs.slice().sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)];
+  const scale = maxRange / currentRange;
+
+  return keyframes.map(k => ({
+    t: k.t,
+    x: Math.round(Math.max(0, Math.min(100, median + (k.x - median) * scale))),
+  }));
+}
+
+/**
  * Eliminate jittery micro-movements by snapping small changes to previous value.
  *
- * A human editor would hold the frame still for movements smaller than
- * threshold (in subject_x units, where 1 unit = 1% of frame width).
+ * When aspect ratio info is provided, the threshold is computed dynamically
+ * so it operates on VISIBLE crop movement (~3% of crop width) rather than
+ * raw source-frame movement. This prevents the dead zone from being too
+ * permissive at high R values (e.g. 16:9→9:16 where R=3.16).
  *
  * Matches backend _apply_dead_zone() exactly for preview-export parity.
  *
  * @param {Array<{t: number, x: number}>} keyframes - Sorted keyframes
  * @param {number} threshold - Minimum delta to allow movement (default 5)
+ * @param {number|null} srcRatio - Source video aspect ratio (optional)
+ * @param {number|null} targetRatio - Target crop aspect ratio (optional)
  * @returns {Array<{t: number, x: number}>} Keyframes with micro-movements removed
  */
-export function applyDeadZone(keyframes, threshold = 5) {
+export function applyDeadZone(keyframes, threshold = 5, srcRatio = null, targetRatio = null) {
   if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
+
+  // Compute effective threshold: we want ~3% of VISIBLE crop width as the dead zone
+  const VISIBLE_THRESHOLD = 3; // % of visible crop width
+  let effectiveThreshold = threshold;
+  if (srcRatio && targetRatio) {
+    const R = srcRatio / targetRatio;
+    if (R > 1.01) {
+      // Convert visible threshold back to source-frame units
+      effectiveThreshold = Math.max(2, Math.round(VISIBLE_THRESHOLD * (R - 1) / R));
+    }
+  }
 
   const result = [keyframes[0]];
   for (let i = 1; i < keyframes.length; i++) {
     const cur = keyframes[i];
     const prevX = result[result.length - 1].x;
-    if (Math.abs(cur.x - prevX) < threshold) {
+    if (Math.abs(cur.x - prevX) < effectiveThreshold) {
       // Small change — hold position (snap to previous)
       result.push({ t: cur.t, x: prevX });
     } else {
@@ -189,10 +276,10 @@ export function applyDeadZone(keyframes, threshold = 5) {
  * Matches backend _smooth_keyframes_bidirectional() exactly for preview-export parity.
  *
  * @param {Array<{t: number, x: number}>} keyframes - Sorted keyframes
- * @param {number} maxSpeed - Maximum subject_x units per second (default 40)
+ * @param {number} maxSpeed - Maximum subject_x units per second (default 25)
  * @returns {Array<{t: number, x: number}>} Smoothed keyframes
  */
-export function smoothKeyframesBidirectional(keyframes, maxSpeed = 40) {
+export function smoothKeyframesBidirectional(keyframes, maxSpeed = 25) {
   if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
 
   // Forward pass
@@ -256,10 +343,10 @@ export function smoothKeyframesBidirectional(keyframes, maxSpeed = 40) {
  * Matches backend _merge_holds() exactly for preview-export parity.
  *
  * @param {Array<{t: number, x: number}>} keyframes - Sorted keyframes
- * @param {number} tolerance - Maximum delta to merge (default 2)
+ * @param {number} tolerance - Maximum delta to merge (default 3)
  * @returns {Array<{t: number, x: number}>} Keyframes with holds merged
  */
-export function mergeHolds(keyframes, tolerance = 2) {
+export function mergeHolds(keyframes, tolerance = 3) {
   if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
 
   const result = [keyframes[0]];
@@ -277,22 +364,25 @@ export function mergeHolds(keyframes, tolerance = 2) {
 }
 
 /**
- * Full keyframe processing pipeline: build → scene cuts → dead zone →
- * bidirectional smooth → merge holds.
+ * Full keyframe processing pipeline:
+ *   build → scene cuts → compress range → dead zone → bidirectional smooth → merge holds
  *
  * Matches the backend export_clip() pipeline exactly for preview-export parity.
  *
  * @param {Array} scenes - Scene objects with {timestamp, subject_x}
  * @param {number} clipStart - Clip start time in seconds
  * @param {number} clipEnd - Clip end time in seconds
+ * @param {number|null} srcRatio - Source video aspect ratio (optional)
+ * @param {number|null} targetRatio - Target crop aspect ratio (optional)
  * @returns {Array<{t: number, x: number}>} Fully processed keyframes
  */
-export function processKeyframes(scenes, clipStart, clipEnd) {
-  const raw = buildSubjectKeyframes(scenes, clipStart, clipEnd);
+export function processKeyframes(scenes, clipStart, clipEnd, srcRatio = null, targetRatio = null) {
+  const raw = buildSubjectKeyframes(scenes, clipStart, clipEnd, srcRatio, targetRatio);
   if (!raw || raw.length <= 1) return raw;
 
   const afterCuts = handleSceneCuts(raw);
-  const afterDeadZone = applyDeadZone(afterCuts);
+  const afterCompress = compressRange(afterCuts);
+  const afterDeadZone = applyDeadZone(afterCompress, 5, srcRatio, targetRatio);
   const afterSmooth = smoothKeyframesBidirectional(afterDeadZone);
   const afterHolds = mergeHolds(afterSmooth);
 
