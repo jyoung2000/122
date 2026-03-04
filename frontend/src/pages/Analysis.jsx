@@ -804,6 +804,7 @@ export default function Analysis() {
       display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
       background: 'var(--bg-panel)', borderRadius: '0 0 var(--radius-md) var(--radius-md)',
       borderTop: '1px solid var(--border)', flexWrap: 'wrap', marginTop: -1,
+      justifyContent: isMobile ? 'center' : undefined,
     }}>
       {extraLeft}
       <button
@@ -847,7 +848,7 @@ export default function Analysis() {
           showToast('Settings applied — your exported video will use these subtitle settings', 'info');
         }}
         style={{
-          marginLeft: 'auto',
+          marginLeft: isMobile ? undefined : 'auto',
           display: 'flex', alignItems: 'center', gap: 4,
           padding: '5px 12px', fontSize: 11, fontWeight: 600,
           background: settingsAppliedFlash ? 'var(--success)' : 'var(--bg-elevated)',
