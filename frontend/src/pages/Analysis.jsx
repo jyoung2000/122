@@ -734,6 +734,28 @@ export default function Analysis() {
   }, [clipSettings, clipPreview]);
   useEffect(() => () => { if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current); }, []);
 
+  // Determine if playhead is inside a segment — used for segment-aware subs toggle.
+  // MUST be before early returns to satisfy Rules of Hooks.
+  const activeSegment = useMemo(() => {
+    if (!editorSegments || editorSegments.length === 0) return null;
+    return editorSegments.find(s => videoCurrentTime >= s.start && videoCurrentTime < s.end) || null;
+  }, [editorSegments, videoCurrentTime]);
+
+  // Effective subs state: active segment's subtitlesEnabled takes precedence over global
+  const effectiveSubsEnabled = activeSegment ? (activeSegment.subtitlesEnabled !== false) : clipSettings.subtitlesEnabled;
+
+  const handleSubsToggle = useCallback(() => {
+    if (activeSegment) {
+      // Toggle the active segment's subtitlesEnabled
+      const newVal = activeSegment.subtitlesEnabled === false; // flip: false→true, true/undefined→false
+      setEditorSegments(prev =>
+        prev.map(s => s.id === activeSegment.id ? { ...s, subtitlesEnabled: newVal } : s)
+      );
+    } else {
+      setClipSettings(prev => ({ ...prev, subtitlesEnabled: !prev.subtitlesEnabled }));
+    }
+  }, [activeSegment]);
+
   const handleApplyClipSettings = (settings) => {
     setClipSettings(settings);
     showToast('Clip settings applied to preview & export', 'info');
@@ -835,28 +857,6 @@ export default function Analysis() {
     border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer',
   });
   const updateCS = (key, val) => setClipSettings(prev => ({ ...prev, [key]: val }));
-
-  // Determine if playhead is inside a segment — used for segment-aware subs toggle
-  const activeSegment = useMemo(() => {
-    if (!editorSegments || editorSegments.length === 0) return null;
-    return editorSegments.find(s => videoCurrentTime >= s.start && videoCurrentTime < s.end) || null;
-  }, [editorSegments, videoCurrentTime]);
-
-  // Effective subs state: active segment's subtitlesEnabled takes precedence over global
-  const effectiveSubsEnabled = activeSegment ? (activeSegment.subtitlesEnabled !== false) : clipSettings.subtitlesEnabled;
-
-  const handleSubsToggle = () => {
-    if (activeSegment) {
-      // Toggle the active segment's subtitlesEnabled
-      const newVal = activeSegment.subtitlesEnabled === false; // flip: false→true, true/undefined→false
-      setEditorSegments(prev =>
-        prev.map(s => s.id === activeSegment.id ? { ...s, subtitlesEnabled: newVal } : s)
-      );
-    } else {
-      // Toggle global subtitles
-      updateCS('subtitlesEnabled', !clipSettings.subtitlesEnabled);
-    }
-  };
 
   const renderInlineSubToolbar = (extraLeft) => (
     <div style={{
