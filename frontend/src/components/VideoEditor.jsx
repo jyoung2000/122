@@ -786,6 +786,209 @@ export default function VideoEditor({
     onTrimChange?.({ trimStart: trimStartOffset, trimEnd: trimEndOffset });
   }, [trimStartOffset, trimEndOffset, onTrimChange]);
 
+  // ── Player controls ────────────────────────────────
+  const togglePlay = useCallback(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    // Resume AudioContext if needed
+    if (audioCtxRef.current?.state === 'suspended') {
+      audioCtxRef.current.resume().catch(() => {});
+    }
+    if (video.paused) {
+      if (video.currentTime >= trimmedEnd) video.currentTime = trimmedStart;
+      video.play().then(() => setPlaying(true)).catch(() => {});
+    } else {
+      video.pause();
+      setPlaying(false);
+    }
+  }, [trimmedStart, trimmedEnd]);
+
+  const seekTo = useCallback((time) => {
+    const video = videoRef.current;
+    if (!video) return;
+    const clamped = Math.max(trimmedStart, Math.min(trimmedEnd, time));
+    video.currentTime = clamped;
+    setCurrentTime(clamped);
+  }, [trimmedStart, trimmedEnd]);
+
+  const skipTime = useCallback((delta) => {
+    const video = videoRef.current;
+    if (!video) return;
+    seekTo(video.currentTime + delta);
+  }, [seekTo]);
+
+  const toggleMute = useCallback(() => {
+    if (selectedSegment) {
+      updateSegment(selectedSegment.id, {
+        muted: !selectedSegment.muted,
+        volume: selectedSegment.muted ? 100 : 0,
+      });
+      return;
+    }
+    if (isMuted) {
+      setIsMuted(false);
+      setVolume(prevVolume || 100);
+    } else {
+      setPrevVolume(volume);
+      setIsMuted(true);
+    }
+  }, [isMuted, volume, prevVolume, selectedSegment, updateSegment]);
+
+  const toggleFullscreen = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      el.requestFullscreen().catch(() => {});
+    }
+  }, []);
+
+  // ── Apply trim ────────────────────────────────────
+  const handleApplyTrim = useCallback(() => {
+    setTrimApplied(true);
+    onTrimChange?.({ trimStart: trimStartOffset, trimEnd: trimEndOffset });
+    // Notify parent to update clip boundaries so the trimmed range becomes the full video
+    if (onApplyTrim) {
+      onApplyTrim({ start: trimmedStart, end: trimmedEnd });
+      // Reset trim offsets since the clip boundaries are now narrower
+      setTrimStartOffset(0);
+      setTrimEndOffset(0);
+    }
+  }, [trimStartOffset, trimEndOffset, trimmedStart, trimmedEnd, onTrimChange, onApplyTrim]);
+
+  // Reset applied state when trim handles change
+  useEffect(() => {
+    setTrimApplied(false);
+  }, [trimStartOffset, trimEndOffset]);
+
+  // ── Timeline pointer handling ──────────────────────
+  const getTimeFromPointer = useCallback((clientX) => {
+    const track = timelineRef.current;
+    if (!track || clipDur <= 0) return clipStart;
+    const rect = track.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    return clipStart + pct * clipDur;
+  }, [clipStart, clipDur]);
+
+  const startDragTracking = useCallback((e, handle) => {
+    const onMove = (ev) => {
+      const time = getTimeFromPointer(ev.clientX);
+      const offset = time - clipStart;
+
+      if (handle === 'left') {
+        const maxOffset = clipDur - trimEndOffset - 1; // minimum 1s gap
+        const newOffset = Math.max(0, Math.min(maxOffset, offset));
+        setTrimStartOffset(newOffset);
+        // Show frame at handle position
+        const video = videoRef.current;
+        if (video) video.currentTime = clipStart + newOffset;
+      } else {
+        const maxOffset = clipDur - trimStartOffset - 1;
+        const fromEnd = effectiveClipEnd - time;
+        const newOffset = Math.max(0, Math.min(maxOffset, fromEnd));
+        setTrimEndOffset(newOffset);
+        const video = videoRef.current;
+        if (video) video.currentTime = effectiveClipEnd - newOffset;
+      }
+    };
+    const onUp = () => {
+      setDraggingHandle(null);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [clipStart, effectiveClipEnd, clipDur, trimStartOffset, trimEndOffset, getTimeFromPointer]);
+
+  const onTimelinePointerDown = useCallback((e) => {
+    e.preventDefault();
+    const track = timelineRef.current;
+    if (!track) return;
+    const rect = track.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    const time = clipStart + pct * clipDur;
+
+    // Check if clicking near trim handles
+    const leftHandlePct = trimStartOffset / clipDur;
+    const rightHandlePct = 1 - trimEndOffset / clipDur;
+    const handleThresholdPct = 24 / rect.width; // 24px hit area
+
+    if (Math.abs(pct - leftHandlePct) < handleThresholdPct) {
+      setDraggingHandle('left');
+      startDragTracking(e, 'left');
+      return;
+    }
+    if (Math.abs(pct - rightHandlePct) < handleThresholdPct) {
+      setDraggingHandle('right');
+      startDragTracking(e, 'right');
+      return;
+    }
+
+    // Click-to-seek anywhere on timeline (Premiere-style)
+    seekTo(time);
+    setDraggingPlayhead(true);
+
+    // Remember play state to restore after scrub
+    const wasPlaying = !videoRef.current?.paused;
+    if (wasPlaying) {
+      videoRef.current.pause();
+      setPlaying(false);
+    }
+
+    let rafPending = null;
+    const onMove = (ev) => {
+      const t = getTimeFromPointer(ev.clientX);
+      const clampedT = Math.max(trimmedStart, Math.min(trimmedEnd, t));
+      // Throttle via rAF for smooth scrubbing
+      if (rafPending === null) {
+        rafPending = requestAnimationFrame(() => {
+          seekTo(clampedT);
+          rafPending = null;
+        });
+      }
+    };
+    const onUp = () => {
+      setDraggingPlayhead(false);
+      if (rafPending !== null) cancelAnimationFrame(rafPending);
+      // Resume playback if it was playing before scrub
+      if (wasPlaying && videoRef.current) {
+        videoRef.current.play().then(() => setPlaying(true)).catch(() => {});
+      }
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [clipStart, clipDur, trimStartOffset, trimEndOffset, trimmedStart, trimmedEnd, seekTo, getTimeFromPointer, startDragTracking]);
+
+  // Trim handle direct pointer down
+  const onTrimHandlePointerDown = useCallback((e, handle) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDraggingHandle(handle);
+    startDragTracking(e, handle);
+  }, [startDragTracking]);
+
+  // ── Speed menu ─────────────────────────────────────
+  const selectSpeed = useCallback((val) => {
+    if (selectedSegment) {
+      updateSegment(selectedSegment.id, { speed: val });
+      setShowSpeedMenu(false);
+      return;
+    }
+    setSpeed(val);
+    setShowSpeedMenu(false);
+  }, [selectedSegment, updateSegment]);
+
+  // Close speed menu on outside click
+  useEffect(() => {
+    if (!showSpeedMenu) return;
+    const onClick = () => setShowSpeedMenu(false);
+    window.addEventListener('click', onClick);
+    return () => window.removeEventListener('click', onClick);
+  }, [showSpeedMenu]);
+
   // ── Keyboard shortcuts (J-K-L shuttle control) ─────
   useEffect(() => {
     const onKeyDown = (e) => {
@@ -876,209 +1079,6 @@ export default function VideoEditor({
       return () => clearInterval(interval);
     }
   }, [shuttleSpeed, trimmedStart]);
-
-  // ── Player controls ────────────────────────────────
-  const togglePlay = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    // Resume AudioContext if needed
-    if (audioCtxRef.current?.state === 'suspended') {
-      audioCtxRef.current.resume().catch(() => {});
-    }
-    if (video.paused) {
-      if (video.currentTime >= trimmedEnd) video.currentTime = trimmedStart;
-      video.play().then(() => setPlaying(true)).catch(() => {});
-    } else {
-      video.pause();
-      setPlaying(false);
-    }
-  }, [trimmedStart, trimmedEnd]);
-
-  const seekTo = useCallback((time) => {
-    const video = videoRef.current;
-    if (!video) return;
-    const clamped = Math.max(trimmedStart, Math.min(trimmedEnd, time));
-    video.currentTime = clamped;
-    setCurrentTime(clamped);
-  }, [trimmedStart, trimmedEnd]);
-
-  const skipTime = useCallback((delta) => {
-    const video = videoRef.current;
-    if (!video) return;
-    seekTo(video.currentTime + delta);
-  }, [seekTo]);
-
-  const toggleMute = useCallback(() => {
-    if (selectedSegment) {
-      updateSegment(selectedSegment.id, {
-        muted: !selectedSegment.muted,
-        volume: selectedSegment.muted ? 100 : 0,
-      });
-      return;
-    }
-    if (isMuted) {
-      setIsMuted(false);
-      setVolume(prevVolume || 100);
-    } else {
-      setPrevVolume(volume);
-      setIsMuted(true);
-    }
-  }, [isMuted, volume, prevVolume, selectedSegment, updateSegment]);
-
-  const toggleFullscreen = useCallback(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    } else {
-      el.requestFullscreen().catch(() => {});
-    }
-  }, []);
-
-  // ── Apply trim ────────────────────────────────────
-  const handleApplyTrim = useCallback(() => {
-    setTrimApplied(true);
-    onTrimChange?.({ trimStart: trimStartOffset, trimEnd: trimEndOffset });
-    // Notify parent to update clip boundaries so the trimmed range becomes the full video
-    if (onApplyTrim) {
-      onApplyTrim({ start: trimmedStart, end: trimmedEnd });
-      // Reset trim offsets since the clip boundaries are now narrower
-      setTrimStartOffset(0);
-      setTrimEndOffset(0);
-    }
-  }, [trimStartOffset, trimEndOffset, trimmedStart, trimmedEnd, onTrimChange, onApplyTrim]);
-
-  // Reset applied state when trim handles change
-  useEffect(() => {
-    setTrimApplied(false);
-  }, [trimStartOffset, trimEndOffset]);
-
-  // ── Timeline pointer handling ──────────────────────
-  const getTimeFromPointer = useCallback((clientX) => {
-    const track = timelineRef.current;
-    if (!track || clipDur <= 0) return clipStart;
-    const rect = track.getBoundingClientRect();
-    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    return clipStart + pct * clipDur;
-  }, [clipStart, clipDur]);
-
-  const onTimelinePointerDown = useCallback((e) => {
-    e.preventDefault();
-    const track = timelineRef.current;
-    if (!track) return;
-    const rect = track.getBoundingClientRect();
-    const pct = (e.clientX - rect.left) / rect.width;
-    const time = clipStart + pct * clipDur;
-
-    // Check if clicking near trim handles
-    const leftHandlePct = trimStartOffset / clipDur;
-    const rightHandlePct = 1 - trimEndOffset / clipDur;
-    const handleThresholdPct = 24 / rect.width; // 24px hit area
-
-    if (Math.abs(pct - leftHandlePct) < handleThresholdPct) {
-      setDraggingHandle('left');
-      startDragTracking(e, 'left');
-      return;
-    }
-    if (Math.abs(pct - rightHandlePct) < handleThresholdPct) {
-      setDraggingHandle('right');
-      startDragTracking(e, 'right');
-      return;
-    }
-
-    // Click-to-seek anywhere on timeline (Premiere-style)
-    seekTo(time);
-    setDraggingPlayhead(true);
-
-    // Remember play state to restore after scrub
-    const wasPlaying = !videoRef.current?.paused;
-    if (wasPlaying) {
-      videoRef.current.pause();
-      setPlaying(false);
-    }
-
-    let rafPending = null;
-    const onMove = (ev) => {
-      const t = getTimeFromPointer(ev.clientX);
-      const clampedT = Math.max(trimmedStart, Math.min(trimmedEnd, t));
-      // Throttle via rAF for smooth scrubbing
-      if (rafPending === null) {
-        rafPending = requestAnimationFrame(() => {
-          seekTo(clampedT);
-          rafPending = null;
-        });
-      }
-    };
-    const onUp = () => {
-      setDraggingPlayhead(false);
-      if (rafPending !== null) cancelAnimationFrame(rafPending);
-      // Resume playback if it was playing before scrub
-      if (wasPlaying && videoRef.current) {
-        videoRef.current.play().then(() => setPlaying(true)).catch(() => {});
-      }
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }, [clipStart, clipDur, trimStartOffset, trimEndOffset, trimmedStart, trimmedEnd, seekTo, getTimeFromPointer, startDragTracking]);
-
-  const startDragTracking = useCallback((e, handle) => {
-    const onMove = (ev) => {
-      const time = getTimeFromPointer(ev.clientX);
-      const offset = time - clipStart;
-
-      if (handle === 'left') {
-        const maxOffset = clipDur - trimEndOffset - 1; // minimum 1s gap
-        const newOffset = Math.max(0, Math.min(maxOffset, offset));
-        setTrimStartOffset(newOffset);
-        // Show frame at handle position
-        const video = videoRef.current;
-        if (video) video.currentTime = clipStart + newOffset;
-      } else {
-        const maxOffset = clipDur - trimStartOffset - 1;
-        const fromEnd = effectiveClipEnd - time;
-        const newOffset = Math.max(0, Math.min(maxOffset, fromEnd));
-        setTrimEndOffset(newOffset);
-        const video = videoRef.current;
-        if (video) video.currentTime = effectiveClipEnd - newOffset;
-      }
-    };
-    const onUp = () => {
-      setDraggingHandle(null);
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }, [clipStart, effectiveClipEnd, clipDur, trimStartOffset, trimEndOffset, getTimeFromPointer]);
-
-  // Trim handle direct pointer down
-  const onTrimHandlePointerDown = useCallback((e, handle) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDraggingHandle(handle);
-    startDragTracking(e, handle);
-  }, [startDragTracking]);
-
-  // ── Speed menu ─────────────────────────────────────
-  const selectSpeed = useCallback((val) => {
-    if (selectedSegment) {
-      updateSegment(selectedSegment.id, { speed: val });
-      setShowSpeedMenu(false);
-      return;
-    }
-    setSpeed(val);
-    setShowSpeedMenu(false);
-  }, [selectedSegment, updateSegment]);
-
-  // Close speed menu on outside click
-  useEffect(() => {
-    if (!showSpeedMenu) return;
-    const onClick = () => setShowSpeedMenu(false);
-    window.addEventListener('click', onClick);
-    return () => window.removeEventListener('click', onClick);
-  }, [showSpeedMenu]);
 
   // ── Volume icon selector ───────────────────────────
   const VolumeIcon = useMemo(() => {
