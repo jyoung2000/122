@@ -46,7 +46,7 @@ DEFAULT_MARGIN_V = {
 
 # Safe-area limits: total margin (base + inset) per side must not consume
 # more than this fraction of the frame, guaranteeing a minimum text area.
-MIN_TEXT_AREA_W = 0.50  # subtitle text area >= 50% of output width
+MIN_TEXT_AREA_W = 0.20  # subtitle text area >= 20% of output width
 MIN_TEXT_AREA_H = 0.60  # subtitle text area >= 60% of output height
 
 DEFAULT_SPEAKER_PALETTE = [
@@ -211,7 +211,7 @@ def generate_ass(
     bold_flag = FONT_WEIGHT_MAP.get(font_weight, 0)
 
     # Clamp user-configurable values
-    max_width_pct = max(50, min(100, max_width_pct))
+    max_width_pct = max(20, min(100, max_width_pct))
     offset_v_pct = max(0, min(100, offset_v_pct))
 
     # Clamp outline values

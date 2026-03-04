@@ -273,6 +273,15 @@ export default function Analysis() {
   const [editorVolume, setEditorVolume] = useState(1.0);
   const [editorSpeed, setEditorSpeed] = useState(1.0);
   const [showInlineSubSettings, setShowInlineSubSettings] = useState(false);
+  const [inlineCustomFonts, setInlineCustomFonts] = useState([]);
+
+  // Fetch custom fonts for the inline subtitle settings panel
+  useEffect(() => {
+    fetch('/api/fonts')
+      .then((r) => r.ok ? r.json() : [])
+      .then(setInlineCustomFonts)
+      .catch(() => {});
+  }, []);
   const [isGeneratingClips, setIsGeneratingClips] = useState(false);
   const [stuckSeconds, setStuckSeconds] = useState(0);
   const lastProgressRef = useRef({ message: '', time: Date.now() });
@@ -767,6 +776,207 @@ export default function Analysis() {
     return b.viral_score - a.viral_score;
   });
 
+  // ── Inline subtitle settings toolbar + panel (shared by both editors) ──
+  const builtinFonts = ['DM Sans', 'Montserrat', 'Open Sans', 'Roboto', 'Poppins', 'Inter', 'Nunito', 'Lato', 'Oswald', 'Playfair Display', 'Bebas Neue'];
+  const inlineLabelStyle = { fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' };
+  const inlineFieldStyle = { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 80 };
+  const inlineChipStyle = (active) => ({
+    padding: '4px 8px', fontSize: 10, fontWeight: 600,
+    background: active ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+    color: active ? '#fff' : 'var(--text-secondary)',
+    border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer',
+  });
+  const updateCS = (key, val) => setClipSettings(prev => ({ ...prev, [key]: val }));
+
+  const renderInlineSubToolbar = (extraLeft) => (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
+      background: 'var(--bg-panel)', borderRadius: '0 0 var(--radius-md) var(--radius-md)',
+      borderTop: '1px solid var(--border)', flexWrap: 'wrap', marginTop: -1,
+    }}>
+      {extraLeft}
+      <button
+        onClick={() => updateCS('subtitlesEnabled', !clipSettings.subtitlesEnabled)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 4,
+          padding: '5px 10px', fontSize: 11, fontWeight: 600,
+          background: clipSettings.subtitlesEnabled ? 'var(--accent-cyan-dim)' : 'var(--bg-elevated)',
+          color: clipSettings.subtitlesEnabled ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+          border: `1px solid ${clipSettings.subtitlesEnabled ? 'var(--accent-cyan)' : 'var(--border)'}`,
+          borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
+        }}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="1" y="4" width="22" height="16" rx="2" /><line x1="1" y1="14" x2="23" y2="14" />
+        </svg>
+        Subs {clipSettings.subtitlesEnabled ? 'On' : 'Off'}
+      </button>
+      {!isMobile && (
+        <button
+          onClick={() => setShowInlineSubSettings(v => !v)}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 3,
+            padding: '5px 8px', fontSize: 10, fontWeight: 500,
+            background: showInlineSubSettings ? 'var(--accent-cyan-dim)' : 'transparent',
+            color: 'var(--text-muted)',
+            border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+            cursor: 'pointer', whiteSpace: 'nowrap',
+          }}>
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+          </svg>
+          {showInlineSubSettings ? 'Hide Settings' : 'Subtitle Settings'}
+        </button>
+      )}
+    </div>
+  );
+
+  const renderInlineSubPanel = () => {
+    if (!showInlineSubSettings || isMobile) return null;
+    return (
+      <div style={{
+        padding: '12px 16px', background: 'var(--bg-panel)',
+        border: '1px solid var(--border)', borderTop: 'none',
+        borderRadius: '0 0 var(--radius-md) var(--radius-md)',
+      }}>
+        {/* Row 1: Font, Size, Weight, Color */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end', marginBottom: 10 }}>
+          <div style={{ ...inlineFieldStyle, minWidth: 120 }}>
+            <label style={inlineLabelStyle}>Font</label>
+            <select value={clipSettings.subtitleFont || 'DM Sans'} onChange={e => updateCS('subtitleFont', e.target.value)}
+              style={{ padding: '5px 8px', fontSize: 12, borderRadius: 'var(--radius-xs)', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text-primary)' }}>
+              {builtinFonts.map(f => <option key={f} value={f}>{f}</option>)}
+              {inlineCustomFonts.length > 0 && (
+                <optgroup label="Custom Fonts">
+                  {inlineCustomFonts.map(f => <option key={f.name} value={f.name}>{f.name}</option>)}
+                </optgroup>
+              )}
+            </select>
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Size</label>
+            <div style={{ display: 'flex', gap: 2 }}>
+              {[{ l: 'S', v: 22 }, { l: 'M', v: 30 }, { l: 'L', v: 40 }].map(s => (
+                <button key={s.v} onClick={() => updateCS('subtitleSize', s.v)} style={inlineChipStyle((clipSettings.subtitleSize || 30) === s.v)}>{s.l}</button>
+              ))}
+            </div>
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Weight</label>
+            <div style={{ display: 'flex', gap: 2 }}>
+              {['normal', 'bold'].map(w => (
+                <button key={w} onClick={() => updateCS('subtitleFontWeight', w)}
+                  style={{ ...inlineChipStyle((clipSettings.subtitleFontWeight || 'bold') === w), fontWeight: w === 'bold' ? 700 : 400, textTransform: 'capitalize' }}>{w}</button>
+              ))}
+            </div>
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Color</label>
+            <input type="color" value={clipSettings.subtitleFontColor || '#FFFFFF'} onChange={e => updateCS('subtitleFontColor', e.target.value)}
+              style={{ width: 32, height: 28, border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer', padding: 1 }} />
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Position</label>
+            <div style={{ display: 'flex', gap: 2 }}>
+              {['top', 'center', 'bottom'].map(p => (
+                <button key={p} onClick={() => updateCS('subtitlePosition', p)} style={{ ...inlineChipStyle((clipSettings.subtitlePosition || 'bottom') === p), textTransform: 'capitalize' }}>{p}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Row 2: Max Width, Offset, Outline, Max Words */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end', marginBottom: 10 }}>
+          <div style={{ ...inlineFieldStyle, minWidth: 120 }}>
+            <label style={inlineLabelStyle}>Max Width</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="range" min="20" max="100" step="5" value={Math.min(100, Math.max(20, clipSettings.subtitleMaxWidth))}
+                onChange={e => updateCS('subtitleMaxWidth', parseInt(e.target.value))}
+                style={{ flex: 1, accentColor: 'var(--accent-cyan)', minWidth: 60 }} />
+              <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 28, textAlign: 'right' }}>{clipSettings.subtitleMaxWidth}%</span>
+            </div>
+          </div>
+          <div style={{ ...inlineFieldStyle, minWidth: 100 }}>
+            <label style={inlineLabelStyle}>Vertical Offset</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="range" min="0" max="40" step="1" value={clipSettings.subtitleOffsetV ?? 4}
+                onChange={e => updateCS('subtitleOffsetV', parseInt(e.target.value))}
+                style={{ flex: 1, accentColor: 'var(--accent-cyan)', minWidth: 60 }} />
+              <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 28, textAlign: 'right' }}>{clipSettings.subtitleOffsetV ?? 4}%</span>
+            </div>
+          </div>
+          <div style={{ ...inlineFieldStyle, minWidth: 100 }}>
+            <label style={inlineLabelStyle}>Outline</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="range" min="0" max="10" step="1" value={clipSettings.subtitleOutlineWidth ?? 2}
+                onChange={e => updateCS('subtitleOutlineWidth', parseInt(e.target.value))}
+                style={{ flex: 1, accentColor: 'var(--accent-cyan)', minWidth: 60 }} />
+              <input type="color" value={clipSettings.subtitleOutlineColor || '#000000'} onChange={e => updateCS('subtitleOutlineColor', e.target.value)}
+                style={{ width: 24, height: 22, border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer', padding: 1 }} />
+            </div>
+          </div>
+          <div style={{ ...inlineFieldStyle, minWidth: 80 }}>
+            <label style={inlineLabelStyle}>Max Words</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="range" min="0" max="12" step="1" value={clipSettings.subtitleMaxWords ?? 0}
+                onChange={e => updateCS('subtitleMaxWords', parseInt(e.target.value))}
+                style={{ flex: 1, accentColor: 'var(--accent-cyan)', minWidth: 50 }} />
+              <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 20, textAlign: 'right' }}>{clipSettings.subtitleMaxWords || 'Off'}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Row 3: Background, Active Word, Speaker Labels */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end' }}>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Background</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <button onClick={() => updateCS('subtitleBgEnabled', !clipSettings.subtitleBgEnabled)}
+                style={inlineChipStyle(clipSettings.subtitleBgEnabled)}>
+                {clipSettings.subtitleBgEnabled ? 'On' : 'Off'}
+              </button>
+              {clipSettings.subtitleBgEnabled && (
+                <>
+                  <input type="color" value={clipSettings.subtitleBgColor || '#000000'} onChange={e => updateCS('subtitleBgColor', e.target.value)}
+                    style={{ width: 24, height: 22, border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer', padding: 1 }} />
+                  <input type="range" min="0" max="100" step="5" value={clipSettings.subtitleBgOpacity ?? 75}
+                    onChange={e => updateCS('subtitleBgOpacity', parseInt(e.target.value))}
+                    style={{ width: 50, accentColor: 'var(--accent-cyan)' }} />
+                </>
+              )}
+            </div>
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Active Word</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <button onClick={() => updateCS('activeWordEnabled', !clipSettings.activeWordEnabled)}
+                style={inlineChipStyle(clipSettings.activeWordEnabled)}>
+                {clipSettings.activeWordEnabled ? 'On' : 'Off'}
+              </button>
+              {clipSettings.activeWordEnabled && (
+                <input type="color" value={clipSettings.activeWordColor || '#FFD700'} onChange={e => updateCS('activeWordColor', e.target.value)}
+                  style={{ width: 24, height: 22, border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer', padding: 1 }} />
+              )}
+            </div>
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Speaker Labels</label>
+            <button onClick={() => updateCS('showSpeakerLabels', !(clipSettings.showSpeakerLabels ?? false))}
+              style={inlineChipStyle(clipSettings.showSpeakerLabels ?? false)}>
+              {(clipSettings.showSpeakerLabels ?? false) ? 'On' : 'Off'}
+            </button>
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Speaker Colors</label>
+            <button onClick={() => updateCS('useSpeakerColors', !(clipSettings.useSpeakerColors ?? true))}
+              style={inlineChipStyle(clipSettings.useSpeakerColors ?? true)}>
+              {(clipSettings.useSpeakerColors ?? true) ? 'On' : 'Off'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div>
       {/* Video Player (sticky) — hidden on Transcript tab where we show side-by-side layout */}
@@ -824,6 +1034,9 @@ export default function Analysis() {
                 Settings applied to preview
               </div>
             )}
+            {/* Inline subtitle settings for clip preview */}
+            {renderInlineSubToolbar(null)}
+            {renderInlineSubPanel()}
           </div>
         ) : (
           <div style={{ width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto' }}>
@@ -857,138 +1070,28 @@ export default function Analysis() {
               }
             />
 
-            {/* ── Inline Editor Toolbar: Export + Subtitle Quick Settings ── */}
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
-              background: 'var(--bg-panel)', borderRadius: '0 0 var(--radius-md) var(--radius-md)',
-              borderTop: '1px solid var(--border)', flexWrap: 'wrap', marginTop: -1,
-            }}>
-              {fullVideoExporting ? (
-                <span style={{ fontSize: 11, color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>Exporting...</span>
-              ) : (
-                <button onClick={handleExportFullVideo} style={{
-                  display: 'flex', alignItems: 'center', gap: 5,
-                  padding: '6px 14px', fontSize: 11, fontWeight: 700,
-                  background: 'var(--accent-cyan)', color: '#fff',
-                  border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
-                }}>
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
-                  </svg>
-                  Export Full Video ({clipSettings?.exportQuality || '1080p'})
-                </button>
-              )}
-
-              <div style={{ width: 1, height: 20, background: 'var(--border)', margin: '0 4px' }} />
-
-              <button
-                onClick={() => setClipSettings(prev => ({ ...prev, subtitlesEnabled: !prev.subtitlesEnabled }))}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 4,
-                  padding: '5px 10px', fontSize: 11, fontWeight: 600,
-                  background: clipSettings.subtitlesEnabled ? 'var(--accent-cyan-dim)' : 'var(--bg-elevated)',
-                  color: clipSettings.subtitlesEnabled ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-                  border: `1px solid ${clipSettings.subtitlesEnabled ? 'var(--accent-cyan)' : 'var(--border)'}`,
-                  borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
-                }}>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="1" y="4" width="22" height="16" rx="2" /><line x1="1" y1="14" x2="23" y2="14" />
-                </svg>
-                Subs {clipSettings.subtitlesEnabled ? 'On' : 'Off'}
-              </button>
-
-              <button
-                onClick={() => setShowInlineSubSettings(v => !v)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 3,
-                  padding: '5px 8px', fontSize: 10, fontWeight: 500,
-                  background: showInlineSubSettings ? 'var(--accent-cyan-dim)' : 'transparent',
-                  color: 'var(--text-muted)',
-                  border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
-                  cursor: 'pointer', whiteSpace: 'nowrap',
-                }}>
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
-                </svg>
-                {showInlineSubSettings ? 'Hide' : 'Settings'}
-              </button>
-
-              <span style={{ marginLeft: 'auto', fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
-                {job.filename || 'Full Video'} &middot; {formatDuration(job.duration)}
-              </span>
-            </div>
-
-            {showInlineSubSettings && (
-              <div style={{
-                padding: '12px 16px', background: 'var(--bg-panel)',
-                border: '1px solid var(--border)', borderTop: 'none',
-                borderRadius: '0 0 var(--radius-md) var(--radius-md)',
-                display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end',
-              }}>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 120 }}>
-                  <label style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Font</label>
-                  <select value={clipSettings.subtitleFont || 'DM Sans'} onChange={e => setClipSettings(prev => ({ ...prev, subtitleFont: e.target.value }))}
-                    style={{ padding: '5px 8px', fontSize: 12, borderRadius: 'var(--radius-xs)', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text-primary)' }}>
-                    {['DM Sans', 'Montserrat', 'Open Sans', 'Roboto', 'Poppins', 'Inter', 'Nunito', 'Lato', 'Oswald', 'Playfair Display', 'Bebas Neue'].map(f => (
-                      <option key={f} value={f}>{f}</option>
-                    ))}
-                  </select>
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                  <label style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Size</label>
-                  <div style={{ display: 'flex', gap: 2 }}>
-                    {[{ l: 'S', v: 22 }, { l: 'M', v: 30 }, { l: 'L', v: 40 }].map(s => (
-                      <button key={s.v} onClick={() => setClipSettings(prev => ({ ...prev, subtitleSize: s.v }))}
-                        style={{
-                          padding: '4px 10px', fontSize: 11, fontWeight: 600,
-                          background: (clipSettings.subtitleSize || 30) === s.v ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
-                          color: (clipSettings.subtitleSize || 30) === s.v ? '#fff' : 'var(--text-secondary)',
-                          border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer',
-                        }}>{s.l}</button>
-                    ))}
-                  </div>
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                  <label style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Weight</label>
-                  <div style={{ display: 'flex', gap: 2 }}>
-                    {['normal', 'bold', 'black'].map(w => (
-                      <button key={w} onClick={() => setClipSettings(prev => ({ ...prev, subtitleFontWeight: w }))}
-                        style={{
-                          padding: '4px 8px', fontSize: 10, fontWeight: w === 'bold' ? 700 : w === 'black' ? 900 : 400,
-                          background: (clipSettings.subtitleFontWeight || 'bold') === w ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
-                          color: (clipSettings.subtitleFontWeight || 'bold') === w ? '#fff' : 'var(--text-secondary)',
-                          border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer', textTransform: 'capitalize',
-                        }}>{w}</button>
-                    ))}
-                  </div>
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                  <label style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Color</label>
-                  <input type="color" value={clipSettings.subtitleFontColor || '#FFFFFF'} onChange={e => setClipSettings(prev => ({ ...prev, subtitleFontColor: e.target.value }))}
-                    style={{ width: 32, height: 28, border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer', padding: 1 }} />
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-                  <label style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Position</label>
-                  <div style={{ display: 'flex', gap: 2 }}>
-                    {['top', 'center', 'bottom'].map(p => (
-                      <button key={p} onClick={() => setClipSettings(prev => ({ ...prev, subtitlePosition: p }))}
-                        style={{
-                          padding: '4px 8px', fontSize: 10, fontWeight: 600,
-                          background: (clipSettings.subtitlePosition || 'bottom') === p ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
-                          color: (clipSettings.subtitlePosition || 'bottom') === p ? '#fff' : 'var(--text-secondary)',
-                          border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer', textTransform: 'capitalize',
-                        }}>{p}</button>
-                    ))}
-                  </div>
-                </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 80 }}>
-                  <label style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Outline</label>
-                  <input type="range" min="0" max="10" step="1" value={clipSettings.subtitleOutlineWidth ?? 2}
-                    onChange={e => setClipSettings(prev => ({ ...prev, subtitleOutlineWidth: parseInt(e.target.value) }))}
-                    style={{ width: 80, accentColor: 'var(--accent-cyan)' }} />
-                </div>
-              </div>
+            {/* ── Inline Editor Toolbar: Export + Subtitle Settings ── */}
+            {renderInlineSubToolbar(
+              <>
+                {fullVideoExporting ? (
+                  <span style={{ fontSize: 11, color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>Exporting...</span>
+                ) : (
+                  <button onClick={handleExportFullVideo} style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    padding: '6px 14px', fontSize: 11, fontWeight: 700,
+                    background: 'var(--accent-cyan)', color: '#fff',
+                    border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
+                  }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    Export Full Video ({clipSettings?.exportQuality || '1080p'})
+                  </button>
+                )}
+                <div style={{ width: 1, height: 20, background: 'var(--border)', margin: '0 4px' }} />
+              </>
             )}
+            {renderInlineSubPanel()}
           </div>
         )}
         {/* Export button — visible when a clip is loaded in the preview player */}

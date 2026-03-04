@@ -389,10 +389,10 @@ export default function SubtitleOverlay({
   }
 
   // Margins
-  const clampedMaxWidth = Math.max(50, Math.min(100, maxWidthPct));
+  const clampedMaxWidth = Math.max(20, Math.min(100, maxWidthPct));
   const clampedOffsetV = Math.max(0, Math.min(100, offsetVPct));
   const marginH_px = Math.max(20, Math.floor(outputDims.w * (100 - clampedMaxWidth) / 100 / 2));
-  const maxMarginH = Math.floor(outputDims.w * 0.25);
+  const maxMarginH = Math.floor(outputDims.w * 0.40);
   const effectiveMarginH = Math.min(marginH_px, maxMarginH) / outputDims.w * 100;
   const positionStyle = { bottom: `${clampedOffsetV}%` };
 

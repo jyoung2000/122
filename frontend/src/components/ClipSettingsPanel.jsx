@@ -925,8 +925,8 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                       <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>Max Width</div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <input
-                          type="range" min="50" max="100" step="5"
-                          value={Math.min(100, Math.max(50, settings.subtitleMaxWidth))}
+                          type="range" min="20" max="100" step="5"
+                          value={Math.min(100, Math.max(20, settings.subtitleMaxWidth))}
                           onChange={(e) => update('subtitleMaxWidth', parseInt(e.target.value))}
                           style={{ flex: 1, accentColor: 'var(--accent-cyan)' }}
                         />

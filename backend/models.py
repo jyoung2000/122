@@ -126,7 +126,7 @@ class SubtitleSettings(BaseModel):
     outline_opacity: int = 100  # 0-100, text outline opacity
     outline_width: int = 2  # 0-10, text outline thickness in reference pixels
     show_speaker_labels: bool = False  # show "Speaker:" prefix in subtitle text
-    max_width: int = 90  # 50-100, max subtitle width as % of video width
+    max_width: int = 90  # 20-100, max subtitle width as % of video width
     offset_v: int = 4  # 0-100, vertical offset from edge as % of video height
     max_words: int = 0  # 0 = disabled, 1-20 = max words per subtitle event
     active_word_enabled: bool = False  # highlight the currently spoken word

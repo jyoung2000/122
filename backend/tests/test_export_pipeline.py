@@ -808,7 +808,7 @@ def test_ass_frontend_backend_margin_consistency():
         actual_mv = int(sp1.get("MarginV", 0))
 
         # Replicate backend logic
-        clamped_mw = max(50, min(100, max_w))
+        clamped_mw = max(20, min(100, max_w))
         clamped_ov = max(0, min(100, off_v))
         expected_mh = max(20, int(vw * (100 - clamped_mw) / 100 / 2))
         max_mh = int(vw * (1 - MIN_TEXT_AREA_W) / 2)

@@ -730,12 +730,12 @@ export default function ClipPreview({
     }
 
     // Margin calculations matching backend (ass_generator.py:196-235)
-    const clampedMaxWidth = Math.max(50, Math.min(100, maxWidthPct));
+    const clampedMaxWidth = Math.max(20, Math.min(100, maxWidthPct));
     const clampedOffsetV = Math.max(0, Math.min(100, offsetVPct));
 
     // Horizontal: backend uses max(20, ...) minimum + safe-area cap
     const marginH_px = Math.max(20, Math.floor(outputDims.w * (100 - clampedMaxWidth) / 100 / 2));
-    const maxMarginH = Math.floor(outputDims.w * 0.25); // (1 - MIN_TEXT_AREA_W=0.50) / 2
+    const maxMarginH = Math.floor(outputDims.w * 0.40); // (1 - MIN_TEXT_AREA_W=0.20) / 2
     const effectiveMarginH = Math.min(marginH_px, maxMarginH) / outputDims.w * 100;
 
     // Vertical: offset_v is absolute position (0=bottom, 100=top)

@@ -209,7 +209,7 @@ def _validate_ass_settings(
     outline_opacity = settings.get("outline_opacity", 100)
     outline_width = max(0, min(10, settings.get("outline_width", 2)))
     show_speaker_labels = settings.get("show_speaker_labels", False)
-    max_width_pct = max(50, min(100, settings.get("max_width", 90)))
+    max_width_pct = max(20, min(100, settings.get("max_width", 90)))
     offset_v_pct = max(0, min(100, settings.get("offset_v", 4)))
     max_words = settings.get("max_words", 0)
     active_word_enabled = settings.get("active_word_enabled", False)
