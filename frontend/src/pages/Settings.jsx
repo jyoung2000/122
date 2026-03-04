@@ -527,7 +527,7 @@ export default function Settings() {
     URL.revokeObjectURL(url);
   };
 
-  const SETTINGS_TABS = ['AI Provider', 'Prompts', 'Fonts', 'Presets', 'Advanced', 'Usage & Costs', 'API Access', 'Developed By'];
+  const SETTINGS_TABS = ['AI Provider', 'Prompts', 'Fonts', 'Presets', 'Advanced', 'Usage & Costs', 'API Access', 'About'];
   const active = statuses._active || {};
 
   // Model dropdown renderer
@@ -1773,7 +1773,7 @@ print(resp.json())`.trim()}</pre>
         </div>
       )}
 
-      {/* ═══════ Tab 7: Developed By ═══════ */}
+      {/* ═══════ Tab 7: About ═══════ */}
       {settingsTab === 7 && (
         <div style={{ maxWidth: isMobile ? '100%' : 640 }}>
 
