@@ -803,13 +803,15 @@ export default function VideoEditor({
     }
   }, [trimmedStart, trimmedEnd]);
 
+  // seekTo clamps to full clip range, NOT trim region.
+  // Trim boundaries only constrain playback auto-stop, not manual seeking.
   const seekTo = useCallback((time) => {
     const video = videoRef.current;
     if (!video) return;
-    const clamped = Math.max(trimmedStart, Math.min(trimmedEnd, time));
+    const clamped = Math.max(clipStart, Math.min(effectiveClipEnd, time));
     video.currentTime = clamped;
     setCurrentTime(clamped);
-  }, [trimmedStart, trimmedEnd]);
+  }, [clipStart, effectiveClipEnd]);
 
   const skipTime = useCallback((delta) => {
     const video = videoRef.current;
@@ -939,11 +941,10 @@ export default function VideoEditor({
     let rafPending = null;
     const onMove = (ev) => {
       const t = getTimeFromPointer(ev.clientX);
-      const clampedT = Math.max(trimmedStart, Math.min(trimmedEnd, t));
-      // Throttle via rAF for smooth scrubbing
+      // Throttle via rAF for smooth scrubbing — seekTo handles clamping to clip range
       if (rafPending === null) {
         rafPending = requestAnimationFrame(() => {
-          seekTo(clampedT);
+          seekTo(t);
           rafPending = null;
         });
       }
@@ -960,7 +961,7 @@ export default function VideoEditor({
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-  }, [clipStart, clipDur, trimStartOffset, trimEndOffset, trimmedStart, trimmedEnd, seekTo, getTimeFromPointer, startDragTracking]);
+  }, [clipStart, clipDur, trimStartOffset, trimEndOffset, seekTo, getTimeFromPointer, startDragTracking]);
 
   // Trim handle direct pointer down
   const onTrimHandlePointerDown = useCallback((e, handle) => {
@@ -1505,10 +1506,10 @@ export default function VideoEditor({
                 }
                 // Select this segment
                 setSelectedSegmentId(seg.id);
-                // Enable drag-scrub
+                // Enable drag-scrub — seekTo handles clamping to clip range
                 const onMove = (ev) => {
                   const t = getTimeFromPointer(ev.clientX);
-                  if (t >= trimmedStart && t <= trimmedEnd) seekTo(t);
+                  seekTo(t);
                 };
                 const onUp = () => {
                   window.removeEventListener('pointermove', onMove);
