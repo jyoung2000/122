@@ -235,6 +235,13 @@ export default function VideoEditor({
   const segmentIdRef = useRef(1);
   const [selectedSegmentId, setSelectedSegmentId] = useState(null);
 
+  // J-K-L shuttle control
+  const [shuttleSpeed, setShuttleSpeed] = useState(0);
+
+  // Hover time preview
+  const [hoverTime, setHoverTime] = useState(null);
+  const [hoverX, setHoverX] = useState(0);
+
   // Derived: the currently selected segment object (or null)
   const selectedSegment = useMemo(
     () => segments.find(s => s.id === selectedSegmentId) || null,
@@ -752,8 +759,11 @@ export default function VideoEditor({
         video.volume = Math.min(1, effectiveVol / 100);
       }
     }
-    onVolumeChange?.(isMuted ? 0 : volume / 100);
-  }, [volume, isMuted, onVolumeChange, segments]);
+    // ONLY fire global callback when NOT editing a segment
+    if (!selectedSegmentId) {
+      onVolumeChange?.(isMuted ? 0 : volume / 100);
+    }
+  }, [volume, isMuted, onVolumeChange, segments, selectedSegmentId]);
 
   // ── Apply speed changes ────────────────────────────
   useEffect(() => {
@@ -765,15 +775,18 @@ export default function VideoEditor({
     if (!inSegment) {
       video.playbackRate = speed;
     }
-    onSpeedChange?.(speed);
-  }, [speed, onSpeedChange, segments]);
+    // ONLY fire global callback when NOT editing a segment
+    if (!selectedSegmentId) {
+      onSpeedChange?.(speed);
+    }
+  }, [speed, onSpeedChange, segments, selectedSegmentId]);
 
   // ── Trim change callback ───────────────────────────
   useEffect(() => {
     onTrimChange?.({ trimStart: trimStartOffset, trimEnd: trimEndOffset });
   }, [trimStartOffset, trimEndOffset, onTrimChange]);
 
-  // ── Keyboard shortcuts ─────────────────────────────
+  // ── Keyboard shortcuts (J-K-L shuttle control) ─────
   useEffect(() => {
     const onKeyDown = (e) => {
       // Don't capture keys when typing in inputs
@@ -782,6 +795,7 @@ export default function VideoEditor({
       switch (e.code) {
         case 'Space':
           e.preventDefault();
+          setShuttleSpeed(0);
           togglePlay();
           break;
         case 'ArrowLeft':
@@ -794,11 +808,29 @@ export default function VideoEditor({
           break;
         case 'KeyJ':
           e.preventDefault();
-          skipTime(-5);
+          setShuttleSpeed(prev => {
+            if (prev > 0) return 0; // If going forward, stop first
+            const reverseSteps = [0, -1, -2, -4];
+            const curIdx = reverseSteps.indexOf(prev);
+            return reverseSteps[Math.min(curIdx + 1, reverseSteps.length - 1)] ?? -1;
+          });
+          break;
+        case 'KeyK':
+          e.preventDefault();
+          setShuttleSpeed(0);
+          if (videoRef.current) {
+            videoRef.current.pause();
+            setPlaying(false);
+          }
           break;
         case 'KeyL':
           e.preventDefault();
-          skipTime(5);
+          setShuttleSpeed(prev => {
+            if (prev < 0) return 0; // If going reverse, stop first
+            const forwardSteps = [0, 1, 2, 4];
+            const curIdx = forwardSteps.indexOf(prev);
+            return forwardSteps[Math.min(curIdx + 1, forwardSteps.length - 1)] ?? 1;
+          });
           break;
         case 'Home':
           e.preventDefault();
@@ -816,7 +848,34 @@ export default function VideoEditor({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [trimmedStart, trimmedEnd, playing, isMuted, volume]);
+  }, [togglePlay, skipTime, seekTo, toggleMute, trimmedStart, trimmedEnd]);
+
+  // ── J-K-L shuttle speed effect ──────────────────────
+  useEffect(() => {
+    if (shuttleSpeed === 0) return;
+    const video = videoRef.current;
+    if (!video) return;
+
+    if (shuttleSpeed > 0) {
+      video.playbackRate = shuttleSpeed;
+      video.play().then(() => setPlaying(true)).catch(() => {});
+    } else {
+      // Reverse playback via interval-based frame stepping
+      video.pause();
+      setPlaying(true); // Show as "playing" for UI
+      const interval = setInterval(() => {
+        const step = (1 / 30) * Math.abs(shuttleSpeed);
+        const newTime = Math.max(trimmedStart, video.currentTime - step);
+        video.currentTime = newTime;
+        setCurrentTime(newTime);
+        if (newTime <= trimmedStart) {
+          setShuttleSpeed(0);
+          setPlaying(false);
+        }
+      }, 1000 / 30);
+      return () => clearInterval(interval);
+    }
+  }, [shuttleSpeed, trimmedStart]);
 
   // ── Player controls ────────────────────────────────
   const togglePlay = useCallback(() => {
@@ -927,23 +986,42 @@ export default function VideoEditor({
       return;
     }
 
-    // Click-to-seek within trim region
-    if (time >= trimmedStart && time <= trimmedEnd) {
-      seekTo(time);
-      setDraggingPlayhead(true);
-      const onMove = (ev) => {
-        const t = getTimeFromPointer(ev.clientX);
-        if (t >= trimmedStart && t <= trimmedEnd) seekTo(t);
-      };
-      const onUp = () => {
-        setDraggingPlayhead(false);
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-      };
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
+    // Click-to-seek anywhere on timeline (Premiere-style)
+    seekTo(time);
+    setDraggingPlayhead(true);
+
+    // Remember play state to restore after scrub
+    const wasPlaying = !videoRef.current?.paused;
+    if (wasPlaying) {
+      videoRef.current.pause();
+      setPlaying(false);
     }
-  }, [clipStart, clipDur, trimStartOffset, trimEndOffset, trimmedStart, trimmedEnd, seekTo, getTimeFromPointer]);
+
+    let rafPending = null;
+    const onMove = (ev) => {
+      const t = getTimeFromPointer(ev.clientX);
+      const clampedT = Math.max(trimmedStart, Math.min(trimmedEnd, t));
+      // Throttle via rAF for smooth scrubbing
+      if (rafPending === null) {
+        rafPending = requestAnimationFrame(() => {
+          seekTo(clampedT);
+          rafPending = null;
+        });
+      }
+    };
+    const onUp = () => {
+      setDraggingPlayhead(false);
+      if (rafPending !== null) cancelAnimationFrame(rafPending);
+      // Resume playback if it was playing before scrub
+      if (wasPlaying && videoRef.current) {
+        videoRef.current.play().then(() => setPlaying(true)).catch(() => {});
+      }
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [clipStart, clipDur, trimStartOffset, trimEndOffset, trimmedStart, trimmedEnd, seekTo, getTimeFromPointer, startDragTracking]);
 
   const startDragTracking = useCallback((e, handle) => {
     const onMove = (ev) => {
@@ -1231,16 +1309,91 @@ export default function VideoEditor({
 
       {/* ── Timeline ── */}
       <div className="ve-timeline">
-        <div className="ve-timeline__ruler">
+        {/* Ruler — clickable for Premiere-style seek */}
+        <div
+          className="ve-timeline__ruler"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            const track = timelineRef.current;
+            if (!track || clipDur <= 0) return;
+            const rect = track.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+            const time = clipStart + pct * clipDur;
+            seekTo(time);
+            // Enable drag-to-scrub from ruler
+            const onMove = (ev) => {
+              const t = getTimeFromPointer(ev.clientX);
+              seekTo(t);
+            };
+            const onUp = () => {
+              window.removeEventListener('pointermove', onMove);
+              window.removeEventListener('pointerup', onUp);
+            };
+            window.addEventListener('pointermove', onMove);
+            window.addEventListener('pointerup', onUp);
+          }}
+        >
           {rulerMarks.map((mark, i) => (
             <span key={i}>{mark}</span>
           ))}
         </div>
 
+        <div style={{ position: 'relative' }}>
+          <span className="ve-timeline__track-label">VIDEO</span>
         <div
           ref={timelineRef}
           className="ve-timeline__track"
           onPointerDown={onTimelinePointerDown}
+          onPointerMove={(e) => {
+            if (draggingHandle || draggingPlayhead) return;
+            const track = timelineRef.current;
+            if (!track || clipDur <= 0) return;
+            const rect = track.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+            setHoverTime(pct * clipDur);
+            setHoverX(e.clientX - rect.left);
+          }}
+          onPointerLeave={() => setHoverTime(null)}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            const track = timelineRef.current;
+            if (!track || clipDur <= 0) return;
+            const rect = track.getBoundingClientRect();
+            const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+            const splitTime = clipStart + pct * clipDur;
+
+            // If inside an existing segment, split it
+            const existingSeg = segments.find(s => splitTime > s.start + 0.5 && splitTime < s.end - 0.5);
+            if (existingSeg) {
+              const seg1 = { ...existingSeg, end: splitTime };
+              const seg2 = {
+                ...existingSeg,
+                id: `seg_${segmentIdRef.current++}`,
+                start: splitTime,
+              };
+              const next = segments.map(s => s.id === existingSeg.id ? seg1 : s);
+              next.push(seg2);
+              next.sort((a, b) => a.start - b.start);
+              setSegments(next);
+              onSegmentsChange?.(next);
+              return;
+            }
+
+            // Otherwise, create a new segment around the split point (±2s default)
+            const halfDur = 2;
+            const newSeg = {
+              id: `seg_${segmentIdRef.current++}`,
+              start: Math.max(trimmedStart, splitTime - halfDur),
+              end: Math.min(trimmedEnd, splitTime + halfDur),
+              volume: isMuted ? 0 : volume,
+              muted: isMuted,
+              subtitlesEnabled: true,
+              speed,
+            };
+            const next = [...segments, newSeg].sort((a, b) => a.start - b.start);
+            setSegments(next);
+            onSegmentsChange?.(next);
+          }}
         >
           {/* Keyframe thumbnails */}
           <canvas ref={thumbnailCanvasRef} className="ve-timeline__thumbnails" />
@@ -1270,6 +1423,16 @@ export default function VideoEditor({
               width: `${Math.max(0, playheadPct - leftTrimPct)}%`,
             }}
           />
+
+          {/* Hover time indicator */}
+          {hoverTime !== null && !draggingHandle && !draggingPlayhead && (
+            <>
+              <div className="ve-timeline__hover-line" style={{ left: `${(hoverTime / clipDur) * 100}%` }} />
+              <div className="ve-timeline__hover-tooltip" style={{ left: hoverX }}>
+                {formatTimecode(hoverTime)}
+              </div>
+            </>
+          )}
 
           {/* Playhead */}
           <div className="ve-timeline__playhead" style={{ left: `${playheadPct}%` }} />
@@ -1316,7 +1479,44 @@ export default function VideoEditor({
             <div
               key={seg.id}
               className="ve-timeline__segment-overlay"
-              onClick={(e) => { e.stopPropagation(); setSelectedSegmentId(isSegSelected ? null : seg.id); }}
+              onClick={(e) => {
+                e.stopPropagation();
+                // Seek playhead to the exact clicked position within the segment
+                const track = timelineRef.current;
+                if (track && clipDur > 0) {
+                  const rect = track.getBoundingClientRect();
+                  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                  const clickedTime = clipStart + pct * clipDur;
+                  seekTo(clickedTime);
+                }
+                // Toggle segment selection
+                setSelectedSegmentId(isSegSelected ? null : seg.id);
+              }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                // Seek to click position
+                const track = timelineRef.current;
+                if (track && clipDur > 0) {
+                  const rect = track.getBoundingClientRect();
+                  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                  const clickedTime = clipStart + pct * clipDur;
+                  seekTo(clickedTime);
+                }
+                // Select this segment
+                setSelectedSegmentId(seg.id);
+                // Enable drag-scrub
+                const onMove = (ev) => {
+                  const t = getTimeFromPointer(ev.clientX);
+                  if (t >= trimmedStart && t <= trimmedEnd) seekTo(t);
+                };
+                const onUp = () => {
+                  window.removeEventListener('pointermove', onMove);
+                  window.removeEventListener('pointerup', onUp);
+                };
+                window.addEventListener('pointermove', onMove);
+                window.addEventListener('pointerup', onUp);
+              }}
               style={{
                 position: 'absolute',
                 left: `${segLeftPct}%`,
@@ -1371,12 +1571,30 @@ export default function VideoEditor({
           );
         })}
         </div>
+        </div>{/* close VIDEO track-label wrapper */}
 
         {/* ── Waveform audio track (separate row) ── */}
+        <div style={{ position: 'relative' }}>
+          <span className="ve-timeline__track-label">AUDIO</span>
         <div className="ve-timeline__waveform-track" onPointerDown={onTimelinePointerDown}>
           <canvas ref={waveformCanvasRef} className="ve-timeline__waveform" />
+          {/* Segment overlays on waveform track */}
+          {segments.map(seg => {
+            const segLeftPct = clipDur > 0 ? ((seg.start - clipStart) / clipDur) * 100 : 0;
+            const segWidthPct = clipDur > 0 ? ((seg.end - seg.start) / clipDur) * 100 : 0;
+            return (
+              <div key={`wf-${seg.id}`} style={{
+                position: 'absolute', left: `${segLeftPct}%`, width: `${segWidthPct}%`,
+                top: 0, bottom: 0, zIndex: 2, pointerEvents: 'none',
+                background: seg.muted ? 'rgba(255,59,48,0.15)' : 'rgba(10,132,255,0.1)',
+                borderLeft: `1px solid ${seg.muted ? 'rgba(255,59,48,0.4)' : 'rgba(10,132,255,0.3)'}`,
+                borderRight: `1px solid ${seg.muted ? 'rgba(255,59,48,0.4)' : 'rgba(10,132,255,0.3)'}`,
+              }} />
+            );
+          })}
           <div className="ve-timeline__playhead" style={{ left: `${playheadPct}%` }} />
         </div>
+        </div>{/* close AUDIO track-label wrapper */}
 
         {/* ── Segment controls ── */}
         {(segments.length > 0 || hasTrim) && (
@@ -1489,7 +1707,7 @@ export default function VideoEditor({
       )}
 
       {/* ── Controls bar ── */}
-      <div className={`ve-controls${compact ? ' ve-controls--compact' : ''}`}>
+      <div className={`ve-controls${compact ? ' ve-controls--compact' : ''}${selectedSegment ? ' ve-controls--segment-mode' : ''}`}>
         {/* Transport row: centered on all devices */}
         <div className="ve-controls__transport">
           <button className="ve-btn" onClick={(e) => { e.stopPropagation(); skipTime(-5); }} title="Back 5s (J)">
@@ -1654,10 +1872,10 @@ export default function VideoEditor({
       {!compact && (
         <div className="ve-shortcuts">
           <span><kbd>Space</kbd> Play/Pause</span>
-          <span><kbd>J</kbd>/<kbd>L</kbd> -/+5s</span>
+          <span><kbd>J</kbd>/<kbd>K</kbd>/<kbd>L</kbd> Shuttle</span>
           <span><kbd>{'\u2190'}</kbd>/<kbd>{'\u2192'}</kbd> Frame</span>
           <span><kbd>M</kbd> Mute</span>
-          <span>Drag trim handles to trim</span>
+          <span>Double-click timeline to add segment</span>
         </div>
       )}
     </div>

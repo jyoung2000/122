@@ -176,7 +176,7 @@
 .ve-timeline {
   position: relative;
   background: var(--ve-chrome-bg);
-  padding: 6px 12px 4px;
+  padding: 6px 12px 4px 40px;
   border-top: 1px solid var(--ve-chrome-border);
   backdrop-filter: blur(20px) saturate(1.8);
   -webkit-backdrop-filter: blur(20px) saturate(1.8);
@@ -189,7 +189,8 @@
   font-size: 9px;
   font-family: var(--font-mono, monospace);
   color: var(--ve-text-muted);
-  pointer-events: none;
+  cursor: pointer;
+  user-select: none;
 }
 
 .ve-timeline__track {
@@ -279,23 +280,97 @@
 
 .ve-timeline__playhead {
   position: absolute;
-  top: -2px;
+  top: -4px;
   width: 2px;
-  height: calc(100% + 4px);
-  background: var(--ve-accent);
+  height: calc(100% + 8px);
+  background: #FF3B30;
   pointer-events: none;
-  z-index: 3;
+  z-index: 5;
+  transition: none;
 }
 .ve-timeline__playhead::before {
   content: '';
   position: absolute;
-  top: -4px;
+  top: -2px;
   left: -5px;
   width: 0;
   height: 0;
   border-left: 6px solid transparent;
   border-right: 6px solid transparent;
-  border-top: 6px solid var(--ve-accent);
+  border-top: 7px solid #FF3B30;
+}
+/* Playhead glow effect */
+.ve-timeline__playhead::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -3px;
+  width: 8px;
+  height: 100%;
+  background: radial-gradient(ellipse, rgba(255, 59, 48, 0.15) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+/* No triangle on waveform — the main track has it */
+.ve-timeline__waveform-track .ve-timeline__playhead::before {
+  display: none;
+}
+
+/* ── Hover time preview ───────────────────────────── */
+
+.ve-timeline__hover-line {
+  position: absolute;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  background: rgba(255, 255, 255, 0.3);
+  pointer-events: none;
+  z-index: 2;
+}
+
+[data-theme="dark"] .ve-timeline__hover-line {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.ve-timeline__hover-tooltip {
+  position: absolute;
+  top: -20px;
+  transform: translateX(-50%);
+  padding: 1px 6px;
+  background: rgba(0, 0, 0, 0.8);
+  color: #fff;
+  font-size: 9px;
+  font-family: var(--font-mono, monospace);
+  border-radius: 3px;
+  pointer-events: none;
+  z-index: 10;
+  white-space: nowrap;
+}
+
+/* ── Track labels ─────────────────────────────────── */
+
+.ve-timeline__track-label {
+  position: absolute;
+  left: -28px;
+  top: 50%;
+  transform: translateY(-50%) rotate(-90deg);
+  font-size: 7px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ve-text-muted);
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+/* ── Segment overlay interactions ─────────────────── */
+
+.ve-timeline__segment-overlay {
+  transition: background 0.15s ease, opacity 0.15s ease;
+}
+.ve-timeline__segment-overlay:hover {
+  filter: brightness(1.2);
 }
 
 /* ── Trim handles ──────────────────────────────────── */
@@ -322,6 +397,15 @@
 .ve-trim-handle:hover,
 .ve-trim-handle--active {
   box-shadow: 0 0 10px rgba(10, 132, 255, 0.5);
+}
+
+/* Active trim handle pulse */
+.ve-trim-handle--active {
+  animation: ve-handle-pulse 0.8s ease infinite;
+}
+@keyframes ve-handle-pulse {
+  0%, 100% { box-shadow: 0 0 8px rgba(10, 132, 255, 0.4); }
+  50% { box-shadow: 0 0 16px rgba(10, 132, 255, 0.7); }
 }
 
 /* Grip texture */
@@ -395,6 +479,23 @@
   flex: 0 0 auto;
 }
 
+/* Segment editing mode — visual scope indicator */
+.ve-controls--segment-mode {
+  background: rgba(10, 132, 255, 0.04);
+  border-left: 3px solid var(--ve-accent);
+  box-shadow: inset 0 1px 0 rgba(10, 132, 255, 0.3),
+              inset 0 -1px 0 rgba(10, 132, 255, 0.3);
+}
+
+.ve-controls--segment-mode .ve-volume__label,
+.ve-controls--segment-mode .ve-speed__btn {
+  color: var(--ve-accent);
+}
+
+[data-theme="dark"] .ve-controls--segment-mode {
+  background: rgba(10, 132, 255, 0.06);
+}
+
 /* ── Buttons ───────────────────────────────────────── */
 
 .ve-btn {
@@ -425,6 +526,11 @@
 .ve-btn--play {
   width: 36px;
   height: 36px;
+}
+/* Transport button press feedback */
+.ve-btn--play:active {
+  transform: scale(0.9);
+  transition: transform 0.05s ease;
 }
 
 /* ── Timecode ──────────────────────────────────────── */
