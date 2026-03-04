@@ -12,6 +12,37 @@ const FONT_SIZE_MAP = { small: 22, medium: 30, large: 40 };
 const REF_W = 1920;
 const REF_H = 1080;
 
+// ── Builtin font URL map (mirrors ClipSettingsPanel) ─────────────────────
+const BUILTIN_FONT_FILES = {
+  'DM Sans': '/api/fonts/builtin/DMSans.ttf',
+  'Montserrat': '/api/fonts/builtin/Montserrat.ttf',
+  'Open Sans': '/api/fonts/builtin/OpenSans.ttf',
+  'Roboto': '/api/fonts/builtin/Roboto.ttf',
+  'Poppins': '/api/fonts/builtin/Poppins-Regular.ttf',
+  'Inter': '/api/fonts/builtin/Inter.ttf',
+  'Nunito': '/api/fonts/builtin/Nunito.ttf',
+  'Lato': '/api/fonts/builtin/Lato-Regular.ttf',
+  'Oswald': '/api/fonts/builtin/Oswald.ttf',
+  'Playfair Display': '/api/fonts/builtin/PlayfairDisplay.ttf',
+  'Bebas Neue': '/api/fonts/builtin/BebasNeue-Regular.ttf',
+  'Liberation Sans': '/api/fonts/builtin/LiberationSans-Regular.ttf',
+  'Liberation Serif': '/api/fonts/builtin/LiberationSerif-Regular.ttf',
+  'Liberation Mono': '/api/fonts/builtin/LiberationMono-Regular.ttf',
+  'DejaVu Sans': '/api/fonts/builtin/DejaVuSans.ttf',
+  'DejaVu Serif': '/api/fonts/builtin/DejaVuSerif.ttf',
+  'DejaVu Sans Mono': '/api/fonts/builtin/DejaVuSansMono.ttf',
+  'FreeSans': '/api/fonts/builtin/FreeSans.ttf',
+};
+
+function registerFontFace(fontName, url) {
+  const existingId = `custom-font-${fontName.replace(/\s+/g, '-')}`;
+  if (document.getElementById(existingId)) return;
+  const style = document.createElement('style');
+  style.id = existingId;
+  style.textContent = `@font-face { font-family: '${fontName}'; src: url('${url}'); font-weight: 100 900; font-display: swap; }`;
+  document.head.appendChild(style);
+}
+
 const DEFAULT_SPEAKER_PALETTE = [
   '#00D9FF', '#F59E0B', '#10B981', '#A78BFA', '#EF4444', '#EC4899',
 ];
@@ -174,10 +205,30 @@ export default function SubtitleOverlay({
     return () => ro.disconnect();
   }, []);
 
-  // Preload subtitle font
+  // Register @font-face and preload subtitle font
+  // This ensures fonts work even if ClipSettingsPanel hasn't loaded yet
   useEffect(() => {
     const font = settings.subtitleFont;
     if (!font || typeof document === 'undefined') return;
+
+    // Register builtin font @font-face if known
+    if (BUILTIN_FONT_FILES[font]) {
+      registerFontFace(font, BUILTIN_FONT_FILES[font]);
+    } else {
+      // Custom font — look up URL from /api/fonts
+      fetch('/api/fonts')
+        .then((r) => r.ok ? r.json() : [])
+        .then((fonts) => {
+          const match = fonts.find((f) => f.name === font);
+          if (match) {
+            registerFontFace(match.name, match.url);
+            document.fonts.load(`400 16px "${font}"`).catch(() => {});
+            document.fonts.load(`700 16px "${font}"`).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
+
     document.fonts.load(`400 16px "${font}"`).catch(() => {});
     document.fonts.load(`700 16px "${font}"`).catch(() => {});
   }, [settings.subtitleFont]);

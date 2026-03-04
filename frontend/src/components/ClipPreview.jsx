@@ -10,6 +10,37 @@ const ASPECT_RATIO_DIMS = {
   '1:1': [1080, 1080],
   '4:5': [1080, 1350],
 };
+
+// ── Builtin font URL map (mirrors ClipSettingsPanel) ─────────────────────
+const BUILTIN_FONT_FILES = {
+  'DM Sans': '/api/fonts/builtin/DMSans.ttf',
+  'Montserrat': '/api/fonts/builtin/Montserrat.ttf',
+  'Open Sans': '/api/fonts/builtin/OpenSans.ttf',
+  'Roboto': '/api/fonts/builtin/Roboto.ttf',
+  'Poppins': '/api/fonts/builtin/Poppins-Regular.ttf',
+  'Inter': '/api/fonts/builtin/Inter.ttf',
+  'Nunito': '/api/fonts/builtin/Nunito.ttf',
+  'Lato': '/api/fonts/builtin/Lato-Regular.ttf',
+  'Oswald': '/api/fonts/builtin/Oswald.ttf',
+  'Playfair Display': '/api/fonts/builtin/PlayfairDisplay.ttf',
+  'Bebas Neue': '/api/fonts/builtin/BebasNeue-Regular.ttf',
+  'Liberation Sans': '/api/fonts/builtin/LiberationSans-Regular.ttf',
+  'Liberation Serif': '/api/fonts/builtin/LiberationSerif-Regular.ttf',
+  'Liberation Mono': '/api/fonts/builtin/LiberationMono-Regular.ttf',
+  'DejaVu Sans': '/api/fonts/builtin/DejaVuSans.ttf',
+  'DejaVu Serif': '/api/fonts/builtin/DejaVuSerif.ttf',
+  'DejaVu Sans Mono': '/api/fonts/builtin/DejaVuSansMono.ttf',
+  'FreeSans': '/api/fonts/builtin/FreeSans.ttf',
+};
+
+function registerFontFace(fontName, url) {
+  const existingId = `custom-font-${fontName.replace(/\s+/g, '-')}`;
+  if (document.getElementById(existingId)) return;
+  const style = document.createElement('style');
+  style.id = existingId;
+  style.textContent = `@font-face { font-family: '${fontName}'; src: url('${url}'); font-weight: 100 900; font-display: swap; }`;
+  document.head.appendChild(style);
+}
 // clip_exporter.py:19-24
 const ASPECT_RATIO_VALUES = {
   '16:9': 16 / 9,
@@ -427,11 +458,30 @@ export default function ClipPreview({
     if (fgVideoRef.current) fgVideoRef.current.playbackRate = speed;
   }, [speed]);
 
-  // --- Eagerly preload the selected subtitle font so the browser downloads
-  //     it before the subtitle text first renders (avoids FOUT / stuck fallback).
+  // --- Register @font-face and preload the selected subtitle font so the
+  //     browser downloads it before the subtitle text first renders.
   useEffect(() => {
     const font = subtitleSettings?.subtitleFont;
     if (!font || typeof document === 'undefined') return;
+
+    // Register builtin font @font-face if known
+    if (BUILTIN_FONT_FILES[font]) {
+      registerFontFace(font, BUILTIN_FONT_FILES[font]);
+    } else {
+      // Custom font — look up URL from /api/fonts
+      fetch('/api/fonts')
+        .then((r) => r.ok ? r.json() : [])
+        .then((fonts) => {
+          const match = fonts.find((f) => f.name === font);
+          if (match) {
+            registerFontFace(match.name, match.url);
+            document.fonts.load(`400 16px "${font}"`).catch(() => {});
+            document.fonts.load(`700 16px "${font}"`).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
+
     // Trigger download for both normal and bold weights
     document.fonts.load(`400 16px "${font}"`).catch(() => {});
     document.fonts.load(`700 16px "${font}"`).catch(() => {});
