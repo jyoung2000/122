@@ -376,7 +376,7 @@
   min-height: 36px;
 }
 
-.ve-controls__left,
+.ve-controls__transport,
 .ve-controls__center,
 .ve-controls__right {
   display: flex;
@@ -384,7 +384,7 @@
   gap: 4px;
 }
 
-.ve-controls__left {
+.ve-controls__transport {
   flex: 0 0 auto;
 }
 .ve-controls__center {
@@ -673,9 +673,35 @@ input.ve-timecode--input {
 
 @media (max-width: 767px) {
   .ve-controls {
-    min-height: 48px;
+    min-height: auto;
     flex-wrap: wrap;
+    justify-content: center;
     gap: 2px;
+    padding: 6px 8px;
+  }
+
+  /* Transport: full width, centered */
+  .ve-controls__transport {
+    flex: 1 1 100%;
+    justify-content: center;
+    order: 1;
+  }
+
+  /* Center (trim): full width, centered */
+  .ve-controls__center {
+    flex: 1 1 100%;
+    order: 2;
+  }
+
+  .ve-controls__center:empty {
+    display: none;
+  }
+
+  /* Right (vol/speed/fs): full width, centered */
+  .ve-controls__right {
+    flex: 1 1 100%;
+    justify-content: center;
+    order: 3;
   }
 
   .ve-btn {
@@ -708,10 +734,6 @@ input.ve-timecode--input {
   .ve-volume__slider-wrap {
     max-width: 0 !important;
     opacity: 0 !important;
-  }
-
-  .ve-controls__center:empty {
-    display: none;
   }
 }
 

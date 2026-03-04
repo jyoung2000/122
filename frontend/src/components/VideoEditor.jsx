@@ -483,15 +483,21 @@ export default function VideoEditor({
     return () => ro.disconnect();
   }, [drawThumbnails]);
 
-  // ── Playback time tracking via rAF ─────────────────
+  // ── Playback time tracking via rAF + native events ──
+  // rAF provides smooth visual updates; native events ensure we never
+  // miss a seek or time change on any device (mobile can throttle rAF).
+  const syncTime = useCallback((t) => {
+    setCurrentTime(t);
+    onTimeUpdate?.(t);
+  }, [onTimeUpdate]);
+
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     let rafId;
     const tick = () => {
       const t = video.currentTime;
-      setCurrentTime(t);
-      onTimeUpdate?.(t);
+      syncTime(t);
       // Auto-stop at trimmed end
       if (trimmedEnd && t >= trimmedEnd) {
         video.pause();
@@ -500,8 +506,19 @@ export default function VideoEditor({
       rafId = requestAnimationFrame(tick);
     };
     rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-  }, [trimmedEnd, onTimeUpdate]);
+
+    // Fallback: native timeupdate + seeked ensure accuracy on mobile
+    // where rAF may be throttled or skipped.
+    const onNativeTime = () => syncTime(video.currentTime);
+    video.addEventListener('timeupdate', onNativeTime);
+    video.addEventListener('seeked', onNativeTime);
+
+    return () => {
+      cancelAnimationFrame(rafId);
+      video.removeEventListener('timeupdate', onNativeTime);
+      video.removeEventListener('seeked', onNativeTime);
+    };
+  }, [trimmedEnd, syncTime]);
 
   // ── Dynamic subject tracking via rAF ───────────────
   useEffect(() => {
@@ -1019,8 +1036,8 @@ export default function VideoEditor({
 
       {/* ── Controls bar ── */}
       <div className={`ve-controls${compact ? ' ve-controls--compact' : ''}`}>
-        {/* Left: transport */}
-        <div className="ve-controls__left">
+        {/* Transport row: centered on all devices */}
+        <div className="ve-controls__transport">
           <button className="ve-btn" onClick={(e) => { e.stopPropagation(); skipTime(-5); }} title="Back 5s (J)">
             <Icon.SkipBack />
           </button>
