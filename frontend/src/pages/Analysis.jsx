@@ -1057,6 +1057,7 @@ export default function Analysis() {
                 setEditorTrim({ trimStart: 0, trimEnd: 0 });
                 showToast('Trim applied — clip range updated', 'info');
               }}
+              onAspectRatioChange={(ar) => setClipSettings((prev) => ({ ...prev, aspectRatio: ar }))}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
               onSegmentsChange={setEditorSegments}
@@ -1122,6 +1123,7 @@ export default function Analysis() {
                 setEditorTrim({ trimStart: 0, trimEnd: 0 });
                 showToast('Trim applied — video range updated', 'info');
               }}
+              onAspectRatioChange={(ar) => setClipSettings((prev) => ({ ...prev, aspectRatio: ar }))}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
               onSegmentsChange={setEditorSegments}

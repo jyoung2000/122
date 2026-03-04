@@ -154,6 +154,14 @@ function parseTimecodeInput(str) {
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
+const ASPECT_RATIO_OPTIONS = [
+  { value: null, label: 'Original', icon: null },
+  { value: '16:9', label: '16:9', icon: 'landscape' },
+  { value: '9:16', label: '9:16', icon: 'portrait' },
+  { value: '1:1', label: '1:1', icon: 'square' },
+  { value: '4:5', label: '4:5', icon: 'portrait' },
+];
+
 export default function VideoEditor({
   src,
   clipStart = 0,
@@ -164,6 +172,7 @@ export default function VideoEditor({
   onVolumeChange,
   onSpeedChange,
   onSegmentsChange,
+  onAspectRatioChange,
   aspectRatio,
   sourceWidth = 1920,
   sourceHeight = 1080,
@@ -1046,6 +1055,121 @@ export default function VideoEditor({
         )}
       </div>
 
+      {/* ── Aspect Ratio Picker ── */}
+      {onAspectRatioChange && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
+          padding: '5px 8px', margin: '0 auto',
+          maxWidth: compact ? undefined : `calc(50vh * ${targetRatio})`,
+          width: '100%',
+        }}>
+          <span style={{
+            fontSize: 10, fontWeight: 600, color: 'var(--text-muted, #888)',
+            marginRight: 4, whiteSpace: 'nowrap', textTransform: 'uppercase',
+            letterSpacing: '0.05em',
+          }}>
+            Ratio
+          </span>
+          {ASPECT_RATIO_OPTIONS.map((opt) => {
+            const isActive = aspectRatio === opt.value;
+            return (
+              <button
+                key={opt.label}
+                onClick={(e) => { e.stopPropagation(); onAspectRatioChange(opt.value); }}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 3,
+                  padding: '3px 8px', fontSize: 10, fontWeight: isActive ? 700 : 500,
+                  background: isActive ? 'var(--accent-cyan, #0A84FF)' : 'var(--bg-elevated, rgba(0,0,0,0.04))',
+                  color: isActive ? '#fff' : 'var(--text-secondary, #666)',
+                  border: isActive ? '1px solid var(--accent-cyan, #0A84FF)' : '1px solid var(--border-dim, rgba(0,0,0,0.08))',
+                  borderRadius: 'var(--radius-xs, 4px)', cursor: 'pointer',
+                  transition: 'all 0.15s ease',
+                  whiteSpace: 'nowrap',
+                }}
+                title={opt.value ? `${opt.value} crop` : 'Original aspect ratio'}
+              >
+                {opt.value && (
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" style={{ opacity: 0.7 }}>
+                    {opt.value === '16:9' && <rect x="1" y="3.5" width="14" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.3" />}
+                    {opt.value === '9:16' && <rect x="3.5" y="1" width="9" height="14" rx="1.5" stroke="currentColor" strokeWidth="1.3" />}
+                    {opt.value === '1:1' && <rect x="2" y="2" width="12" height="12" rx="1.5" stroke="currentColor" strokeWidth="1.3" />}
+                    {opt.value === '4:5' && <rect x="2.5" y="1.5" width="11" height="13" rx="1.5" stroke="currentColor" strokeWidth="1.3" />}
+                  </svg>
+                )}
+                {opt.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Active Settings Indicator ── */}
+      {(segments.length > 0 || (aspectRatio && aspectRatio !== null) || Math.abs(speed - 1.0) > 0.001 || Math.abs(volume - 100) > 0.5 || isMuted) && (
+        <div style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+          padding: '3px 8px', flexWrap: 'wrap',
+        }}>
+          {aspectRatio && (
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+              padding: '2px 6px', fontSize: 9, fontWeight: 600,
+              background: 'rgba(10, 132, 255, 0.08)', color: 'var(--accent-cyan, #0A84FF)',
+              border: '1px solid rgba(10, 132, 255, 0.2)', borderRadius: 3,
+            }}>
+              <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <rect x="1" y="3" width="14" height="10" rx="1.5" />
+              </svg>
+              {aspectRatio}
+            </span>
+          )}
+          {isMuted && (
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+              padding: '2px 6px', fontSize: 9, fontWeight: 600,
+              background: 'rgba(255, 59, 48, 0.08)', color: '#FF3B30',
+              border: '1px solid rgba(255, 59, 48, 0.2)', borderRadius: 3,
+            }}>
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                <path d="M11 5L6 9H2v6h4l5 4V5z" /><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" />
+              </svg>
+              Muted
+            </span>
+          )}
+          {!isMuted && Math.abs(volume - 100) > 0.5 && (
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+              padding: '2px 6px', fontSize: 9, fontWeight: 600,
+              background: volume > 100 ? 'rgba(255, 159, 10, 0.08)' : 'rgba(10, 132, 255, 0.08)',
+              color: volume > 100 ? 'var(--accent-amber, #FF9F0A)' : 'var(--accent-cyan, #0A84FF)',
+              border: `1px solid ${volume > 100 ? 'rgba(255, 159, 10, 0.2)' : 'rgba(10, 132, 255, 0.2)'}`,
+              borderRadius: 3,
+            }}>
+              Vol {volume}%
+            </span>
+          )}
+          {Math.abs(speed - 1.0) > 0.001 && (
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+              padding: '2px 6px', fontSize: 9, fontWeight: 600,
+              background: 'rgba(175, 82, 222, 0.08)', color: '#AF52DE',
+              border: '1px solid rgba(175, 82, 222, 0.2)', borderRadius: 3,
+            }}>
+              {speed}x Speed
+            </span>
+          )}
+          {segments.length > 0 && (
+            <span style={{
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+              padding: '2px 6px', fontSize: 9, fontWeight: 600,
+              background: 'rgba(48, 209, 88, 0.08)', color: '#30D158',
+              border: '1px solid rgba(48, 209, 88, 0.2)', borderRadius: 3,
+            }}>
+              {segments.length} Segment{segments.length > 1 ? 's' : ''}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* ── Timeline ── */}
       <div className="ve-timeline">
         <div className="ve-timeline__ruler">
@@ -1127,6 +1251,7 @@ export default function VideoEditor({
           {segments.map(seg => {
           const segLeftPct = clipDur > 0 ? ((seg.start - clipStart) / clipDur) * 100 : 0;
           const segWidthPct = clipDur > 0 ? ((seg.end - seg.start) / clipDur) * 100 : 0;
+          const segColor = seg.muted ? 'rgba(255, 59, 48' : !seg.subtitlesEnabled ? 'rgba(255, 149, 0' : 'rgba(10, 132, 255';
           return (
             <div
               key={seg.id}
@@ -1136,23 +1261,50 @@ export default function VideoEditor({
                 left: `${segLeftPct}%`,
                 width: `${segWidthPct}%`,
                 top: 0, bottom: 0,
-                background: seg.muted
-                  ? 'rgba(255, 59, 48, 0.18)'
-                  : 'rgba(10, 132, 255, 0.15)',
-                borderLeft: `2px solid ${seg.muted ? 'rgba(255, 59, 48, 0.6)' : 'rgba(10, 132, 255, 0.5)'}`,
-                borderRight: `2px solid ${seg.muted ? 'rgba(255, 59, 48, 0.6)' : 'rgba(10, 132, 255, 0.5)'}`,
+                background: `${segColor}, 0.15)`,
+                borderLeft: `2px solid ${segColor}, 0.6)`,
+                borderRight: `2px solid ${segColor}, 0.6)`,
                 pointerEvents: 'none',
                 zIndex: 3,
               }}
             >
+              {/* Top label with icon */}
               <span style={{
-                position: 'absolute', top: 2, left: 4,
-                fontSize: 8, fontWeight: 700, letterSpacing: '0.05em',
-                color: seg.muted ? 'rgba(255, 59, 48, 0.9)' : 'rgba(10, 132, 255, 0.9)',
+                position: 'absolute', top: 1, left: 3,
+                display: 'flex', alignItems: 'center', gap: 2,
+                fontSize: 7, fontWeight: 700, letterSpacing: '0.04em',
+                color: `${segColor}, 0.95)`,
                 textTransform: 'uppercase', lineHeight: 1, pointerEvents: 'none',
+                whiteSpace: 'nowrap',
               }}>
-                {seg.muted ? 'MUTED' : !seg.subtitlesEnabled ? 'NO SUBS' : `${seg.volume}%`}
+                {seg.muted ? (
+                  <>
+                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                      <path d="M11 5L6 9H2v6h4l5 4V5z" /><line x1="23" y1="9" x2="17" y2="15" />
+                    </svg>
+                    MUTED
+                  </>
+                ) : !seg.subtitlesEnabled ? (
+                  <>
+                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                      <rect x="2" y="6" width="20" height="12" rx="2" /><line x1="2" y1="2" x2="22" y2="22" />
+                    </svg>
+                    NO SUBS
+                  </>
+                ) : (
+                  <>
+                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
+                      <path d="M11 5L6 9H2v6h4l5 4V5z" />
+                    </svg>
+                    {seg.volume}%
+                  </>
+                )}
               </span>
+              {/* Bottom border indicator bar */}
+              <div style={{
+                position: 'absolute', bottom: 0, left: 0, right: 0, height: 2,
+                background: `${segColor}, 0.7)`,
+              }} />
             </div>
           );
         })}
