@@ -155,12 +155,25 @@ function saveSettings(settings) {
   } catch {}
 }
 
-export default function ClipSettingsPanel({ speakers, speakerNames, videoResolution, onSettingsChange, onApplySettings, onPresetsLoaded }) {
+export default function ClipSettingsPanel({ speakers, speakerNames, videoResolution, onSettingsChange, onApplySettings, onPresetsLoaded, serverSettings }) {
   const { isMobile } = useResponsive();
   const [settings, setSettings] = useState(() => {
+    // Prefer server-provided settings over localStorage (server is source of truth)
+    if (serverSettings && Object.keys(serverSettings).length > 0) {
+      return { ...DEFAULT_SETTINGS, ...serverSettings };
+    }
     const loaded = loadSettings();
     return loaded;
   });
+  const serverSettingsApplied = useRef(false);
+
+  // When serverSettings prop arrives (async from job fetch), apply it once
+  useEffect(() => {
+    if (serverSettings && Object.keys(serverSettings).length > 0 && !serverSettingsApplied.current) {
+      serverSettingsApplied.current = true;
+      setSettings(prev => ({ ...DEFAULT_SETTINGS, ...serverSettings }));
+    }
+  }, [serverSettings]);
   const [customFonts, setCustomFonts] = useState([]);
   const [fontUploading, setFontUploading] = useState(false);
   const fontInputRef = useRef(null);

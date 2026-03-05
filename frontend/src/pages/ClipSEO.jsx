@@ -1325,6 +1325,7 @@ export default function ClipSEO() {
               videoResolution={job.resolution}
               onSettingsChange={setClipSettings}
               onApplySettings={handleApplySettings}
+              serverSettings={job?.subtitle_settings}
             />
           </div>
 

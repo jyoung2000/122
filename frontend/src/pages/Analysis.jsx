@@ -238,9 +238,9 @@ export default function Analysis() {
   const [activityLog, setActivityLog] = useState([]);
   const [logExpanded, setLogExpanded] = useState(true);
   const logEndRef = useRef(null);
-  // Initialize with defaults, merged with any saved settings from localStorage
-  // so settings persist across page reloads (ClipSettingsPanel will also
-  // fire its callback on mount, keeping them in sync).
+  // Subtitle/clip settings — server is the source of truth.
+  // On mount we start with defaults; once the job loads, server-stored
+  // settings replace them (see the effect below).
   const CLIP_SETTINGS_DEFAULTS = React.useMemo(() => ({
     aspectRatio: null,
     subtitlesEnabled: false,
@@ -2285,6 +2285,7 @@ export default function Analysis() {
                   onSettingsChange={setClipSettings}
                   onApplySettings={handleApplyClipSettings}
                   onPresetsLoaded={setClipPresets}
+                  serverSettings={job.subtitle_settings}
                 />
 
                 {/* Export Full Video */}
