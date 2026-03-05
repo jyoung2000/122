@@ -452,7 +452,13 @@ def generate_ass(
             words = safe_text.split()
             if len(words) <= 1:
                 # Single word — just color the whole event with active word color
-                aw_tags = f"\\c{aw_color}\\3c{aw_outline}\\bord{ol_width}\\shad{shadow_depth}"
+                if background_enabled:
+                    # BorderStyle=3: \3c = box color (not outline).  Don't override
+                    # \3c/\bord/\shad — let the Style definition provide the
+                    # uniform background box.  Only change text color (\c).
+                    aw_tags = f"\\c{aw_color}"
+                else:
+                    aw_tags = f"\\c{aw_color}\\3c{aw_outline}\\bord{ol_width}\\shad{shadow_depth}"
                 if aw_bg:
                     aw_tags += f"\\4c{aw_bg}"
                 event_text = f"{prefix}{{{aw_tags}}}{safe_text}"
@@ -496,18 +502,28 @@ def generate_ass(
                         continue
 
                     # Build text with inline overrides on the active word.
-                    # Every word gets explicit \bord and \shad to guarantee
-                    # outline rendering regardless of libass style caching.
+                    # When background_enabled (BorderStyle=3), \3c controls the
+                    # box color — only override \c (text color) to avoid changing
+                    # the background per-word (which causes double-clip artifacts).
+                    # When background is off (BorderStyle=1), include full outline
+                    # overrides (\3c, \bord, \shad) per-word for consistent stroke.
                     parts = []
                     for i, w in enumerate(words):
-                        if i == word_idx:
-                            tags = f"\\c{aw_color}\\3c{aw_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                            if aw_bg:
-                                tags += f"\\4c{aw_bg}"
-                            parts.append(f"{{{tags}}}{w}")
+                        if background_enabled:
+                            if i == word_idx:
+                                tags = f"\\c{aw_color}"
+                                if aw_bg:
+                                    tags += f"\\4c{aw_bg}"
+                            else:
+                                tags = f"\\c{base_color}"
                         else:
-                            tags = f"\\c{base_color}\\3c{base_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                            parts.append(f"{{{tags}}}{w}")
+                            if i == word_idx:
+                                tags = f"\\c{aw_color}\\3c{aw_outline}\\bord{ol_width}\\shad{shadow_depth}"
+                                if aw_bg:
+                                    tags += f"\\4c{aw_bg}"
+                            else:
+                                tags = f"\\c{base_color}\\3c{base_outline}\\bord{ol_width}\\shad{shadow_depth}"
+                        parts.append(f"{{{tags}}}{w}")
 
                     event_text = prefix + " ".join(parts)
                     pending_word_events.append((w_start, w_end, style_name, event_text))
@@ -599,17 +615,24 @@ def generate_ass(
                     shifted_start = max(clip_start, current_time - anticipation)
 
                     # Build text with inline overrides on the active word.
-                    # Every word gets explicit \bord and \shad.
+                    # Same BorderStyle-aware logic as the real-timestamp path.
                     parts = []
                     for i, w in enumerate(words):
-                        if i == word_idx:
-                            tags = f"\\c{aw_color}\\3c{aw_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                            if aw_bg:
-                                tags += f"\\4c{aw_bg}"
-                            parts.append(f"{{{tags}}}{w}")
+                        if background_enabled:
+                            if i == word_idx:
+                                tags = f"\\c{aw_color}"
+                                if aw_bg:
+                                    tags += f"\\4c{aw_bg}"
+                            else:
+                                tags = f"\\c{base_color}"
                         else:
-                            tags = f"\\c{base_color}\\3c{base_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                            parts.append(f"{{{tags}}}{w}")
+                            if i == word_idx:
+                                tags = f"\\c{aw_color}\\3c{aw_outline}\\bord{ol_width}\\shad{shadow_depth}"
+                                if aw_bg:
+                                    tags += f"\\4c{aw_bg}"
+                            else:
+                                tags = f"\\c{base_color}\\3c{base_outline}\\bord{ol_width}\\shad{shadow_depth}"
+                        parts.append(f"{{{tags}}}{w}")
 
                     event_text = prefix + " ".join(parts)
                     pending_word_events.append((shifted_start, word_end, style_name, event_text))

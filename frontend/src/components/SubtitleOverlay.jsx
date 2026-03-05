@@ -452,7 +452,10 @@ export default function SubtitleOverlay({
           const isActive = idx === currentWordIdx;
           const wordStyle = isActive ? {
             color: awColor,
-            ...(scaledOlWidth > 0 ? {
+            // When background is enabled (BorderStyle=3 in ASS), outline
+            // strokes can't coexist with the box — only change text color.
+            // When background is off, apply outline per active word.
+            ...(!bgEnabled && scaledOlWidth > 0 ? {
               WebkitTextStroke: `${scaledOlWidth * 2}px rgba(${awOlR},${awOlG},${awOlB},${olOpacity})`,
               paintOrder: 'stroke fill',
               textShadow: outlineTextShadow(scaledOlWidth, `rgba(${awOlR},${awOlG},${awOlB},${olOpacity})`),

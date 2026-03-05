@@ -404,10 +404,41 @@ def _validate_ass_settings(
             warnings.append(
                 f"Active word color {expected_aw_color} not found in any dialogue event"
             )
-        aw_outline_found = any(expected_aw_outline.upper() in ev["Text"].upper() for ev in events)
-        if not aw_outline_found:
+        # Active word outline color only applies when background is OFF
+        # (BorderStyle=1).  With BorderStyle=3, \3c controls box color and
+        # must NOT be overridden per-word — the Style provides the uniform box.
+        if not background_enabled:
+            aw_outline_found = any(expected_aw_outline.upper() in ev["Text"].upper() for ev in events)
+            if not aw_outline_found:
+                warnings.append(
+                    f"Active word outline color {expected_aw_outline} not found in any dialogue event"
+                )
+
+    # 14aa. BorderStyle=3 + inline \3c/\bord/\shad conflict detection
+    # With BorderStyle=3, \3c = box color, \bord = box padding.  Inline
+    # overrides of these per-word would change the background box color/size
+    # for individual words, causing double-clip artifacts and mismatched
+    # background appearance vs the preview player.
+    if background_enabled and active_word_enabled and has_override_tags:
+        has_3c_override = any("\\3c" in ev["Text"] for ev in events)
+        if has_3c_override:
             warnings.append(
-                f"Active word outline color {expected_aw_outline} not found in any dialogue event"
+                "BorderStyle=3 (background) + inline \\3c tags detected — "
+                "per-word \\3c overrides change the box color, causing "
+                "double-clip artifacts (should only use \\c for text color)"
+            )
+        has_bord_override = any("\\bord" in ev["Text"] for ev in events)
+        if has_bord_override:
+            warnings.append(
+                "BorderStyle=3 (background) + inline \\bord tags detected — "
+                "per-word \\bord overrides change box padding, causing "
+                "inconsistent background sizing"
+            )
+        has_shad_override = any("\\shad" in ev["Text"] for ev in events)
+        if has_shad_override:
+            warnings.append(
+                "BorderStyle=3 (background) + inline \\shad tags detected — "
+                "per-word \\shad overrides are unnecessary with Shadow=0"
             )
 
     # 14b. Active word background color (when bg_opacity > 0)
