@@ -4,7 +4,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -503,6 +503,27 @@ async def delete_scene(job_id: str, scene_index: int):
     job.scenes.pop(scene_index)
     await database.save_job(job)
     return {"job_id": job_id, "scene_count": len(job.scenes)}
+
+
+# --- Subtitle settings (server is source of truth) ---
+
+@router.put("/jobs/{job_id}/subtitle-settings")
+async def save_subtitle_settings(job_id: str, request: Request):
+    """Save canonical subtitle settings for a job.
+
+    The server stores these so the browser never relies on potentially-stale
+    localStorage values.  On every export the frontend should read settings
+    from the job object (populated by GET /api/jobs/{job_id}) rather than
+    from local cache.
+    """
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    settings = await request.json()
+    job.subtitle_settings = settings
+    await database.save_job(job)
+    return {"job_id": job_id, "subtitle_settings": job.subtitle_settings}
 
 
 # --- Subject tracking re-center ---

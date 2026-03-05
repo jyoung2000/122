@@ -99,6 +99,7 @@ class JobResult(BaseModel):
     clips: list[ClipCandidate] = []
     speaker_names: dict[str, str] = {}  # {"Speaker 1": "Eric", "Speaker 2": "Alice"}
     exported_clips: list[dict] = []
+    subtitle_settings: Optional[dict] = None  # Canonical subtitle settings — server is source of truth
     error: Optional[str] = None
     estimated_cost_usd: Optional[float] = None
 

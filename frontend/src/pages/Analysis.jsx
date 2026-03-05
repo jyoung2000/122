@@ -241,47 +241,85 @@ export default function Analysis() {
   // Initialize with defaults, merged with any saved settings from localStorage
   // so settings persist across page reloads (ClipSettingsPanel will also
   // fire its callback on mount, keeping them in sync).
-  const [clipSettings, setClipSettings] = useState(() => {
-    const defaults = {
-      aspectRatio: null,
-      subtitlesEnabled: false,
-      subtitleFont: 'DM Sans',
-      subtitleSize: 30,
-      subtitleFontWeight: 'bold',
-      subtitleFontColor: '#FFFFFF',
-      subtitlePosition: 'bottom',
-      speakerColors: {},
-      subtitleBgEnabled: false,
-      subtitleBgColor: '#000000',
-      subtitleBgOpacity: 75,
-      subtitleBgRadius: 0,
-      subtitleOutlineColor: '#000000',
-      subtitleOutlineOpacity: 100,
-      subtitleOutlineWidth: 2,
-      showSpeakerLabels: false,
-      subtitleMaxWidth: 90,
-      subtitleOffsetV: 4,
-      subtitleMaxWords: 0,
-      activeWordEnabled: false,
-      activeWordColor: '#FFD700',
-      activeWordOutlineColor: '#000000',
-      activeWordBgColor: '#000000',
-      activeWordBgOpacity: 0,
-      useSpeakerColors: true,
-      playbackVolume: 100,
-      playbackSpeed: 1.0,
-    };
-    try {
-      const saved = localStorage.getItem('clipai_clip_settings');
-      if (saved) return { ...defaults, ...JSON.parse(saved) };
-    } catch {}
-    return defaults;
-  });
-  // Persist clipSettings to localStorage whenever they change, so settings
-  // survive page reload even if ClipSettingsPanel isn't mounted.
+  const CLIP_SETTINGS_DEFAULTS = React.useMemo(() => ({
+    aspectRatio: null,
+    subtitlesEnabled: false,
+    subtitleFont: 'DM Sans',
+    subtitleSize: 30,
+    subtitleFontWeight: 'bold',
+    subtitleFontColor: '#FFFFFF',
+    subtitlePosition: 'bottom',
+    speakerColors: {},
+    subtitleBgEnabled: false,
+    subtitleBgColor: '#000000',
+    subtitleBgOpacity: 75,
+    subtitleBgRadius: 0,
+    subtitleOutlineColor: '#000000',
+    subtitleOutlineOpacity: 100,
+    subtitleOutlineWidth: 2,
+    showSpeakerLabels: false,
+    subtitleMaxWidth: 90,
+    subtitleOffsetV: 4,
+    subtitleMaxWords: 0,
+    activeWordEnabled: false,
+    activeWordColor: '#FFD700',
+    activeWordOutlineColor: '#000000',
+    activeWordBgColor: '#000000',
+    activeWordBgOpacity: 0,
+    useSpeakerColors: true,
+    playbackVolume: 100,
+    playbackSpeed: 1.0,
+  }), []);
+  const [clipSettings, setClipSettings] = useState(CLIP_SETTINGS_DEFAULTS);
+  const clipSettingsLoadedFromServer = useRef(false);
+  const skipNextServerSave = useRef(false);
+
+  // ── Server is source of truth for subtitle settings ──
+  // When the job loads from the backend, apply server-stored settings (ignoring
+  // potentially-stale localStorage).  This runs every time `job` changes.
   useEffect(() => {
+    if (!job) return;
+    if (job.subtitle_settings && Object.keys(job.subtitle_settings).length > 0) {
+      // Server has canonical settings — use them, merged over defaults
+      skipNextServerSave.current = true; // Don't echo back to server
+      setClipSettings({ ...CLIP_SETTINGS_DEFAULTS, ...job.subtitle_settings });
+      clipSettingsLoadedFromServer.current = true;
+    } else if (!clipSettingsLoadedFromServer.current) {
+      // No server settings yet — fall back to localStorage for first-time migration
+      try {
+        const saved = localStorage.getItem('clipai_clip_settings');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          setClipSettings({ ...CLIP_SETTINGS_DEFAULTS, ...parsed });
+        }
+      } catch {}
+    }
+  }, [job?.subtitle_settings, CLIP_SETTINGS_DEFAULTS]);
+
+  // ── Persist settings to server whenever they change (debounced) ──
+  // This replaces the old localStorage-only persistence.  The server is the
+  // source of truth; localStorage is only kept as a temporary migration path.
+  const saveSettingsTimerRef = useRef(null);
+  useEffect(() => {
+    // Also keep localStorage in sync as a fallback
     try { localStorage.setItem('clipai_clip_settings', JSON.stringify(clipSettings)); } catch {}
-  }, [clipSettings]);
+    // Skip the echo-back when settings were just loaded from server
+    if (skipNextServerSave.current) {
+      skipNextServerSave.current = false;
+      return;
+    }
+    // Debounced save to server
+    if (!jobId) return;
+    if (saveSettingsTimerRef.current) clearTimeout(saveSettingsTimerRef.current);
+    saveSettingsTimerRef.current = setTimeout(() => {
+      fetch(`/api/jobs/${jobId}/subtitle-settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(clipSettings),
+      }).catch(() => {});
+    }, 800);
+    return () => { if (saveSettingsTimerRef.current) clearTimeout(saveSettingsTimerRef.current); };
+  }, [clipSettings, jobId]);
 
   // VideoEditor state for export params
   const [editorTrim, setEditorTrim] = useState({ trimStart: 0, trimEnd: 0 });

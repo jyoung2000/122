@@ -152,19 +152,75 @@ export default function ClipSEO() {
 
   // Clip settings — managed by ClipSettingsPanel, received via onSettingsChange.
   // Load from localStorage so settings persist across page reloads immediately.
-  const [clipSettings, setClipSettings] = useState(() => {
-    try {
-      const saved = localStorage.getItem('clipai_clip_settings');
-      if (saved) return JSON.parse(saved);
-    } catch {}
-    return {};
-  });
-  // Persist clipSettings to localStorage whenever they change
+  const CLIP_SETTINGS_DEFAULTS = React.useMemo(() => ({
+    aspectRatio: null,
+    subtitlesEnabled: false,
+    subtitleFont: 'DM Sans',
+    subtitleSize: 30,
+    subtitleFontWeight: 'bold',
+    subtitleFontColor: '#FFFFFF',
+    subtitlePosition: 'bottom',
+    speakerColors: {},
+    subtitleBgEnabled: false,
+    subtitleBgColor: '#000000',
+    subtitleBgOpacity: 75,
+    subtitleBgRadius: 0,
+    subtitleOutlineColor: '#000000',
+    subtitleOutlineOpacity: 100,
+    subtitleOutlineWidth: 2,
+    showSpeakerLabels: false,
+    subtitleMaxWidth: 90,
+    subtitleOffsetV: 4,
+    subtitleMaxWords: 0,
+    activeWordEnabled: false,
+    activeWordColor: '#FFD700',
+    activeWordOutlineColor: '#000000',
+    activeWordBgColor: '#000000',
+    activeWordBgOpacity: 0,
+    useSpeakerColors: true,
+    playbackVolume: 100,
+    playbackSpeed: 1.0,
+  }), []);
+  const [clipSettings, setClipSettings] = useState(CLIP_SETTINGS_DEFAULTS);
+  const clipSettingsLoadedFromServer = useRef(false);
+  const skipNextServerSave = useRef(false);
+
+  // ── Server is source of truth for subtitle settings ──
+  useEffect(() => {
+    if (!job) return;
+    if (job.subtitle_settings && Object.keys(job.subtitle_settings).length > 0) {
+      skipNextServerSave.current = true;
+      setClipSettings({ ...CLIP_SETTINGS_DEFAULTS, ...job.subtitle_settings });
+      clipSettingsLoadedFromServer.current = true;
+    } else if (!clipSettingsLoadedFromServer.current) {
+      try {
+        const saved = localStorage.getItem('clipai_clip_settings');
+        if (saved) setClipSettings({ ...CLIP_SETTINGS_DEFAULTS, ...JSON.parse(saved) });
+      } catch {}
+    }
+  }, [job?.subtitle_settings, CLIP_SETTINGS_DEFAULTS]);
+
+  // Persist to server (debounced) + localStorage fallback
+  const saveSettingsTimerRef = useRef(null);
   useEffect(() => {
     if (clipSettings && Object.keys(clipSettings).length > 0) {
       try { localStorage.setItem('clipai_clip_settings', JSON.stringify(clipSettings)); } catch {}
     }
-  }, [clipSettings]);
+    if (skipNextServerSave.current) {
+      skipNextServerSave.current = false;
+      return;
+    }
+    if (!jobId) return;
+    if (saveSettingsTimerRef.current) clearTimeout(saveSettingsTimerRef.current);
+    saveSettingsTimerRef.current = setTimeout(() => {
+      fetch(`/api/jobs/${jobId}/subtitle-settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(clipSettings),
+      }).catch(() => {});
+    }, 800);
+    return () => { if (saveSettingsTimerRef.current) clearTimeout(saveSettingsTimerRef.current); };
+  }, [clipSettings, jobId]);
 
   const [currentWordIdx, setCurrentWordIdx] = useState(-1);
   const [settingsAppliedFlash, setSettingsAppliedFlash] = useState(false);
