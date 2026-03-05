@@ -1043,6 +1043,104 @@ export default function VideoEditor({
     window.addEventListener('pointerup', onUp);
   }, [clipStart, effectiveClipEnd, clipDur, trimStartOffset, trimEndOffset, getTimeFromPointer]);
 
+  // ── Segment drag-to-resize and drag-to-move ────────
+  const EDGE_THRESHOLD_PX = 8;
+  const PLAYHEAD_SNAP_PX = 5;
+
+  const onSegmentPointerMove = useCallback((e) => {
+    if (segDrag) return;
+    const track = timelineRef.current;
+    if (!track || clipDur <= 0) return;
+    const rect = track.getBoundingClientRect();
+    const pointerX = e.clientX - rect.left;
+    const trackWidth = rect.width;
+
+    for (const seg of segments) {
+      const segLeftPx = ((seg.start - clipStart) / clipDur) * trackWidth;
+      const segRightPx = ((seg.end - clipStart) / clipDur) * trackWidth;
+
+      if (Math.abs(pointerX - segLeftPx) < EDGE_THRESHOLD_PX) {
+        setSegHoverEdge({ segId: seg.id, edge: 'start' });
+        return;
+      }
+      if (Math.abs(pointerX - segRightPx) < EDGE_THRESHOLD_PX) {
+        setSegHoverEdge({ segId: seg.id, edge: 'end' });
+        return;
+      }
+      if (pointerX > segLeftPx + EDGE_THRESHOLD_PX && pointerX < segRightPx - EDGE_THRESHOLD_PX) {
+        setSegHoverEdge({ segId: seg.id, edge: 'center' });
+        return;
+      }
+    }
+    setSegHoverEdge(null);
+  }, [segments, clipStart, clipDur, segDrag]);
+
+  const startSegDrag = useCallback((e, segId, mode) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const seg = segments.find(s => s.id === segId);
+    if (!seg) return;
+    setSelectedSegmentId(segId);
+
+    const track = timelineRef.current;
+    if (!track) return;
+    const trackRect = track.getBoundingClientRect();
+
+    const state = {
+      segId,
+      mode,
+      startPointerX: e.clientX,
+      origStart: seg.start,
+      origEnd: seg.end,
+      trackLeft: trackRect.left,
+      trackWidth: trackRect.width,
+    };
+    setSegDrag(state);
+
+    const onMove = (ev) => {
+      const pxDelta = ev.clientX - state.startPointerX;
+      const timeDelta = (pxDelta / state.trackWidth) * clipDur;
+      const playheadTime = videoRef.current?.currentTime ?? currentTime;
+      const playheadPx = ((playheadTime - clipStart) / clipDur) * state.trackWidth;
+      const pointerPx = ev.clientX - state.trackLeft;
+
+      if (mode === 'start') {
+        let newStart = state.origStart + timeDelta;
+        if (Math.abs(pointerPx - playheadPx) < PLAYHEAD_SNAP_PX) newStart = playheadTime;
+        newStart = Math.max(clipStart, Math.min(state.origEnd - 0.5, newStart));
+        const prevSeg = segments.filter(s => s.id !== segId && s.end <= state.origStart).sort((a, b) => b.end - a.end)[0];
+        if (prevSeg) newStart = Math.max(prevSeg.end, newStart);
+        updateSegment(segId, { start: newStart });
+      } else if (mode === 'end') {
+        let newEnd = state.origEnd + timeDelta;
+        if (Math.abs(pointerPx - playheadPx) < PLAYHEAD_SNAP_PX) newEnd = playheadTime;
+        newEnd = Math.max(state.origStart + 0.5, Math.min(effectiveClipEnd, newEnd));
+        const nextSeg = segments.filter(s => s.id !== segId && s.start >= state.origEnd).sort((a, b) => a.start - b.start)[0];
+        if (nextSeg) newEnd = Math.min(nextSeg.start, newEnd);
+        updateSegment(segId, { end: newEnd });
+      } else if (mode === 'move') {
+        const dur = state.origEnd - state.origStart;
+        let newStart = state.origStart + timeDelta;
+        let newEnd = newStart + dur;
+        if (newStart < clipStart) { newStart = clipStart; newEnd = newStart + dur; }
+        if (newEnd > effectiveClipEnd) { newEnd = effectiveClipEnd; newStart = newEnd - dur; }
+        const prevSeg = segments.filter(s => s.id !== segId && s.end <= state.origStart).sort((a, b) => b.end - a.end)[0];
+        const nextSeg = segments.filter(s => s.id !== segId && s.start >= state.origEnd).sort((a, b) => a.start - b.start)[0];
+        if (prevSeg && newStart < prevSeg.end) { newStart = prevSeg.end; newEnd = newStart + dur; }
+        if (nextSeg && newEnd > nextSeg.start) { newEnd = nextSeg.start; newStart = newEnd - dur; }
+        updateSegment(segId, { start: newStart, end: newEnd });
+      }
+    };
+
+    const onUp = () => {
+      setSegDrag(null);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [segments, clipStart, clipDur, effectiveClipEnd, currentTime, updateSegment]);
+
   const onTimelinePointerDown = useCallback((e) => {
     e.preventDefault();
     const track = timelineRef.current;
@@ -1336,116 +1434,6 @@ export default function VideoEditor({
       return () => clearInterval(interval);
     }
   }, [shuttleSpeed, trimmedStart]);
-
-  // ── Segment drag-to-resize and drag-to-move ────────
-  const EDGE_THRESHOLD_PX = 8;
-  const PLAYHEAD_SNAP_PX = 5;
-
-  const onSegmentPointerMove = useCallback((e) => {
-    if (segDrag) return; // Don't change hover while dragging
-    const track = timelineRef.current;
-    if (!track || clipDur <= 0) return;
-    const rect = track.getBoundingClientRect();
-    const pointerX = e.clientX - rect.left;
-    const trackWidth = rect.width;
-
-    for (const seg of segments) {
-      const segLeftPx = ((seg.start - clipStart) / clipDur) * trackWidth;
-      const segRightPx = ((seg.end - clipStart) / clipDur) * trackWidth;
-
-      if (Math.abs(pointerX - segLeftPx) < EDGE_THRESHOLD_PX) {
-        setSegHoverEdge({ segId: seg.id, edge: 'start' });
-        return;
-      }
-      if (Math.abs(pointerX - segRightPx) < EDGE_THRESHOLD_PX) {
-        setSegHoverEdge({ segId: seg.id, edge: 'end' });
-        return;
-      }
-      if (pointerX > segLeftPx + EDGE_THRESHOLD_PX && pointerX < segRightPx - EDGE_THRESHOLD_PX) {
-        setSegHoverEdge({ segId: seg.id, edge: 'center' });
-        return;
-      }
-    }
-    setSegHoverEdge(null);
-  }, [segments, clipStart, clipDur, segDrag]);
-
-  const startSegDrag = useCallback((e, segId, mode) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const seg = segments.find(s => s.id === segId);
-    if (!seg) return;
-    setSelectedSegmentId(segId);
-
-    const track = timelineRef.current;
-    if (!track) return;
-    const trackRect = track.getBoundingClientRect();
-
-    const state = {
-      segId,
-      mode,
-      startPointerX: e.clientX,
-      origStart: seg.start,
-      origEnd: seg.end,
-      trackLeft: trackRect.left,
-      trackWidth: trackRect.width,
-    };
-    setSegDrag(state);
-
-    const onMove = (ev) => {
-      const pxDelta = ev.clientX - state.startPointerX;
-      const timeDelta = (pxDelta / state.trackWidth) * clipDur;
-      const playheadTime = videoRef.current?.currentTime ?? currentTime;
-      const playheadPx = ((playheadTime - clipStart) / clipDur) * state.trackWidth;
-      const pointerPx = ev.clientX - state.trackLeft;
-
-      if (mode === 'start') {
-        let newStart = state.origStart + timeDelta;
-        // Snap to playhead
-        if (Math.abs(pointerPx - playheadPx) < PLAYHEAD_SNAP_PX) {
-          newStart = playheadTime;
-        }
-        // Clamp
-        newStart = Math.max(clipStart, Math.min(state.origEnd - 0.5, newStart));
-        // Prevent overlap with previous segment
-        const prevSeg = segments.filter(s => s.id !== segId && s.end <= state.origStart).sort((a, b) => b.end - a.end)[0];
-        if (prevSeg) newStart = Math.max(prevSeg.end, newStart);
-        updateSegment(segId, { start: newStart });
-      } else if (mode === 'end') {
-        let newEnd = state.origEnd + timeDelta;
-        // Snap to playhead
-        if (Math.abs(pointerPx - playheadPx) < PLAYHEAD_SNAP_PX) {
-          newEnd = playheadTime;
-        }
-        // Clamp
-        newEnd = Math.max(state.origStart + 0.5, Math.min(effectiveClipEnd, newEnd));
-        // Prevent overlap with next segment
-        const nextSeg = segments.filter(s => s.id !== segId && s.start >= state.origEnd).sort((a, b) => a.start - b.start)[0];
-        if (nextSeg) newEnd = Math.min(nextSeg.start, newEnd);
-        updateSegment(segId, { end: newEnd });
-      } else if (mode === 'move') {
-        const dur = state.origEnd - state.origStart;
-        let newStart = state.origStart + timeDelta;
-        let newEnd = newStart + dur;
-        // Clamp to clip range
-        if (newStart < clipStart) { newStart = clipStart; newEnd = newStart + dur; }
-        if (newEnd > effectiveClipEnd) { newEnd = effectiveClipEnd; newStart = newEnd - dur; }
-        // Prevent overlap
-        const prevSeg = segments.filter(s => s.id !== segId && s.end <= state.origStart).sort((a, b) => b.end - a.end)[0];
-        const nextSeg = segments.filter(s => s.id !== segId && s.start >= state.origEnd).sort((a, b) => a.start - b.start)[0];
-        if (prevSeg && newStart < prevSeg.end) { newStart = prevSeg.end; newEnd = newStart + dur; }
-        if (nextSeg && newEnd > nextSeg.start) { newEnd = nextSeg.start; newStart = newEnd - dur; }
-        updateSegment(segId, { start: newStart, end: newEnd });
-      }
-    };
-
-    const onUp = () => {
-      setSegDrag(null);
-      window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
-    };
-    window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp);
-  }, [segments, clipStart, clipDur, effectiveClipEnd, currentTime, updateSegment]);
 
   // ── Volume icon selector ───────────────────────────
   const VolumeIcon = useMemo(() => {
@@ -2214,16 +2202,16 @@ export default function VideoEditor({
       {/* ── Speaker Color Editor (below timeline, above controls) ── */}
       {speakers && speakers.length > 0 && settings?.subtitlesEnabled && (
         <div style={{
-          display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
-          padding: '4px 12px',
+          display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+          padding: '8px 14px',
           background: 'var(--ve-chrome-bg)',
           borderTop: '1px solid var(--ve-chrome-border)',
-          fontSize: 9,
+          borderBottom: '1px solid var(--ve-chrome-border)',
         }}>
           <span style={{
-            fontSize: 8, fontWeight: 700, letterSpacing: '0.05em',
-            textTransform: 'uppercase', color: 'var(--ve-text-muted)',
-            marginRight: 2,
+            fontSize: 11, fontWeight: 700, letterSpacing: '0.04em',
+            textTransform: 'uppercase', color: 'var(--ve-text)',
+            marginRight: 4,
           }}>
             Speaker Colors
           </span>
@@ -2232,8 +2220,13 @@ export default function VideoEditor({
             const displayName = speakerNames?.[spk] || spk;
             return (
               <label key={spk} style={{
-                display: 'inline-flex', alignItems: 'center', gap: 3,
+                display: 'inline-flex', alignItems: 'center', gap: 6,
                 cursor: 'pointer',
+                padding: '4px 8px',
+                borderRadius: 6,
+                background: 'var(--ve-track-bg, rgba(0,0,0,0.04))',
+                border: '1px solid var(--ve-chrome-border)',
+                transition: 'all 0.15s ease',
               }}>
                 <input
                   type="color"
@@ -2247,14 +2240,15 @@ export default function VideoEditor({
                   }}
                   onClick={(e) => e.stopPropagation()}
                   style={{
-                    width: 16, height: 16, padding: 0, border: '1px solid var(--border, #ddd)',
-                    borderRadius: 3, cursor: 'pointer', background: 'none',
+                    width: 24, height: 24, padding: 0,
+                    border: '2px solid var(--border, #ddd)',
+                    borderRadius: 6, cursor: 'pointer', background: 'none',
                   }}
                   title={`Color for ${displayName}`}
                 />
                 <span style={{
-                  color: 'var(--text-secondary, #666)', fontSize: 9,
-                  maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  color: 'var(--ve-text)', fontSize: 12, fontWeight: 500,
+                  maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                 }}>
                   {displayName}
                 </span>
