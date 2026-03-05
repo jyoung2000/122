@@ -174,16 +174,20 @@ async def export_clip_endpoint(
                 })
 
             async def _export_progress(msg: str):
-                # Extract real encoding percentage from message text
+                # Extract real encoding percentage from message text.
+                # When the message has no percentage (e.g. "Preparing clip..."
+                # or "Subtitle file generated..."), omit the progress field so
+                # the frontend keeps the previous value instead of jumping.
                 import re as _re
                 _m = _re.search(r'(\d+)%', msg)
-                _pct = int(_m.group(1)) if _m else 50
-                await broadcast_ws(job_id, {
+                payload = {
                     "type": "status",
                     "status": "exporting",
-                    "progress": _pct,
                     "message": msg,
-                })
+                }
+                if _m:
+                    payload["progress"] = int(_m.group(1))
+                await broadcast_ws(job_id, payload)
 
             output_path = await export_clip(
                 job_id=job_id,
@@ -332,16 +336,16 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                 })
 
             async def _export_progress(msg: str):
-                # Extract real encoding percentage from message text
                 import re as _re
                 _m = _re.search(r'(\d+)%', msg)
-                _pct = int(_m.group(1)) if _m else 50
-                await broadcast_ws(job_id, {
+                payload = {
                     "type": "status",
                     "status": "exporting",
-                    "progress": _pct,
                     "message": msg,
-                })
+                }
+                if _m:
+                    payload["progress"] = int(_m.group(1))
+                await broadcast_ws(job_id, payload)
 
             # Apply VideoEditor trim offsets for full video
             fv_start = 0 + req.trim_start_offset
