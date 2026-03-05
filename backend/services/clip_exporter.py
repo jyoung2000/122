@@ -2146,52 +2146,82 @@ async def export_clip(
                 timeline = _build_speed_timeline(segments, clip_dur_local, speed, volume, start)
                 n = len(timeline)
                 logger.info(
-                    "Per-segment speed for clip %s: %d timeline entries from %d segments",
+                    "Per-segment speed for clip %s: %d timeline entries from %d segments — %s",
                     clip_id, n, len(segments),
+                    [(f"[{tl['start']:.1f}-{tl['end']:.1f}@{tl['speed']}x]") for tl in timeline],
                 )
 
-                # --- Video: base_chain → [base] → split → trim+setpts → concat → [finalv]
+                # Probe whether the input has an audio stream
+                _probe_cmd = [
+                    "ffprobe", "-v", "quiet", "-select_streams", "a",
+                    "-show_entries", "stream=index", "-of", "csv=p=0",
+                    video_path,
+                ]
+                _probe_proc = await asyncio.create_subprocess_exec(
+                    *_probe_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _probe_out, _ = await _probe_proc.communicate()
+                _has_audio = bool(_probe_out.strip())
+
+                # --- Video: base_chain → normalize PTS → split → trim+setpts → concat
                 fc_lines: list[str] = []
+                # Apply visual filters then normalize timestamps to 0-based
                 if vf:
-                    fc_lines.append(f"[0:v]{vf}[base]")
+                    fc_lines.append(f"[0:v]{vf},setpts=PTS-STARTPTS[base]")
                 else:
-                    fc_lines.append("[0:v]null[base]")
+                    fc_lines.append("[0:v]setpts=PTS-STARTPTS[base]")
 
                 split_labels = "".join(f"[vs{i}]" for i in range(n))
                 fc_lines.append(f"[base]split={n}{split_labels}")
 
                 for i, tl in enumerate(timeline):
+                    pts_factor = 1.0 / tl["speed"]
                     chain = (
                         f"[vs{i}]trim=start={tl['start']:.3f}:end={tl['end']:.3f}"
                         f",setpts=PTS-STARTPTS"
                     )
+                    # Apply speed as a single PTS scale (avoid double setpts)
                     if abs(tl["speed"] - 1.0) > 0.001:
-                        chain += f",setpts={1.0/tl['speed']:.6f}*PTS"
+                        chain += f",setpts={pts_factor:.6f}*PTS"
                     chain += f"[vo{i}]"
                     fc_lines.append(chain)
 
-                # --- Audio: asplit → atrim+atempo+volume → concat
-                asplit_labels = "".join(f"[as{i}]" for i in range(n))
-                fc_lines.append(f"[0:a]asplit={n}{asplit_labels}")
+                # --- Audio chain (only if audio exists)
+                if _has_audio:
+                    # Normalize audio timestamps too
+                    asplit_labels = "".join(f"[as{i}]" for i in range(n))
+                    fc_lines.append(f"[0:a]asetpts=PTS-STARTPTS,asplit={n}{asplit_labels}")
 
-                for i, tl in enumerate(timeline):
-                    chain = (
-                        f"[as{i}]atrim=start={tl['start']:.3f}:end={tl['end']:.3f}"
-                        f",asetpts=PTS-STARTPTS"
-                    )
-                    if abs(tl["speed"] - 1.0) > 0.001:
-                        chain += f",{_atempo_chain(tl['speed'])}"
-                    seg_vol = 0.0 if tl["muted"] else tl["volume"]
-                    if abs(seg_vol - 1.0) > 0.001 or tl["muted"]:
-                        chain += f",volume={seg_vol:.4f}"
-                    chain += f"[ao{i}]"
-                    fc_lines.append(chain)
+                    for i, tl in enumerate(timeline):
+                        chain = (
+                            f"[as{i}]atrim=start={tl['start']:.3f}:end={tl['end']:.3f}"
+                            f",asetpts=PTS-STARTPTS"
+                        )
+                        if abs(tl["speed"] - 1.0) > 0.001:
+                            chain += f",{_atempo_chain(tl['speed'])}"
+                        seg_vol = 0.0 if tl["muted"] else tl["volume"]
+                        if abs(seg_vol - 1.0) > 0.001 or tl["muted"]:
+                            chain += f",volume={seg_vol:.4f}"
+                        chain += f"[ao{i}]"
+                        fc_lines.append(chain)
 
-                # Concat all segments
-                concat_inputs = "".join(f"[vo{i}][ao{i}]" for i in range(n))
-                fc_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=1[finalv][finala]")
+                    # Concat video + audio
+                    concat_inputs = "".join(f"[vo{i}][ao{i}]" for i in range(n))
+                    fc_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=1[finalv][finala]")
+                    map_args = ["-map", "[finalv]", "-map", "[finala]"]
+                else:
+                    # No audio — video-only concat
+                    concat_inputs = "".join(f"[vo{i}]" for i in range(n))
+                    fc_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=0[finalv]")
+                    map_args = ["-map", "[finalv]"]
 
                 full_fc = ";".join(fc_lines)
+                logger.info(
+                    "Per-segment speed filter_complex for clip %s:\n%s",
+                    clip_id, full_fc,
+                )
 
                 cmd = [
                     "ffmpeg", "-y",
@@ -2199,15 +2229,16 @@ async def export_clip(
                     "-i", video_path,
                     "-t", str(end - start),
                     "-filter_complex", full_fc,
-                    "-map", "[finalv]", "-map", "[finala]",
+                ] + map_args + [
                     "-c:v", "libx264",
                     "-pix_fmt", "yuv420p",
                     "-preset", enc_preset,
                     "-crf", str(enc_crf),
                     "-threads", str(app_settings.FFMPEG_THREADS),
-                    "-c:a", "aac",
-                    "-avoid_negative_ts", "make_zero",
                 ]
+                if _has_audio:
+                    cmd += ["-c:a", "aac"]
+                cmd += ["-avoid_negative_ts", "make_zero"]
                 if app_settings.FFMPEG_FASTSTART:
                     cmd += ["-movflags", "+faststart"]
                 cmd += ["-progress", "pipe:1"]
@@ -2353,7 +2384,10 @@ async def export_clip(
             stderr = b"".join(_stderr_chunks)
 
             if proc.returncode != 0:
-                raise RuntimeError(f"Clip export failed: {stderr.decode()[:2000]}")
+                _stderr_text = stderr.decode(errors="replace")
+                # Take the TAIL of stderr — the actual error is at the end,
+                # not the FFmpeg version/config preamble at the start.
+                raise RuntimeError(f"Clip export failed: {_stderr_text[-3000:]}")
         else:
             # No filters — use stream copy for speed
             await _notify(f"Exporting clip {clip_id} (stream copy — fast mode)")
