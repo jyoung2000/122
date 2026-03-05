@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
+import { sendNotification } from '../utils/notifications';
 
 const EncodingContext = createContext(null);
 
@@ -153,6 +154,10 @@ export function EncodingProvider({ children }) {
             };
           });
           pushLog('success', msg.message || `Clip exported successfully`);
+          sendNotification('Export Complete', {
+            body: `${clipTitle || `Clip ${msg.clip_id}`} is ready for download.`,
+            tag: `export-${jobId}-${msg.clip_id}`,
+          });
           if (msg.download_url && !recentDownloadsRef.current.has(msg.download_url)) {
             // Dedup: mark this URL so duplicate WS messages don't trigger
             // multiple browser downloads for the same file.

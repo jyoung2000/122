@@ -8,6 +8,7 @@ import ProgressBar from '../components/ProgressBar';
 import SceneCard from '../components/SceneCard';
 import TranscriptViewer from '../components/TranscriptViewer';
 import ClipCard from '../components/ClipCard';
+import { sendNotification, requestNotificationPermission } from '../utils/notifications';
 import ClipSettingsPanel from '../components/ClipSettingsPanel';
 import { showToast } from '../components/Toast';
 import useResponsive from '../hooks/useResponsive';
@@ -395,6 +396,7 @@ export default function Analysis() {
       ws.onopen = () => {
         reconnectDelay = 1000; // reset backoff on successful connect
         pushLog('info', 'Connected to live updates');
+        requestNotificationPermission();
       };
 
       ws.onmessage = (evt) => {
@@ -426,6 +428,10 @@ export default function Analysis() {
               { progress: msg.progress },
             );
             if (msg.type === 'complete') {
+              sendNotification('Analysis Complete', {
+                body: msg.message || 'Your video analysis has finished.',
+                tag: `analysis-${jobId}`,
+              });
               fetchJob();
             }
           } else if (msg.type === 'fallback') {
