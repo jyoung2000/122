@@ -275,6 +275,31 @@ export default function Analysis() {
   const [editorSegments, setEditorSegments] = useState([]);
   // Persist segments per clip ID so switching clips doesn't lose segments
   const clipSegmentsMapRef = useRef({});
+
+  // ── localStorage helpers for segment persistence across refresh ──
+  const segStorageKey = useCallback((cId) => `clipai_segments_${jobId}_${cId}`, [jobId]);
+  const saveSegmentsToStorage = useCallback((cId, segs) => {
+    try {
+      if (segs && segs.length > 0) {
+        localStorage.setItem(segStorageKey(cId), JSON.stringify(segs));
+      } else {
+        localStorage.removeItem(segStorageKey(cId));
+      }
+    } catch {}
+  }, [segStorageKey]);
+  const loadSegmentsFromStorage = useCallback((cId) => {
+    try {
+      const raw = localStorage.getItem(segStorageKey(cId));
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  }, [segStorageKey]);
+  // Restore segments from localStorage on mount (full video uses key 'full')
+  useEffect(() => {
+    if (!jobId) return;
+    const saved = loadSegmentsFromStorage('full');
+    if (saved.length > 0) setEditorSegments(saved);
+  }, [jobId, loadSegmentsFromStorage]);
+
   // Track applied trim ranges so the trimmed region becomes the full video
   const [fullVideoRange, setFullVideoRange] = useState(null); // { start, end } for full video editor
   const [showInlineSubSettings, setShowInlineSubSettings] = useState(false);
@@ -505,9 +530,11 @@ export default function Analysis() {
     // Save current clip's segments before switching
     if (clipPreview) {
       clipSegmentsMapRef.current[clipPreview.id] = editorSegments;
+      saveSegmentsToStorage(clipPreview.id, editorSegments);
     }
-    // Restore segments for the new clip (if any were previously saved)
-    const savedSegments = clipSegmentsMapRef.current[clip.id] || [];
+    // Restore segments for the new clip: in-memory cache first, then localStorage
+    const savedSegments = clipSegmentsMapRef.current[clip.id] || loadSegmentsFromStorage(clip.id);
+    clipSegmentsMapRef.current[clip.id] = savedSegments;
     setEditorSegments(savedSegments);
     setClipPreview(clip);
     handleSeek(clip.start_time);
@@ -1104,7 +1131,10 @@ export default function Analysis() {
               onSpeedChange={setEditorSpeed}
               onSegmentsChange={(segs) => {
                 setEditorSegments(segs);
-                if (clipPreview) clipSegmentsMapRef.current[clipPreview.id] = segs;
+                if (clipPreview) {
+                  clipSegmentsMapRef.current[clipPreview.id] = segs;
+                  saveSegmentsToStorage(clipPreview.id, segs);
+                }
               }}
               initialSegments={editorSegments}
               settings={clipSettings}
@@ -1114,6 +1144,7 @@ export default function Analysis() {
               onClose={() => {
                 if (clipPreview) {
                   clipSegmentsMapRef.current[clipPreview.id] = editorSegments;
+                  saveSegmentsToStorage(clipPreview.id, editorSegments);
                 }
                 setClipPreview(null);
               }}
@@ -1180,7 +1211,10 @@ export default function Analysis() {
               onAspectRatioChange={(ar) => setClipSettings((prev) => ({ ...prev, aspectRatio: ar }))}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
-              onSegmentsChange={setEditorSegments}
+              onSegmentsChange={(segs) => {
+                setEditorSegments(segs);
+                saveSegmentsToStorage('full', segs);
+              }}
               initialSegments={editorSegments}
               settings={clipSettings}
               speakers={speakers}

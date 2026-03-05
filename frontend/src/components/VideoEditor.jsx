@@ -258,6 +258,16 @@ export default function VideoEditor({
     [segments, selectedSegmentId],
   );
 
+  // Active segment: the segment the playhead is currently inside (for live UI feedback)
+  const [activeSegmentId, setActiveSegmentId] = useState(null);
+  const activeSegment = useMemo(
+    () => segments.find(s => s.id === activeSegmentId) || null,
+    [segments, activeSegmentId],
+  );
+
+  // Effective segment for UI display: selected takes priority, else active
+  const effectiveSegment = selectedSegment || activeSegment;
+
   // Derived — use video's natural duration as fallback when clipEnd is 0
   const effectiveClipEnd = clipEnd > clipStart ? clipEnd : (videoDuration || clipEnd);
   const clipDur = effectiveClipEnd - clipStart;
@@ -383,15 +393,28 @@ export default function VideoEditor({
     onSpeedChange?.(spd);
   }, [clipStart, clipEnd, src]);
 
+  // ── Sync segments from parent (e.g. loaded from localStorage after mount) ──
+  useEffect(() => {
+    if (initialSegments && initialSegments.length > 0) {
+      setSegments(initialSegments);
+      // Ensure segment IDs don't collide with new segments
+      const maxId = initialSegments.reduce((mx, s) => {
+        const num = parseInt(String(s.id).replace(/\D/g, ''), 10);
+        return isNaN(num) ? mx : Math.max(mx, num);
+      }, 0);
+      segmentIdRef.current = maxId + 1;
+    }
+  }, [initialSegments]);
+
   // ── Sync volume/speed from settings panel ──────────
-  // When a segment is selected, route changes to that segment instead of global.
+  // When a segment is active (selected or playhead inside), route changes to that segment.
   useEffect(() => {
     if (initialVolume == null || initialVolume < 0) return;
-    if (selectedSegmentId) {
-      // Route to selected segment
-      const seg = segments.find(s => s.id === selectedSegmentId);
+    const targetId = selectedSegmentId || activeSegmentId;
+    if (targetId) {
+      const seg = segments.find(s => s.id === targetId);
       if (seg) {
-        const next = segments.map(s => s.id === selectedSegmentId
+        const next = segments.map(s => s.id === targetId
           ? { ...s, volume: initialVolume, muted: initialVolume === 0 }
           : s
         );
@@ -408,11 +431,11 @@ export default function VideoEditor({
 
   useEffect(() => {
     if (initialSpeed == null || initialSpeed <= 0) return;
-    if (selectedSegmentId) {
-      // Route to selected segment
-      const seg = segments.find(s => s.id === selectedSegmentId);
+    const targetId = selectedSegmentId || activeSegmentId;
+    if (targetId) {
+      const seg = segments.find(s => s.id === targetId);
       if (seg) {
-        const next = segments.map(s => s.id === selectedSegmentId
+        const next = segments.map(s => s.id === targetId
           ? { ...s, speed: initialSpeed }
           : s
         );
@@ -673,6 +696,10 @@ export default function VideoEditor({
       const curHash = segHash(seg);
       const prev = activeSegRef.current;
 
+      // Update active segment ID for UI display (only on change to avoid re-renders)
+      if (curId !== prev.id) {
+        setActiveSegmentId(curId);
+      }
       if (curId !== prev.id || curHash !== prev.hash) {
         activeSegRef.current = { id: curId, hash: curHash };
         if (seg) {
@@ -819,10 +846,10 @@ export default function VideoEditor({
       }
     }
     // ONLY fire global callback when NOT editing a segment
-    if (!selectedSegmentId) {
+    if (!selectedSegmentId && !activeSegmentId) {
       onVolumeChange?.(isMuted ? 0 : volume / 100);
     }
-  }, [volume, isMuted, onVolumeChange, segments, selectedSegmentId]);
+  }, [volume, isMuted, onVolumeChange, segments, selectedSegmentId, activeSegmentId]);
 
   // ── Apply speed changes ────────────────────────────
   useEffect(() => {
@@ -835,10 +862,10 @@ export default function VideoEditor({
       video.playbackRate = speed;
     }
     // ONLY fire global callback when NOT editing a segment
-    if (!selectedSegmentId) {
+    if (!selectedSegmentId && !activeSegmentId) {
       onSpeedChange?.(speed);
     }
-  }, [speed, onSpeedChange, segments, selectedSegmentId]);
+  }, [speed, onSpeedChange, segments, selectedSegmentId, activeSegmentId]);
 
   // ── Trim change callback ───────────────────────────
   useEffect(() => {
@@ -879,10 +906,10 @@ export default function VideoEditor({
   }, [seekTo]);
 
   const toggleMute = useCallback(() => {
-    if (selectedSegment) {
-      updateSegment(selectedSegment.id, {
-        muted: !selectedSegment.muted,
-        volume: selectedSegment.muted ? 100 : 0,
+    if (effectiveSegment) {
+      updateSegment(effectiveSegment.id, {
+        muted: !effectiveSegment.muted,
+        volume: effectiveSegment.muted ? 100 : 0,
       });
       return;
     }
@@ -893,7 +920,7 @@ export default function VideoEditor({
       setPrevVolume(volume);
       setIsMuted(true);
     }
-  }, [isMuted, volume, prevVolume, selectedSegment, updateSegment]);
+  }, [isMuted, volume, prevVolume, effectiveSegment, updateSegment]);
 
   const toggleFullscreen = useCallback(() => {
     const el = containerRef.current;
@@ -1032,14 +1059,14 @@ export default function VideoEditor({
 
   // ── Speed menu ─────────────────────────────────────
   const selectSpeed = useCallback((val) => {
-    if (selectedSegment) {
-      updateSegment(selectedSegment.id, { speed: val });
+    if (effectiveSegment) {
+      updateSegment(effectiveSegment.id, { speed: val });
       setShowSpeedMenu(false);
       return;
     }
     setSpeed(val);
     setShowSpeedMenu(false);
-  }, [selectedSegment, updateSegment]);
+  }, [effectiveSegment, updateSegment]);
 
   // Close speed menu on outside click
   useEffect(() => {
@@ -1949,7 +1976,7 @@ export default function VideoEditor({
       )}
 
       {/* ── Controls bar ── */}
-      <div className={`ve-controls${compact ? ' ve-controls--compact' : ''}${selectedSegment ? ' ve-controls--segment-mode' : ''}`}>
+      <div className={`ve-controls${compact ? ' ve-controls--compact' : ''}${effectiveSegment ? ' ve-controls--segment-mode' : ''}`}>
         {/* Transport row: centered on all devices */}
         <div className="ve-controls__transport">
           <button className="ve-btn" onClick={(e) => { e.stopPropagation(); skipTime(-5); }} title="Back 5s (J)">
@@ -2033,13 +2060,13 @@ export default function VideoEditor({
         <div className="ve-controls__right">
           {/* Volume — segment-aware */}
           <div className={`ve-volume${isMobile ? '' : ''}`} onClick={(e) => e.stopPropagation()}>
-            <button className="ve-btn" onClick={toggleMute} title={selectedSegment ? `${selectedSegment.muted ? 'Unmute' : 'Mute'} segment` : isMuted ? 'Unmute (M)' : 'Mute (M)'}>
+            <button className="ve-btn" onClick={toggleMute} title={effectiveSegment ? `${effectiveSegment.muted ? 'Unmute' : 'Mute'} segment` : isMuted ? 'Unmute (M)' : 'Mute (M)'}>
               <VolumeIcon />
             </button>
             <div className="ve-volume__slider-wrap">
               {(() => {
-                const dispVol = selectedSegment ? (selectedSegment.muted ? 0 : selectedSegment.volume) : (isMuted ? 0 : volume);
-                const dispMax = selectedSegment ? selectedSegment.volume : volume;
+                const dispVol = effectiveSegment ? (effectiveSegment.muted ? 0 : effectiveSegment.volume) : (isMuted ? 0 : volume);
+                const dispMax = effectiveSegment ? effectiveSegment.volume : volume;
                 return (
                   <>
                     <input
@@ -2051,8 +2078,8 @@ export default function VideoEditor({
                       value={dispVol}
                       onChange={(e) => {
                         const v = parseInt(e.target.value);
-                        if (selectedSegment) {
-                          updateSegment(selectedSegment.id, { volume: v, muted: v === 0 });
+                        if (effectiveSegment) {
+                          updateSegment(effectiveSegment.id, { volume: v, muted: v === 0 });
                         } else {
                           setVolume(v);
                           if (isMuted && v > 0) setIsMuted(false);
@@ -2076,12 +2103,12 @@ export default function VideoEditor({
           {/* Speed — segment-aware */}
           <div className="ve-speed" onClick={(e) => e.stopPropagation()}>
             {(() => {
-              const dispSpeed = selectedSegment ? (selectedSegment.speed || 1.0) : speed;
+              const dispSpeed = effectiveSegment ? (effectiveSegment.speed || 1.0) : speed;
               return (
                 <button
                   className={`ve-speed__btn${dispSpeed !== 1.0 ? ' ve-speed__btn--active' : ''}`}
                   onClick={() => setShowSpeedMenu((v) => !v)}
-                  title={selectedSegment ? 'Segment playback speed' : 'Playback speed'}
+                  title={effectiveSegment ? 'Segment playback speed' : 'Playback speed'}
                 >
                   {dispSpeed}x
                 </button>
@@ -2102,6 +2129,18 @@ export default function VideoEditor({
               </div>
             )}
           </div>
+
+          {/* Active segment indicator */}
+          {effectiveSegment && (
+            <span style={{
+              fontSize: 9, fontFamily: 'var(--font-mono, monospace)', padding: '2px 6px',
+              borderRadius: 4, background: 'rgba(10,132,255,0.12)', color: 'var(--accent-cyan, #0A84FF)',
+              border: '1px solid rgba(10,132,255,0.25)', whiteSpace: 'nowrap', lineHeight: 1.3,
+            }}>
+              {selectedSegment ? 'SEG' : 'SEG'} · {effectiveSegment.muted ? 'muted' : `${effectiveSegment.volume}%`}
+              {effectiveSegment.speed && Math.abs(effectiveSegment.speed - 1.0) > 0.001 ? ` · ${effectiveSegment.speed}x` : ''}
+            </span>
+          )}
 
           {/* Fullscreen */}
           <button className="ve-btn" onClick={(e) => { e.stopPropagation(); toggleFullscreen(); }} title="Fullscreen">

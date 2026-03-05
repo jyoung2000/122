@@ -161,7 +161,22 @@ export default function ClipSEO() {
   const [editorTrim, setEditorTrim] = useState({ trimStart: 0, trimEnd: 0 });
   const [editorVolume, setEditorVolume] = useState(1.0);
   const [editorSpeed, setEditorSpeed] = useState(1.0);
-  const [editorSegments, setEditorSegments] = useState([]);
+
+  // ── Segment persistence via localStorage ──
+  const segStorageKey = `clipai_segments_${jobId}_${clipId}`;
+  const [editorSegments, setEditorSegments] = useState(() => {
+    try {
+      const raw = localStorage.getItem(segStorageKey);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  });
+  const saveSegments = useCallback((segs) => {
+    setEditorSegments(segs);
+    try {
+      if (segs && segs.length > 0) localStorage.setItem(segStorageKey, JSON.stringify(segs));
+      else localStorage.removeItem(segStorageKey);
+    } catch {}
+  }, [segStorageKey]);
   const [showInlineSubSettings, setShowInlineSubSettings] = useState(false);
 
   // Layout mode: 'editor' = full-width NLE above, 'sidebyside' = player left + transcript right
@@ -830,7 +845,7 @@ export default function ClipSEO() {
               onTrimChange={setEditorTrim}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
-              onSegmentsChange={setEditorSegments}
+              onSegmentsChange={saveSegments}
               initialSegments={editorSegments}
               settings={clipSettings}
               speakers={speakers}
@@ -1048,7 +1063,7 @@ export default function ClipSEO() {
               onTrimChange={setEditorTrim}
               onVolumeChange={setEditorVolume}
               onSpeedChange={setEditorSpeed}
-              onSegmentsChange={setEditorSegments}
+              onSegmentsChange={saveSegments}
               initialSegments={editorSegments}
               settings={clipSettings}
               speakers={speakers}
