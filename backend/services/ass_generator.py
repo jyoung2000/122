@@ -364,8 +364,12 @@ def generate_ass(
 
     # Compute outline/background style settings (same for all speakers)
     if background_enabled:
-        back_color_ass = _hex_to_ass_color_with_alpha(background_color, background_opacity)
-        style_outline_color = back_color_ass  # same as box so border blends in
+        # BorderStyle=3: OutlineColour = box color, BackColour = shadow behind box.
+        # With Shadow=0, BackColour should be invisible but some libass builds
+        # still composite it at offset (0,0), doubling the box opacity.
+        # Fix: keep BackColour fully transparent so only OutlineColour renders.
+        style_outline_color = _hex_to_ass_color_with_alpha(background_color, background_opacity)
+        back_color_ass = "&HFF000000&"  # fully transparent — no shadow needed
         border_style = 3
         ol_width = max(int(4 * font_scale), 2)  # minimum padding for the box
         shadow_depth = 0
@@ -434,10 +438,15 @@ def generate_ass(
         if active_word_enabled:
             prefix = f"{speaker}: " if show_speaker_labels and speaker else ""
 
-            # Add base text event on Layer 0 (full segment, no highlight)
-            base_bord_override = f"{{{bord_tag}}}" if bord_tag else ""
-            base_event_text = f"{base_bord_override}{prefix}{safe_text}" if prefix else f"{base_bord_override}{safe_text}"
-            base_text_events.append((clip_start, clip_end, style_name, base_event_text))
+            # When background is enabled, skip the base text layer — the word
+            # highlight events already render all text and each inherits the
+            # Style's BorderStyle=3 background box.  Having BOTH layers would
+            # cause two semi-transparent boxes to overlap, doubling the opacity.
+            if not background_enabled:
+                # Add base text event on Layer 0 (full segment, no highlight)
+                base_bord_override = f"{{{bord_tag}}}" if bord_tag else ""
+                base_event_text = f"{base_bord_override}{prefix}{safe_text}" if prefix else f"{base_bord_override}{safe_text}"
+                base_text_events.append((clip_start, clip_end, style_name, base_event_text))
 
             # --- Per-word highlight events ---
             words = safe_text.split()

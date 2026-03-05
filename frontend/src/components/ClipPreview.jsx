@@ -754,8 +754,15 @@ export default function ClipPreview({
     const maxMarginH = Math.floor(outputDims.w * 0.40); // (1 - MIN_TEXT_AREA_W=0.20) / 2
     const effectiveMarginH = Math.min(marginH_px, maxMarginH) / outputDims.w * 100;
 
-    // Vertical: offset_v is absolute position (0=bottom, 100=top)
-    const positionStyle = { bottom: `${clampedOffsetV}%` };
+    // Vertical positioning based on position setting
+    let positionStyle;
+    if (position === 'top') {
+      positionStyle = { top: `${clampedOffsetV}%` };
+    } else if (position === 'center') {
+      positionStyle = { top: '50%', transform: 'translateY(-50%)' };
+    } else {
+      positionStyle = { bottom: `${clampedOffsetV}%` };
+    }
 
     const text = showLabels && currentSubtitle.speaker
       ? `${currentSubtitle.speaker}: ${currentSubtitle.text}`

@@ -415,7 +415,17 @@ export default function SubtitleOverlay({
   const marginH_px = Math.max(20, Math.floor(outputDims.w * (100 - clampedMaxWidth) / 100 / 2));
   const maxMarginH = Math.floor(outputDims.w * 0.40);
   const effectiveMarginH = Math.min(marginH_px, maxMarginH) / outputDims.w * 100;
-  const positionStyle = { bottom: `${clampedOffsetV}%` };
+  // Map position setting to CSS positioning.
+  // "bottom" = offset from bottom edge, "top" = offset from top edge,
+  // "center" = vertically centered (offset ignored).
+  let positionStyle;
+  if (position === 'top') {
+    positionStyle = { top: `${clampedOffsetV}%` };
+  } else if (position === 'center') {
+    positionStyle = { top: '50%', transform: 'translateY(-50%)' };
+  } else {
+    positionStyle = { bottom: `${clampedOffsetV}%` };
+  }
 
   const text = showLabels && currentSubtitle.speaker
     ? `${currentSubtitle.speaker}: ${currentSubtitle.text}`
