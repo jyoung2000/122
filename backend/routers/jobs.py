@@ -53,7 +53,8 @@ async def get_job(job_id: str):
 
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str):
-    """Cancel a running or queued job."""
+    """Cancel a running or queued job. Also cancels active exports/clip-generation
+    for jobs that are already in a terminal state."""
     job = await database.load_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -64,6 +65,33 @@ async def cancel_job(job_id: str):
 
     terminal = (JobStatus.COMPLETE, JobStatus.FAILED)
     if job.status in terminal:
+        # Job is terminal, but there may be active exports or clip tasks —
+        # try to cancel those before rejecting.
+        from backend.routers.clips import _active_export_tasks, _export_cancel_events
+        from backend.routers.clips import _active_clip_tasks, _clip_cancel_events
+
+        cancelled_something = False
+
+        cancel_evt = _clip_cancel_events.get(job_id)
+        if cancel_evt:
+            cancel_evt.set()
+        clip_task = _active_clip_tasks.pop(job_id, None)
+        if clip_task and not clip_task.done():
+            clip_task.cancel()
+            cancelled_something = True
+
+        for key in list(_active_export_tasks.keys()):
+            if key.startswith(f"{job_id}_"):
+                evt = _export_cancel_events.get(key)
+                if evt:
+                    evt.set()
+                t = _active_export_tasks.pop(key, None)
+                if t and not t.done():
+                    t.cancel()
+                    cancelled_something = True
+
+        if cancelled_something:
+            return {"job_id": job_id, "status": "cancelled"}
         raise HTTPException(status_code=409, detail=f"Job is already {job.status}")
 
     # For queued jobs not yet running, mark cancelled directly
@@ -760,6 +788,8 @@ async def get_allocation():
             parts = key.split("_", 1)
             active_jobs.append({
                 "job_id": parts[0] if len(parts) > 1 else key,
+                "clip_id": int(parts[1]) if len(parts) > 1 else 0,
+                "export_key": key,
                 "filename": f"Clip {parts[1]}" if len(parts) > 1 else key,
                 "status": "encoding",
                 "progress": None,
@@ -798,34 +828,26 @@ async def get_allocation():
 
 @router.post("/jobs/{job_id}/force-fail")
 async def force_fail_job(job_id: str):
-    """Force-fail a job to free up resources. Works on any non-terminal job."""
+    """Force-fail a job to free up resources. Works on any non-terminal job,
+    and also cancels active exports/clip-generation for already-terminal jobs."""
     job = await database.load_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    terminal = (JobStatus.COMPLETE, JobStatus.FAILED, JobStatus.CANCELLED)
-    if job.status in terminal:
-        raise HTTPException(status_code=409, detail=f"Job is already {job.status}")
-
-    # Signal cancellation and force the status to failed
-    request_cancel(job_id)
-    await database.update_job_status(
-        job_id,
-        status=JobStatus.FAILED,
-        progress_message="Force-failed by admin to free resources",
-    )
-
-    # Also cancel any related clip tasks
     from backend.routers.clips import _active_clip_tasks, _clip_cancel_events
     from backend.routers.clips import _active_export_tasks, _export_cancel_events
 
-    # Cancel clip generation
+    terminal = (JobStatus.COMPLETE, JobStatus.FAILED, JobStatus.CANCELLED)
+    cancelled_something = False
+
+    # Cancel clip generation tasks for this job
     cancel_evt = _clip_cancel_events.get(job_id)
     if cancel_evt:
         cancel_evt.set()
     clip_task = _active_clip_tasks.pop(job_id, None)
     if clip_task and not clip_task.done():
         clip_task.cancel()
+        cancelled_something = True
 
     # Cancel any exports for this job
     for key in list(_active_export_tasks.keys()):
@@ -836,5 +858,18 @@ async def force_fail_job(job_id: str):
             t = _active_export_tasks.pop(key, None)
             if t and not t.done():
                 t.cancel()
+                cancelled_something = True
+
+    if job.status in terminal and not cancelled_something:
+        raise HTTPException(status_code=409, detail=f"Job is already {job.status}")
+
+    # Signal analysis pipeline cancellation and mark failed (if not already terminal)
+    if job.status not in terminal:
+        request_cancel(job_id)
+        await database.update_job_status(
+            job_id,
+            status=JobStatus.FAILED,
+            progress_message="Force-failed by admin to free resources",
+        )
 
     return {"job_id": job_id, "status": "failed", "message": "Job force-failed"}
