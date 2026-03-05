@@ -313,6 +313,59 @@ export default function VideoEditor({
   const trimmedDur = trimmedEnd - trimmedStart;
   const elapsed = Math.max(0, Math.min(trimmedDur, currentTime - trimmedStart));
 
+  // ── Speed-adjusted duration: accounts for per-segment speed overrides ──
+  // Builds a timeline of (start, end, speed) covering the trimmed range,
+  // then sums each region's wall-clock duration = media_duration / speed.
+  const { effectiveDuration, mediaToWallClock } = useMemo(() => {
+    // Collect segments that overlap the trimmed range, sorted by start
+    const segs = segments
+      .filter(s => s.end > trimmedStart && s.start < trimmedEnd)
+      .sort((a, b) => a.start - b.start);
+
+    // Build timeline entries: [{start, end, speed}] in trimmed-relative coords
+    const timeline = [];
+    let pos = 0; // clip-relative position
+    for (const seg of segs) {
+      const segStart = Math.max(0, seg.start - trimmedStart);
+      const segEnd = Math.min(trimmedDur, seg.end - trimmedStart);
+      if (segEnd <= segStart) continue;
+      // Gap before segment
+      if (segStart > pos + 0.001) {
+        timeline.push({ start: pos, end: segStart, speed });
+      }
+      timeline.push({ start: segStart, end: segEnd, speed: seg.speed || 1.0 });
+      pos = segEnd;
+    }
+    // Gap after last segment
+    if (pos < trimmedDur - 0.001) {
+      timeline.push({ start: pos, end: trimmedDur, speed });
+    }
+    // If no segments, the whole range uses global speed
+    if (timeline.length === 0) {
+      timeline.push({ start: 0, end: trimmedDur, speed });
+    }
+
+    // Total effective (wall-clock) duration
+    let total = 0;
+    for (const t of timeline) {
+      total += (t.end - t.start) / t.speed;
+    }
+
+    // Map media elapsed time → wall-clock elapsed time
+    const mapFn = (mediaElapsed) => {
+      let wallClock = 0;
+      for (const t of timeline) {
+        if (mediaElapsed <= t.start) break;
+        const consumed = Math.min(mediaElapsed, t.end) - t.start;
+        wallClock += consumed / t.speed;
+        if (mediaElapsed <= t.end) break;
+      }
+      return wallClock;
+    };
+
+    return { effectiveDuration: total, mediaToWallClock: mapFn };
+  }, [segments, trimmedStart, trimmedEnd, trimmedDur, speed]);
+
   // ── Aspect ratio & subject tracking ─────────────────
   const srcRatio = sourceWidth / sourceHeight;
   const targetRatio = useMemo(() => {
@@ -2313,10 +2366,10 @@ export default function VideoEditor({
               title="Click to type a time"
             >
               {showTimecodeRemaining
-                ? `-${formatTimecode(Math.max(0, (trimmedDur - elapsed) / speed))}`
-                : formatTimecode(elapsed / speed)}
+                ? `-${formatTimecode(Math.max(0, effectiveDuration - mediaToWallClock(elapsed)))}`
+                : formatTimecode(mediaToWallClock(elapsed))}
               {' / '}
-              {formatTimecode(trimmedDur / speed)}
+              {formatTimecode(effectiveDuration)}
             </span>
           )}
         </div>
@@ -2329,11 +2382,11 @@ export default function VideoEditor({
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="20 6 9 17 4 12" />
                 </svg>
-                Trim Applied · {formatTimeShort(trimmedDur / speed)}
+                Trim Applied · {formatTimeShort(effectiveDuration)}
               </span>
             ) : (
               <button className="ve-apply-trim" onClick={(e) => { e.stopPropagation(); handleApplyTrim(); }} title="Apply trim to preview and export">
-                Apply Trim · {formatTimeShort(trimmedDur / speed)}
+                Apply Trim · {formatTimeShort(effectiveDuration)}
               </button>
             )
           )}
