@@ -364,13 +364,41 @@
   opacity: 0.5;
 }
 
-/* ── Segment overlay interactions ─────────────────── */
+/* ── Segment overlay on timeline ──────────────────── */
 
-.ve-timeline__segment-overlay {
-  transition: background 0.15s ease, opacity 0.15s ease;
+.ve-timeline__segment {
+  transition: background 0.15s ease, border-color 0.15s ease;
+  border-radius: 2px;
 }
-.ve-timeline__segment-overlay:hover {
-  filter: brightness(1.2);
+.ve-timeline__segment--selected {
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.3);
+}
+.ve-timeline__segment--active {
+  animation: ve-seg-pulse 0.6s ease 1;
+}
+@keyframes ve-seg-pulse {
+  0% { filter: brightness(1); }
+  30% { filter: brightness(1.4); }
+  100% { filter: brightness(1); }
+}
+.ve-timeline__segment-label {
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* ── Segment drag handles (visual affordance on hover) ── */
+.ve-timeline__segment-handle {
+  position: absolute;
+  top: 0;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 5;
+}
+.ve-timeline__segment-handle--left {
+  left: -4px;
+}
+.ve-timeline__segment-handle--right {
+  right: -4px;
 }
 
 /* ── Trim handles ──────────────────────────────────── */
@@ -884,6 +912,408 @@ input.ve-timecode--input {
 @media (max-width: 767px) {
   .ve-shortcuts {
     display: none;
+  }
+}
+
+/* ── Segment Chips ────────────────────────────────── */
+
+.ve-segment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 9px;
+  font-weight: 500;
+  background: var(--bg-elevated, #f5f5f5);
+  color: var(--text-secondary, #666);
+  border: 1.5px solid var(--border, #ddd);
+  border-radius: var(--radius-xs, 4px);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.ve-segment-chip:hover {
+  background: var(--ve-btn-hover);
+}
+.ve-segment-chip--selected {
+  background: rgba(10, 132, 255, 0.06);
+  outline: 2px solid rgba(10, 132, 255, 0.15);
+}
+.ve-segment-chip--add {
+  font-weight: 600;
+  background: var(--accent-cyan-dim, rgba(10, 132, 255, 0.1));
+  color: var(--accent-cyan, #0A84FF);
+  border-color: var(--accent-cyan, #0A84FF);
+}
+.ve-segment-chip--action {
+  font-weight: 500;
+  color: var(--ve-text-muted);
+  border-style: dashed;
+}
+.ve-segment-chip__dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.ve-segment-chip__label {
+  font-weight: 600;
+  color: var(--ve-text);
+}
+.ve-segment-chip__time {
+  font-family: var(--font-mono, monospace);
+  font-size: 8px;
+  opacity: 0.7;
+}
+.ve-segment-chip__summary {
+  font-size: 8px;
+  color: var(--ve-text-muted);
+}
+
+[data-theme="dark"] .ve-segment-chip {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.1);
+}
+[data-theme="dark"] .ve-segment-chip--selected {
+  background: rgba(10, 132, 255, 0.1);
+}
+
+/* ── Segment Inspector Panel ─────────────────────── */
+
+.ve-segment-inspector {
+  background: var(--ve-chrome-bg);
+  border: 1px solid var(--ve-chrome-border);
+  border-left: 3px solid var(--seg-color, var(--ve-accent));
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 4px 0 0;
+  backdrop-filter: blur(20px) saturate(1.8);
+  -webkit-backdrop-filter: blur(20px) saturate(1.8);
+  animation: ve-inspector-enter 0.2s ease;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+}
+
+@keyframes ve-inspector-enter {
+  0% { opacity: 0; transform: translateY(-4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+[data-theme="dark"] .ve-segment-inspector {
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.3);
+}
+
+.ve-segment-inspector__header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.ve-segment-inspector__color-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.ve-segment-inspector__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ve-text);
+  cursor: text;
+  padding: 1px 4px;
+  border-radius: 3px;
+  border: 1px solid transparent;
+  transition: border-color 0.15s, background 0.15s;
+}
+.ve-segment-inspector__label:hover {
+  border-color: var(--ve-chrome-border);
+  background: var(--ve-btn-hover);
+}
+
+.ve-segment-inspector__label-input {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ve-text);
+  padding: 1px 4px;
+  border-radius: 3px;
+  border: 1px solid var(--seg-color, var(--ve-accent));
+  background: var(--bg-elevated, rgba(0, 0, 0, 0.05));
+  outline: none;
+  width: 120px;
+}
+
+.ve-segment-inspector__time-range {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  color: var(--ve-text-muted);
+}
+
+.ve-segment-inspector__time-editable {
+  padding: 1px 4px;
+  border-radius: 3px;
+  cursor: text;
+  border: 1px solid transparent;
+  transition: border-color 0.15s, background 0.15s;
+}
+.ve-segment-inspector__time-editable:hover {
+  border-color: var(--seg-color, var(--ve-accent));
+  background: rgba(10, 132, 255, 0.06);
+}
+
+.ve-segment-inspector__time-input {
+  width: 42px;
+  padding: 1px 4px;
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  text-align: center;
+  border: 1px solid var(--seg-color, var(--ve-accent));
+  border-radius: 3px;
+  outline: none;
+  background: var(--bg-elevated, rgba(0, 0, 0, 0.08));
+  color: var(--ve-text);
+}
+
+.ve-segment-inspector__time-sep {
+  color: var(--ve-text-muted);
+  opacity: 0.5;
+}
+
+.ve-segment-inspector__time-dur {
+  font-size: 9px;
+  color: var(--ve-text-muted);
+  opacity: 0.6;
+  margin-left: 2px;
+}
+
+.ve-segment-inspector__delete {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 6px;
+  border: none;
+  background: transparent;
+  color: var(--ve-text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  min-width: 24px;
+}
+.ve-segment-inspector__delete:hover {
+  background: rgba(255, 59, 48, 0.1);
+  color: #FF3B30;
+}
+
+.ve-segment-inspector__controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ve-segment-inspector__volume-row,
+.ve-segment-inspector__speed-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ve-segment-inspector__control-label {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--ve-text-muted);
+  width: 48px;
+  flex-shrink: 0;
+}
+
+.ve-segment-inspector__volume-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  outline: none;
+  border: none;
+  cursor: pointer;
+  margin: 0;
+  padding: 0;
+}
+.ve-segment-inspector__volume-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--ve-text);
+  cursor: pointer;
+  border: none;
+  margin-top: -4.5px;
+}
+.ve-segment-inspector__volume-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--ve-text);
+  cursor: pointer;
+  border: none;
+}
+.ve-segment-inspector__volume-slider::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+}
+.ve-segment-inspector__volume-slider::-moz-range-track {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--ve-slider-track);
+}
+
+.ve-segment-inspector__volume-value {
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  color: var(--ve-text-muted);
+  min-width: 32px;
+  text-align: right;
+}
+
+.ve-segment-inspector__speed-pills {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.ve-segment-inspector__speed-pill {
+  padding: 2px 8px;
+  font-size: 10px;
+  font-family: var(--font-mono, monospace);
+  font-weight: 500;
+  border: 1px solid var(--ve-track-border);
+  background: var(--ve-track-bg);
+  color: var(--ve-text-muted);
+  border-radius: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.ve-segment-inspector__speed-pill:hover {
+  background: var(--ve-btn-hover);
+  color: var(--ve-text);
+}
+.ve-segment-inspector__speed-pill--active {
+  font-weight: 600;
+}
+
+.ve-segment-inspector__toggles {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 2px;
+}
+
+.ve-segment-inspector__toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--ve-text);
+  cursor: pointer;
+}
+
+.ve-segment-inspector__toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: var(--seg-color, var(--ve-accent));
+}
+
+.ve-segment-inspector__actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.ve-segment-inspector__done {
+  padding: 3px 12px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--seg-color, var(--ve-accent));
+  color: #fff;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.ve-segment-inspector__done:hover {
+  filter: brightness(1.1);
+}
+.ve-segment-inspector__done:active {
+  transform: scale(0.97);
+}
+
+/* ── Segment Entry Indicator (viewport overlay) ──── */
+
+.ve-segment-enter-indicator {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 500;
+  border-radius: 4px;
+  border-left: 3px solid var(--seg-color, #0A84FF);
+  pointer-events: none;
+  z-index: 6;
+  animation: ve-seg-entry-fade 1.5s ease forwards;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.ve-segment-enter-indicator__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+@keyframes ve-seg-entry-fade {
+  0% { opacity: 0; transform: translateY(-4px); }
+  10% { opacity: 1; transform: translateY(0); }
+  70% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* ── Responsive: segment inspector ───────────────── */
+
+@media (max-width: 767px) {
+  .ve-segment-inspector {
+    padding: 6px 8px;
+  }
+  .ve-segment-inspector__header {
+    flex-wrap: wrap;
+  }
+  .ve-segment-inspector__time-range {
+    margin-left: 0;
+    width: 100%;
+    margin-top: 4px;
+  }
+  .ve-segment-inspector__volume-row,
+  .ve-segment-inspector__speed-row {
+    flex-wrap: wrap;
+  }
+  .ve-segment-inspector__control-label {
+    width: auto;
+  }
+  .ve-segment-inspector__speed-pills {
+    flex-wrap: wrap;
   }
 }
 

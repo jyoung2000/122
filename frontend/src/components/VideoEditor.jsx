@@ -3,6 +3,18 @@ import { processKeyframes, interpolateSubjectX, isDynamic, safeSubjectX } from '
 import useResponsive from '../hooks/useResponsive';
 import './VideoEditor.css';
 
+// ── Segment Color Palette ────────────────────────────────────────────────────
+const SEGMENT_COLORS = [
+  '#0A84FF', // Blue (Apple system blue)
+  '#30D158', // Green
+  '#FF9F0A', // Orange
+  '#AF52DE', // Purple
+  '#FF375F', // Pink
+  '#64D2FF', // Cyan
+  '#FFD60A', // Yellow
+  '#AC8E68', // Tan/Brown
+];
+
 // ── Constants ────────────────────────────────────────────────────────────────
 const ASPECT_RATIO_VALUES = {
   '16:9': 16 / 9,
@@ -252,6 +264,23 @@ export default function VideoEditor({
   const [segTimeInput, setSegTimeInput] = useState('');
   const segTimeInputRef = useRef(null);
 
+  // Segment drag state for edge-resize and move
+  const [segDrag, setSegDrag] = useState(null); // { segId, mode: 'start'|'end'|'move', startPointerX, origStart, origEnd }
+  const [segHoverEdge, setSegHoverEdge] = useState(null); // { segId, edge: 'start'|'end'|'center' }
+  const segDragTooltipRef = useRef(null);
+
+  // Segment entry indicator (briefly shows segment info on viewport when entering)
+  const [segEntryIndicator, setSegEntryIndicator] = useState(null); // { label, volume, speed, muted }
+  const segEntryTimerRef = useRef(null);
+
+  // Segment label editing
+  const [editingSegLabel, setEditingSegLabel] = useState(null); // segId
+  const [segLabelInput, setSegLabelInput] = useState('');
+  const segLabelInputRef = useRef(null);
+
+  // Segment delete confirmation
+  const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+
   // Derived: the currently selected segment object (or null)
   const selectedSegment = useMemo(
     () => segments.find(s => s.id === selectedSegmentId) || null,
@@ -265,8 +294,16 @@ export default function VideoEditor({
     [segments, activeSegmentId],
   );
 
-  // Effective segment for UI display: selected takes priority, else active
-  const effectiveSegment = selectedSegment || activeSegment;
+  // controlTargetSegment — ONLY set when user explicitly selects a segment.
+  // This is what controls (volume, speed, mute) modify.
+  const controlTargetSegment = selectedSegment; // Never falls back to activeSegment
+
+  // displaySegment — What the controls DISPLAY.
+  // Shows selected segment's values if selected, else active segment's values.
+  const displaySegment = selectedSegment || activeSegment;
+
+  // Backward compat alias — used in controls bar class
+  const effectiveSegment = displaySegment;
 
   // Derived — use video's natural duration as fallback when clipEnd is 0
   const effectiveClipEnd = clipEnd > clipStart ? clipEnd : (videoDuration || clipEnd);
@@ -312,15 +349,18 @@ export default function VideoEditor({
       id: `seg_${segmentIdRef.current++}`,
       start: segStart,
       end: segEnd,
-      volume: isMuted ? 0 : volume,
-      muted: isMuted,
+      volume: 100,
+      muted: false,
       subtitlesEnabled: true,
-      speed,
+      speed: 1.0,
+      color: SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length],
+      label: `Segment ${segments.length + 1}`,
     };
     const next = [...segments, newSeg].sort((a, b) => a.start - b.start);
     setSegments(next);
     onSegmentsChange?.(next);
-  }, [trimStartOffset, trimEndOffset, clipStart, effectiveClipEnd, volume, isMuted, speed, segments, onSegmentsChange]);
+    setSelectedSegmentId(newSeg.id);
+  }, [trimStartOffset, trimEndOffset, clipStart, effectiveClipEnd, segments, onSegmentsChange]);
 
   const removeSegment = useCallback((segId) => {
     const next = segments.filter(s => s.id !== segId);
@@ -396,9 +436,15 @@ export default function VideoEditor({
   // ── Sync segments from parent (e.g. loaded from localStorage after mount) ──
   useEffect(() => {
     if (initialSegments && initialSegments.length > 0) {
-      setSegments(initialSegments);
+      // Ensure backward compatibility — add color/label if missing
+      const migrated = initialSegments.map((s, i) => ({
+        ...s,
+        color: s.color || SEGMENT_COLORS[i % SEGMENT_COLORS.length],
+        label: s.label || `Segment ${i + 1}`,
+      }));
+      setSegments(migrated);
       // Ensure segment IDs don't collide with new segments
-      const maxId = initialSegments.reduce((mx, s) => {
+      const maxId = migrated.reduce((mx, s) => {
         const num = parseInt(String(s.id).replace(/\D/g, ''), 10);
         return isNaN(num) ? mx : Math.max(mx, num);
       }, 0);
@@ -407,46 +453,21 @@ export default function VideoEditor({
   }, [initialSegments]);
 
   // ── Sync volume/speed from settings panel ──────────
-  // When a segment is active (selected or playhead inside), route changes to that segment.
+  // These ONLY apply to global state — never route to segments.
+  // Segment settings should only change via direct user interaction.
   useEffect(() => {
     if (initialVolume == null || initialVolume < 0) return;
-    const targetId = selectedSegmentId || activeSegmentId;
-    if (targetId) {
-      const seg = segments.find(s => s.id === targetId);
-      if (seg) {
-        const next = segments.map(s => s.id === targetId
-          ? { ...s, volume: initialVolume, muted: initialVolume === 0 }
-          : s
-        );
-        setSegments(next);
-        onSegmentsChange?.(next);
-      }
-    } else {
-      setVolume(initialVolume);
-      setPrevVolume(initialVolume);
-      if (initialVolume === 0) setIsMuted(true);
-      else setIsMuted(false);
-    }
+    setVolume(initialVolume);
+    setPrevVolume(initialVolume);
+    if (initialVolume === 0) setIsMuted(true);
+    else setIsMuted(false);
   }, [initialVolume]);
 
   useEffect(() => {
     if (initialSpeed == null || initialSpeed <= 0) return;
-    const targetId = selectedSegmentId || activeSegmentId;
-    if (targetId) {
-      const seg = segments.find(s => s.id === targetId);
-      if (seg) {
-        const next = segments.map(s => s.id === targetId
-          ? { ...s, speed: initialSpeed }
-          : s
-        );
-        setSegments(next);
-        onSegmentsChange?.(next);
-      }
-    } else {
-      setSpeed(initialSpeed);
-      if (videoRef.current) {
-        videoRef.current.playbackRate = initialSpeed;
-      }
+    setSpeed(initialSpeed);
+    if (videoRef.current) {
+      videoRef.current.playbackRate = initialSpeed;
     }
   }, [initialSpeed]);
 
@@ -699,14 +720,29 @@ export default function VideoEditor({
       // Update active segment ID for UI display (only on change to avoid re-renders)
       if (curId !== prev.id) {
         setActiveSegmentId(curId);
+        // Show segment entry indicator on viewport
+        if (seg && curId) {
+          setSegEntryIndicator({
+            label: seg.label || 'Segment',
+            volume: seg.volume,
+            speed: seg.speed || 1.0,
+            muted: seg.muted,
+            color: seg.color || SEGMENT_COLORS[0],
+          });
+          if (segEntryTimerRef.current) clearTimeout(segEntryTimerRef.current);
+          segEntryTimerRef.current = setTimeout(() => setSegEntryIndicator(null), 1500);
+        }
       }
       if (curId !== prev.id || curHash !== prev.hash) {
         activeSegRef.current = { id: curId, hash: curHash };
         if (seg) {
-          // Apply segment volume
+          // Apply segment volume with smooth ramp
           const segVol = seg.muted ? 0 : seg.volume;
-          if (gainNodeRef.current) {
-            gainNodeRef.current.gain.value = segVol / 100;
+          if (gainNodeRef.current && audioCtxRef.current) {
+            const now = audioCtxRef.current.currentTime;
+            gainNodeRef.current.gain.cancelScheduledValues(now);
+            gainNodeRef.current.gain.setValueAtTime(gainNodeRef.current.gain.value, now);
+            gainNodeRef.current.gain.linearRampToValueAtTime(segVol / 100, now + 0.05);
           } else {
             video.volume = Math.min(1, segVol / 100);
           }
@@ -716,10 +752,13 @@ export default function VideoEditor({
             video.playbackRate = segSpeed;
           }
         } else {
-          // Restore global volume
+          // Restore global volume with smooth ramp
           const effectiveVol = isMuted ? 0 : volume;
-          if (gainNodeRef.current) {
-            gainNodeRef.current.gain.value = effectiveVol / 100;
+          if (gainNodeRef.current && audioCtxRef.current) {
+            const now = audioCtxRef.current.currentTime;
+            gainNodeRef.current.gain.cancelScheduledValues(now);
+            gainNodeRef.current.gain.setValueAtTime(gainNodeRef.current.gain.value, now);
+            gainNodeRef.current.gain.linearRampToValueAtTime(effectiveVol / 100, now + 0.05);
           } else {
             video.volume = Math.min(1, effectiveVol / 100);
           }
@@ -906,10 +945,10 @@ export default function VideoEditor({
   }, [seekTo]);
 
   const toggleMute = useCallback(() => {
-    if (effectiveSegment) {
-      updateSegment(effectiveSegment.id, {
-        muted: !effectiveSegment.muted,
-        volume: effectiveSegment.muted ? 100 : 0,
+    if (controlTargetSegment) {
+      updateSegment(controlTargetSegment.id, {
+        muted: !controlTargetSegment.muted,
+        volume: controlTargetSegment.muted ? 100 : 0,
       });
       return;
     }
@@ -920,7 +959,7 @@ export default function VideoEditor({
       setPrevVolume(volume);
       setIsMuted(true);
     }
-  }, [isMuted, volume, prevVolume, effectiveSegment, updateSegment]);
+  }, [isMuted, volume, prevVolume, controlTargetSegment, updateSegment]);
 
   const toggleFullscreen = useCallback(() => {
     const el = containerRef.current;
@@ -938,12 +977,27 @@ export default function VideoEditor({
     onTrimChange?.({ trimStart: trimStartOffset, trimEnd: trimEndOffset });
     // Notify parent to update clip boundaries so the trimmed range becomes the full video
     if (onApplyTrim) {
-      onApplyTrim({ start: trimmedStart, end: trimmedEnd });
+      // Adjust segment coordinates to fit the new clip range
+      const newStart = trimmedStart;
+      const newEnd = trimmedEnd;
+      const adjusted = segments
+        .map(seg => {
+          const clampedStart = Math.max(newStart, seg.start);
+          const clampedEnd = Math.min(newEnd, seg.end);
+          if (clampedEnd - clampedStart < 0.5) return null; // segment falls outside
+          return { ...seg, start: clampedStart, end: clampedEnd };
+        })
+        .filter(Boolean);
+      if (adjusted.length !== segments.length || adjusted.some((s, i) => s.start !== segments[i]?.start || s.end !== segments[i]?.end)) {
+        setSegments(adjusted);
+        onSegmentsChange?.(adjusted);
+      }
+      onApplyTrim({ start: newStart, end: newEnd });
       // Reset trim offsets since the clip boundaries are now narrower
       setTrimStartOffset(0);
       setTrimEndOffset(0);
     }
-  }, [trimStartOffset, trimEndOffset, trimmedStart, trimmedEnd, onTrimChange, onApplyTrim]);
+  }, [trimStartOffset, trimEndOffset, trimmedStart, trimmedEnd, onTrimChange, onApplyTrim, segments, onSegmentsChange]);
 
   // Reset applied state when trim handles change
   useEffect(() => {
@@ -1013,8 +1067,39 @@ export default function VideoEditor({
       return;
     }
 
+    // Check if clicking near a segment edge (for resize) or center (for move)
+    if (segments.length > 0) {
+      const pointerX = e.clientX - rect.left;
+      const trackWidth = rect.width;
+      for (const seg of segments) {
+        const segLeftPx = ((seg.start - clipStart) / clipDur) * trackWidth;
+        const segRightPx = ((seg.end - clipStart) / clipDur) * trackWidth;
+        if (Math.abs(pointerX - segLeftPx) < EDGE_THRESHOLD_PX) {
+          startSegDrag(e, seg.id, 'start');
+          return;
+        }
+        if (Math.abs(pointerX - segRightPx) < EDGE_THRESHOLD_PX) {
+          startSegDrag(e, seg.id, 'end');
+          return;
+        }
+        if (pointerX > segLeftPx + EDGE_THRESHOLD_PX && pointerX < segRightPx - EDGE_THRESHOLD_PX) {
+          startSegDrag(e, seg.id, 'move');
+          return;
+        }
+      }
+    }
+
     // Click-to-seek anywhere on timeline (Premiere-style)
     seekTo(time);
+
+    // Check if click is inside a segment — if so, select it; otherwise deselect
+    const clickedSeg = segments.find(s => time >= s.start && time < s.end);
+    if (clickedSeg) {
+      setSelectedSegmentId(prev => prev === clickedSeg.id ? null : clickedSeg.id);
+    } else {
+      setSelectedSegmentId(null);
+    }
+
     setDraggingPlayhead(true);
 
     // Remember play state to restore after scrub
@@ -1047,7 +1132,7 @@ export default function VideoEditor({
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-  }, [clipStart, clipDur, trimStartOffset, trimEndOffset, seekTo, getTimeFromPointer, startDragTracking]);
+  }, [clipStart, clipDur, trimStartOffset, trimEndOffset, seekTo, getTimeFromPointer, startDragTracking, segments, startSegDrag]);
 
   // Trim handle direct pointer down
   const onTrimHandlePointerDown = useCallback((e, handle) => {
@@ -1059,14 +1144,14 @@ export default function VideoEditor({
 
   // ── Speed menu ─────────────────────────────────────
   const selectSpeed = useCallback((val) => {
-    if (effectiveSegment) {
-      updateSegment(effectiveSegment.id, { speed: val });
+    if (controlTargetSegment) {
+      updateSegment(controlTargetSegment.id, { speed: val });
       setShowSpeedMenu(false);
       return;
     }
     setSpeed(val);
     setShowSpeedMenu(false);
-  }, [effectiveSegment, updateSegment]);
+  }, [controlTargetSegment, updateSegment]);
 
   // Close speed menu on outside click
   useEffect(() => {
@@ -1134,11 +1219,96 @@ export default function VideoEditor({
           e.preventDefault();
           toggleMute();
           break;
+        // ── Segment shortcuts ──
+        case 'KeyS': {
+          e.preventDefault();
+          const splitTime = videoRef.current?.currentTime ?? currentTime;
+          // Split existing segment at playhead, or create a new one
+          const existingSeg = segments.find(s => splitTime > s.start + 0.5 && splitTime < s.end - 0.5);
+          if (existingSeg) {
+            const seg1 = { ...existingSeg, end: splitTime };
+            const newId = `seg_${segmentIdRef.current++}`;
+            const seg2 = {
+              ...existingSeg,
+              id: newId,
+              start: splitTime,
+              label: `Segment ${segments.length + 1}`,
+              color: SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length],
+            };
+            const next = segments.map(s => s.id === existingSeg.id ? seg1 : s);
+            next.push(seg2);
+            next.sort((a, b) => a.start - b.start);
+            setSegments(next);
+            onSegmentsChange?.(next);
+            setSelectedSegmentId(newId);
+          } else {
+            const halfDur = 2;
+            const newSeg = {
+              id: `seg_${segmentIdRef.current++}`,
+              start: Math.max(trimmedStart, splitTime - halfDur),
+              end: Math.min(trimmedEnd, splitTime + halfDur),
+              volume: 100,
+              muted: false,
+              subtitlesEnabled: true,
+              speed: 1.0,
+              color: SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length],
+              label: `Segment ${segments.length + 1}`,
+            };
+            const next = [...segments, newSeg].sort((a, b) => a.start - b.start);
+            setSegments(next);
+            onSegmentsChange?.(next);
+            setSelectedSegmentId(newSeg.id);
+          }
+          break;
+        }
+        case 'Delete':
+        case 'Backspace': {
+          if (selectedSegmentId) {
+            e.preventDefault();
+            const next = segments.filter(s => s.id !== selectedSegmentId);
+            setSegments(next);
+            onSegmentsChange?.(next);
+            setSelectedSegmentId(null);
+          }
+          break;
+        }
+        case 'Escape':
+          if (selectedSegmentId) {
+            e.preventDefault();
+            setSelectedSegmentId(null);
+          }
+          break;
+        case 'Tab': {
+          if (segments.length > 0) {
+            e.preventDefault();
+            const curIdx = segments.findIndex(s => s.id === selectedSegmentId);
+            if (e.shiftKey) {
+              const prevIdx = curIdx <= 0 ? segments.length - 1 : curIdx - 1;
+              setSelectedSegmentId(segments[prevIdx].id);
+            } else {
+              const nextIdx = curIdx < 0 || curIdx >= segments.length - 1 ? 0 : curIdx + 1;
+              setSelectedSegmentId(segments[nextIdx].id);
+            }
+          }
+          break;
+        }
+        case 'BracketLeft':
+          if (selectedSegment) {
+            e.preventDefault();
+            seekTo(selectedSegment.start);
+          }
+          break;
+        case 'BracketRight':
+          if (selectedSegment) {
+            e.preventDefault();
+            seekTo(selectedSegment.end);
+          }
+          break;
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [togglePlay, skipTime, seekTo, toggleMute, trimmedStart, trimmedEnd]);
+  }, [togglePlay, skipTime, seekTo, toggleMute, trimmedStart, trimmedEnd, segments, selectedSegmentId, selectedSegment, currentTime, onSegmentsChange]);
 
   // ── J-K-L shuttle speed effect ──────────────────────
   useEffect(() => {
@@ -1166,6 +1336,116 @@ export default function VideoEditor({
       return () => clearInterval(interval);
     }
   }, [shuttleSpeed, trimmedStart]);
+
+  // ── Segment drag-to-resize and drag-to-move ────────
+  const EDGE_THRESHOLD_PX = 8;
+  const PLAYHEAD_SNAP_PX = 5;
+
+  const onSegmentPointerMove = useCallback((e) => {
+    if (segDrag) return; // Don't change hover while dragging
+    const track = timelineRef.current;
+    if (!track || clipDur <= 0) return;
+    const rect = track.getBoundingClientRect();
+    const pointerX = e.clientX - rect.left;
+    const trackWidth = rect.width;
+
+    for (const seg of segments) {
+      const segLeftPx = ((seg.start - clipStart) / clipDur) * trackWidth;
+      const segRightPx = ((seg.end - clipStart) / clipDur) * trackWidth;
+
+      if (Math.abs(pointerX - segLeftPx) < EDGE_THRESHOLD_PX) {
+        setSegHoverEdge({ segId: seg.id, edge: 'start' });
+        return;
+      }
+      if (Math.abs(pointerX - segRightPx) < EDGE_THRESHOLD_PX) {
+        setSegHoverEdge({ segId: seg.id, edge: 'end' });
+        return;
+      }
+      if (pointerX > segLeftPx + EDGE_THRESHOLD_PX && pointerX < segRightPx - EDGE_THRESHOLD_PX) {
+        setSegHoverEdge({ segId: seg.id, edge: 'center' });
+        return;
+      }
+    }
+    setSegHoverEdge(null);
+  }, [segments, clipStart, clipDur, segDrag]);
+
+  const startSegDrag = useCallback((e, segId, mode) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const seg = segments.find(s => s.id === segId);
+    if (!seg) return;
+    setSelectedSegmentId(segId);
+
+    const track = timelineRef.current;
+    if (!track) return;
+    const trackRect = track.getBoundingClientRect();
+
+    const state = {
+      segId,
+      mode,
+      startPointerX: e.clientX,
+      origStart: seg.start,
+      origEnd: seg.end,
+      trackLeft: trackRect.left,
+      trackWidth: trackRect.width,
+    };
+    setSegDrag(state);
+
+    const onMove = (ev) => {
+      const pxDelta = ev.clientX - state.startPointerX;
+      const timeDelta = (pxDelta / state.trackWidth) * clipDur;
+      const playheadTime = videoRef.current?.currentTime ?? currentTime;
+      const playheadPx = ((playheadTime - clipStart) / clipDur) * state.trackWidth;
+      const pointerPx = ev.clientX - state.trackLeft;
+
+      if (mode === 'start') {
+        let newStart = state.origStart + timeDelta;
+        // Snap to playhead
+        if (Math.abs(pointerPx - playheadPx) < PLAYHEAD_SNAP_PX) {
+          newStart = playheadTime;
+        }
+        // Clamp
+        newStart = Math.max(clipStart, Math.min(state.origEnd - 0.5, newStart));
+        // Prevent overlap with previous segment
+        const prevSeg = segments.filter(s => s.id !== segId && s.end <= state.origStart).sort((a, b) => b.end - a.end)[0];
+        if (prevSeg) newStart = Math.max(prevSeg.end, newStart);
+        updateSegment(segId, { start: newStart });
+      } else if (mode === 'end') {
+        let newEnd = state.origEnd + timeDelta;
+        // Snap to playhead
+        if (Math.abs(pointerPx - playheadPx) < PLAYHEAD_SNAP_PX) {
+          newEnd = playheadTime;
+        }
+        // Clamp
+        newEnd = Math.max(state.origStart + 0.5, Math.min(effectiveClipEnd, newEnd));
+        // Prevent overlap with next segment
+        const nextSeg = segments.filter(s => s.id !== segId && s.start >= state.origEnd).sort((a, b) => a.start - b.start)[0];
+        if (nextSeg) newEnd = Math.min(nextSeg.start, newEnd);
+        updateSegment(segId, { end: newEnd });
+      } else if (mode === 'move') {
+        const dur = state.origEnd - state.origStart;
+        let newStart = state.origStart + timeDelta;
+        let newEnd = newStart + dur;
+        // Clamp to clip range
+        if (newStart < clipStart) { newStart = clipStart; newEnd = newStart + dur; }
+        if (newEnd > effectiveClipEnd) { newEnd = effectiveClipEnd; newStart = newEnd - dur; }
+        // Prevent overlap
+        const prevSeg = segments.filter(s => s.id !== segId && s.end <= state.origStart).sort((a, b) => b.end - a.end)[0];
+        const nextSeg = segments.filter(s => s.id !== segId && s.start >= state.origEnd).sort((a, b) => a.start - b.start)[0];
+        if (prevSeg && newStart < prevSeg.end) { newStart = prevSeg.end; newEnd = newStart + dur; }
+        if (nextSeg && newEnd > nextSeg.start) { newEnd = nextSeg.start; newStart = newEnd - dur; }
+        updateSegment(segId, { start: newStart, end: newEnd });
+      }
+    };
+
+    const onUp = () => {
+      setSegDrag(null);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }, [segments, clipStart, clipDur, effectiveClipEnd, currentTime, updateSegment]);
 
   // ── Volume icon selector ───────────────────────────
   const VolumeIcon = useMemo(() => {
@@ -1263,6 +1543,22 @@ export default function VideoEditor({
         />
 
         {subtitleOverlay}
+
+        {/* Segment entry indicator */}
+        {segEntryIndicator && (
+          <div className="ve-segment-enter-indicator" style={{ '--seg-color': segEntryIndicator.color }}>
+            <span className="ve-segment-enter-indicator__dot" style={{ background: segEntryIndicator.color }} />
+            <span>{segEntryIndicator.label}</span>
+            {segEntryIndicator.muted ? (
+              <span style={{ color: '#FF3B30' }}>Muted</span>
+            ) : (
+              <span>{segEntryIndicator.volume}%</span>
+            )}
+            {Math.abs(segEntryIndicator.speed - 1.0) > 0.001 && (
+              <span>{segEntryIndicator.speed}x</span>
+            )}
+          </div>
+        )}
 
         {aspectRatio && (
           <div className="ve-aspect-badge">{aspectRatio}</div>
@@ -1439,8 +1735,17 @@ export default function VideoEditor({
             const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
             setHoverTime(pct * clipDur);
             setHoverX(e.clientX - rect.left);
+            // Segment edge detection for cursor change
+            onSegmentPointerMove(e);
           }}
-          onPointerLeave={() => setHoverTime(null)}
+          onPointerLeave={() => { setHoverTime(null); setSegHoverEdge(null); }}
+          style={{
+            cursor: segDrag
+              ? (segDrag.mode === 'move' ? 'grabbing' : 'col-resize')
+              : segHoverEdge
+                ? (segHoverEdge.edge === 'center' ? 'grab' : 'col-resize')
+                : 'pointer',
+          }}
           onDoubleClick={(e) => {
             e.stopPropagation();
             const track = timelineRef.current;
@@ -1453,16 +1758,20 @@ export default function VideoEditor({
             const existingSeg = segments.find(s => splitTime > s.start + 0.5 && splitTime < s.end - 0.5);
             if (existingSeg) {
               const seg1 = { ...existingSeg, end: splitTime };
+              const newId = `seg_${segmentIdRef.current++}`;
               const seg2 = {
                 ...existingSeg,
-                id: `seg_${segmentIdRef.current++}`,
+                id: newId,
                 start: splitTime,
+                label: `Segment ${segments.length + 1}`,
+                color: SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length],
               };
               const next = segments.map(s => s.id === existingSeg.id ? seg1 : s);
               next.push(seg2);
               next.sort((a, b) => a.start - b.start);
               setSegments(next);
               onSegmentsChange?.(next);
+              setSelectedSegmentId(newId);
               return;
             }
 
@@ -1472,14 +1781,17 @@ export default function VideoEditor({
               id: `seg_${segmentIdRef.current++}`,
               start: Math.max(trimmedStart, splitTime - halfDur),
               end: Math.min(trimmedEnd, splitTime + halfDur),
-              volume: isMuted ? 0 : volume,
-              muted: isMuted,
+              volume: 100,
+              muted: false,
               subtitlesEnabled: true,
-              speed,
+              speed: 1.0,
+              color: SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length],
+              label: `Segment ${segments.length + 1}`,
             };
             const next = [...segments, newSeg].sort((a, b) => a.start - b.start);
             setSegments(next);
             onSegmentsChange?.(next);
+            setSelectedSegmentId(newSeg.id);
           }}
         >
           {/* Keyframe thumbnails */}
@@ -1561,98 +1873,53 @@ export default function VideoEditor({
           const segLeftPct = clipDur > 0 ? ((seg.start - clipStart) / clipDur) * 100 : 0;
           const segWidthPct = clipDur > 0 ? ((seg.end - seg.start) / clipDur) * 100 : 0;
           const isSegSelected = selectedSegmentId === seg.id;
-          const segColor = seg.muted ? 'rgba(255, 59, 48' : !seg.subtitlesEnabled ? 'rgba(255, 149, 0' : 'rgba(10, 132, 255';
+          const isSegActive = activeSegmentId === seg.id;
+          const segHexColor = seg.color || SEGMENT_COLORS[0];
+          // Convert hex to rgba for overlays
+          const hexToRgb = (hex) => {
+            const r = parseInt(hex.slice(1, 3), 16);
+            const g = parseInt(hex.slice(3, 5), 16);
+            const b = parseInt(hex.slice(5, 7), 16);
+            return `${r}, ${g}, ${b}`;
+          };
+          const segRgb = hexToRgb(segHexColor);
           return (
             <div
               key={seg.id}
-              className="ve-timeline__segment-overlay"
-              onClick={(e) => {
-                e.stopPropagation();
-                // Seek playhead to the exact clicked position within the segment
-                const track = timelineRef.current;
-                if (track && clipDur > 0) {
-                  const rect = track.getBoundingClientRect();
-                  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                  const clickedTime = clipStart + pct * clipDur;
-                  seekTo(clickedTime);
-                }
-                // Toggle segment selection
-                setSelectedSegmentId(isSegSelected ? null : seg.id);
-              }}
-              onPointerDown={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                // Seek to click position
-                const track = timelineRef.current;
-                if (track && clipDur > 0) {
-                  const rect = track.getBoundingClientRect();
-                  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                  const clickedTime = clipStart + pct * clipDur;
-                  seekTo(clickedTime);
-                }
-                // Select this segment
-                setSelectedSegmentId(seg.id);
-                // Enable drag-scrub — seekTo handles clamping to clip range
-                const onMove = (ev) => {
-                  const t = getTimeFromPointer(ev.clientX);
-                  seekTo(t);
-                };
-                const onUp = () => {
-                  window.removeEventListener('pointermove', onMove);
-                  window.removeEventListener('pointerup', onUp);
-                };
-                window.addEventListener('pointermove', onMove);
-                window.addEventListener('pointerup', onUp);
-              }}
+              className={`ve-timeline__segment${isSegSelected ? ' ve-timeline__segment--selected' : ''}${isSegActive ? ' ve-timeline__segment--active' : ''}`}
               style={{
                 position: 'absolute',
                 left: `${segLeftPct}%`,
                 width: `${segWidthPct}%`,
                 top: 0, bottom: 0,
-                background: isSegSelected ? `${segColor}, 0.3)` : `${segColor}, 0.15)`,
-                borderLeft: `2px solid ${segColor}, ${isSegSelected ? '1' : '0.6'})`,
-                borderRight: `2px solid ${segColor}, ${isSegSelected ? '1' : '0.6'})`,
-                pointerEvents: 'auto',
-                zIndex: 4,
-                cursor: 'pointer',
+                background: isSegSelected ? `rgba(${segRgb}, 0.3)` : isSegActive ? `rgba(${segRgb}, 0.2)` : `rgba(${segRgb}, 0.12)`,
+                borderLeft: `2px solid rgba(${segRgb}, ${isSegSelected ? '1' : '0.5'})`,
+                borderRight: `2px solid rgba(${segRgb}, ${isSegSelected ? '1' : '0.5'})`,
+                pointerEvents: 'none',
+                zIndex: 3,
               }}
             >
-              {/* Top label with icon */}
-              <span style={{
+              {/* Segment label */}
+              <span className="ve-timeline__segment-label" style={{
                 position: 'absolute', top: 1, left: 3,
                 display: 'flex', alignItems: 'center', gap: 2,
                 fontSize: 7, fontWeight: 700, letterSpacing: '0.04em',
-                color: `${segColor}, 0.95)`,
+                color: segHexColor,
                 textTransform: 'uppercase', lineHeight: 1, pointerEvents: 'none',
-                whiteSpace: 'nowrap',
+                whiteSpace: 'nowrap', opacity: isSegSelected ? 1 : 0.8,
               }}>
-                {seg.muted ? (
-                  <>
-                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-                      <path d="M11 5L6 9H2v6h4l5 4V5z" /><line x1="23" y1="9" x2="17" y2="15" />
-                    </svg>
-                    MUTED
-                  </>
-                ) : !seg.subtitlesEnabled ? (
-                  <>
-                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-                      <rect x="2" y="6" width="20" height="12" rx="2" /><line x1="2" y1="2" x2="22" y2="22" />
-                    </svg>
-                    NO SUBS
-                  </>
-                ) : (
-                  <>
-                    <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round">
-                      <path d="M11 5L6 9H2v6h4l5 4V5z" />
-                    </svg>
-                    {seg.volume}%{seg.speed && Math.abs(seg.speed - 1.0) > 0.001 ? ` ${seg.speed}x` : ''}
-                  </>
-                )}
+                <span style={{
+                  display: 'inline-block', width: 5, height: 5,
+                  borderRadius: '50%', background: segHexColor,
+                }} />
+                {seg.label || 'Segment'}
+                {seg.muted ? ' (muted)' : ''}
+                {!seg.subtitlesEnabled ? ' (no subs)' : ''}
               </span>
               {/* Bottom border indicator bar */}
               <div style={{
                 position: 'absolute', bottom: 0, left: 0, right: 0, height: 2,
-                background: `${segColor}, 0.7)`,
+                background: segHexColor, opacity: isSegSelected ? 0.9 : 0.5,
               }} />
             </div>
           );
@@ -1669,13 +1936,16 @@ export default function VideoEditor({
           {segments.map(seg => {
             const segLeftPct = clipDur > 0 ? ((seg.start - clipStart) / clipDur) * 100 : 0;
             const segWidthPct = clipDur > 0 ? ((seg.end - seg.start) / clipDur) * 100 : 0;
+            const segHexColor = seg.color || SEGMENT_COLORS[0];
+            const hexToRgb = (hex) => { const r = parseInt(hex.slice(1,3),16); const g = parseInt(hex.slice(3,5),16); const b = parseInt(hex.slice(5,7),16); return `${r},${g},${b}`; };
+            const segRgb = hexToRgb(segHexColor);
             return (
               <div key={`wf-${seg.id}`} style={{
                 position: 'absolute', left: `${segLeftPct}%`, width: `${segWidthPct}%`,
                 top: 0, bottom: 0, zIndex: 2, pointerEvents: 'none',
-                background: seg.muted ? 'rgba(255,59,48,0.15)' : 'rgba(10,132,255,0.1)',
-                borderLeft: `1px solid ${seg.muted ? 'rgba(255,59,48,0.4)' : 'rgba(10,132,255,0.3)'}`,
-                borderRight: `1px solid ${seg.muted ? 'rgba(255,59,48,0.4)' : 'rgba(10,132,255,0.3)'}`,
+                background: seg.muted ? `rgba(${segRgb},0.15)` : `rgba(${segRgb},0.1)`,
+                borderLeft: `1px solid rgba(${segRgb},0.4)`,
+                borderRight: `1px solid rgba(${segRgb},0.4)`,
               }} />
             );
           })}
@@ -1683,243 +1953,262 @@ export default function VideoEditor({
         </div>
         </div>{/* close AUDIO track-label wrapper */}
 
-        {/* ── Segment controls with editable time inputs ── */}
+        {/* ── Segment chips row ── */}
         {(segments.length > 0 || hasTrim) && (
           <div style={{
-            display: 'flex', alignItems: 'flex-start', gap: 6, padding: '4px 0',
+            display: 'flex', alignItems: 'center', gap: 4, padding: '4px 0',
             flexWrap: 'wrap', fontSize: 10,
           }}>
             {hasTrim && (
               <button
                 onClick={(e) => { e.stopPropagation(); addSegment(); }}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: 3,
-                  padding: '3px 8px', fontSize: 10, fontWeight: 600,
-                  background: 'var(--accent-cyan-dim, rgba(10,132,255,0.1))',
-                  color: 'var(--accent-cyan, #0A84FF)',
-                  border: '1px solid var(--accent-cyan, #0A84FF)',
-                  borderRadius: 'var(--radius-xs, 4px)', cursor: 'pointer',
-                  whiteSpace: 'nowrap', alignSelf: 'center',
-                }}
-                title="Save current selection as a segment with current volume/mute settings"
+                className="ve-segment-chip ve-segment-chip--add"
+                title="Save current selection as a segment"
               >
                 + Add Segment
               </button>
             )}
             {segments.map(seg => {
               const isSelected = selectedSegmentId === seg.id;
-              const isEditingStart = editingSegTime?.segId === seg.id && editingSegTime?.field === 'start';
-              const isEditingEnd = editingSegTime?.segId === seg.id && editingSegTime?.field === 'end';
-              const segDur = seg.end - seg.start;
+              const segHexColor = seg.color || SEGMENT_COLORS[0];
               return (
-              <div
-                key={seg.id}
-                onClick={(e) => { e.stopPropagation(); setSelectedSegmentId(isSelected ? null : seg.id); }}
-                style={{
-                  display: 'flex', flexDirection: 'column', gap: 2,
-                  padding: isSelected ? '4px 8px' : '2px 6px', cursor: 'pointer',
-                  background: isSelected ? 'rgba(10,132,255,0.08)' : seg.muted ? 'rgba(255,59,48,0.05)' : 'var(--bg-elevated, #f5f5f5)',
-                  border: `1.5px solid ${isSelected ? 'var(--accent-cyan, #0A84FF)' : seg.muted ? 'rgba(255,59,48,0.3)' : 'var(--border, #ddd)'}`,
-                  borderRadius: 'var(--radius-xs, 4px)',
-                  fontSize: 9, color: 'var(--text-secondary, #666)',
-                  outline: isSelected ? '2px solid rgba(10,132,255,0.2)' : 'none',
-                  transition: 'all 0.15s ease',
-                  minWidth: isSelected ? 150 : undefined,
+                <div
+                  key={seg.id}
+                  className={`ve-segment-chip${isSelected ? ' ve-segment-chip--selected' : ''}`}
+                  onClick={(e) => { e.stopPropagation(); setSelectedSegmentId(isSelected ? null : seg.id); }}
+                  style={{
+                    '--seg-color': segHexColor,
+                    borderColor: isSelected ? segHexColor : undefined,
+                  }}
+                >
+                  <span className="ve-segment-chip__dot" style={{ background: segHexColor }} />
+                  <span className="ve-segment-chip__label">{seg.label || 'Segment'}</span>
+                  <span className="ve-segment-chip__time">
+                    {formatTimeShort(seg.start - clipStart)} – {formatTimeShort(seg.end - clipStart)}
+                  </span>
+                  {!isSelected && (
+                    <span className="ve-segment-chip__summary">
+                      {seg.muted ? 'muted' : `${seg.volume}%`}
+                      {seg.speed && Math.abs(seg.speed - 1.0) > 0.001 ? ` · ${seg.speed}x` : ''}
+                      {!seg.subtitlesEnabled ? ' · no subs' : ''}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+            {/* Quick action: Split at playhead */}
+            {segments.length > 0 && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  // Simulate S key
+                  const splitTime = videoRef.current?.currentTime ?? currentTime;
+                  const existingSeg = segments.find(s => splitTime > s.start + 0.5 && splitTime < s.end - 0.5);
+                  if (existingSeg) {
+                    const seg1 = { ...existingSeg, end: splitTime };
+                    const newId = `seg_${segmentIdRef.current++}`;
+                    const seg2 = { ...existingSeg, id: newId, start: splitTime, label: `Segment ${segments.length + 1}`, color: SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length] };
+                    const next = segments.map(s => s.id === existingSeg.id ? seg1 : s);
+                    next.push(seg2);
+                    next.sort((a, b) => a.start - b.start);
+                    setSegments(next);
+                    onSegmentsChange?.(next);
+                    setSelectedSegmentId(newId);
+                  }
                 }}
-                title={isSelected ? 'Editing — controls apply to this segment' : 'Click to select and edit this segment'}
+                className="ve-segment-chip ve-segment-chip--action"
+                title="Split segment at playhead (S)"
               >
-                {/* Row 1: time range (editable when selected) + remove button */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-                  {isSelected && <span style={{ fontSize: 7, fontWeight: 700, color: 'var(--accent-cyan, #0A84FF)', letterSpacing: '0.05em', textTransform: 'uppercase' }}>SEG</span>}
-                  {/* Start time */}
-                  {isSelected && !isEditingStart ? (
+                Split at Playhead
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* ── Segment Inspector Panel ── */}
+        {selectedSegment && (() => {
+          const seg = selectedSegment;
+          const segHexColor = seg.color || SEGMENT_COLORS[0];
+          const isEditingStart = editingSegTime?.segId === seg.id && editingSegTime?.field === 'start';
+          const isEditingEnd = editingSegTime?.segId === seg.id && editingSegTime?.field === 'end';
+          const segDurSec = seg.end - seg.start;
+          const isEditingLabel = editingSegLabel === seg.id;
+          return (
+            <div className="ve-segment-inspector" style={{ '--seg-color': segHexColor }} onClick={(e) => e.stopPropagation()}>
+              {/* Header row */}
+              <div className="ve-segment-inspector__header">
+                <span className="ve-segment-inspector__color-dot" style={{ background: segHexColor }} />
+                {isEditingLabel ? (
+                  <input
+                    ref={segLabelInputRef}
+                    className="ve-segment-inspector__label-input"
+                    type="text"
+                    value={segLabelInput}
+                    onChange={(e) => setSegLabelInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        if (segLabelInput.trim()) updateSegment(seg.id, { label: segLabelInput.trim() });
+                        setEditingSegLabel(null);
+                      } else if (e.key === 'Escape') {
+                        setEditingSegLabel(null);
+                      }
+                      e.stopPropagation();
+                    }}
+                    onBlur={() => {
+                      if (segLabelInput.trim()) updateSegment(seg.id, { label: segLabelInput.trim() });
+                      setEditingSegLabel(null);
+                    }}
+                    autoFocus
+                  />
+                ) : (
+                  <span
+                    className="ve-segment-inspector__label"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSegLabelInput(seg.label || '');
+                      setEditingSegLabel(seg.id);
+                      setTimeout(() => segLabelInputRef.current?.select(), 0);
+                    }}
+                    title="Click to rename"
+                  >
+                    {seg.label || 'Segment'}
+                  </span>
+                )}
+                {/* Time range */}
+                <div className="ve-segment-inspector__time-range">
+                  {isEditingStart ? (
+                    <input
+                      ref={segTimeInputRef}
+                      type="text" value={segTimeInput}
+                      onChange={(e) => setSegTimeInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') commitSegTimeEdit(); else if (e.key === 'Escape') setEditingSegTime(null); e.stopPropagation(); }}
+                      onBlur={commitSegTimeEdit}
+                      className="ve-segment-inspector__time-input"
+                      autoFocus
+                    />
+                  ) : (
                     <span
+                      className="ve-segment-inspector__time-editable"
                       onClick={(e) => {
                         e.stopPropagation();
                         setSegTimeInput(formatTimeShort(seg.start - clipStart));
                         setEditingSegTime({ segId: seg.id, field: 'start' });
                         setTimeout(() => segTimeInputRef.current?.select(), 0);
                       }}
-                      style={{
-                        fontFamily: 'var(--font-mono, monospace)', cursor: 'text',
-                        padding: '1px 3px', borderRadius: 2,
-                        background: 'rgba(10,132,255,0.08)', border: '1px solid rgba(10,132,255,0.2)',
-                      }}
-                      title="Click to type start time"
                     >
                       {formatTimeShort(seg.start - clipStart)}
                     </span>
-                  ) : isEditingStart ? (
+                  )}
+                  <span className="ve-segment-inspector__time-sep">—</span>
+                  {isEditingEnd ? (
                     <input
                       ref={segTimeInputRef}
-                      type="text"
-                      value={segTimeInput}
+                      type="text" value={segTimeInput}
                       onChange={(e) => setSegTimeInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') commitSegTimeEdit();
-                        else if (e.key === 'Escape') setEditingSegTime(null);
-                        e.stopPropagation();
-                      }}
+                      onKeyDown={(e) => { if (e.key === 'Enter') commitSegTimeEdit(); else if (e.key === 'Escape') setEditingSegTime(null); e.stopPropagation(); }}
                       onBlur={commitSegTimeEdit}
-                      onClick={(e) => e.stopPropagation()}
-                      style={{
-                        width: 42, padding: '1px 3px', fontSize: 9,
-                        fontFamily: 'var(--font-mono, monospace)', textAlign: 'center',
-                        border: '1px solid var(--accent-cyan, #0A84FF)',
-                        borderRadius: 2, outline: 'none',
-                        background: 'var(--bg-elevated, rgba(0,0,0,0.1))',
-                        color: 'var(--text-primary, #333)',
-                      }}
+                      className="ve-segment-inspector__time-input"
                       autoFocus
                     />
                   ) : (
-                    <span style={{ fontFamily: 'var(--font-mono, monospace)' }}>
-                      {formatTimeShort(seg.start - clipStart)}
-                    </span>
-                  )}
-                  <span style={{ color: 'var(--text-muted, #999)' }}>–</span>
-                  {/* End time */}
-                  {isSelected && !isEditingEnd ? (
                     <span
+                      className="ve-segment-inspector__time-editable"
                       onClick={(e) => {
                         e.stopPropagation();
                         setSegTimeInput(formatTimeShort(seg.end - clipStart));
                         setEditingSegTime({ segId: seg.id, field: 'end' });
                         setTimeout(() => segTimeInputRef.current?.select(), 0);
                       }}
-                      style={{
-                        fontFamily: 'var(--font-mono, monospace)', cursor: 'text',
-                        padding: '1px 3px', borderRadius: 2,
-                        background: 'rgba(10,132,255,0.08)', border: '1px solid rgba(10,132,255,0.2)',
-                      }}
-                      title="Click to type end time"
                     >
                       {formatTimeShort(seg.end - clipStart)}
                     </span>
-                  ) : isEditingEnd ? (
-                    <input
-                      ref={segTimeInputRef}
-                      type="text"
-                      value={segTimeInput}
-                      onChange={(e) => setSegTimeInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') commitSegTimeEdit();
-                        else if (e.key === 'Escape') setEditingSegTime(null);
-                        e.stopPropagation();
-                      }}
-                      onBlur={commitSegTimeEdit}
-                      onClick={(e) => e.stopPropagation()}
-                      style={{
-                        width: 42, padding: '1px 3px', fontSize: 9,
-                        fontFamily: 'var(--font-mono, monospace)', textAlign: 'center',
-                        border: '1px solid var(--accent-cyan, #0A84FF)',
-                        borderRadius: 2, outline: 'none',
-                        background: 'var(--bg-elevated, rgba(0,0,0,0.1))',
-                        color: 'var(--text-primary, #333)',
-                      }}
-                      autoFocus
-                    />
-                  ) : (
-                    <span style={{ fontFamily: 'var(--font-mono, monospace)' }}>
-                      {formatTimeShort(seg.end - clipStart)}
-                    </span>
                   )}
-                  {isSelected && (
-                    <span style={{ fontSize: 8, color: 'var(--text-muted, #999)', marginLeft: 2 }}>
-                      ({formatTimeShort(segDur)})
-                    </span>
-                  )}
-                  <button
-                    onClick={(e) => { e.stopPropagation(); removeSegment(seg.id); if (isSelected) setSelectedSegmentId(null); }}
-                    style={{
-                      padding: '0 3px', fontSize: 11, fontWeight: 700, lineHeight: 1,
-                      background: 'transparent', color: 'var(--text-muted, #999)',
-                      border: 'none', borderRadius: 2, cursor: 'pointer', marginLeft: 'auto',
-                    }}
-                    title="Remove segment"
-                  >
-                    ×
-                  </button>
+                  <span className="ve-segment-inspector__time-dur">({formatTimeShort(segDurSec)})</span>
                 </div>
-                {/* Row 2 (selected only): settings applied to this segment */}
-                {isSelected && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap', marginTop: 1 }}>
-                    {/* Volume badge */}
-                    <span style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 2,
-                      padding: '1px 5px', fontSize: 8, fontWeight: 600, borderRadius: 2,
-                      background: seg.muted ? 'rgba(255,59,48,0.1)' : 'rgba(10,132,255,0.08)',
-                      color: seg.muted ? '#FF3B30' : 'var(--accent-cyan, #0A84FF)',
-                      border: `1px solid ${seg.muted ? 'rgba(255,59,48,0.25)' : 'rgba(10,132,255,0.2)'}`,
-                    }}>
-                      <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                        <path d="M11 5L6 9H2v6h4l5 4V5z" />
-                        {seg.muted && <><line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" /></>}
-                      </svg>
-                      {seg.muted ? 'Muted' : `Vol ${seg.volume}%`}
-                    </span>
-                    {/* Speed badge */}
-                    <span style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 2,
-                      padding: '1px 5px', fontSize: 8, fontWeight: 600, borderRadius: 2,
-                      background: Math.abs((seg.speed || 1) - 1.0) > 0.001 ? 'rgba(175,82,222,0.08)' : 'rgba(0,0,0,0.04)',
-                      color: Math.abs((seg.speed || 1) - 1.0) > 0.001 ? '#AF52DE' : 'var(--text-muted, #999)',
-                      border: `1px solid ${Math.abs((seg.speed || 1) - 1.0) > 0.001 ? 'rgba(175,82,222,0.25)' : 'rgba(0,0,0,0.08)'}`,
-                    }}>
-                      {(seg.speed || 1)}x
-                    </span>
-                    {/* Subtitles badge */}
-                    <span
-                      onClick={(e) => { e.stopPropagation(); toggleSegmentSubs(seg.id); }}
-                      style={{
-                        display: 'inline-flex', alignItems: 'center', gap: 2,
-                        padding: '1px 5px', fontSize: 8, fontWeight: 600, borderRadius: 2, cursor: 'pointer',
-                        background: !seg.subtitlesEnabled ? 'rgba(255,149,0,0.1)' : 'rgba(48,209,88,0.06)',
-                        color: !seg.subtitlesEnabled ? '#FF9500' : '#30D158',
-                        border: `1px solid ${!seg.subtitlesEnabled ? 'rgba(255,149,0,0.25)' : 'rgba(48,209,88,0.2)'}`,
-                      }}
-                      title="Toggle subtitles for this segment"
-                    >
-                      <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                        <rect x="2" y="6" width="20" height="12" rx="2" />
-                        {!seg.subtitlesEnabled && <line x1="2" y1="2" x2="22" y2="22" />}
-                      </svg>
-                      {seg.subtitlesEnabled ? 'Subs' : 'No Subs'}
-                    </span>
-                    {/* Done button */}
-                    <button
-                      onClick={(e) => { e.stopPropagation(); deselectSegment(); }}
-                      style={{
-                        padding: '1px 6px', fontSize: 8, fontWeight: 600,
-                        background: 'var(--bg-elevated, #f5f5f5)',
-                        color: 'var(--text-secondary, #666)',
-                        border: '1px solid var(--border, #ddd)',
-                        borderRadius: 2, cursor: 'pointer', marginLeft: 'auto',
-                      }}
-                    >
-                      Done
-                    </button>
-                  </div>
-                )}
-                {/* Row 3 (selected): reminder that controls bar edits this segment */}
-                {isSelected && (
-                  <div style={{ fontSize: 8, color: 'var(--text-muted, #999)', fontStyle: 'italic', lineHeight: 1.2 }}>
-                    Volume/speed/mute controls below apply to this segment
-                  </div>
-                )}
-                {/* Compact summary when NOT selected */}
-                {!isSelected && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 8, color: 'var(--text-muted, #999)' }}>
-                    {seg.muted ? 'muted' : `${seg.volume}%`}
-                    {seg.speed && Math.abs(seg.speed - 1.0) > 0.001 ? ` · ${seg.speed}x` : ''}
-                    {!seg.subtitlesEnabled ? ' · no subs' : ''}
-                  </div>
-                )}
+                {/* Delete button */}
+                <button
+                  className="ve-segment-inspector__delete"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (deleteConfirmId === seg.id) {
+                      removeSegment(seg.id);
+                      setSelectedSegmentId(null);
+                      setDeleteConfirmId(null);
+                    } else {
+                      setDeleteConfirmId(seg.id);
+                      setTimeout(() => setDeleteConfirmId(null), 2000);
+                    }
+                  }}
+                  title={deleteConfirmId === seg.id ? 'Click again to confirm' : 'Remove segment'}
+                >
+                  {deleteConfirmId === seg.id ? 'Remove?' : '×'}
+                </button>
               </div>
-              );
-            })}
-          </div>
-        )}
+              {/* Controls row */}
+              <div className="ve-segment-inspector__controls">
+                {/* Volume */}
+                <div className="ve-segment-inspector__volume-row">
+                  <span className="ve-segment-inspector__control-label">Volume</span>
+                  <input
+                    type="range" min="0" max="200" step="1"
+                    value={seg.muted ? 0 : seg.volume}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value);
+                      updateSegment(seg.id, { volume: v, muted: v === 0 });
+                    }}
+                    className="ve-segment-inspector__volume-slider"
+                    style={{
+                      background: `linear-gradient(to right, ${segHexColor} ${(seg.muted ? 0 : seg.volume) / 2}%, var(--ve-slider-track, rgba(0,0,0,0.12)) ${(seg.muted ? 0 : seg.volume) / 2}%)`,
+                    }}
+                  />
+                  <span className="ve-segment-inspector__volume-value">{seg.muted ? 0 : seg.volume}%</span>
+                </div>
+                {/* Speed pills */}
+                <div className="ve-segment-inspector__speed-row">
+                  <span className="ve-segment-inspector__control-label">Speed</span>
+                  <div className="ve-segment-inspector__speed-pills">
+                    {[0.5, 0.75, 1.0, 1.25, 1.5, 2.0].map(spd => (
+                      <button
+                        key={spd}
+                        className={`ve-segment-inspector__speed-pill${Math.abs((seg.speed || 1) - spd) < 0.001 ? ' ve-segment-inspector__speed-pill--active' : ''}`}
+                        onClick={(e) => { e.stopPropagation(); updateSegment(seg.id, { speed: spd }); }}
+                        style={Math.abs((seg.speed || 1) - spd) < 0.001 ? { background: segHexColor, color: '#fff', borderColor: segHexColor } : {}}
+                      >
+                        {spd}x
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {/* Toggles */}
+                <div className="ve-segment-inspector__toggles">
+                  <label className="ve-segment-inspector__toggle" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox" checked={seg.subtitlesEnabled !== false}
+                      onChange={() => toggleSegmentSubs(seg.id)}
+                    />
+                    <span>Subtitles</span>
+                  </label>
+                  <label className="ve-segment-inspector__toggle" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox" checked={seg.muted}
+                      onChange={() => toggleSegmentMute(seg.id)}
+                    />
+                    <span>Muted</span>
+                  </label>
+                </div>
+              </div>
+              {/* Footer */}
+              <div className="ve-segment-inspector__actions">
+                <button
+                  className="ve-segment-inspector__done"
+                  onClick={(e) => { e.stopPropagation(); deselectSegment(); }}
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          );
+        })()}
       </div>
 
       {/* ── Speaker Color Editor (below timeline, above controls) ── */}
@@ -2065,8 +2354,8 @@ export default function VideoEditor({
             </button>
             <div className="ve-volume__slider-wrap">
               {(() => {
-                const dispVol = effectiveSegment ? (effectiveSegment.muted ? 0 : effectiveSegment.volume) : (isMuted ? 0 : volume);
-                const dispMax = effectiveSegment ? effectiveSegment.volume : volume;
+                const dispVol = displaySegment ? (displaySegment.muted ? 0 : displaySegment.volume) : (isMuted ? 0 : volume);
+                const dispMax = displaySegment ? displaySegment.volume : volume;
                 return (
                   <>
                     <input
@@ -2078,8 +2367,8 @@ export default function VideoEditor({
                       value={dispVol}
                       onChange={(e) => {
                         const v = parseInt(e.target.value);
-                        if (effectiveSegment) {
-                          updateSegment(effectiveSegment.id, { volume: v, muted: v === 0 });
+                        if (controlTargetSegment) {
+                          updateSegment(controlTargetSegment.id, { volume: v, muted: v === 0 });
                         } else {
                           setVolume(v);
                           if (isMuted && v > 0) setIsMuted(false);
@@ -2103,12 +2392,12 @@ export default function VideoEditor({
           {/* Speed — segment-aware */}
           <div className="ve-speed" onClick={(e) => e.stopPropagation()}>
             {(() => {
-              const dispSpeed = effectiveSegment ? (effectiveSegment.speed || 1.0) : speed;
+              const dispSpeed = displaySegment ? (displaySegment.speed || 1.0) : speed;
               return (
                 <button
                   className={`ve-speed__btn${dispSpeed !== 1.0 ? ' ve-speed__btn--active' : ''}`}
                   onClick={() => setShowSpeedMenu((v) => !v)}
-                  title={effectiveSegment ? 'Segment playback speed' : 'Playback speed'}
+                  title={displaySegment ? 'Segment playback speed' : 'Playback speed'}
                 >
                   {dispSpeed}x
                 </button>
@@ -2131,14 +2420,18 @@ export default function VideoEditor({
           </div>
 
           {/* Active segment indicator */}
-          {effectiveSegment && (
+          {displaySegment && (
             <span style={{
               fontSize: 9, fontFamily: 'var(--font-mono, monospace)', padding: '2px 6px',
-              borderRadius: 4, background: 'rgba(10,132,255,0.12)', color: 'var(--accent-cyan, #0A84FF)',
-              border: '1px solid rgba(10,132,255,0.25)', whiteSpace: 'nowrap', lineHeight: 1.3,
+              borderRadius: 4,
+              background: `${displaySegment.color || SEGMENT_COLORS[0]}18`,
+              color: displaySegment.color || SEGMENT_COLORS[0],
+              border: `1px solid ${displaySegment.color || SEGMENT_COLORS[0]}40`,
+              whiteSpace: 'nowrap', lineHeight: 1.3,
             }}>
-              {selectedSegment ? 'SEG' : 'SEG'} · {effectiveSegment.muted ? 'muted' : `${effectiveSegment.volume}%`}
-              {effectiveSegment.speed && Math.abs(effectiveSegment.speed - 1.0) > 0.001 ? ` · ${effectiveSegment.speed}x` : ''}
+              <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: displaySegment.color || SEGMENT_COLORS[0], marginRight: 3, verticalAlign: 'middle' }} />
+              {displaySegment.label || 'Segment'} · {displaySegment.muted ? 'muted' : `${displaySegment.volume}%`}
+              {displaySegment.speed && Math.abs(displaySegment.speed - 1.0) > 0.001 ? ` · ${displaySegment.speed}x` : ''}
             </span>
           )}
 
@@ -2156,7 +2449,10 @@ export default function VideoEditor({
           <span><kbd>J</kbd>/<kbd>K</kbd>/<kbd>L</kbd> Shuttle</span>
           <span><kbd>{'\u2190'}</kbd>/<kbd>{'\u2192'}</kbd> Frame</span>
           <span><kbd>M</kbd> Mute</span>
-          <span>Double-click timeline to add segment</span>
+          <span><kbd>S</kbd> Split/Add Segment</span>
+          <span><kbd>Del</kbd> Remove Segment</span>
+          <span><kbd>Esc</kbd> Deselect</span>
+          <span><kbd>Tab</kbd> Cycle Segments</span>
         </div>
       )}
     </div>
