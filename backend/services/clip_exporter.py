@@ -242,7 +242,7 @@ def _validate_ass_settings(
     if background_enabled:
         expected_border_style = 3
         expected_outline_colour = _hex_to_ass_color_with_alpha(background_color, background_opacity)
-        expected_back_colour = expected_outline_colour
+        expected_back_colour = "&HFF000000&"  # fully transparent — matches ass_generator fix
         expected_ol_width = max(int(4 * font_scale), 2)
         expected_shadow = 0
     else:
