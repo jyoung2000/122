@@ -2140,7 +2140,13 @@ async def export_clip(
             enc_crf = qp["crf"]
             enc_preset = qp["preset"]
 
-            # ── Per-segment speed via split→trim→setpts/atempo→concat ───
+            # ── Per-segment speed via multi-input→setpts/atempo→concat ───
+            # The previous split→trim→concat approach caused FFmpeg to
+            # buffer the entire decoded video for each split output.  For
+            # long videos (e.g. 722s at 1080p) this exhausts memory and
+            # crashes the process.  The multi-input approach opens the
+            # source file once per timeline segment with its own -ss seek,
+            # so each input only decodes its own frames.
             if has_seg_speed:
                 clip_dur_local = end - start
                 timeline = _build_speed_timeline(segments, clip_dur_local, speed, volume, start)
@@ -2165,38 +2171,49 @@ async def export_clip(
                 _probe_out, _ = await _probe_proc.communicate()
                 _has_audio = bool(_probe_out.strip())
 
-                # --- Video: base_chain → normalize PTS → split → trim+setpts → concat
-                fc_lines: list[str] = []
-                # Apply visual filters then normalize timestamps to 0-based
-                if vf:
-                    fc_lines.append(f"[0:v]{vf},setpts=PTS-STARTPTS[base]")
-                else:
-                    fc_lines.append("[0:v]setpts=PTS-STARTPTS[base]")
-
-                split_labels = "".join(f"[vs{i}]" for i in range(n))
-                fc_lines.append(f"[base]split={n}{split_labels}")
-
+                # --- Build multi-input args: one -ss/-t/-i per segment ---
+                input_args: list[str] = []
                 for i, tl in enumerate(timeline):
+                    abs_start = start + tl["start"]
+                    seg_dur = tl["end"] - tl["start"]
+                    # Add 1s buffer for keyframe alignment; trim in filter
+                    # ensures exact segment duration
+                    input_args += [
+                        "-ss", f"{abs_start:.3f}",
+                        "-t", f"{seg_dur + 1.0:.3f}",
+                        "-i", video_path,
+                    ]
+
+                # --- Video filter chain per input ---
+                fc_lines: list[str] = []
+                for i, tl in enumerate(timeline):
+                    seg_dur = tl["end"] - tl["start"]
+                    pts_offset = tl["start"]
                     pts_factor = 1.0 / tl["speed"]
-                    chain = (
-                        f"[vs{i}]trim=start={tl['start']:.3f}:end={tl['end']:.3f}"
-                        f",setpts=PTS-STARTPTS"
-                    )
-                    # Apply speed as a single PTS scale (avoid double setpts)
+
+                    # 1. trim to exact segment duration (safety for -ss buffer)
+                    # 2. normalize PTS to 0 then shift to clip-relative time
+                    #    so subtitle burn-in and dynamic crop keyframes align
+                    # 3. apply visual filters (crop, subtitles, scale)
+                    # 4. normalize PTS back to 0
+                    # 5. apply speed scaling if needed
+                    chain = f"[{i}:v]trim=duration={seg_dur:.3f},setpts=PTS-STARTPTS"
+                    if pts_offset > 0.001:
+                        chain += f"+{pts_offset:.3f}/TB"
+                    if vf:
+                        chain += f",{vf}"
+                    chain += ",setpts=PTS-STARTPTS"
                     if abs(tl["speed"] - 1.0) > 0.001:
                         chain += f",setpts={pts_factor:.6f}*PTS"
                     chain += f"[vo{i}]"
                     fc_lines.append(chain)
 
-                # --- Audio chain (only if audio exists)
+                # --- Audio chain (only if audio exists) ---
                 if _has_audio:
-                    # Normalize audio timestamps too
-                    asplit_labels = "".join(f"[as{i}]" for i in range(n))
-                    fc_lines.append(f"[0:a]asetpts=PTS-STARTPTS,asplit={n}{asplit_labels}")
-
                     for i, tl in enumerate(timeline):
+                        seg_dur = tl["end"] - tl["start"]
                         chain = (
-                            f"[as{i}]atrim=start={tl['start']:.3f}:end={tl['end']:.3f}"
+                            f"[{i}:a]atrim=duration={seg_dur:.3f}"
                             f",asetpts=PTS-STARTPTS"
                         )
                         if abs(tl["speed"] - 1.0) > 0.001:
@@ -2225,9 +2242,7 @@ async def export_clip(
 
                 cmd = [
                     "ffmpeg", "-y",
-                    "-ss", str(start),
-                    "-i", video_path,
-                    "-t", str(end - start),
+                ] + input_args + [
                     "-filter_complex", full_fc,
                 ] + map_args + [
                     "-c:v", "libx264",
