@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import { processKeyframes, interpolateSubjectX, isDynamic, safeSubjectX } from '../utils/subjectTracking';
+import { outlineTextShadow } from '../utils/textOutline';
 import useResponsive from '../hooks/useResponsive';
 
 // --- Constants replicated from backend ---
@@ -730,10 +731,12 @@ export default function ClipPreview({
       // Shadow depth matches ASS: proportional to outline width.
       const shadowDepth = Math.max(1, Math.min(4, Math.round(backendOlWidth * 0.75)));
       const scaledShadow = shadowDepth * subtitleScale;
+      const olColorStr = `rgba(${olR},${olG},${olB},${olOpacity})`;
+      const dropShadow = `${scaledShadow}px ${scaledShadow}px 0px rgba(0,0,0,0.5)`;
       outlineStyle = {
-        WebkitTextStroke: `${scaledOlWidth * 2}px rgba(${olR},${olG},${olB},${olOpacity})`,
+        WebkitTextStroke: `${scaledOlWidth * 2}px ${olColorStr}`,
         paintOrder: 'stroke fill',
-        textShadow: `${scaledShadow}px ${scaledShadow}px 0px rgba(0,0,0,0.5)`,
+        textShadow: outlineTextShadow(scaledOlWidth, olColorStr, dropShadow),
       };
     } else {
       // No outline, no background — minimal shadow for readability
@@ -789,6 +792,7 @@ export default function ClipPreview({
                     ? {
                         WebkitTextStroke: `${scaledOlWidth * 2}px rgba(${awOlR},${awOlG},${awOlB},${olOpacity})`,
                         paintOrder: 'stroke fill',
+                        textShadow: outlineTextShadow(scaledOlWidth, `rgba(${awOlR},${awOlG},${awOlB},${olOpacity})`),
                       }
                     : {}),
                   ...(awBgOpacity > 0

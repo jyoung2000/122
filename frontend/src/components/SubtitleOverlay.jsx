@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { outlineTextShadow } from '../utils/textOutline';
 
 // ── Backend-matching constants (ass_generator.py / clip_exporter.py) ──────
 const ASPECT_RATIO_DIMS = {
@@ -397,10 +398,12 @@ export default function SubtitleOverlay({
   } else if (scaledOlWidth > 0) {
     const shadowDepth = Math.max(1, Math.min(4, Math.round(backendOlWidth * 0.75)));
     const scaledShadow = shadowDepth * subtitleScale;
+    const olColorStr = `rgba(${olR},${olG},${olB},${olOpacity})`;
+    const dropShadow = `${scaledShadow}px ${scaledShadow}px 0px rgba(0,0,0,0.5)`;
     outlineStyle = {
-      WebkitTextStroke: `${scaledOlWidth * 2}px rgba(${olR},${olG},${olB},${olOpacity})`,
+      WebkitTextStroke: `${scaledOlWidth * 2}px ${olColorStr}`,
       paintOrder: 'stroke fill',
-      textShadow: `${scaledShadow}px ${scaledShadow}px 0px rgba(0,0,0,0.5)`,
+      textShadow: outlineTextShadow(scaledOlWidth, olColorStr, dropShadow),
     };
   } else {
     outlineStyle = { textShadow: '1px 1px 2px rgba(0,0,0,0.8)' };
@@ -442,6 +445,7 @@ export default function SubtitleOverlay({
             ...(scaledOlWidth > 0 ? {
               WebkitTextStroke: `${scaledOlWidth * 2}px rgba(${awOlR},${awOlG},${awOlB},${olOpacity})`,
               paintOrder: 'stroke fill',
+              textShadow: outlineTextShadow(scaledOlWidth, `rgba(${awOlR},${awOlG},${awOlB},${olOpacity})`),
             } : {}),
             ...(awBgOpacity > 0 ? {
               backgroundColor: hexToRgba(awBgColor, awBgOpacity / 100),

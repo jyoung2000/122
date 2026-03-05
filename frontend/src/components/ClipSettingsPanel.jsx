@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { outlineTextShadow } from '../utils/textOutline';
 import useResponsive from '../hooks/useResponsive';
 
 const STORAGE_KEY = 'clipai_clip_settings';
@@ -1366,11 +1367,12 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                     const olG = parseInt(olHex.substring(2, 4), 16) || 0;
                     const olB = parseInt(olHex.substring(4, 6), 16) || 0;
                     const scaledOlWidth = Math.max(0, Math.round(olWidth * previewScale));
+                    const olColorStr = `rgba(${olR},${olG},${olB},${olOpacity})`;
                     const outlineStyle = !settings.subtitleBgEnabled && scaledOlWidth > 0
                       ? {
-                          WebkitTextStroke: `${scaledOlWidth * 2}px rgba(${olR},${olG},${olB},${olOpacity})`,
+                          WebkitTextStroke: `${scaledOlWidth * 2}px ${olColorStr}`,
                           paintOrder: 'stroke fill',
-                          textShadow: `1px 1px 2px rgba(0,0,0,0.5)`,
+                          textShadow: outlineTextShadow(scaledOlWidth, olColorStr, '1px 1px 2px rgba(0,0,0,0.5)'),
                         }
                       : (!settings.subtitleBgEnabled
                           ? { textShadow: '1px 1px 2px rgba(0,0,0,0.7)' }

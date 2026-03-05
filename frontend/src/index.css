@@ -206,7 +206,12 @@ select {
   padding-right: 28px;
 }
 
-/* Refined scrollbar */
+/* Refined scrollbar — Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+/* Refined scrollbar — WebKit */
 ::-webkit-scrollbar { width: 4px; height: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
@@ -326,6 +331,10 @@ select {
 }
 
 /* Clip settings sidebar scrollbar */
+.clip-settings-sidebar {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
 .clip-settings-sidebar::-webkit-scrollbar { width: 4px; }
 .clip-settings-sidebar::-webkit-scrollbar-track { background: transparent; }
 .clip-settings-sidebar::-webkit-scrollbar-thumb { background: var(--scrollbar-thumb); border-radius: 2px; }
