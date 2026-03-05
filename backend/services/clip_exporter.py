@@ -441,19 +441,31 @@ def _validate_ass_settings(
                 "per-word \\shad overrides are unnecessary with Shadow=0"
             )
 
-    # 14b. Active word background color (when bg_opacity > 0)
+    # 14b. Active word background color (\4c)
+    # With BorderStyle=3, \4c sets BackColour which causes shadow artifacts
+    # even with Shadow=0 — it must NEVER appear when background is enabled.
+    # With BorderStyle=1, \4c is only valid when aw_bg_opacity > 0.
     aw_bg_opacity = settings.get("active_word_bg_opacity", 0)
-    if active_word_enabled and aw_bg_opacity > 0 and has_override_tags:
-        aw_bg_color = settings.get("active_word_bg_color", "#000000")
-        expected_aw_bg = _hex_to_ass_color_with_alpha(aw_bg_color, aw_bg_opacity)
-        aw_bg_found = any(expected_aw_bg.upper() in ev["Text"].upper() for ev in events)
-        if not aw_bg_found:
-            warnings.append(
-                f"Active word background color {expected_aw_bg} not found in any dialogue event"
-            )
+    if active_word_enabled and has_override_tags:
+        if background_enabled:
+            has_4c = any("\\4c" in ev["Text"] for ev in events)
+            if has_4c:
+                warnings.append(
+                    "BorderStyle=3 (background) + inline \\4c tags detected — "
+                    "\\4c sets BackColour causing shadow artifacts even with "
+                    "Shadow=0 (black bars around active word)"
+                )
+        elif aw_bg_opacity > 0:
+            aw_bg_color = settings.get("active_word_bg_color", "#000000")
+            expected_aw_bg = _hex_to_ass_color_with_alpha(aw_bg_color, aw_bg_opacity)
+            aw_bg_found = any(expected_aw_bg.upper() in ev["Text"].upper() for ev in events)
+            if not aw_bg_found:
+                warnings.append(
+                    f"Active word background color {expected_aw_bg} not found in any dialogue event"
+                )
 
-    # 14c. Verify no \4c tags when active word bg_opacity is 0
-    if active_word_enabled and aw_bg_opacity == 0 and has_override_tags:
+    # 14c. Verify no \4c tags when active word bg_opacity is 0 (and no background)
+    if active_word_enabled and not background_enabled and aw_bg_opacity == 0 and has_override_tags:
         has_4c = any("\\4c" in ev["Text"] for ev in events)
         if has_4c:
             warnings.append("active_word bg_opacity=0 but \\4c tags found in dialogue events")

@@ -163,12 +163,35 @@ export function EncodingProvider({ children }) {
             // multiple browser downloads for the same file.
             recentDownloadsRef.current.add(msg.download_url);
             setTimeout(() => recentDownloadsRef.current.delete(msg.download_url), 10000);
-            const a = document.createElement('a');
-            a.href = msg.download_url;
-            a.download = '';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
+            // Auto-download: use a blob fetch so the browser saves
+            // immediately without a "Save As" dialog or title prompt.
+            // The download attribute with an explicit filename bypasses
+            // Content-Disposition: attachment which can trigger save dialogs.
+            const title = clipTitle || `Clip ${msg.clip_id}`;
+            const safeName = title.replace(/[^a-zA-Z0-9_\-\s().]/g, '').trim() || 'clip';
+            const ext = (msg.download_url.split('.').pop() || 'mp4').split('?')[0];
+            const downloadName = `${safeName}.${ext}`;
+            fetch(msg.download_url)
+              .then((res) => res.blob())
+              .then((blob) => {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = downloadName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+              })
+              .catch(() => {
+                // Fallback: direct link click if blob fetch fails
+                const a = document.createElement('a');
+                a.href = msg.download_url;
+                a.download = downloadName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+              });
           }
           _maybeCloseWs(jobId);
         } else if (msg.type === 'error') {
