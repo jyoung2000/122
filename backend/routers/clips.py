@@ -384,7 +384,7 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                     "start": 0,
                     "end": job.duration,
                     "exported_at": datetime.now(timezone.utc).isoformat(),
-                    "duration": round(job.duration, 2),
+                    "duration": round(job.duration / req.speed, 2) if req.speed and req.speed != 1.0 else round(job.duration, 2),
                     "export_quality": req.export_quality or "1080p",
                     "aspect_ratio": req.aspect_ratio,
                     "subtitles_enabled": req.subtitles_enabled,

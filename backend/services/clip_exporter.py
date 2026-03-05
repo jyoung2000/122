@@ -1528,6 +1528,73 @@ def _subtitle_filter(ass_path: str, force_style: str = "") -> str:
     return f"subtitles=filename='{safe_path}':fontsdir='{safe_fonts_dir}'"
 
 
+def _atempo_chain(spd: float) -> str:
+    """Build chained atempo filters for a given speed value.
+
+    FFmpeg's atempo filter only supports the 0.5–2.0 range, so extreme
+    values must be split into multiple chained filters.
+    """
+    parts: list[str] = []
+    remaining = spd
+    while remaining > 2.0:
+        parts.append("atempo=2.0")
+        remaining /= 2.0
+    while remaining < 0.5:
+        parts.append("atempo=0.5")
+        remaining /= 0.5
+    if abs(remaining - 1.0) > 0.001:
+        parts.append(f"atempo={remaining:.4f}")
+    return ",".join(parts)
+
+
+def _build_speed_timeline(
+    segments: list[dict],
+    clip_dur: float,
+    global_speed: float,
+    global_volume: float,
+    clip_start: float,
+) -> list[dict]:
+    """Build a complete timeline covering 0..clip_dur from segment overrides.
+
+    Fills gaps between segments with global speed/volume settings.
+    Returns list of dicts with keys: start, end, speed, volume, muted.
+    Times are clip-relative (0-based).
+    """
+    sorted_segs = sorted(segments, key=lambda s: s["start"])
+    timeline: list[dict] = []
+    pos = 0.0
+
+    for seg in sorted_segs:
+        seg_start = max(0.0, seg["start"] - clip_start)
+        seg_end = min(clip_dur, seg["end"] - clip_start)
+        if seg_end <= seg_start:
+            continue
+
+        # Gap before this segment
+        if seg_start > pos + 0.01:
+            timeline.append({
+                "start": pos, "end": seg_start,
+                "speed": global_speed, "volume": global_volume, "muted": False,
+            })
+
+        seg_vol = 0.0 if seg.get("muted", False) else seg.get("volume", 1.0)
+        timeline.append({
+            "start": seg_start, "end": seg_end,
+            "speed": seg.get("speed", 1.0),
+            "volume": seg_vol, "muted": seg.get("muted", False),
+        })
+        pos = seg_end
+
+    # Gap after last segment
+    if pos < clip_dur - 0.01:
+        timeline.append({
+            "start": pos, "end": clip_dur,
+            "speed": global_speed, "volume": global_volume, "muted": False,
+        })
+
+    return timeline
+
+
 def _build_filter_chain(
     aspect_ratio: str | None,
     src_w: int,
@@ -1734,7 +1801,14 @@ async def export_clip(
     has_speed = abs(speed - 1.0) > 0.001
     has_volume = abs(volume - 1.0) > 0.001
     has_segments = bool(segments) and len(segments) > 0
-    needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments
+    # Detect per-segment speed overrides (different from global speed)
+    has_seg_speed = False
+    if has_segments:
+        for seg in segments:
+            if abs(seg.get("speed", 1.0) - 1.0) > 0.001:
+                has_seg_speed = True
+                break
+    needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments or has_seg_speed
     filter_parts = []
     if aspect_ratio:
         filter_parts.append(f"crop to {aspect_ratio}")
@@ -1742,7 +1816,10 @@ async def export_clip(
         filter_parts.append("burn subtitles")
     if needs_quality_scale:
         filter_parts.append(f"scale to {export_quality}")
-    if has_speed:
+    if has_seg_speed:
+        seg_speeds = set(seg.get("speed", 1.0) for seg in segments)
+        filter_parts.append(f"per-segment speed ({len(seg_speeds)} unique)")
+    elif has_speed:
         filter_parts.append(f"speed {speed}x")
     if has_volume:
         filter_parts.append(f"volume {volume:.0%}")
@@ -2063,71 +2140,138 @@ async def export_clip(
             enc_crf = qp["crf"]
             enc_preset = qp["preset"]
 
-            # --- Speed filter: append setpts to video chain ---
-            if has_speed and vf:
-                vf = f"{vf},setpts={1.0/speed}*PTS"
-            elif has_speed:
-                vf = f"setpts={1.0/speed}*PTS"
-
-            # --- Audio filter chain: atempo + volume ---
-            af_parts = []
-            if has_speed:
-                # atempo only supports 0.5-2.0 range, chain for extremes
-                remaining = speed
-                while remaining > 2.0:
-                    af_parts.append("atempo=2.0")
-                    remaining /= 2.0
-                while remaining < 0.5:
-                    af_parts.append("atempo=0.5")
-                    remaining /= 0.5
-                if abs(remaining - 1.0) > 0.001:
-                    af_parts.append(f"atempo={remaining:.4f}")
-            if has_volume:
-                if not has_segments:
-                    af_parts.append(f"volume={volume:.2f}")
-            # Per-segment volume overrides using FFmpeg volume expression.
-            # When segments exist, we build a single volume filter with an
-            # if(between()) expression that picks the right gain for each
-            # time range, falling back to the global volume for gaps.
-            if has_segments:
+            # ── Per-segment speed via split→trim→setpts/atempo→concat ───
+            if has_seg_speed:
                 clip_dur_local = end - start
-                # Build expression: if(between(t,s1,e1),vol1,if(between(t,s2,e2),vol2,...,global))
-                expr = f"{volume:.4f}"  # fallback = global volume
-                for seg in reversed(segments):  # reversed so first segment is outermost if()
-                    seg_start = max(0, seg["start"] - start)
-                    seg_end = min(clip_dur_local, seg["end"] - start)
-                    seg_vol = 0.0 if seg.get("muted", False) else seg.get("volume", 1.0)
-                    expr = f"if(between(t\\,{seg_start:.3f}\\,{seg_end:.3f})\\,{seg_vol:.4f}\\,{expr})"
-                af_parts.append(f"volume='{expr}':eval=frame")
-            af = ",".join(af_parts) if af_parts else None
+                timeline = _build_speed_timeline(segments, clip_dur_local, speed, volume, start)
+                n = len(timeline)
+                logger.info(
+                    "Per-segment speed for clip %s: %d timeline entries from %d segments",
+                    clip_id, n, len(segments),
+                )
 
-            cmd = [
-                "ffmpeg", "-y",
-                "-ss", str(start),
-                "-i", video_path,
-                "-t", str(end - start),
-            ]
-            if vf:
-                if is_complex:
-                    cmd += ["-filter_complex", vf, "-map", "[out]", "-map", "0:a?"]
+                # --- Video: base_chain → [base] → split → trim+setpts → concat → [finalv]
+                fc_lines: list[str] = []
+                if vf:
+                    fc_lines.append(f"[0:v]{vf}[base]")
                 else:
-                    cmd += ["-vf", vf]
-            if af:
-                cmd += ["-af", af]
-            cmd += [
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                "-preset", enc_preset,
-                "-crf", str(enc_crf),
-                "-threads", str(app_settings.FFMPEG_THREADS),
-                "-c:a", "aac",
-                "-avoid_negative_ts", "make_zero",
-            ]
-            if app_settings.FFMPEG_FASTSTART:
-                cmd += ["-movflags", "+faststart"]
-            # Add -progress pipe:1 for machine-readable progress on stdout
-            cmd += ["-progress", "pipe:1"]
-            cmd.append(output_path)
+                    fc_lines.append("[0:v]null[base]")
+
+                split_labels = "".join(f"[vs{i}]" for i in range(n))
+                fc_lines.append(f"[base]split={n}{split_labels}")
+
+                for i, tl in enumerate(timeline):
+                    chain = (
+                        f"[vs{i}]trim=start={tl['start']:.3f}:end={tl['end']:.3f}"
+                        f",setpts=PTS-STARTPTS"
+                    )
+                    if abs(tl["speed"] - 1.0) > 0.001:
+                        chain += f",setpts={1.0/tl['speed']:.6f}*PTS"
+                    chain += f"[vo{i}]"
+                    fc_lines.append(chain)
+
+                # --- Audio: asplit → atrim+atempo+volume → concat
+                asplit_labels = "".join(f"[as{i}]" for i in range(n))
+                fc_lines.append(f"[0:a]asplit={n}{asplit_labels}")
+
+                for i, tl in enumerate(timeline):
+                    chain = (
+                        f"[as{i}]atrim=start={tl['start']:.3f}:end={tl['end']:.3f}"
+                        f",asetpts=PTS-STARTPTS"
+                    )
+                    if abs(tl["speed"] - 1.0) > 0.001:
+                        chain += f",{_atempo_chain(tl['speed'])}"
+                    seg_vol = 0.0 if tl["muted"] else tl["volume"]
+                    if abs(seg_vol - 1.0) > 0.001 or tl["muted"]:
+                        chain += f",volume={seg_vol:.4f}"
+                    chain += f"[ao{i}]"
+                    fc_lines.append(chain)
+
+                # Concat all segments
+                concat_inputs = "".join(f"[vo{i}][ao{i}]" for i in range(n))
+                fc_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=1[finalv][finala]")
+
+                full_fc = ";".join(fc_lines)
+
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(start),
+                    "-i", video_path,
+                    "-t", str(end - start),
+                    "-filter_complex", full_fc,
+                    "-map", "[finalv]", "-map", "[finala]",
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-preset", enc_preset,
+                    "-crf", str(enc_crf),
+                    "-threads", str(app_settings.FFMPEG_THREADS),
+                    "-c:a", "aac",
+                    "-avoid_negative_ts", "make_zero",
+                ]
+                if app_settings.FFMPEG_FASTSTART:
+                    cmd += ["-movflags", "+faststart"]
+                cmd += ["-progress", "pipe:1"]
+                cmd.append(output_path)
+
+            else:
+                # ── Global speed + volume (original path) ─────────────
+                # --- Speed filter: append setpts to video chain ---
+                if has_speed and vf:
+                    vf = f"{vf},setpts={1.0/speed}*PTS"
+                elif has_speed:
+                    vf = f"setpts={1.0/speed}*PTS"
+
+                # --- Audio filter chain: atempo + volume ---
+                af_parts: list[str] = []
+                if has_speed:
+                    atempo = _atempo_chain(speed)
+                    if atempo:
+                        af_parts.append(atempo)
+                if has_volume:
+                    if not has_segments:
+                        af_parts.append(f"volume={volume:.2f}")
+                # Per-segment volume overrides using FFmpeg volume expression.
+                # When segments exist, we build a single volume filter with an
+                # if(between()) expression that picks the right gain for each
+                # time range, falling back to the global volume for gaps.
+                if has_segments:
+                    clip_dur_local = end - start
+                    # Build expression: if(between(t,s1,e1),vol1,if(between(t,s2,e2),vol2,...,global))
+                    expr = f"{volume:.4f}"  # fallback = global volume
+                    for seg in reversed(segments):  # reversed so first segment is outermost if()
+                        seg_start = max(0, seg["start"] - start)
+                        seg_end = min(clip_dur_local, seg["end"] - start)
+                        seg_vol = 0.0 if seg.get("muted", False) else seg.get("volume", 1.0)
+                        expr = f"if(between(t\\,{seg_start:.3f}\\,{seg_end:.3f})\\,{seg_vol:.4f}\\,{expr})"
+                    af_parts.append(f"volume='{expr}':eval=frame")
+                af = ",".join(af_parts) if af_parts else None
+
+                cmd = [
+                    "ffmpeg", "-y",
+                    "-ss", str(start),
+                    "-i", video_path,
+                    "-t", str(end - start),
+                ]
+                if vf:
+                    if is_complex:
+                        cmd += ["-filter_complex", vf, "-map", "[out]", "-map", "0:a?"]
+                    else:
+                        cmd += ["-vf", vf]
+                if af:
+                    cmd += ["-af", af]
+                cmd += [
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-preset", enc_preset,
+                    "-crf", str(enc_crf),
+                    "-threads", str(app_settings.FFMPEG_THREADS),
+                    "-c:a", "aac",
+                    "-avoid_negative_ts", "make_zero",
+                ]
+                if app_settings.FFMPEG_FASTSTART:
+                    cmd += ["-movflags", "+faststart"]
+                cmd += ["-progress", "pipe:1"]
+                cmd.append(output_path)
 
             logger.info("FFmpeg export command for clip %s: %s", clip_id, " ".join(cmd))
             logger.info("FFmpeg filter chain for clip %s: %s", clip_id, vf or "(none)")
@@ -2142,7 +2286,13 @@ async def export_clip(
             # Track encoding progress with ETA via FFmpeg -progress output
             import time as _time
             _enc_start = _time.monotonic()
-            _clip_dur = (end - start) / speed if has_speed else (end - start)
+            if has_seg_speed:
+                # Compute expected output duration from per-segment speeds
+                _clip_dur = sum((tl["end"] - tl["start"]) / tl["speed"] for tl in timeline)
+            elif has_speed:
+                _clip_dur = (end - start) / speed
+            else:
+                _clip_dur = (end - start)
             _last_notify_time = _enc_start
             _current_out_time = 0.0
             _stderr_chunks: list[bytes] = []
@@ -2264,9 +2414,16 @@ async def export_clip(
                     raise RuntimeError(f"Clip export failed: {stderr.decode()[:2000]}")
 
         # QA validation: verify the exported file is valid
+        # Use speed-adjusted duration so the check matches actual output
+        if has_seg_speed:
+            qa_expected_dur = sum((tl["end"] - tl["start"]) / tl["speed"] for tl in timeline)
+        elif has_speed:
+            qa_expected_dur = clip_dur / speed
+        else:
+            qa_expected_dur = clip_dur
         await _validate_export(
             output_path=output_path,
-            expected_duration=clip_dur,
+            expected_duration=qa_expected_dur,
             aspect_ratio=aspect_ratio,
             subtitles_enabled=subtitles_enabled,
             export_quality=export_quality,
