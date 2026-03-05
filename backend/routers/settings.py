@@ -7,7 +7,7 @@ import time
 import uuid
 
 import httpx
-from fastapi import APIRouter, File, UploadFile, Form
+from fastapi import APIRouter, File, Request, UploadFile, Form
 from pydantic import BaseModel
 
 from typing import Optional
@@ -1544,3 +1544,52 @@ async def serve_site_upload(filename: str):
         return JSONResponse(status_code=404, content={"error": "not found"})
     from fastapi.responses import FileResponse
     return FileResponse(fpath)
+
+
+# ═══════════════════════════════════════════════════════════════
+# UI State Sync — persists frontend localStorage to the server
+# so settings stay consistent across browsers.
+# ═══════════════════════════════════════════════════════════════
+
+UI_STATE_PATH = os.path.join(_DATA_DIR, "ui_state.json")
+
+
+def _load_ui_state() -> dict:
+    if os.path.exists(UI_STATE_PATH):
+        try:
+            with open(UI_STATE_PATH, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_ui_state(state: dict):
+    os.makedirs(os.path.dirname(UI_STATE_PATH), exist_ok=True)
+    with open(UI_STATE_PATH, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+@router.get("/ui-state")
+async def get_ui_state():
+    """Return all persisted frontend UI state (settings, segments, etc.)."""
+    return _load_ui_state()
+
+
+@router.put("/ui-state")
+async def put_ui_state(request: Request):
+    """Merge incoming UI state into the persisted file.
+
+    Accepts a JSON object of localStorage key→value pairs.  Values that
+    are ``null`` delete the key from the persisted state so that
+    localStorage.removeItem propagates to other browsers.
+    """
+    incoming = await request.json()
+    state = _load_ui_state()
+    for key, value in incoming.items():
+        if value is None:
+            state.pop(key, None)
+        else:
+            state[key] = value
+    _save_ui_state(state)
+    return {"status": "saved", "keys": len(state)}
