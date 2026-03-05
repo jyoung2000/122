@@ -1786,7 +1786,7 @@ async def export_clip(
         # Generate ASS subtitle file if subtitles are enabled
         if subtitles_enabled and transcript:
             settings = subtitle_settings or {}
-            segments = [
+            transcript_segments = [
                 TranscriptSegment(**s) if isinstance(s, dict) else s
                 for s in transcript
             ]
@@ -1811,7 +1811,7 @@ async def export_clip(
                 out_w, out_h = video_width, video_height
 
             ass_content = generate_ass(
-                segments=segments,
+                segments=transcript_segments,
                 start_time=start,
                 end_time=end,
                 font=settings.get("font", "DM Sans"),
