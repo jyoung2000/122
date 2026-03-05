@@ -294,13 +294,16 @@ export default function VideoEditor({
     [segments, activeSegmentId],
   );
 
-  // controlTargetSegment — ONLY set when user explicitly selects a segment.
-  // This is what controls (volume, speed, mute) modify.
-  const controlTargetSegment = selectedSegment; // Never falls back to activeSegment
+  // controlTargetSegment — The segment that controls (volume, speed, mute)
+  // modify.  Falls back to the segment the playhead is currently inside so
+  // that changes match what the user sees in the control bar.  When no
+  // segment is selected AND the playhead is outside all segments, this is
+  // null and changes go to the global clip settings.
+  const controlTargetSegment = selectedSegment || activeSegment;
 
   // displaySegment — What the controls DISPLAY.
   // Shows selected segment's values if selected, else active segment's values.
-  const displaySegment = selectedSegment || activeSegment;
+  const displaySegment = controlTargetSegment;
 
   // Backward compat alias — used in controls bar class
   const effectiveSegment = displaySegment;
@@ -2437,34 +2440,34 @@ export default function VideoEditor({
           </div>
 
           {/* Speed — segment-aware */}
-          <div className="ve-speed" onClick={(e) => e.stopPropagation()}>
-            {(() => {
-              const dispSpeed = displaySegment ? (displaySegment.speed || 1.0) : speed;
-              return (
-                <button
-                  className={`ve-speed__btn${dispSpeed !== 1.0 ? ' ve-speed__btn--active' : ''}`}
-                  onClick={() => setShowSpeedMenu((v) => !v)}
-                  title={displaySegment ? 'Segment playback speed' : 'Playback speed'}
-                >
-                  {dispSpeed}x
-                </button>
-              );
-            })()}
-            {showSpeedMenu && (
-              <div className="ve-speed__dropdown" onClick={(e) => e.stopPropagation()}>
-                {SPEED_PRESETS.map((p) => (
-                  <button
-                    key={p.value}
-                    className={`ve-speed__option${speed === p.value ? ' ve-speed__option--current' : ''}`}
-                    onClick={() => selectSpeed(p.value)}
-                  >
-                    {p.value}x
-                    {p.label && <span className="ve-speed__option-label">{p.label}</span>}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+          {(() => {
+            const dispSpeed = displaySegment ? (displaySegment.speed || 1.0) : speed;
+            return (
+            <div className="ve-speed" onClick={(e) => e.stopPropagation()}>
+              <button
+                className={`ve-speed__btn${dispSpeed !== 1.0 ? ' ve-speed__btn--active' : ''}`}
+                onClick={() => setShowSpeedMenu((v) => !v)}
+                title={displaySegment ? 'Segment playback speed' : 'Playback speed'}
+              >
+                {dispSpeed}x
+              </button>
+              {showSpeedMenu && (
+                <div className="ve-speed__dropdown" onClick={(e) => e.stopPropagation()}>
+                  {SPEED_PRESETS.map((p) => (
+                    <button
+                      key={p.value}
+                      className={`ve-speed__option${dispSpeed === p.value ? ' ve-speed__option--current' : ''}`}
+                      onClick={() => selectSpeed(p.value)}
+                    >
+                      {p.value}x
+                      {p.label && <span className="ve-speed__option-label">{p.label}</span>}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            );
+          })()}
 
           {/* Active segment indicator */}
           {displaySegment && (
