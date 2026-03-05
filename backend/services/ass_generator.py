@@ -400,7 +400,10 @@ def generate_ass(
     # Pre-compute active word ASS colors
     if active_word_enabled:
         aw_color = _hex_to_ass_color(active_word_color)
-        aw_outline = _hex_to_ass_color(active_word_outline_color)
+        # Use the same outline color+alpha as the style so the active word
+        # outline matches non-active words (prevents thicker/darker outline
+        # on the highlighted word).
+        aw_outline = style_outline_color
         aw_bg = None
         if active_word_bg_opacity > 0:
             aw_bg = _hex_to_ass_color_with_alpha(
@@ -438,15 +441,13 @@ def generate_ass(
         if active_word_enabled:
             prefix = f"{speaker}: " if show_speaker_labels and speaker else ""
 
-            # When background is enabled, skip the base text layer — the word
-            # highlight events already render all text and each inherits the
-            # Style's BorderStyle=3 background box.  Having BOTH layers would
-            # cause two semi-transparent boxes to overlap, doubling the opacity.
-            if not background_enabled:
-                # Add base text event on Layer 0 (full segment, no highlight)
-                base_bord_override = f"{{{bord_tag}}}" if bord_tag else ""
-                base_event_text = f"{base_bord_override}{prefix}{safe_text}" if prefix else f"{base_bord_override}{safe_text}"
-                base_text_events.append((clip_start, clip_end, style_name, base_event_text))
+            # Skip the base text layer entirely when active word is
+            # enabled — the per-word highlight events already render ALL
+            # words (active + non-active) for every time slot.  Having
+            # both layers causes doubled outlines/shadows that create
+            # visible "black bars" around words in the exported video.
+            # (Previously this skip only applied to background mode, but
+            # the same doubling problem occurs with BorderStyle=1 outlines.)
 
             # --- Per-word highlight events ---
             words = safe_text.split()

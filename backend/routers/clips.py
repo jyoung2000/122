@@ -125,6 +125,15 @@ async def export_clip_endpoint(
         logger.info("[SubjectTracking] clip %s: no scene data in job — using default center crop", req.clip_id)
 
     export_key = f"{job_id}_{req.clip_id}"
+
+    # Prevent duplicate exports: if an export for this clip is already
+    # in progress, reject the second request instead of creating a
+    # parallel task that would race and double-export.
+    existing_task = _active_export_tasks.get(export_key)
+    if existing_task and not existing_task.done():
+        logger.info("Export already in progress for %s — ignoring duplicate request", export_key)
+        return {"export_id": export_key, "status": "exporting", "duplicate": True}
+
     cancel_event = asyncio.Event()
     _export_cancel_events[export_key] = cancel_event
 
@@ -313,6 +322,13 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
 
     # Use clip_id=0 to denote full-video export (matches frontend's ${jobId}_0 convention)
     export_key = f"{job_id}_0"
+
+    # Prevent duplicate exports
+    existing_task = _active_export_tasks.get(export_key)
+    if existing_task and not existing_task.done():
+        logger.info("Full video export already in progress for %s — ignoring duplicate request", export_key)
+        return {"export_id": export_key, "status": "exporting", "duplicate": True}
+
     cancel_event = asyncio.Event()
     _export_cancel_events[export_key] = cancel_event
 
