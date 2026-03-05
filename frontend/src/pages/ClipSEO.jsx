@@ -150,8 +150,22 @@ export default function ClipSEO() {
   const [startText, setStartText] = useState('');
   const [endText, setEndText] = useState('');
 
-  // Clip settings — managed by ClipSettingsPanel, received via onSettingsChange
-  const [clipSettings, setClipSettings] = useState({});
+  // Clip settings — managed by ClipSettingsPanel, received via onSettingsChange.
+  // Load from localStorage so settings persist across page reloads immediately.
+  const [clipSettings, setClipSettings] = useState(() => {
+    try {
+      const saved = localStorage.getItem('clipai_clip_settings');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return {};
+  });
+  // Persist clipSettings to localStorage whenever they change
+  useEffect(() => {
+    if (clipSettings && Object.keys(clipSettings).length > 0) {
+      try { localStorage.setItem('clipai_clip_settings', JSON.stringify(clipSettings)); } catch {}
+    }
+  }, [clipSettings]);
+
   const [currentWordIdx, setCurrentWordIdx] = useState(-1);
   const [settingsAppliedFlash, setSettingsAppliedFlash] = useState(false);
   const settingsFlashTimerRef = useRef(null);

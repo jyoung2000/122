@@ -237,37 +237,51 @@ export default function Analysis() {
   const [activityLog, setActivityLog] = useState([]);
   const [logExpanded, setLogExpanded] = useState(true);
   const logEndRef = useRef(null);
-  // Initialize with defaults so ClipPreview renders immediately when a clip
-  // is selected, even before ClipSettingsPanel mounts and fires its callback.
-  const [clipSettings, setClipSettings] = useState({
-    aspectRatio: null,
-    subtitlesEnabled: false,
-    subtitleFont: 'DM Sans',
-    subtitleSize: 30,
-    subtitleFontWeight: 'bold',
-    subtitleFontColor: '#FFFFFF',
-    subtitlePosition: 'bottom',
-    speakerColors: {},
-    subtitleBgEnabled: false,
-    subtitleBgColor: '#000000',
-    subtitleBgOpacity: 75,
-    subtitleBgRadius: 0,
-    subtitleOutlineColor: '#000000',
-    subtitleOutlineOpacity: 100,
-    subtitleOutlineWidth: 2,
-    showSpeakerLabels: false,
-    subtitleMaxWidth: 90,
-    subtitleOffsetV: 4,
-    subtitleMaxWords: 0,
-    activeWordEnabled: false,
-    activeWordColor: '#FFD700',
-    activeWordOutlineColor: '#000000',
-    activeWordBgColor: '#000000',
-    activeWordBgOpacity: 0,
-    useSpeakerColors: true,
-    playbackVolume: 100,
-    playbackSpeed: 1.0,
+  // Initialize with defaults, merged with any saved settings from localStorage
+  // so settings persist across page reloads (ClipSettingsPanel will also
+  // fire its callback on mount, keeping them in sync).
+  const [clipSettings, setClipSettings] = useState(() => {
+    const defaults = {
+      aspectRatio: null,
+      subtitlesEnabled: false,
+      subtitleFont: 'DM Sans',
+      subtitleSize: 30,
+      subtitleFontWeight: 'bold',
+      subtitleFontColor: '#FFFFFF',
+      subtitlePosition: 'bottom',
+      speakerColors: {},
+      subtitleBgEnabled: false,
+      subtitleBgColor: '#000000',
+      subtitleBgOpacity: 75,
+      subtitleBgRadius: 0,
+      subtitleOutlineColor: '#000000',
+      subtitleOutlineOpacity: 100,
+      subtitleOutlineWidth: 2,
+      showSpeakerLabels: false,
+      subtitleMaxWidth: 90,
+      subtitleOffsetV: 4,
+      subtitleMaxWords: 0,
+      activeWordEnabled: false,
+      activeWordColor: '#FFD700',
+      activeWordOutlineColor: '#000000',
+      activeWordBgColor: '#000000',
+      activeWordBgOpacity: 0,
+      useSpeakerColors: true,
+      playbackVolume: 100,
+      playbackSpeed: 1.0,
+    };
+    try {
+      const saved = localStorage.getItem('clipai_clip_settings');
+      if (saved) return { ...defaults, ...JSON.parse(saved) };
+    } catch {}
+    return defaults;
   });
+  // Persist clipSettings to localStorage whenever they change, so settings
+  // survive page reload even if ClipSettingsPanel isn't mounted.
+  useEffect(() => {
+    try { localStorage.setItem('clipai_clip_settings', JSON.stringify(clipSettings)); } catch {}
+  }, [clipSettings]);
+
   // VideoEditor state for export params
   const [editorTrim, setEditorTrim] = useState({ trimStart: 0, trimEnd: 0 });
   const [editorVolume, setEditorVolume] = useState(1.0);
