@@ -318,6 +318,12 @@ export default function Analysis() {
   // Track applied trim ranges so the trimmed region becomes the full video
   const [fullVideoRange, setFullVideoRange] = useState(null); // { start, end } for full video editor
   const [showInlineSubSettings, setShowInlineSubSettings] = useState(false);
+
+  // ── Mark Key Scene inline state ──
+  const [showMarkScene, setShowMarkScene] = useState(false);
+  const [markSceneDesc, setMarkSceneDesc] = useState('');
+  const [markSceneScore, setMarkSceneScore] = useState(8);
+  const [markSceneSaving, setMarkSceneSaving] = useState(false);
   const [inlineCustomFonts, setInlineCustomFonts] = useState([]);
 
   // Fetch custom fonts for the inline subtitle settings panel
@@ -364,6 +370,35 @@ export default function Analysis() {
       setLoading(false);
     }
   }, [jobId]);
+
+  const handleMarkKeyScene = useCallback(async () => {
+    if (!markSceneDesc.trim() || markSceneSaving) return;
+    setMarkSceneSaving(true);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/scenes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          timestamp: videoCurrentTime,
+          description: markSceneDesc.trim(),
+          importance_score: markSceneScore,
+        }),
+      });
+      if (res.ok) {
+        showToast(`Key scene marked at ${formatDuration(videoCurrentTime)}`, 'success');
+        setMarkSceneDesc('');
+        setMarkSceneScore(8);
+        setShowMarkScene(false);
+        fetchJob();
+      } else {
+        showToast('Failed to mark key scene', 'error');
+      }
+    } catch {
+      showToast('Failed to mark key scene', 'error');
+    } finally {
+      setMarkSceneSaving(false);
+    }
+  }, [jobId, videoCurrentTime, markSceneDesc, markSceneScore, markSceneSaving, fetchJob]);
 
   const pushLog = useCallback((type, message, extra) => {
     const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -945,6 +980,23 @@ export default function Analysis() {
           {showInlineSubSettings ? 'Hide Settings' : 'Subtitle Settings'}
         </button>
       )}
+      {/* Mark Key Scene — adds current playhead position as a keyscene for AI clip generation */}
+      <button
+        onClick={() => setShowMarkScene(v => !v)}
+        title="Mark current moment as a key scene for AI clip generation"
+        style={{
+          display: 'flex', alignItems: 'center', gap: 4,
+          padding: '5px 10px', fontSize: 11, fontWeight: 600,
+          background: showMarkScene ? 'var(--accent-amber-dim, rgba(255,159,10,0.12))' : 'var(--bg-elevated)',
+          color: showMarkScene ? 'var(--accent-amber, #FF9F0A)' : 'var(--text-secondary)',
+          border: `1px solid ${showMarkScene ? 'var(--accent-amber, #FF9F0A)' : 'var(--border)'}`,
+          borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
+        }}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+        </svg>
+        Mark Key Scene
+      </button>
       {/* Apply Settings — confirms to user that current settings will be used for export */}
       <button
         onClick={() => {
@@ -973,6 +1025,79 @@ export default function Analysis() {
       </button>
     </div>
   );
+
+  const renderMarkScenePanel = () => {
+    if (!showMarkScene) return null;
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
+        background: 'var(--bg-panel)', borderTop: '1px solid var(--border)',
+        flexWrap: 'wrap', marginTop: -1,
+      }}>
+        <span style={{
+          fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--accent-amber, #FF9F0A)',
+          textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap',
+        }}>
+          {formatDuration(videoCurrentTime)}
+        </span>
+        <input
+          type="text"
+          value={markSceneDesc}
+          onChange={(e) => setMarkSceneDesc(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') handleMarkKeyScene(); }}
+          placeholder="Describe this moment (e.g. 'dramatic reveal', 'emotional reaction')..."
+          style={{
+            flex: 1, minWidth: 180, padding: '5px 10px', fontSize: 12,
+            background: 'var(--bg-elevated)', color: 'var(--text-primary)',
+            border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+            outline: 'none',
+          }}
+          autoFocus
+        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>Score:</span>
+          <select
+            value={markSceneScore}
+            onChange={(e) => setMarkSceneScore(parseInt(e.target.value))}
+            style={{
+              padding: '4px 6px', fontSize: 11, background: 'var(--bg-elevated)',
+              color: 'var(--text-primary)', border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+            }}
+          >
+            {[10, 9, 8, 7, 6, 5, 4, 3, 2, 1].map(v => (
+              <option key={v} value={v}>{v}{v >= 9 ? ' - viral' : v >= 7 ? ' - compelling' : v >= 4 ? ' - interesting' : ''}</option>
+            ))}
+          </select>
+        </div>
+        <button
+          onClick={handleMarkKeyScene}
+          disabled={markSceneSaving || !markSceneDesc.trim()}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 4,
+            padding: '5px 12px', fontSize: 11, fontWeight: 600,
+            background: markSceneDesc.trim() ? 'var(--accent-amber, #FF9F0A)' : 'var(--bg-elevated)',
+            color: markSceneDesc.trim() ? '#fff' : 'var(--text-muted)',
+            border: 'none', borderRadius: 'var(--radius-sm)',
+            cursor: markSceneDesc.trim() ? 'pointer' : 'not-allowed',
+            whiteSpace: 'nowrap', opacity: markSceneSaving ? 0.6 : 1,
+          }}
+        >
+          {markSceneSaving ? 'Saving...' : 'Add'}
+        </button>
+        <button
+          onClick={() => { setShowMarkScene(false); setMarkSceneDesc(''); }}
+          style={{
+            padding: '5px 8px', fontSize: 11, background: 'transparent',
+            color: 'var(--text-muted)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+    );
+  };
 
   const renderInlineSubPanel = () => {
     if (!showInlineSubSettings || isMobile) return null;
@@ -1205,6 +1330,7 @@ export default function Analysis() {
             )}
             {/* Inline subtitle settings for clip preview */}
             {renderInlineSubToolbar(null)}
+            {renderMarkScenePanel()}
             {renderInlineSubPanel()}
           </div>
         ) : (
@@ -1276,6 +1402,7 @@ export default function Analysis() {
                 <div style={{ width: 1, height: 20, background: 'var(--border)', margin: '0 4px' }} />
               </>
             )}
+            {renderMarkScenePanel()}
             {renderInlineSubPanel()}
           </div>
         )}
