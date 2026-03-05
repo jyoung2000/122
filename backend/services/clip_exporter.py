@@ -397,48 +397,63 @@ def _validate_ass_settings(
     # 14. Active word colors (spot-check)
     if active_word_enabled and has_override_tags:
         expected_aw_color = _hex_to_ass_color(active_word_color)
-        expected_aw_outline = _hex_to_ass_color(active_word_outline_color)
         # Check that at least one event contains the expected active word color
         aw_color_found = any(expected_aw_color.upper() in ev["Text"].upper() for ev in events)
         if not aw_color_found:
             warnings.append(
                 f"Active word color {expected_aw_color} not found in any dialogue event"
             )
-        # Active word outline color only applies when background is OFF
-        # (BorderStyle=1).  With BorderStyle=3, \3c controls box color and
-        # must NOT be overridden per-word — the Style provides the uniform box.
+        # Active word outline: with the minimal-tag approach, \3c is set
+        # once in the bord_tag prefix (not per-word).  Verify the outline
+        # color appears in the event prefix, not as per-word inline tags.
         if not background_enabled:
-            aw_outline_found = any(expected_aw_outline.upper() in ev["Text"].upper() for ev in events)
-            if not aw_outline_found:
+            expected_outline_in_prefix = _hex_to_ass_color_with_alpha(
+                settings.get("outline_color", "#000000"),
+                settings.get("outline_opacity", 100),
+            )
+            outline_in_prefix = any(
+                expected_outline_in_prefix.upper() in ev["Text"].upper()
+                for ev in events
+            )
+            if not outline_in_prefix:
                 warnings.append(
-                    f"Active word outline color {expected_aw_outline} not found in any dialogue event"
+                    f"Active word outline color {expected_outline_in_prefix} "
+                    f"not found in any dialogue event prefix"
                 )
 
-    # 14aa. BorderStyle=3 + inline \3c/\bord/\shad conflict detection
-    # With BorderStyle=3, \3c = box color, \bord = box padding.  Inline
-    # overrides of these per-word would change the background box color/size
-    # for individual words, causing double-clip artifacts and mismatched
-    # background appearance vs the preview player.
-    if background_enabled and active_word_enabled and has_override_tags:
-        has_3c_override = any("\\3c" in ev["Text"] for ev in events)
-        if has_3c_override:
+    # 14aa. Per-word \3c/\bord/\shad conflict detection for active word mode.
+    # When active word highlighting is enabled, only \c (text color) should
+    # be used per-word.  Per-word \3c/\bord/\shad tags cause libass to
+    # render each word as a separate segment with an independent shadow box,
+    # producing visible "black bars" around words.  This applies to ALL
+    # BorderStyles, not just BorderStyle=3.
+    if active_word_enabled and has_override_tags:
+        # Count events where \3c appears MORE than once (the bord_tag prefix
+        # is allowed to set \3c once — multiple \3c means per-word overrides).
+        events_with_multi_3c = sum(
+            1 for ev in events if ev["Text"].count("\\3c") > 1
+        )
+        if events_with_multi_3c > 0:
             warnings.append(
-                "BorderStyle=3 (background) + inline \\3c tags detected — "
-                "per-word \\3c overrides change the box color, causing "
-                "double-clip artifacts (should only use \\c for text color)"
+                f"Per-word \\3c overrides detected in {events_with_multi_3c} events — "
+                "this causes libass to render separate shadow boxes per word "
+                "(black bars). Only \\c should vary per word."
             )
-        has_bord_override = any("\\bord" in ev["Text"] for ev in events)
-        if has_bord_override:
+        events_with_multi_bord = sum(
+            1 for ev in events if ev["Text"].count("\\bord") > 1
+        )
+        if events_with_multi_bord > 0:
             warnings.append(
-                "BorderStyle=3 (background) + inline \\bord tags detected — "
-                "per-word \\bord overrides change box padding, causing "
-                "inconsistent background sizing"
+                f"Per-word \\bord overrides detected in {events_with_multi_bord} events — "
+                "this causes per-word shadow box rendering (black bars)"
             )
-        has_shad_override = any("\\shad" in ev["Text"] for ev in events)
-        if has_shad_override:
+        events_with_multi_shad = sum(
+            1 for ev in events if ev["Text"].count("\\shad") > 1
+        )
+        if events_with_multi_shad > 0:
             warnings.append(
-                "BorderStyle=3 (background) + inline \\shad tags detected — "
-                "per-word \\shad overrides are unnecessary with Shadow=0"
+                f"Per-word \\shad overrides detected in {events_with_multi_shad} events — "
+                "this causes per-word shadow box rendering (black bars)"
             )
 
     # 14b. Active word background color (\4c)

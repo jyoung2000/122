@@ -452,19 +452,12 @@ def generate_ass(
             # --- Per-word highlight events ---
             words = safe_text.split()
             if len(words) <= 1:
-                # Single word — just color the whole event with active word color
-                if background_enabled:
-                    # BorderStyle=3: \3c = box color (not outline).  Don't override
-                    # \3c/\bord/\shad — let the Style definition provide the
-                    # uniform background box.  Only change text color (\c).
-                    # Never emit \4c with BorderStyle=3: it sets BackColour which
-                    # causes visible shadow artifacts even with Shadow=0.
-                    aw_tags = f"\\c{aw_color}"
-                else:
-                    aw_tags = f"\\c{aw_color}\\3c{aw_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                    if aw_bg:
-                        aw_tags += f"\\4c{aw_bg}"
-                event_text = f"{prefix}{{{aw_tags}}}{safe_text}"
+                # Single word — just color the whole event with active word color.
+                # Only override \c (text color).  Outline/border/shadow come from
+                # bord_tag prefix + Style definition to avoid per-word shadow boxes.
+                bord_prefix = "{" + bord_tag + "}" if bord_tag else ""
+                aw_tags = f"\\c{aw_color}"
+                event_text = f"{bord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
                 pending_word_events.append((clip_start, clip_end, style_name, event_text))
             elif seg_word_ts and len(seg_word_ts) == len(words):
                 # Real per-word timestamps from Whisper — use them directly.
@@ -487,7 +480,6 @@ def generate_ass(
                 # gaps between words, keeping the last highlighted word visible.
                 _WORD_ANTICIPATION_S = 0.10
                 base_color = _hex_to_ass_color(speaker_color_map[speaker])
-                base_outline = style_outline_color
 
                 for word_idx in range(len(words)):
                     w_start, w_end, _ = seg_word_ts[word_idx]
@@ -506,43 +498,27 @@ def generate_ass(
 
                     # Build text with inline overrides on the active word.
                     #
-                    # BorderStyle=3 (background box):
-                    #   Minimize tag boundaries — each override block can cause
-                    #   libass to create a separate box segment, producing visible
-                    #   seams ("black bars") at word boundaries.  Use a single
-                    #   \c tag at the start for base color and only add overrides
-                    #   around the active word.  Never emit \4c (BackColour) as
-                    #   it causes shadow artifacts even with Shadow=0.
-                    #
-                    # BorderStyle=1 (outline):
-                    #   Full per-word overrides (\c, \3c, \bord, \shad) to
-                    #   guarantee consistent stroke rendering.
-                    if background_enabled:
-                        # Minimal-tag approach: base color at start, override
-                        # only around the active word.
-                        before = " ".join(words[:word_idx])
-                        active = words[word_idx]
-                        after = " ".join(words[word_idx + 1:])
-                        base_tag = "{" + f"\\c{base_color}" + "}"
-                        aw_tag = "{" + f"\\c{aw_color}" + "}"
-                        parts = []
-                        if before:
-                            parts.append(f"{base_tag}{before} ")
-                        parts.append(f"{aw_tag}{active}")
-                        if after:
-                            parts.append(f" {base_tag}{after}")
-                        event_text = prefix + "".join(parts)
-                    else:
-                        parts = []
-                        for i, w in enumerate(words):
-                            if i == word_idx:
-                                tags = f"\\c{aw_color}\\3c{aw_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                                if aw_bg:
-                                    tags += f"\\4c{aw_bg}"
-                            else:
-                                tags = f"\\c{base_color}\\3c{base_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                            parts.append(f"{{{tags}}}{w}")
-                        event_text = prefix + " ".join(parts)
+                    # Minimal-tag approach for BOTH BorderStyle=3 and
+                    # BorderStyle=1: only change \c (text color) around the
+                    # active word.  Outline, border, and shadow are set ONCE
+                    # via bord_tag at the start of the event and inherited by
+                    # every word.  Giving each word its own \3c/\bord/\shad
+                    # tags causes libass to treat each word as a separate
+                    # rendering segment with an independent shadow box,
+                    # producing visible "black bars" around words.
+                    before = " ".join(words[:word_idx])
+                    active = words[word_idx]
+                    after = " ".join(words[word_idx + 1:])
+                    bord_prefix = "{" + bord_tag + "}" if bord_tag else ""
+                    base_tag = "{" + f"\\c{base_color}" + "}"
+                    aw_tag = "{" + f"\\c{aw_color}" + "}"
+                    parts = []
+                    if before:
+                        parts.append(f"{base_tag}{before} ")
+                    parts.append(f"{aw_tag}{active}")
+                    if after:
+                        parts.append(f" {base_tag}{after}")
+                    event_text = bord_prefix + prefix + "".join(parts)
                     pending_word_events.append((w_start, w_end, style_name, event_text))
             else:
                 # Fallback: character-proportional estimation
@@ -566,7 +542,6 @@ def generate_ass(
                     "its", "this", "that",
                 })
                 base_color = _hex_to_ass_color(speaker_color_map[speaker])
-                base_outline = style_outline_color
                 total_chars = sum(len(w) for w in words)
                 if total_chars == 0:
                     total_chars = 1
@@ -632,31 +607,21 @@ def generate_ass(
                     shifted_start = max(clip_start, current_time - anticipation)
 
                     # Build text with inline overrides on the active word.
-                    # Same BorderStyle-aware logic as the real-timestamp path.
-                    if background_enabled:
-                        before = " ".join(words[:word_idx])
-                        active = words[word_idx]
-                        after = " ".join(words[word_idx + 1:])
-                        base_tag = "{" + f"\\c{base_color}" + "}"
-                        aw_tag = "{" + f"\\c{aw_color}" + "}"
-                        parts = []
-                        if before:
-                            parts.append(f"{base_tag}{before} ")
-                        parts.append(f"{aw_tag}{active}")
-                        if after:
-                            parts.append(f" {base_tag}{after}")
-                        event_text = prefix + "".join(parts)
-                    else:
-                        parts = []
-                        for i, w in enumerate(words):
-                            if i == word_idx:
-                                tags = f"\\c{aw_color}\\3c{aw_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                                if aw_bg:
-                                    tags += f"\\4c{aw_bg}"
-                            else:
-                                tags = f"\\c{base_color}\\3c{base_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                            parts.append(f"{{{tags}}}{w}")
-                        event_text = prefix + " ".join(parts)
+                    # Minimal-tag approach: only change \c (text color).
+                    # Outline/shadow set once via bord_tag prefix.
+                    before = " ".join(words[:word_idx])
+                    active = words[word_idx]
+                    after = " ".join(words[word_idx + 1:])
+                    bord_prefix = "{" + bord_tag + "}" if bord_tag else ""
+                    base_tag = "{" + f"\\c{base_color}" + "}"
+                    aw_tag = "{" + f"\\c{aw_color}" + "}"
+                    parts = []
+                    if before:
+                        parts.append(f"{base_tag}{before} ")
+                    parts.append(f"{aw_tag}{active}")
+                    if after:
+                        parts.append(f" {base_tag}{after}")
+                    event_text = bord_prefix + prefix + "".join(parts)
                     pending_word_events.append((shifted_start, word_end, style_name, event_text))
                     current_time = word_end
         else:
