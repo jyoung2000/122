@@ -1107,6 +1107,10 @@ export default function Analysis() {
                 if (clipPreview) clipSegmentsMapRef.current[clipPreview.id] = segs;
               }}
               initialSegments={editorSegments}
+              settings={clipSettings}
+              speakers={speakers}
+              speakerNames={job.speaker_names}
+              onSettingsChange={setClipSettings}
               onClose={() => {
                 if (clipPreview) {
                   clipSegmentsMapRef.current[clipPreview.id] = editorSegments;
@@ -1178,6 +1182,10 @@ export default function Analysis() {
               onSpeedChange={setEditorSpeed}
               onSegmentsChange={setEditorSegments}
               initialSegments={editorSegments}
+              settings={clipSettings}
+              speakers={speakers}
+              speakerNames={job.speaker_names}
+              onSettingsChange={setClipSettings}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={videoCurrentTime}

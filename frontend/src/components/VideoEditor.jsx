@@ -186,6 +186,11 @@ export default function VideoEditor({
   onClose,
   subtitleOverlay,
   compact = false,
+  // Settings-panel integration
+  settings,
+  speakers,
+  speakerNames,
+  onSettingsChange,
 }) {
   const { isMobile } = useResponsive();
   const videoRef = useRef(null);
@@ -379,19 +384,46 @@ export default function VideoEditor({
   }, [clipStart, clipEnd, src]);
 
   // ── Sync volume/speed from settings panel ──────────
+  // When a segment is selected, route changes to that segment instead of global.
   useEffect(() => {
     if (initialVolume == null || initialVolume < 0) return;
-    setVolume(initialVolume);
-    setPrevVolume(initialVolume);
-    if (initialVolume === 0) setIsMuted(true);
-    else setIsMuted(false);
+    if (selectedSegmentId) {
+      // Route to selected segment
+      const seg = segments.find(s => s.id === selectedSegmentId);
+      if (seg) {
+        const next = segments.map(s => s.id === selectedSegmentId
+          ? { ...s, volume: initialVolume, muted: initialVolume === 0 }
+          : s
+        );
+        setSegments(next);
+        onSegmentsChange?.(next);
+      }
+    } else {
+      setVolume(initialVolume);
+      setPrevVolume(initialVolume);
+      if (initialVolume === 0) setIsMuted(true);
+      else setIsMuted(false);
+    }
   }, [initialVolume]);
 
   useEffect(() => {
     if (initialSpeed == null || initialSpeed <= 0) return;
-    setSpeed(initialSpeed);
-    if (videoRef.current) {
-      videoRef.current.playbackRate = initialSpeed;
+    if (selectedSegmentId) {
+      // Route to selected segment
+      const seg = segments.find(s => s.id === selectedSegmentId);
+      if (seg) {
+        const next = segments.map(s => s.id === selectedSegmentId
+          ? { ...s, speed: initialSpeed }
+          : s
+        );
+        setSegments(next);
+        onSegmentsChange?.(next);
+      }
+    } else {
+      setSpeed(initialSpeed);
+      if (videoRef.current) {
+        videoRef.current.playbackRate = initialSpeed;
+      }
     }
   }, [initialSpeed]);
 
@@ -1862,6 +1894,59 @@ export default function VideoEditor({
           </div>
         )}
       </div>
+
+      {/* ── Speaker Color Editor (below timeline, above controls) ── */}
+      {speakers && speakers.length > 0 && settings?.subtitlesEnabled && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
+          padding: '4px 12px',
+          background: 'var(--ve-chrome-bg)',
+          borderTop: '1px solid var(--ve-chrome-border)',
+          fontSize: 9,
+        }}>
+          <span style={{
+            fontSize: 8, fontWeight: 700, letterSpacing: '0.05em',
+            textTransform: 'uppercase', color: 'var(--ve-text-muted)',
+            marginRight: 2,
+          }}>
+            Speaker Colors
+          </span>
+          {speakers.map((spk) => {
+            const color = settings?.speakerColors?.[spk] || '#00D9FF';
+            const displayName = speakerNames?.[spk] || spk;
+            return (
+              <label key={spk} style={{
+                display: 'inline-flex', alignItems: 'center', gap: 3,
+                cursor: 'pointer',
+              }}>
+                <input
+                  type="color"
+                  value={color}
+                  onChange={(e) => {
+                    e.stopPropagation();
+                    if (onSettingsChange) {
+                      const newColors = { ...(settings?.speakerColors || {}), [spk]: e.target.value };
+                      onSettingsChange({ ...settings, speakerColors: newColors });
+                    }
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  style={{
+                    width: 16, height: 16, padding: 0, border: '1px solid var(--border, #ddd)',
+                    borderRadius: 3, cursor: 'pointer', background: 'none',
+                  }}
+                  title={`Color for ${displayName}`}
+                />
+                <span style={{
+                  color: 'var(--text-secondary, #666)', fontSize: 9,
+                  maxWidth: 80, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                }}>
+                  {displayName}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+      )}
 
       {/* ── Controls bar ── */}
       <div className={`ve-controls${compact ? ' ve-controls--compact' : ''}${selectedSegment ? ' ve-controls--segment-mode' : ''}`}>

@@ -832,6 +832,10 @@ export default function ClipSEO() {
               onSpeedChange={setEditorSpeed}
               onSegmentsChange={setEditorSegments}
               initialSegments={editorSegments}
+              settings={clipSettings}
+              speakers={speakers}
+              speakerNames={job.speaker_names}
+              onSettingsChange={setClipSettings}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={currentTime}
@@ -1046,6 +1050,10 @@ export default function ClipSEO() {
               onSpeedChange={setEditorSpeed}
               onSegmentsChange={setEditorSegments}
               initialSegments={editorSegments}
+              settings={clipSettings}
+              speakers={speakers}
+              speakerNames={job.speaker_names}
+              onSettingsChange={setClipSettings}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={currentTime}
