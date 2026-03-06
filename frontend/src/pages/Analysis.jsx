@@ -431,7 +431,18 @@ export default function Analysis() {
   const prevClipSettingsRef = useRef(clipSettings);
   const [clipPresets, setClipPresets] = useState([]);
   const [selectedPresetId, setSelectedPresetId] = useState('');
+  const [inlinePresetSaveOpen, setInlinePresetSaveOpen] = useState(false);
+  const [inlinePresetName, setInlinePresetName] = useState('');
+  const [inlineActivePreset, setInlineActivePreset] = useState('');
   const fullVideoExporting = encoding.tasks[`${jobId}_0`]?.status === 'encoding';
+
+  // Fetch presets on mount so the preset bar is available from the start
+  useEffect(() => {
+    fetch('/api/clip-presets')
+      .then(r => r.ok ? r.json() : [])
+      .then(data => { if (Array.isArray(data)) setClipPresets(data); })
+      .catch(() => {});
+  }, []);
 
   const fetchJob = useCallback(async () => {
     try {
@@ -1027,6 +1038,202 @@ export default function Analysis() {
   });
   const updateCS = (key, val) => setClipSettings(prev => ({ ...prev, [key]: val }));
 
+  // ── Preset helpers for inline bar ──
+  const handleInlineSavePreset = async () => {
+    const name = inlinePresetName.trim();
+    if (!name) return;
+    const { speakerColors, ...settingsToSave } = clipSettings;
+    try {
+      const res = await fetch('/api/clip-presets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, settings: settingsToSave }),
+      });
+      if (res.ok) {
+        const preset = await res.json();
+        setClipPresets(prev => [...prev, preset]);
+        setInlinePresetName('');
+        setInlinePresetSaveOpen(false);
+        setInlineActivePreset(preset.name);
+        showToast(`Preset "${name}" saved`, 'success');
+      }
+    } catch { showToast('Failed to save preset', 'error'); }
+  };
+
+  const handleInlineLoadPreset = (presetId) => {
+    if (!presetId) return;
+    const preset = clipPresets.find(p => p.id === presetId);
+    if (!preset) return;
+    const merged = { ...clipSettings, ...preset.settings, speakerColors: clipSettings.speakerColors };
+    setClipSettings(merged);
+    setInlineActivePreset(preset.name);
+    showToast(`Preset "${preset.name}" loaded — speed: ${merged.playbackSpeed || 1}x, volume: ${merged.playbackVolume ?? 100}%`, 'info');
+  };
+
+  const handleApplyPresetToSegment = (presetId) => {
+    if (!activeSegment) {
+      showToast('No segment selected — place the playhead inside a timeline segment', 'warning');
+      return;
+    }
+    const preset = presetId ? clipPresets.find(p => p.id === presetId) : null;
+    const settingsToApply = preset ? { ...clipSettings, ...preset.settings, speakerColors: clipSettings.speakerColors } : clipSettings;
+    setEditorSegments(prev =>
+      prev.map(s => s.id === activeSegment.id ? {
+        ...s,
+        subtitlesEnabled: settingsToApply.subtitlesEnabled,
+        playbackSpeed: settingsToApply.playbackSpeed,
+        playbackVolume: settingsToApply.playbackVolume,
+        aspectRatio: settingsToApply.aspectRatio,
+        exportQuality: settingsToApply.exportQuality,
+        subtitleSettings: settingsToApply,
+      } : s)
+    );
+    if (preset) setClipSettings(settingsToApply);
+    showToast(`Settings applied to segment at ${formatDuration(activeSegment.start)}`, 'success');
+  };
+
+  const handleInlineDeletePreset = async (presetId) => {
+    const preset = clipPresets.find(p => p.id === presetId);
+    try {
+      const res = await fetch(`/api/clip-presets/${presetId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setClipPresets(prev => prev.filter(p => p.id !== presetId));
+        if (preset && preset.name === inlineActivePreset) setInlineActivePreset('');
+        showToast(`Preset deleted`, 'success');
+      }
+    } catch {}
+  };
+
+  // ── Preset Bar (rendered below subtitle toolbar) ──
+  const renderPresetBar = () => (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px',
+      background: 'var(--bg-panel)', borderTop: '1px solid var(--border)',
+      flexWrap: 'wrap', marginTop: -1,
+    }}>
+      {/* Label */}
+      <span style={{
+        fontSize: 10, fontWeight: 600, color: 'var(--text-muted)',
+        textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap',
+      }}>Presets</span>
+
+      {/* Load dropdown */}
+      <select
+        value=""
+        onChange={(e) => handleInlineLoadPreset(e.target.value)}
+        style={{
+          padding: '4px 8px', fontSize: 11, minWidth: 140,
+          borderRadius: 'var(--radius-sm)',
+          background: 'var(--bg-elevated)', color: 'var(--text-primary)',
+          border: '1px solid var(--border)',
+        }}
+      >
+        <option value="">Load preset...</option>
+        {clipPresets.map(p => (
+          <option key={p.id} value={p.id}>{p.name}</option>
+        ))}
+      </select>
+
+      {/* Save button */}
+      <button
+        onClick={() => setInlinePresetSaveOpen(v => !v)}
+        title="Save current settings as a preset"
+        style={{
+          padding: '4px 10px', fontSize: 10, fontWeight: 600,
+          background: inlinePresetSaveOpen ? 'var(--accent-cyan-dim)' : 'var(--bg-elevated)',
+          color: inlinePresetSaveOpen ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+          border: `1px solid ${inlinePresetSaveOpen ? 'var(--accent-cyan)' : 'var(--border)'}`,
+          borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
+        }}
+      >
+        + Save
+      </button>
+
+      {/* Apply to segment button */}
+      <button
+        onClick={() => handleApplyPresetToSegment(null)}
+        title={activeSegment ? `Apply current settings to segment at ${formatDuration(activeSegment.start)}` : 'Place playhead inside a segment first'}
+        style={{
+          padding: '4px 10px', fontSize: 10, fontWeight: 600,
+          background: activeSegment ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+          color: activeSegment ? '#fff' : 'var(--text-muted)',
+          border: 'none',
+          borderRadius: 'var(--radius-sm)',
+          cursor: activeSegment ? 'pointer' : 'default',
+          opacity: activeSegment ? 1 : 0.5,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        Apply to Segment
+      </button>
+
+      {/* Active preset indicator */}
+      {inlineActivePreset && (
+        <span style={{
+          fontSize: 10, fontFamily: 'var(--font-mono)',
+          color: 'var(--accent-cyan)', whiteSpace: 'nowrap',
+        }}>
+          Active: {inlineActivePreset}
+        </span>
+      )}
+
+      {/* Delete dropdown — only when presets exist */}
+      {clipPresets.length > 0 && (
+        <select
+          value=""
+          onChange={(e) => { if (e.target.value) handleInlineDeletePreset(e.target.value); }}
+          title="Delete a preset"
+          style={{
+            marginLeft: isMobile ? undefined : 'auto',
+            padding: '4px 6px', fontSize: 10,
+            borderRadius: 'var(--radius-sm)',
+            background: 'var(--bg-elevated)', color: 'var(--text-muted)',
+            border: '1px solid var(--border)', maxWidth: 100,
+          }}
+        >
+          <option value="">Delete...</option>
+          {clipPresets.map(p => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+      )}
+
+      {/* Save input row (conditionally shown) */}
+      {inlinePresetSaveOpen && (
+        <div style={{ width: '100%', display: 'flex', gap: 6, marginTop: 4 }}>
+          <input
+            type="text"
+            placeholder="Preset name..."
+            value={inlinePresetName}
+            onChange={(e) => setInlinePresetName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleInlineSavePreset(); }}
+            autoFocus
+            style={{
+              flex: 1, padding: '5px 8px', fontSize: 11,
+              fontFamily: 'var(--font-mono)',
+              background: 'var(--bg-elevated)', color: 'var(--accent-cyan)',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+              outline: 'none',
+            }}
+          />
+          <button
+            onClick={handleInlineSavePreset}
+            disabled={!inlinePresetName.trim()}
+            style={{
+              padding: '5px 12px', fontSize: 10, fontWeight: 600,
+              background: inlinePresetName.trim() ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+              color: inlinePresetName.trim() ? '#fff' : 'var(--text-muted)',
+              border: 'none', borderRadius: 'var(--radius-sm)',
+              cursor: inlinePresetName.trim() ? 'pointer' : 'default',
+            }}
+          >
+            Save
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
   const renderInlineSubToolbar = (extraLeft) => (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
@@ -1417,6 +1624,7 @@ export default function Analysis() {
             )}
             {/* Inline subtitle settings for clip preview */}
             {renderInlineSubToolbar(null)}
+            {renderPresetBar()}
             {renderMarkScenePanel()}
             {renderInlineSubPanel()}
           </div>
@@ -1489,6 +1697,7 @@ export default function Analysis() {
                 <div style={{ width: 1, height: 20, background: 'var(--border)', margin: '0 4px' }} />
               </>
             )}
+            {renderPresetBar()}
             {renderMarkScenePanel()}
             {renderInlineSubPanel()}
           </div>
