@@ -274,17 +274,19 @@ const useTimelineStore = create((set, get) => ({
       },
     ];
 
-    // Add subtitle items if provided
+    // Add subtitle items if provided (include partially-overlapping segments)
     if (Array.isArray(subtitleSegments)) {
       subtitleSegments.forEach((seg) => {
-        if (seg.start >= clipStart && seg.end <= clipEnd) {
+        if (seg.end > clipStart && seg.start < clipEnd) {
+          const clampedStart = Math.max(seg.start, clipStart);
+          const clampedEnd = Math.min(seg.end, clipEnd);
           items.push({
             id: nextItemId(),
             trackId: 't1',
             type: 'subtitle',
             mediaRef: null,
-            start: seg.start - clipStart,
-            end: seg.end - clipStart,
+            start: clampedStart - clipStart,
+            end: clampedEnd - clipStart,
             trimStart: 0,
             trimEnd: null,
             volume: 1.0,

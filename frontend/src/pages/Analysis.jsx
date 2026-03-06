@@ -1582,6 +1582,7 @@ export default function Analysis() {
               onSettingsChange={setClipSettings}
               jobId={jobId}
               clipId={clipPreview.id}
+              transcript={job.transcript || []}
               onClose={() => {
                 if (clipPreview) {
                   clipSegmentsMapRef.current[clipPreview.id] = editorSegments;
@@ -1664,6 +1665,7 @@ export default function Analysis() {
               speakerNames={job.speaker_names}
               onSettingsChange={setClipSettings}
               jobId={jobId}
+              transcript={job.transcript || []}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={videoCurrentTime}

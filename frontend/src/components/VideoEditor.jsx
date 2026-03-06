@@ -211,6 +211,7 @@ export default function VideoEditor({
   // Multi-track editor props
   jobId,
   clipId,
+  transcript,
 }) {
   const { isMobile } = useResponsive();
 
@@ -223,15 +224,46 @@ export default function VideoEditor({
   const { recovered } = useTimelinePersistence(jobId, clipId);
 
   // Initialize timeline store when clip data changes
+  const addItem = useTimelineStore((s) => s.addItem);
   const multiTrackInitialized = useRef(false);
   useEffect(() => {
     if (!src || multiTrackInitialized.current) return;
-    // Only auto-init if no recovered state
     if (!recovered && timelineStoreItems.length === 0) {
-      initFromClip({ src, clipStart, clipEnd, subtitleSegments: [] });
+      // Fresh init — populate with transcript subtitles
+      initFromClip({ src, clipStart, clipEnd, subtitleSegments: transcript || [] });
+    } else if (recovered && transcript && transcript.length > 0) {
+      // Recovered state but no subtitle items — backfill from transcript
+      const hasSubtitles = timelineStoreItems.some((it) => it.type === 'subtitle');
+      if (!hasSubtitles) {
+        transcript.forEach((seg) => {
+          if (seg.end > clipStart && seg.start < clipEnd) {
+            const s = Math.max(seg.start, clipStart);
+            const e = Math.min(seg.end, clipEnd);
+            addItem({
+              trackId: 't1',
+              type: 'subtitle',
+              mediaRef: null,
+              start: s - clipStart,
+              end: e - clipStart,
+              trimStart: 0,
+              trimEnd: null,
+              volume: 1.0,
+              speed: 1.0,
+              opacity: 1.0,
+              position: { x: 50, y: 90 },
+              size: { w: 100, h: 100 },
+              effects: [],
+              fadeIn: 0,
+              fadeOut: 0,
+              subtitleText: seg.text,
+              subtitleStyle: null,
+            });
+          }
+        });
+      }
     }
     multiTrackInitialized.current = true;
-  }, [src, clipStart, clipEnd, initFromClip, recovered, timelineStoreItems.length]);
+  }, [src, clipStart, clipEnd, initFromClip, recovered, timelineStoreItems.length, transcript, addItem]);
 
   const videoRef = useRef(null);
   const containerRef = useRef(null);
