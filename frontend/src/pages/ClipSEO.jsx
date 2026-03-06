@@ -921,6 +921,8 @@ export default function ClipSEO() {
               speakers={speakers}
               speakerNames={job.speaker_names}
               onSettingsChange={setClipSettings}
+              jobId={jobId}
+              clipId={clipId}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={currentTime}
@@ -1139,6 +1141,8 @@ export default function ClipSEO() {
               speakers={speakers}
               speakerNames={job.speaker_names}
               onSettingsChange={setClipSettings}
+              jobId={jobId}
+              clipId={clipId}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={currentTime}

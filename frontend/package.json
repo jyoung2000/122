@@ -12,7 +12,9 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.23.1",
-    "@huggingface/transformers": "^3.4.0"
+    "@huggingface/transformers": "^3.4.0",
+    "zustand": "^4.5.0",
+    "idb": "^8.0.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",

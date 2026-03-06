@@ -223,3 +223,41 @@ class SavePresetRequest(BaseModel):
 
 class RenamePresetRequest(BaseModel):
     name: str
+
+
+# ── Multi-track Timeline Models ─────────────────────────────────────────────
+
+class TimelineItem(BaseModel):
+    id: str
+    track_id: str
+    type: str  # 'video', 'audio', 'image', 'subtitle'
+    media_ref: Optional[str] = None
+    start: float
+    end: float
+    trim_start: float = 0
+    trim_end: Optional[float] = None
+    volume: float = 1.0
+    speed: float = 1.0
+    opacity: float = 1.0
+    position: Optional[dict] = None  # {x, y} percentages
+    size: Optional[dict] = None      # {w, h} percentages
+    fade_in: float = 0
+    fade_out: float = 0
+    subtitle_text: Optional[str] = None
+    subtitle_style: Optional[dict] = None
+
+
+class TimelineExportRequest(BaseModel):
+    tracks: list[dict] = []
+    items: list[TimelineItem] = []
+    duration: float = 0
+    resolution: str = "1080p"  # "720p", "1080p", "4K"
+    quality: int = 23          # CRF value
+    format: str = "mp4"
+
+
+class EditorStateRequest(BaseModel):
+    tracks: list[dict] = []
+    items: list[dict] = []
+    mediaLibrary: list[dict] = []
+    duration: float = 0

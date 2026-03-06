@@ -1,6 +1,11 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import { processKeyframes, interpolateSubjectX, isDynamic, safeSubjectX } from '../utils/subjectTracking';
 import useResponsive from '../hooks/useResponsive';
+import useTimelineStore from '../stores/timelineStore';
+import useTimelinePersistence from '../hooks/useTimelinePersistence';
+import Timeline from './Timeline';
+import MediaUploader from './MediaUploader';
+import PropertiesPanel from './PropertiesPanel';
 import './VideoEditor.css';
 
 // ── Segment Color Palette ────────────────────────────────────────────────────
@@ -203,8 +208,31 @@ export default function VideoEditor({
   speakers,
   speakerNames,
   onSettingsChange,
+  // Multi-track editor props
+  jobId,
+  clipId,
 }) {
   const { isMobile } = useResponsive();
+
+  // ── Multi-track editor state ──────────────────────
+  const [showMultiTrack, setShowMultiTrack] = useState(false);
+  const [showMediaLibrary, setShowMediaLibrary] = useState(false);
+  const [showProperties, setShowProperties] = useState(false);
+  const initFromClip = useTimelineStore((s) => s.initFromClip);
+  const timelineStoreItems = useTimelineStore((s) => s.items);
+  const { recovered } = useTimelinePersistence(jobId, clipId);
+
+  // Initialize timeline store when clip data changes
+  const multiTrackInitialized = useRef(false);
+  useEffect(() => {
+    if (!src || multiTrackInitialized.current) return;
+    // Only auto-init if no recovered state
+    if (!recovered && timelineStoreItems.length === 0) {
+      initFromClip({ src, clipStart, clipEnd, subtitleSegments: [] });
+    }
+    multiTrackInitialized.current = true;
+  }, [src, clipStart, clipEnd, initFromClip, recovered, timelineStoreItems.length]);
+
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const timelineRef = useRef(null);
@@ -2492,6 +2520,95 @@ export default function VideoEditor({
         </div>
       </div>
 
+      {/* ── Multi-Track Editor Toggle ── */}
+      {!compact && (
+        <div className="ve-multitrack-toggle">
+          <button
+            className={`ve-multitrack-toggle__btn${showMultiTrack ? ' ve-multitrack-toggle__btn--active' : ''}`}
+            onClick={(e) => { e.stopPropagation(); setShowMultiTrack(v => !v); }}
+            title="Toggle multi-track timeline editor"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="1" y="3" width="22" height="4" rx="1" />
+              <rect x="1" y="10" width="22" height="4" rx="1" />
+              <rect x="1" y="17" width="22" height="4" rx="1" />
+            </svg>
+            {showMultiTrack ? 'Hide Multi-Track' : 'Multi-Track Editor'}
+          </button>
+          {showMultiTrack && (
+            <>
+              <button
+                className={`ve-multitrack-toggle__btn ve-multitrack-toggle__btn--sub${showMediaLibrary ? ' ve-multitrack-toggle__btn--active' : ''}`}
+                onClick={(e) => { e.stopPropagation(); setShowMediaLibrary(v => !v); }}
+              >
+                {showMediaLibrary ? 'Hide Media' : 'Media Library'}
+              </button>
+              <button
+                className={`ve-multitrack-toggle__btn ve-multitrack-toggle__btn--sub${showProperties ? ' ve-multitrack-toggle__btn--active' : ''}`}
+                onClick={(e) => { e.stopPropagation(); setShowProperties(v => !v); }}
+              >
+                {showProperties ? 'Hide Properties' : 'Properties'}
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── Multi-Track Editor Panels ── */}
+      {showMultiTrack && (
+        <div className="ve-multitrack">
+          {/* Media Library Sidebar */}
+          {showMediaLibrary && (
+            <div className="ve-multitrack__sidebar ve-multitrack__sidebar--left">
+              <div className="ve-multitrack__sidebar-header">
+                <span>Media Library</span>
+                <button
+                  className="ve-btn"
+                  onClick={() => setShowMediaLibrary(false)}
+                  style={{ minWidth: 24, minHeight: 24, fontSize: 12 }}
+                >
+                  ✕
+                </button>
+              </div>
+              <MediaUploader jobId={jobId} />
+            </div>
+          )}
+
+          {/* Timeline */}
+          <div className="ve-multitrack__timeline">
+            <Timeline
+              compact={compact}
+              onSeek={(time) => {
+                const video = videoRef.current;
+                if (video) {
+                  const absTime = clipStart + time;
+                  video.currentTime = absTime;
+                  setCurrentTime(absTime);
+                  onTimeUpdate?.(absTime);
+                }
+              }}
+            />
+          </div>
+
+          {/* Properties Sidebar */}
+          {showProperties && (
+            <div className="ve-multitrack__sidebar ve-multitrack__sidebar--right">
+              <div className="ve-multitrack__sidebar-header">
+                <span>Properties</span>
+                <button
+                  className="ve-btn"
+                  onClick={() => setShowProperties(false)}
+                  style={{ minWidth: 24, minHeight: 24, fontSize: 12 }}
+                >
+                  ✕
+                </button>
+              </div>
+              <PropertiesPanel compact={compact} />
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Keyboard shortcuts hint ── */}
       {!compact && (
         <div className="ve-shortcuts">
@@ -2503,6 +2620,7 @@ export default function VideoEditor({
           <span><kbd>Del</kbd> Remove Segment</span>
           <span><kbd>Esc</kbd> Deselect</span>
           <span><kbd>Tab</kbd> Cycle Segments</span>
+          {showMultiTrack && <span><kbd>Ctrl+Z</kbd>/<kbd>Ctrl+Shift+Z</kbd> Undo/Redo</span>}
         </div>
       )}
     </div>
