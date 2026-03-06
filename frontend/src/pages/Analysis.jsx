@@ -756,6 +756,7 @@ export default function Analysis() {
         volume: (s.muted ? 0 : s.volume) / 100, // Convert to 0-2.0 gain
         muted: s.muted,
         subtitles_enabled: s.subtitlesEnabled,
+        subject_tracking_enabled: s.subjectTrackingEnabled !== false,
         speed: s.speed || 1.0,
       }));
     }
@@ -816,6 +817,7 @@ export default function Analysis() {
         volume: (s.muted ? 0 : s.volume) / 100,
         muted: s.muted,
         subtitles_enabled: s.subtitlesEnabled,
+        subject_tracking_enabled: s.subjectTrackingEnabled !== false,
         speed: s.speed || 1.0,
       }));
     }

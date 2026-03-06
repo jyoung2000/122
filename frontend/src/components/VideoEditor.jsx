@@ -468,6 +468,7 @@ export default function VideoEditor({
       volume: 100,
       muted: false,
       subtitlesEnabled: true,
+      subjectTrackingEnabled: true,
       speed: 1.0,
       color: SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length],
       label: `Segment ${segments.length + 1}`,
@@ -492,6 +493,12 @@ export default function VideoEditor({
 
   const toggleSegmentSubs = useCallback((segId) => {
     const next = segments.map(s => s.id === segId ? { ...s, subtitlesEnabled: !s.subtitlesEnabled } : s);
+    setSegments(next);
+    onSegmentsChange?.(next);
+  }, [segments, onSegmentsChange]);
+
+  const toggleSegmentTracking = useCallback((segId) => {
+    const next = segments.map(s => s.id === segId ? { ...s, subjectTrackingEnabled: !(s.subjectTrackingEnabled !== false) } : s);
     setSegments(next);
     onSegmentsChange?.(next);
   }, [segments, onSegmentsChange]);
@@ -910,8 +917,14 @@ export default function VideoEditor({
     let animId;
     let lastPct = null;
     const tick = () => {
-      const relTime = video.currentTime - (clipStart || 0);
-      const sx = interpolateSubjectX(subjectKeyframes, relTime);
+      const absTime = video.currentTime;
+      const relTime = absTime - (clipStart || 0);
+      // Check if the current segment has tracking disabled
+      const activeSeg = segments.find(s => absTime >= s.start && absTime < s.end);
+      const trackingOn = !activeSeg || activeSeg.subjectTrackingEnabled !== false;
+      const sx = trackingOn
+        ? interpolateSubjectX(subjectKeyframes, relTime)
+        : (safeSubjectX ? safeSubjectX(subjectX) : subjectX);
       const centerPct = subjectXToCenterPct(sx, srcRatio, targetRatio);
       const rounded = Math.round(centerPct * 100) / 100;
       if (rounded !== lastPct) {
@@ -925,7 +938,7 @@ export default function VideoEditor({
       cancelAnimationFrame(animId);
       video.style.objectPosition = '';
     };
-  }, [hasDynamicSubject, subjectKeyframes, clipStart, srcRatio, targetRatio]);
+  }, [hasDynamicSubject, subjectKeyframes, clipStart, srcRatio, targetRatio, segments, subjectX]);
 
   // Static subject tracking fallback
   useEffect(() => {
@@ -2019,6 +2032,7 @@ export default function VideoEditor({
                 {seg.label || 'Segment'}
                 {seg.muted ? ' (muted)' : ''}
                 {!seg.subtitlesEnabled ? ' (no subs)' : ''}
+                {seg.subjectTrackingEnabled === false ? ' (no tracking)' : ''}
               </span>
               {/* Bottom border indicator bar */}
               <div style={{
@@ -2095,6 +2109,7 @@ export default function VideoEditor({
                       {seg.muted ? 'muted' : `${seg.volume}%`}
                       {seg.speed && Math.abs(seg.speed - 1.0) > 0.001 ? ` · ${seg.speed}x` : ''}
                       {!seg.subtitlesEnabled ? ' · no subs' : ''}
+                      {seg.subjectTrackingEnabled === false ? ' · no tracking' : ''}
                     </span>
                   )}
                 </div>
@@ -2298,6 +2313,13 @@ export default function VideoEditor({
                       onChange={() => toggleSegmentMute(seg.id)}
                     />
                     <span>Muted</span>
+                  </label>
+                  <label className="ve-segment-inspector__toggle" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox" checked={seg.subjectTrackingEnabled !== false}
+                      onChange={() => toggleSegmentTracking(seg.id)}
+                    />
+                    <span>Subject Tracking</span>
                   </label>
                 </div>
               </div>

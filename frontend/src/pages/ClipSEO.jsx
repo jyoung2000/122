@@ -730,6 +730,7 @@ export default function ClipSEO() {
         volume: (s.muted ? 0 : s.volume) / 100,
         muted: s.muted,
         subtitles_enabled: s.subtitlesEnabled,
+        subject_tracking_enabled: s.subjectTrackingEnabled !== false,
         speed: s.speed || 1.0,
       }));
     }

@@ -2425,6 +2425,93 @@ def _build_speed_timeline(
     return timeline
 
 
+def _filter_keyframes_by_segment_tracking(
+    keyframes: list[tuple[float, int]],
+    segments: list[dict],
+    clip_start: float,
+    clip_end: float,
+    static_sx: int = 50,
+) -> list[tuple[float, int]]:
+    """Filter dynamic keyframes based on per-segment subject_tracking_enabled.
+
+    For segments where tracking is disabled, replaces keyframes within that
+    time range with static subject_x fallback values.  For segments where
+    tracking is enabled (or the default), keyframes are preserved.
+
+    Args:
+        keyframes: processed subject tracking keyframes [(time_relative, subject_x)]
+        segments: list of segment dicts with start/end (absolute) and subject_tracking_enabled
+        clip_start: absolute start time of the clip
+        clip_end: absolute end time of the clip
+        static_sx: fallback subject_x for tracking-off segments (default 50 = center)
+
+    Returns:
+        New keyframes list with tracking-off ranges replaced by static values.
+    """
+    if not keyframes or not segments:
+        return keyframes
+
+    # Check if any segments have tracking disabled
+    has_tracking_off = any(
+        not seg.get("subject_tracking_enabled", True) for seg in segments
+    )
+    if not has_tracking_off:
+        return keyframes
+
+    clip_dur = clip_end - clip_start
+
+    # Build list of tracking-off ranges (relative to clip start)
+    off_ranges = []
+    for seg in segments:
+        if not seg.get("subject_tracking_enabled", True):
+            seg_start_rel = max(0.0, seg["start"] - clip_start)
+            seg_end_rel = min(clip_dur, seg["end"] - clip_start)
+            if seg_end_rel > seg_start_rel:
+                off_ranges.append((seg_start_rel, seg_end_rel))
+
+    if not off_ranges:
+        return keyframes
+
+    off_ranges.sort()
+
+    def _in_off_range(t: float) -> bool:
+        for rs, re in off_ranges:
+            if rs - 0.01 <= t <= re + 0.01:
+                return True
+        return False
+
+    # Build new keyframes: keep originals in tracking-on ranges,
+    # replace with static in tracking-off ranges, and add boundary
+    # keyframes at range edges for smooth transitions.
+    result = []
+    for rs, re in off_ranges:
+        # Add static keyframes at boundary of each off range
+        result.append((rs, static_sx))
+        result.append((re, static_sx))
+
+    # Keep original keyframes that fall in tracking-on ranges
+    for t, sx in keyframes:
+        if not _in_off_range(t):
+            result.append((t, sx))
+
+    # Sort by time and deduplicate close timestamps (keep latest)
+    result.sort(key=lambda kf: kf[0])
+    deduped = []
+    for t, sx in result:
+        if deduped and abs(deduped[-1][0] - t) < 0.05:
+            deduped[-1] = (t, sx)
+        else:
+            deduped.append((t, sx))
+
+    logger.info(
+        "[SubjectTracking] _filter_keyframes_by_segment_tracking: "
+        "%d original keyframes → %d filtered (%d tracking-off ranges, static_sx=%d)",
+        len(keyframes), len(deduped), len(off_ranges), static_sx,
+    )
+
+    return deduped
+
+
 def _build_filter_chain(
     aspect_ratio: str | None,
     src_w: int,
@@ -2952,7 +3039,18 @@ async def export_clip(
             _src_ratio = video_width / video_height if video_height else 1
             _target_ratio = ASPECT_RATIO_VALUES.get(aspect_ratio, _src_ratio) if aspect_ratio else _src_ratio
 
-            if subject_scenes and aspect_ratio:
+            # If all segments have tracking disabled, skip dynamic tracking entirely
+            all_tracking_off = (
+                segments
+                and all(not seg.get("subject_tracking_enabled", True) for seg in segments)
+            )
+            if all_tracking_off:
+                logger.info(
+                    "[SubjectTracking] clip %s: ALL segments have tracking disabled — using static center crop",
+                    clip_id,
+                )
+
+            if subject_scenes and aspect_ratio and not all_tracking_off:
                 raw_kf = _build_subject_keyframes(subject_scenes, start, end, src_ratio=_src_ratio, target_ratio=_target_ratio)
                 logger.info(
                     "[SubjectTracking] clip %s: %d raw keyframes from %d scenes",
@@ -3020,6 +3118,22 @@ async def export_clip(
                         len(subject_scenes) if subject_scenes else 0,
                         aspect_ratio or "original",
                     )
+
+            # Apply per-segment subject tracking toggles (if segments provided)
+            if keyframes and segments:
+                keyframes = _filter_keyframes_by_segment_tracking(
+                    keyframes, segments, start, end, static_sx=subject_x,
+                )
+                # Re-check if keyframes collapsed to single value after filtering
+                if keyframes:
+                    unique = set(kf[1] for kf in keyframes)
+                    if len(unique) <= 1:
+                        subject_x = keyframes[0][1]
+                        keyframes = None
+                        logger.info(
+                            "[SubjectTracking] clip %s: keyframes collapsed to static sx=%d after segment filtering",
+                            clip_id, subject_x,
+                        )
 
             # Build filter chain and re-encode
             vf, is_complex = _build_filter_chain(
