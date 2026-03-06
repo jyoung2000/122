@@ -2167,6 +2167,15 @@ async def export_clip(
             output_dir, f"[{quality_tag}]clip_{clip_id}_{int(start)}_{int(end)}.mp4"
         )
 
+    # Delete any pre-existing output file to ensure we never serve a stale
+    # export from a previous run (same clip title → same filename).
+    if os.path.exists(output_path):
+        try:
+            os.remove(output_path)
+            logger.info("Removed stale output file: %s", output_path)
+        except OSError as e:
+            logger.warning("Could not remove stale output: %s", e)
+
     def _check_cancel():
         if cancel_event and cancel_event.is_set():
             raise asyncio.CancelledError("Export cancelled by user")
@@ -2328,9 +2337,32 @@ async def export_clip(
                         ass_content = _filter_ass_by_segments(ass_content, subs_off_ranges)
 
                 ass_path = os.path.join(output_dir, f"clip_{clip_id}_sub.ass")
+                # Remove any stale ASS file from a previous export to ensure
+                # the fresh content is always used (prevents caching issues).
+                if os.path.exists(ass_path):
+                    os.remove(ass_path)
                 with open(ass_path, "w", encoding="utf-8") as f:
                     f.write(ass_content)
                 logger.info("ASS file written: %s (%d bytes)", ass_path, len(ass_content))
+
+                # ── Diagnostic: verify two-layer architecture ──
+                # Log whether the ASS uses the two-layer approach for active
+                # word mode so we can confirm the black-bar fix is active.
+                if settings.get("active_word_enabled"):
+                    layer0_count = ass_content.count("Dialogue: 0,")
+                    layer1_count = ass_content.count("Dialogue: 1,")
+                    has_nobord = "\\bord0\\shad0\\3a&HFF&" in ass_content
+                    logger.info(
+                        "ASS two-layer check for clip %s: Layer0=%d events, Layer1=%d events, "
+                        "has_nobord_tag=%s (expected: both layers populated, nobord=True)",
+                        clip_id, layer0_count, layer1_count, has_nobord,
+                    )
+                    if layer0_count == 0 or layer1_count == 0:
+                        logger.warning(
+                            "ASS two-layer architecture NOT active for clip %s — "
+                            "black bars may still appear. Layer0=%d, Layer1=%d",
+                            clip_id, layer0_count, layer1_count,
+                        )
 
                 # NOTE: force_style is intentionally NOT used.
                 #

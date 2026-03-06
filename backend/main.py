@@ -181,24 +181,29 @@ async def serve_file(job_id: str, path: str, request: Request):
             f.seek(start)
             data = f.read(content_length)
 
-        return Response(
-            content=data,
-            status_code=206,
-            headers={
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(content_length),
-                "Content-Type": content_type,
-            },
-        )
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(content_length),
+            "Content-Type": content_type,
+        }
+        # Prevent browser from caching exported clips (same filename can
+        # change between exports when subtitle settings are updated).
+        if "/clips/" in path:
+            headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return Response(content=data, status_code=206, headers=headers)
 
     # For clip files, force browser download instead of inline playback
+    # Cache-Control: no-store prevents the browser from serving a stale
+    # cached version when the user re-exports the same clip (same filename).
     if "/clips/" in path:
-        return FileResponse(
+        response = FileResponse(
             file_path,
             media_type=content_type,
             filename=os.path.basename(file_path),
         )
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return response
 
     return FileResponse(file_path, media_type=content_type)
 
