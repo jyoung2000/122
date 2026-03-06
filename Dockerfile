@@ -1,25 +1,25 @@
+## Stage 1: Build frontend with Node
+FROM node:20-slim AS frontend-build
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install
+COPY frontend/ ./
+RUN npm run build
+
+## Stage 2: Runtime
 FROM python:3.11-slim
 
 # Install system dependencies (ca-certificates ensures HTTPS model downloads work)
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     git \
-    build-essential \
-    pkg-config \
     ca-certificates \
     fontconfig \
     fonts-dejavu-core \
     fonts-freefont-ttf \
     fonts-liberation2 \
     unzip \
-    libavformat-dev \
-    libavcodec-dev \
-    libavdevice-dev \
-    libavutil-dev \
-    libswscale-dev \
-    libswresample-dev \
-    libavfilter-dev \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -64,13 +64,8 @@ RUN pip install --upgrade pip && \
 # Copy backend source
 COPY backend/ ./backend/
 
-# Build frontend
-COPY frontend/ ./frontend/
-RUN apt-get update && apt-get install -y nodejs npm && \
-    cd frontend && npm install && npm run build
-
-# Move built frontend to be served by FastAPI
-RUN mv frontend/dist ./static
+# Copy built frontend from stage 1
+COPY --from=frontend-build /app/frontend/dist ./static
 
 EXPOSE 1353
 
