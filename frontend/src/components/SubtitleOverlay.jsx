@@ -148,8 +148,14 @@ function splitSegmentsByMaxWords(segments, maxWords) {
 }
 
 function getSpeakerColor(speaker, speakersOrdered, settings) {
+  // If user explicitly set a font color (non-default), it takes priority
+  // so the color picker actually works without requiring useSpeakerColors toggle.
+  const fontColor = settings?.subtitleFontColor;
+  if (fontColor && fontColor.toLowerCase() !== '#ffffff') {
+    return fontColor;
+  }
   const useSpeaker = settings?.useSpeakerColors ?? true;
-  if (!useSpeaker) return settings?.subtitleFontColor || '#FFFFFF';
+  if (!useSpeaker) return fontColor || '#FFFFFF';
   const speakerColors = settings?.speakerColors || {};
   if (speakerColors[speaker]) return speakerColors[speaker];
   const idx = speakersOrdered.indexOf(speaker);
@@ -393,7 +399,14 @@ export default function SubtitleOverlay({
   const scaledOlWidth = backendOlWidth * subtitleScale;
 
   let outlineStyle;
-  if (bgEnabled) {
+  if (bgEnabled && scaledOlWidth > 0) {
+    // Background + outline: show both — CSS can layer text-stroke on top of background
+    const olColorStr = `rgba(${olR},${olG},${olB},${olOpacity})`;
+    outlineStyle = {
+      WebkitTextStroke: `${scaledOlWidth * 2}px ${olColorStr}`,
+      paintOrder: 'stroke fill',
+    };
+  } else if (bgEnabled) {
     outlineStyle = {};
   } else if (scaledOlWidth > 0) {
     const shadowDepth = Math.max(1, Math.min(4, Math.round(backendOlWidth * 0.75)));

@@ -3244,6 +3244,13 @@ async def export_clip(
                         cmd += ["-vf", vf]
                 if af:
                     cmd += ["-af", af]
+                # When active word highlighting is enabled, ensure at least
+                # 30fps output so subtitle color transitions appear smooth.
+                # Low-fps source videos (e.g. 24fps) show visible lag because
+                # subtitle updates only render at video frame boundaries.
+                _aw_enabled = subtitle_settings.get("active_word_enabled", False) if subtitle_settings else False
+                if _aw_enabled and subtitles_enabled:
+                    cmd += ["-r", "30"]
                 cmd += [
                     *_gpu_encode_args(qp, export_quality),
                     "-threads", str(app_settings.FFMPEG_THREADS),

@@ -340,10 +340,12 @@ def generate_ass(
             speakers_seen.append(sp)
 
     speaker_color_map = {}
+    # If user explicitly set a font color (non-default white), it takes priority
+    # so the color picker actually works without requiring useSpeakerColors toggle.
+    font_color_explicit = font_color and font_color.lower() != "#ffffff"
     for i, sp in enumerate(speakers_seen):
-        if not use_speaker_colors:
-            # Toggle off: all speakers use the uniform font color
-            speaker_color_map[sp] = font_color
+        if font_color_explicit or not use_speaker_colors:
+            speaker_color_map[sp] = font_color or "#FFFFFF"
         elif sp in speaker_colors:
             speaker_color_map[sp] = speaker_colors[sp]
         else:
@@ -400,6 +402,23 @@ def generate_ass(
             f"Style: {style_name},{font},{size_px},{ass_color},&H000000FF&,{style_outline_color},{back_color_ass},"
             f"{bold_flag},0,0,0,100,100,0,0,{border_style},{ol_width},{style_shadow},{alignment},{margin_h},{margin_h},{margin_v},1"
         )
+
+    # When background is enabled AND outline_width > 0, create an outline
+    # overlay style (_OL) that renders text outline on top of the box.
+    # ASS BorderStyle=3 hijacks OutlineColour for box fill, so a separate
+    # BorderStyle=1 layer is the only way to show both box AND text outline.
+    bg_has_outline = background_enabled and scaled_outline_width > 0
+    if bg_has_outline:
+        ol_ass_color = _hex_to_ass_color_with_alpha(outline_color, outline_opacity)
+        for sp in speakers_seen:
+            color_hex = speaker_color_map[sp]
+            ass_color = _hex_to_ass_color(color_hex)
+            sn = _sanitize_style_name(sp)
+            # _OL style: BorderStyle=1 for text outline, transparent background
+            lines.append(
+                f"Style: {sn}_OL,{font},{size_px},{ass_color},&H000000FF&,{ol_ass_color},&HFF000000&,"
+                f"{bold_flag},0,0,0,100,100,0,0,1,{scaled_outline_width},0,{alignment},{margin_h},{margin_h},{margin_v},1"
+            )
 
     # When background (BorderStyle=3) + active word highlighting are both
     # enabled, per-word \c color overrides cause libass to segment the
@@ -528,7 +547,10 @@ def generate_ass(
                     pending_word_events.append((clip_start, clip_end, style_name, event_text))
             elif seg_word_ts and len(seg_word_ts) == len(words):
                 # Real per-word timestamps from Whisper.
-                _WORD_ANTICIPATION_S = 0.10
+                # 0.18s anticipation compensates for video frame quantization:
+                # at 24fps each frame is ~42ms, so highlighting must shift
+                # earlier to land on the correct visual frame.
+                _WORD_ANTICIPATION_S = 0.18
                 base_color = _hex_to_ass_color(speaker_color_map[speaker])
 
                 # Background mode: ONE Layer 0 event per segment = one
@@ -580,7 +602,7 @@ def generate_ass(
                 # speech rhythm.  Uses punctuation-aware, speaker-rate-scaled
                 # timing that matches the frontend getCurrentWordIndex().
                 _BASE_OVERHEAD_S = 0.04
-                _ANTICIPATION_S = 0.10  # must match frontend _ANTICIPATION_S
+                _ANTICIPATION_S = 0.18  # slightly ahead of frontend for frame quantization
                 _PUNCT_PAUSE = {
                     ",": 0.15, ";": 0.16, ":": 0.12,
                     ".": 0.22, "!": 0.22, "?": 0.24,
@@ -763,19 +785,33 @@ def generate_ass(
         total_minutes = int(t // 60)
         return total_minutes * 6000 + cs_from_seconds
 
+    # When background + outline are both enabled, create outline overlay events
+    # on a separate layer using the _OL style (BorderStyle=1 with text outline).
+    outline_overlay_events: list[tuple[float, float, str, str]] = []
+    if bg_has_outline:
+        for ev in base_text_events:
+            # Replace style with _OL variant for outline rendering
+            ol_style = ev[2] + "_OL"
+            outline_overlay_events.append((ev[0], ev[1], ol_style, ev[3]))
+
     # Collect all events as (layer, start, end, style, text) tuples.
     # When active_word_enabled, two-layer architecture:
     #   base_text_events → Layer 0 (border layer, uniform color)
     #   pending_word_events → Layer 1 (color layer, \bord0\shad0)
+    #   outline_overlay_events → Layer 2 (outline on top of background box)
     # When active_word is off, only base_text_events (Layer 0) is populated.
     all_events: list[tuple[int, float, float, str, str]] = []
     for ev in base_text_events:
         all_events.append((0, ev[0], ev[1], ev[2], ev[3]))
-    for ev in pending_word_events:
+    for ev in outline_overlay_events:
         all_events.append((1, ev[0], ev[1], ev[2], ev[3]))
+    # Active word events go on Layer 2 when outline overlay is present, else Layer 1
+    aw_layer = 2 if bg_has_outline else 1
+    for ev in pending_word_events:
+        all_events.append((aw_layer, ev[0], ev[1], ev[2], ev[3]))
 
     # Process each layer independently.
-    for layer in (0, 1):
+    for layer in (0, 1, 2):
         layer_evs = [e for e in all_events if e[0] == layer]
         if not layer_evs:
             continue
