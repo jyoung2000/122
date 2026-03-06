@@ -499,13 +499,9 @@ def _validate_ass_settings(
         expected_border_style = 1
         expected_outline_colour = _hex_to_ass_color_with_alpha(outline_color, outline_opacity)
         expected_ol_width = scaled_outline_width
-        # When active word is enabled, shadow is suppressed to 0 in both
-        # the Style definition and per-event tags to prevent per-word shadow
-        # boxes ("black bars") around the highlighted word.
-        if active_word_enabled:
-            expected_shadow = 0
-        else:
-            expected_shadow = max(1, min(4, round(scaled_outline_width * 0.75))) if scaled_outline_width > 0 else 0
+        # With two-layer architecture, shadow is rendered correctly on
+        # Layer 0 (uniform color → continuous shadow, no per-word boxes).
+        expected_shadow = max(1, min(4, round(scaled_outline_width * 0.75))) if scaled_outline_width > 0 else 0
 
     # --- 1. PlayRes dimensions ---
     playres_x = re.search(r"PlayResX:\s*(\d+)", ass_content)
@@ -711,6 +707,67 @@ def _validate_ass_settings(
                 f"Per-word \\shad overrides detected in {events_with_multi_shad} events — "
                 "this causes per-word shadow box rendering (black bars)"
             )
+
+    # 14ab. Two-layer architecture validation for active word mode.
+    # Layer 0 = border layer (uniform color, continuous outline/shadow)
+    # Layer 1 = color layer (per-word \c overrides, \bord0\shad0)
+    if active_word_enabled and events:
+        layer_0_events = [ev for ev in events if ev["Layer"] == "0"]
+        layer_1_events = [ev for ev in events if ev["Layer"] == "1"]
+
+        if not layer_0_events:
+            warnings.append(
+                "Active word mode: no Layer 0 (border) events found — "
+                "export will be missing continuous outline/shadow"
+            )
+        if not layer_1_events:
+            warnings.append(
+                "Active word mode: no Layer 1 (color) events found — "
+                "export will be missing per-word color highlighting"
+            )
+
+        # Layer 0 events must NOT contain \c overrides (would break seamless border)
+        for ev in layer_0_events:
+            text_after_bord = ev["Text"].split("}", 1)[-1] if "}" in ev["Text"] else ev["Text"]
+            if "\\c&H" in text_after_bord or "\\c" in text_after_bord.replace("\\3c", ""):
+                warnings.append(
+                    "Layer 0 (border) event contains \\c color overrides — "
+                    "this WILL cause per-word border segmentation (black bars). "
+                    "Layer 0 must use uniform color only."
+                )
+                break
+
+        # Layer 1 events must have \bord0\shad0 (no border on color layer)
+        for ev in layer_1_events:
+            if "\\bord0" not in ev["Text"]:
+                warnings.append(
+                    "Layer 1 (color) event missing \\bord0 — "
+                    "will render duplicate borders causing black bars"
+                )
+                break
+            if "\\shad0" not in ev["Text"]:
+                warnings.append(
+                    "Layer 1 (color) event missing \\shad0 — "
+                    "will render duplicate shadows causing artifacts"
+                )
+                break
+
+        # CRITICAL: detect events with \bord>0 AND multiple \c overrides
+        # (the exact anti-pattern that causes black bars)
+        if active_word_enabled:
+            bad_events = 0
+            for ev in events:
+                has_border = "\\bord" in ev["Text"] and "\\bord0" not in ev["Text"]
+                color_changes = ev["Text"].count("\\c&H")
+                if has_border and color_changes > 1:
+                    bad_events += 1
+            if bad_events > 0:
+                warnings.append(
+                    f"CRITICAL: {bad_events} events have \\bord>0 WITH multiple \\c color "
+                    f"overrides — this causes libass per-word border segmentation (black bars). "
+                    f"Must use two-layer architecture: Layer 0 = border only (no \\c), "
+                    f"Layer 1 = color only (\\bord0)."
+                )
 
     # 14b. Active word background color (\4c)
     # With BorderStyle=3, \4c sets BackColour which causes shadow artifacts

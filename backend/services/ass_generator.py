@@ -382,11 +382,10 @@ def generate_ass(
         # (backendOlWidth in ClipPreview.jsx:622).
         shadow_depth = max(1, min(4, round(scaled_outline_width * 0.75))) if scaled_outline_width > 0 else 0
 
-    # When active word is enabled without background, suppress shadow in the
-    # Style definition — all active word events use per-event \shad0 overrides,
-    # and having shadow=0 in the Style prevents any fallback rendering artifacts
-    # (per-word shadow boxes that create visible "black bars").
-    style_shadow = 0 if (active_word_enabled and not background_enabled) else shadow_depth
+    # With the two-layer architecture for active word mode, shadow is rendered
+    # correctly on Layer 0 (uniform color, no \c overrides → continuous shadow).
+    # No need to suppress shadow in the Style definition.
+    style_shadow = shadow_depth
 
     # Create a style per speaker
     for sp in speakers_seen:
@@ -425,13 +424,13 @@ def generate_ass(
     # from inheriting unexpected border state from the Style definition.
     if not background_enabled:
         bord_tag = f"\\bord{ol_width}\\shad{shadow_depth}\\3c{style_outline_color}"
-        # Active word mode: suppress shadow to prevent per-word shadow boxes
-        # that create visible "black bars" around the highlighted word.
-        # The outline (\bord) still renders correctly as a continuous stroke.
-        aw_bord_tag = f"\\bord{ol_width}\\shad0\\3c{style_outline_color}"
+        # Layer 1 tag for active word two-layer architecture:
+        # No border, no shadow, transparent outline — renders ONLY text fill.
+        # \3a&HFF& makes OutlineColour fully transparent so no outline bleeds.
+        aw_nobord_tag = "\\bord0\\shad0\\3a&HFF&"
     else:
         bord_tag = ""
-        aw_bord_tag = ""
+        aw_nobord_tag = ""
 
     # Add dialogue events
     # Two-layer architecture for active-word mode:
@@ -452,54 +451,50 @@ def generate_ass(
         if active_word_enabled:
             prefix = f"{speaker}: " if show_speaker_labels and speaker else ""
 
-            # Skip the base text layer entirely when active word is
-            # enabled — the per-word highlight events already render ALL
-            # words (active + non-active) for every time slot.  Having
-            # both layers causes doubled outlines/shadows that create
-            # visible "black bars" around words in the exported video.
-            # (Previously this skip only applied to background mode, but
-            # the same doubling problem occurs with BorderStyle=1 outlines.)
+            # ── Two-layer architecture for active word highlighting ──
+            #
+            # The root cause of "black bars" is that ASS/libass segments
+            # border rendering at every \c (PrimaryColour) override tag.
+            # When two bordered text runs meet, their border rectangles
+            # overlap at the junction, doubling the border opacity and
+            # creating visible dark seams.
+            #
+            # The fix uses two ASS layers that composite together:
+            #
+            #   Layer 0 (border layer): Full text with uniform color
+            #     (no \c overrides) + \bord + \shad.  Because there are
+            #     no color changes, libass treats the entire line as ONE
+            #     text run with a single continuous border/shadow — no
+            #     seams possible.
+            #
+            #   Layer 1 (color layer): Full text with per-word \c color
+            #     overrides + \bord0\shad0\3a&HFF& (no border, no shadow,
+            #     transparent outline).  This renders ONLY the colored
+            #     text fill on top of Layer 0's border.
+            #
+            # This mirrors how CSS renders subtitles in the browser
+            # preview: -webkit-text-stroke is a single layer behind all
+            # text, and inline <span style="color:gold"> only changes
+            # the fill color on top.
 
-            # --- Per-word highlight events ---
             words = safe_text.split()
             if len(words) <= 1:
-                # Single word — just color the whole event with active word color.
-                # Only override \c (text color).  Outline/border/shadow come from
-                # bord_tag prefix + Style definition to avoid per-word shadow boxes.
-                bord_prefix = "{" + aw_bord_tag + "}" if aw_bord_tag else ""
+                # Single word — no color transitions, so no segmentation
+                # issue.  Just use a single layer with active word color.
+                bord_prefix = f"{{{bord_tag}}}" if bord_tag else ""
                 aw_tags = f"\\c{aw_color}"
                 event_text = f"{bord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
                 pending_word_events.append((clip_start, clip_end, style_name, event_text))
             elif seg_word_ts and len(seg_word_ts) == len(words):
-                # Real per-word timestamps from Whisper — use them directly.
-                #
-                # The frontend determines the active word at time T by:
-                #   adjusted = T + anticipation
-                #   for i in words: if adjusted < word[i].end → return i
-                #
-                # To produce the same result, we set each ASS word event to:
-                #   start = word[i].start - anticipation  (highlight leads audio)
-                #   end   = word[i].end - anticipation    (transition matches frontend)
-                #
-                # This way, at time T the ASS engine shows word i when:
-                #   word[i].start - ant <= T < word[i].end - ant
-                # Which is equivalent to:
-                #   word[i].start <= T + ant < word[i].end
-                # Matching the frontend's check: adjusted < word[i].end
-                #
-                # The gap-filling pass later will extend events to fill any
-                # gaps between words, keeping the last highlighted word visible.
+                # Real per-word timestamps from Whisper.
                 _WORD_ANTICIPATION_S = 0.10
                 base_color = _hex_to_ass_color(speaker_color_map[speaker])
 
                 for word_idx in range(len(words)):
                     w_start, w_end, _ = seg_word_ts[word_idx]
-                    # Apply anticipation to BOTH start and end for 1:1 parity
                     w_start = max(w_start - _WORD_ANTICIPATION_S, clip_start)
                     w_end = max(w_end - _WORD_ANTICIPATION_S, w_start + 0.01)
                     w_end = min(w_end, clip_end)
-                    # Ensure first word starts at segment start for complete
-                    # coverage (no gap at beginning where no subtitle shows).
                     if word_idx == 0:
                         w_start = clip_start
                     if word_idx == len(words) - 1:
@@ -507,20 +502,18 @@ def generate_ass(
                     if w_end - w_start < 0.01:
                         continue
 
-                    # Build text with inline overrides on the active word.
-                    #
-                    # Minimal-tag approach for BOTH BorderStyle=3 and
-                    # BorderStyle=1: only change \c (text color) around the
-                    # active word.  Outline, border, and shadow are set ONCE
-                    # via bord_tag at the start of the event and inherited by
-                    # every word.  Giving each word its own \3c/\bord/\shad
-                    # tags causes libass to treat each word as a separate
-                    # rendering segment with an independent shadow box,
-                    # producing visible "black bars" around words.
+                    # Layer 0: Border layer — full text, uniform color,
+                    # WITH border/shadow.  No \c overrides → seamless border.
+                    border_prefix = f"{{{bord_tag}}}" if bord_tag else ""
+                    border_event_text = f"{border_prefix}{prefix}{safe_text}"
+                    base_text_events.append((w_start, w_end, style_name, border_event_text))
+
+                    # Layer 1: Color layer — full text, per-word colors,
+                    # NO border (\bord0\shad0\3a&HFF&).  Only text fill.
                     before = " ".join(words[:word_idx])
                     active = words[word_idx]
                     after = " ".join(words[word_idx + 1:])
-                    bord_prefix = "{" + aw_bord_tag + "}" if aw_bord_tag else ""
+                    nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
                     base_tag = "{" + f"\\c{base_color}" + "}"
                     aw_tag = "{" + f"\\c{aw_color}" + "}"
                     parts = []
@@ -529,13 +522,9 @@ def generate_ass(
                     parts.append(f"{aw_tag}{active}")
                     if after:
                         parts.append(f" {base_tag}{after}")
-                    event_text = bord_prefix + prefix + "".join(parts)
-                    pending_word_events.append((w_start, w_end, style_name, event_text))
+                    color_event_text = nobord_prefix + prefix + "".join(parts)
+                    pending_word_events.append((w_start, w_end, style_name, color_event_text))
             else:
-                # Fallback: character-proportional estimation
-                # Uses punctuation-aware, speaker-rate-scaled timing that
-                # matches the frontend getCurrentWordIndex() algorithm so
-                # the exported video looks identical to the preview.
                 # Fallback: character-proportional estimation with natural
                 # speech rhythm.  Uses punctuation-aware, speaker-rate-scaled
                 # timing that matches the frontend getCurrentWordIndex().
@@ -546,7 +535,6 @@ def generate_ass(
                     ".": 0.22, "!": 0.22, "?": 0.24,
                     "\u2014": 0.12, "\u2013": 0.10,
                 }
-                # Function words are spoken ~25% faster in natural speech
                 _FAST_WORDS = frozenset({
                     "the", "a", "an", "to", "in", "on", "at", "of", "for",
                     "and", "but", "or", "is", "was", "are", "were", "it",
@@ -585,14 +573,11 @@ def generate_ass(
                     char_dur = char_time * (len(words[word_idx]) / total_chars)
                     pause = (_BASE_OVERHEAD_S * rate_scale + punct_pauses[word_idx]) * pause_scale
                     word_dur = char_dur + pause
-                    # Function words are spoken faster
                     stripped = words[word_idx].lower().rstrip(".,!?;:\u2014\u2013")
                     if stripped in _FAST_WORDS:
                         word_dur *= 0.75
-                    # First word emphasis (slightly longer hold)
                     if word_idx == 0:
                         word_dur *= 1.15
-                    # Last word trailing emphasis
                     elif word_idx == len(words) - 1:
                         word_dur *= 1.10
                     raw_durations.append(word_dur)
@@ -609,22 +594,22 @@ def generate_ass(
                     word_end = current_time + word_dur
                     if word_idx == len(words) - 1:
                         word_end = clip_end
-                    # Skip very short word slots (below ASS centisecond resolution)
                     if word_end - current_time < 0.01:
                         current_time = word_end
                         continue
 
-                    # Shift event start earlier by anticipation offset
                     shifted_start = max(clip_start, current_time - anticipation)
 
-                    # Build text with inline overrides on the active word.
-                    # Minimal-tag approach: only change \c (text color).
-                    # Outline/shadow set once via aw_bord_tag prefix (\shad0
-                    # to prevent per-word shadow boxes / "black bars").
+                    # Layer 0: Border layer — uniform color, continuous outline
+                    border_prefix = f"{{{bord_tag}}}" if bord_tag else ""
+                    border_event_text = f"{border_prefix}{prefix}{safe_text}"
+                    base_text_events.append((shifted_start, word_end, style_name, border_event_text))
+
+                    # Layer 1: Color layer — per-word coloring, no border
                     before = " ".join(words[:word_idx])
                     active = words[word_idx]
                     after = " ".join(words[word_idx + 1:])
-                    bord_prefix = "{" + aw_bord_tag + "}" if aw_bord_tag else ""
+                    nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
                     base_tag = "{" + f"\\c{base_color}" + "}"
                     aw_tag = "{" + f"\\c{aw_color}" + "}"
                     parts = []
@@ -633,8 +618,8 @@ def generate_ass(
                     parts.append(f"{aw_tag}{active}")
                     if after:
                         parts.append(f" {base_tag}{after}")
-                    event_text = bord_prefix + prefix + "".join(parts)
-                    pending_word_events.append((shifted_start, word_end, style_name, event_text))
+                    color_event_text = nobord_prefix + prefix + "".join(parts)
+                    pending_word_events.append((shifted_start, word_end, style_name, color_event_text))
                     current_time = word_end
         else:
             # Standard: single event with plain text + explicit outline override
@@ -658,7 +643,7 @@ def generate_ass(
                 # Small gap: extend to fill — keeps text visible between segments
                 base_text_events[i] = (ev_start, next_start, ev_style, ev_text)
 
-    # --- Per-word highlight events (active word mode, Layer 0) ---
+    # --- Per-word color events (active word mode, Layer 1) ---
     # Eliminate temporal overlap AND fill small gaps between word events.
     # Overlap: when multiple word events overlap in time, libass renders
     # them all simultaneously and stacks them vertically ("bouncing").
@@ -722,9 +707,10 @@ def generate_ass(
         return total_minutes * 6000 + cs_from_seconds
 
     # Collect all events as (layer, start, end, style, text) tuples.
-    # When active_word_enabled, word events go on Layer 0 (single-layer
-    # approach) — base_text_events is empty in this case.
-    # When active_word is off, only base_text_events is populated.
+    # When active_word_enabled, two-layer architecture:
+    #   base_text_events → Layer 0 (border layer, uniform color)
+    #   pending_word_events → Layer 1 (color layer, \bord0\shad0)
+    # When active_word is off, only base_text_events (Layer 0) is populated.
     all_events: list[tuple[int, float, float, str, str]] = []
     for ev in base_text_events:
         all_events.append((0, ev[0], ev[1], ev[2], ev[3]))
