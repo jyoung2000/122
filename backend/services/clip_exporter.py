@@ -1951,7 +1951,7 @@ def _build_speed_timeline(
         seg_vol = 0.0 if seg.get("muted", False) else seg.get("volume", 1.0)
         timeline.append({
             "start": seg_start, "end": seg_end,
-            "speed": seg.get("speed", 1.0),
+            "speed": seg.get("speed", global_speed),
             "volume": seg_vol, "muted": seg.get("muted", False),
         })
         pos = seg_end
