@@ -1,3 +1,5 @@
+import os
+
 from pydantic_settings import BaseSettings
 from typing import Optional
 from functools import lru_cache
@@ -43,6 +45,10 @@ class Settings(BaseSettings):
     FFMPEG_CRF: int = 23             # 0-51, lower=better quality, 23=default
     FFMPEG_THREADS: int = 0          # 0=auto (all cores), 1-N=explicit
     FFMPEG_FASTSTART: bool = True    # -movflags +faststart for web streaming
+
+    # GPU acceleration settings (read CLIPAI_GPU_ENABLED / CLIPAI_GPU_VENDOR env vars)
+    GPU_ENABLED: bool = os.getenv("CLIPAI_GPU_ENABLED", "false").lower() == "true"
+    GPU_VENDOR: str = os.getenv("CLIPAI_GPU_VENDOR", "auto")
 
     @property
     def active_provider_chain(self) -> list[str]:

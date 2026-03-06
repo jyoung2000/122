@@ -25,6 +25,173 @@ from backend.services.ass_generator import (
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# GPU hardware acceleration detection & encoder selection
+# ---------------------------------------------------------------------------
+
+_gpu_info: dict | None = None
+
+
+def detect_gpu_capabilities() -> dict:
+    """Detect available GPU hardware encoders/decoders.
+
+    Returns dict with keys:
+        vendor: 'nvidia' | 'intel' | 'amd' | 'none'
+        encoder: 'h264_nvenc' | 'h264_vaapi' | 'h264_qsv' | 'libx264'
+        decoder: 'h264_cuvid' | 'h264_vaapi' | 'h264_qsv' | None
+        hwaccel: 'cuda' | 'vaapi' | 'qsv' | None
+        hwaccel_device: '/dev/dri/renderD128' | None (for VAAPI)
+        scale_filter: 'scale_npp' | 'scale_vaapi' | 'scale'
+    """
+    global _gpu_info
+    if _gpu_info is not None:
+        return _gpu_info
+
+    info = {
+        "vendor": "none",
+        "encoder": "libx264",
+        "decoder": None,
+        "hwaccel": None,
+        "hwaccel_device": None,
+        "scale_filter": "scale",
+    }
+
+    if not app_settings.GPU_ENABLED:
+        _gpu_info = info
+        return info
+
+    forced_vendor = app_settings.GPU_VENDOR
+
+    # Check NVIDIA NVENC
+    if forced_vendor in ("auto", "nvidia"):
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if "h264_nvenc" in result.stdout:
+                # Verify NVENC actually works with a test encode
+                test = subprocess.run(
+                    [
+                        "ffmpeg", "-hide_banner", "-f", "lavfi", "-i",
+                        "nullsrc=s=256x256:d=0.1", "-c:v", "h264_nvenc",
+                        "-f", "null", "-",
+                    ],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if test.returncode == 0:
+                    info.update({
+                        "vendor": "nvidia",
+                        "encoder": "h264_nvenc",
+                        "decoder": "h264_cuvid",
+                        "hwaccel": "cuda",
+                        "hwaccel_device": None,
+                        "scale_filter": "scale",
+                    })
+                    logger.info("GPU detected: NVIDIA NVENC available")
+                    _gpu_info = info
+                    return info
+        except Exception as e:
+            logger.debug("NVENC detection failed: %s", e)
+
+    # Check Intel QSV
+    if forced_vendor in ("auto", "intel"):
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if "h264_qsv" in result.stdout:
+                info.update({
+                    "vendor": "intel",
+                    "encoder": "h264_qsv",
+                    "decoder": "h264_qsv",
+                    "hwaccel": "qsv",
+                    "hwaccel_device": "/dev/dri/renderD128",
+                    "scale_filter": "scale",
+                })
+                logger.info("GPU detected: Intel QSV available")
+                _gpu_info = info
+                return info
+        except Exception:
+            pass
+
+    # Check VA-API (Intel iGPU or AMD)
+    if forced_vendor in ("auto", "intel", "amd"):
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-hide_banner", "-encoders"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if "h264_vaapi" in result.stdout:
+                vaapi_dev = "/dev/dri/renderD128"
+                if os.path.exists(vaapi_dev):
+                    info.update({
+                        "vendor": "amd" if forced_vendor == "amd" else "intel",
+                        "encoder": "h264_vaapi",
+                        "decoder": "h264_vaapi",
+                        "hwaccel": "vaapi",
+                        "hwaccel_device": vaapi_dev,
+                        "scale_filter": "scale",
+                    })
+                    logger.info("GPU detected: VA-API available at %s", vaapi_dev)
+                    _gpu_info = info
+                    return info
+        except Exception:
+            pass
+
+    logger.info("No GPU acceleration available, using CPU encoding (libx264)")
+    _gpu_info = info
+    return info
+
+
+def _gpu_encode_args(quality_preset: dict) -> list[str]:
+    """Return FFmpeg encoder arguments based on detected GPU.
+
+    Falls back to libx264 if GPU is unavailable.
+    Returns list of args to extend the FFmpeg command with.
+    """
+    gpu = detect_gpu_capabilities()
+
+    if gpu["vendor"] == "nvidia":
+        crf = quality_preset.get("crf", 23)
+        return [
+            "-c:v", "h264_nvenc",
+            "-preset", "p5",
+            "-rc", "vbr",
+            "-cq", str(crf),
+            "-b:v", "0",
+            "-pix_fmt", "yuv420p",
+        ]
+
+    elif gpu["vendor"] in ("intel", "amd") and gpu["encoder"] == "h264_vaapi":
+        crf = quality_preset.get("crf", 23)
+        return [
+            "-vaapi_device", gpu["hwaccel_device"],
+            "-c:v", "h264_vaapi",
+            "-qp", str(crf),
+            "-pix_fmt", "vaapi",
+        ]
+
+    elif gpu["encoder"] == "h264_qsv":
+        crf = quality_preset.get("crf", 23)
+        return [
+            "-c:v", "h264_qsv",
+            "-global_quality", str(crf),
+            "-preset", "medium",
+            "-pix_fmt", "yuv420p",
+        ]
+
+    else:
+        # CPU fallback
+        return [
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-preset", quality_preset.get("preset", "medium"),
+            "-crf", str(quality_preset.get("crf", 23)),
+        ]
+
+
 async def _validate_export(
     output_path: str,
     expected_duration: float,
@@ -249,7 +416,13 @@ def _validate_ass_settings(
         expected_border_style = 1
         expected_outline_colour = _hex_to_ass_color_with_alpha(outline_color, outline_opacity)
         expected_ol_width = scaled_outline_width
-        expected_shadow = max(1, min(4, round(scaled_outline_width * 0.75))) if scaled_outline_width > 0 else 0
+        # When active word is enabled, shadow is suppressed to 0 in both
+        # the Style definition and per-event tags to prevent per-word shadow
+        # boxes ("black bars") around the highlighted word.
+        if active_word_enabled:
+            expected_shadow = 0
+        else:
+            expected_shadow = max(1, min(4, round(scaled_outline_width * 0.75))) if scaled_outline_width > 0 else 0
 
     # --- 1. PlayRes dimensions ---
     playres_x = re.search(r"PlayResX:\s*(\d+)", ass_content)
@@ -1776,6 +1949,12 @@ def _build_filter_chain(
     if sub:
         filters.append(sub)
 
+    # VA-API needs frames uploaded to GPU after CPU-side subtitle filter
+    gpu = detect_gpu_capabilities()
+    if gpu["encoder"] == "h264_vaapi" and filters:
+        filters.append("format=nv12")
+        filters.append("hwupload")
+
     return (",".join(filters) if filters else None, False)
 
 
@@ -2303,10 +2482,7 @@ async def export_clip(
                 ] + input_args + [
                     "-filter_complex", full_fc,
                 ] + map_args + [
-                    "-c:v", "libx264",
-                    "-pix_fmt", "yuv420p",
-                    "-preset", enc_preset,
-                    "-crf", str(enc_crf),
+                    *_gpu_encode_args(qp),
                     "-threads", str(app_settings.FFMPEG_THREADS),
                 ]
                 if _has_audio:
@@ -2364,10 +2540,7 @@ async def export_clip(
                 if af:
                     cmd += ["-af", af]
                 cmd += [
-                    "-c:v", "libx264",
-                    "-pix_fmt", "yuv420p",
-                    "-preset", enc_preset,
-                    "-crf", str(enc_crf),
+                    *_gpu_encode_args(qp),
                     "-threads", str(app_settings.FFMPEG_THREADS),
                     "-c:a", "aac",
                     "-avoid_negative_ts", "make_zero",
@@ -2500,10 +2673,7 @@ async def export_clip(
                 if video_height != fb_target_h:
                     cmd += ["-vf", f"scale=-2:{fb_target_h}"]
                 cmd += [
-                    "-c:v", "libx264",
-                    "-pix_fmt", "yuv420p",
-                    "-preset", fb_qp["preset"],
-                    "-crf", str(fb_qp["crf"]),
+                    *_gpu_encode_args(fb_qp),
                     "-threads", str(app_settings.FFMPEG_THREADS),
                     "-c:a", "aac",
                     "-avoid_negative_ts", "make_zero",

@@ -104,11 +104,22 @@ export default function Settings() {
   const faviconInputRef = useRef(null);
   const logoInputRef = useRef(null);
 
+  // GPU status
+  const [gpuStatus, setGpuStatus] = useState(null);
+
   // Load provider statuses
   useEffect(() => {
     fetch('/api/providers/status')
       .then((r) => r.json())
       .then(setStatuses)
+      .catch(() => {});
+  }, []);
+
+  // Load GPU status
+  useEffect(() => {
+    fetch('/api/gpu-status')
+      .then((r) => r.json())
+      .then(setGpuStatus)
       .catch(() => {});
   }, []);
 
@@ -1541,6 +1552,25 @@ export default function Settings() {
                 <span style={{ fontSize: 13 }}>Fallback Chain</span>
                 <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{(statuses._active?.fallback_chain || ['openrouter', 'gemini', 'groq']).join(' \u2192 ')}</span>
               </div>
+            </div>
+
+            <h3 style={{ fontSize: 14, marginTop: 24, marginBottom: 16, color: 'var(--text-secondary)' }}>GPU Acceleration</h3>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
+              <span style={{ fontSize: 13 }}>Video Encoding</span>
+              {gpuStatus ? (
+                <span style={{
+                  fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 600,
+                  padding: '2px 8px', borderRadius: 9999,
+                  background: gpuStatus.gpu_enabled ? 'rgba(34,197,94,0.15)' : 'rgba(156,163,175,0.15)',
+                  color: gpuStatus.gpu_enabled ? 'var(--success)' : 'var(--text-muted)',
+                }}>
+                  {gpuStatus.gpu_enabled
+                    ? `${gpuStatus.vendor.toUpperCase()} ${gpuStatus.encoder}`
+                    : 'CPU (libx264)'}
+                </span>
+              ) : (
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>Loading...</span>
+              )}
             </div>
           </div>
         </div>

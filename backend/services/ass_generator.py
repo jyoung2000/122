@@ -382,6 +382,12 @@ def generate_ass(
         # (backendOlWidth in ClipPreview.jsx:622).
         shadow_depth = max(1, min(4, round(scaled_outline_width * 0.75))) if scaled_outline_width > 0 else 0
 
+    # When active word is enabled without background, suppress shadow in the
+    # Style definition — all active word events use per-event \shad0 overrides,
+    # and having shadow=0 in the Style prevents any fallback rendering artifacts
+    # (per-word shadow boxes that create visible "black bars").
+    style_shadow = 0 if (active_word_enabled and not background_enabled) else shadow_depth
+
     # Create a style per speaker
     for sp in speakers_seen:
         color_hex = speaker_color_map[sp]
@@ -390,7 +396,7 @@ def generate_ass(
 
         lines.append(
             f"Style: {style_name},{font},{size_px},{ass_color},&H000000FF&,{style_outline_color},{back_color_ass},"
-            f"{bold_flag},0,0,0,100,100,0,0,{border_style},{ol_width},{shadow_depth},{alignment},{margin_h},{margin_h},{margin_v},1"
+            f"{bold_flag},0,0,0,100,100,0,0,{border_style},{ol_width},{style_shadow},{alignment},{margin_h},{margin_h},{margin_v},1"
         )
 
     lines.append("")
@@ -419,8 +425,13 @@ def generate_ass(
     # from inheriting unexpected border state from the Style definition.
     if not background_enabled:
         bord_tag = f"\\bord{ol_width}\\shad{shadow_depth}\\3c{style_outline_color}"
+        # Active word mode: suppress shadow to prevent per-word shadow boxes
+        # that create visible "black bars" around the highlighted word.
+        # The outline (\bord) still renders correctly as a continuous stroke.
+        aw_bord_tag = f"\\bord{ol_width}\\shad0\\3c{style_outline_color}"
     else:
         bord_tag = ""
+        aw_bord_tag = ""
 
     # Add dialogue events
     # Two-layer architecture for active-word mode:
@@ -455,7 +466,7 @@ def generate_ass(
                 # Single word — just color the whole event with active word color.
                 # Only override \c (text color).  Outline/border/shadow come from
                 # bord_tag prefix + Style definition to avoid per-word shadow boxes.
-                bord_prefix = "{" + bord_tag + "}" if bord_tag else ""
+                bord_prefix = "{" + aw_bord_tag + "}" if aw_bord_tag else ""
                 aw_tags = f"\\c{aw_color}"
                 event_text = f"{bord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
                 pending_word_events.append((clip_start, clip_end, style_name, event_text))
@@ -509,7 +520,7 @@ def generate_ass(
                     before = " ".join(words[:word_idx])
                     active = words[word_idx]
                     after = " ".join(words[word_idx + 1:])
-                    bord_prefix = "{" + bord_tag + "}" if bord_tag else ""
+                    bord_prefix = "{" + aw_bord_tag + "}" if aw_bord_tag else ""
                     base_tag = "{" + f"\\c{base_color}" + "}"
                     aw_tag = "{" + f"\\c{aw_color}" + "}"
                     parts = []
@@ -608,11 +619,12 @@ def generate_ass(
 
                     # Build text with inline overrides on the active word.
                     # Minimal-tag approach: only change \c (text color).
-                    # Outline/shadow set once via bord_tag prefix.
+                    # Outline/shadow set once via aw_bord_tag prefix (\shad0
+                    # to prevent per-word shadow boxes / "black bars").
                     before = " ".join(words[:word_idx])
                     active = words[word_idx]
                     after = " ".join(words[word_idx + 1:])
-                    bord_prefix = "{" + bord_tag + "}" if bord_tag else ""
+                    bord_prefix = "{" + aw_bord_tag + "}" if aw_bord_tag else ""
                     base_tag = "{" + f"\\c{base_color}" + "}"
                     aw_tag = "{" + f"\\c{aw_color}" + "}"
                     parts = []

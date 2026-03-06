@@ -1,12 +1,24 @@
 services:
   app:
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      - CLIPAI_GPU_ENABLED=true
+      - CLIPAI_GPU_VENDOR=auto
+    devices:
+      # Intel/AMD VA-API support (passthrough DRI devices)
+      - /dev/dri:/dev/dri
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities: [gpu, video, compute]
 
   ollama:
     deploy:
@@ -15,4 +27,4 @@ services:
           devices:
             - driver: nvidia
               count: 1
-              capabilities: [gpu]
+              capabilities: [gpu, compute]
