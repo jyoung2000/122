@@ -3,9 +3,12 @@ import json
 import logging
 import math
 import os
+import platform
 import subprocess
 
 import re
+
+_IS_WINDOWS = platform.system() == "Windows"
 
 from backend.config import settings as app_settings
 from backend.models import TranscriptSegment
@@ -64,6 +67,7 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
         "vendor": "none",
         "gpu_name": "None (CPU only)",
         "encoder": "libx264",
+        "hevc_encoder": None,
         "decoder": None,
         "hwaccel": None,
         "hwaccel_device": None,
@@ -122,7 +126,7 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
             ["ffmpeg", "-hide_banner", "-encoders"],
             capture_output=True, text=True, timeout=10,
         )
-        for enc in ("h264_nvenc", "h264_vaapi", "h264_qsv", "hevc_nvenc", "hevc_vaapi"):
+        for enc in ("h264_nvenc", "h264_vaapi", "h264_qsv", "hevc_nvenc", "hevc_vaapi", "hevc_qsv"):
             if enc in result.stdout:
                 available_encoders.add(enc)
         logger.info("FFmpeg HW encoders available: %s", available_encoders or "none")
@@ -144,19 +148,30 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
         })
 
     if "h264_qsv" in available_encoders and forced_vendor in ("auto", "intel"):
-        encoder_configs.append({
-            "vendor": "intel", "encoder": "h264_qsv", "decoder": "h264_qsv",
-            "hwaccel": "qsv", "hwaccel_device": "/dev/dri/renderD128",
-            "test_cmd": [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1",
-                "-c:v", "h264_qsv", "-f", "null", "-",
-            ],
-        })
+        # On Windows, QSV works without an explicit device path; on Linux
+        # it needs the DRI render node.
+        qsv_device = None if _IS_WINDOWS else "/dev/dri/renderD128"
+        qsv_test_cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1",
+            "-c:v", "h264_qsv", "-f", "null", "-",
+        ]
+        # On Windows, QSV auto-discovers the Intel GPU via DXVA2/D3D11
+        if not _IS_WINDOWS and qsv_device:
+            qsv_ok = os.path.exists(qsv_device)
+        else:
+            qsv_ok = True
+        if qsv_ok:
+            encoder_configs.append({
+                "vendor": "intel", "encoder": "h264_qsv", "decoder": "h264_qsv",
+                "hwaccel": "qsv", "hwaccel_device": qsv_device,
+                "test_cmd": qsv_test_cmd,
+            })
 
     if "h264_vaapi" in available_encoders and forced_vendor in ("auto", "intel", "amd"):
+        # VAAPI is Linux-only (not available on Windows)
         vaapi_dev = "/dev/dri/renderD128"
-        if os.path.exists(vaapi_dev):
+        if not _IS_WINDOWS and os.path.exists(vaapi_dev):
             encoder_configs.append({
                 "vendor": "amd" if forced_vendor == "amd" else "intel",
                 "encoder": "h264_vaapi", "decoder": "h264_vaapi",
@@ -182,6 +197,12 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
                 })
                 if info["cuda_available"]:
                     info["capabilities"].append("whisper_cuda")
+                # Probe HEVC encoder availability (for 4K exports)
+                hevc_enc = {"nvidia": "hevc_nvenc", "intel": "hevc_qsv", "amd": "hevc_vaapi"}.get(cfg["vendor"])
+                if hevc_enc and hevc_enc in available_encoders:
+                    info["hevc_encoder"] = hevc_enc
+                    info["capabilities"].append("encode_hevc_gpu")
+                    logger.info("HEVC GPU encoder available: %s", hevc_enc)
                 # Detect GPU name for Intel/AMD if not set by nvidia-smi
                 if cfg["vendor"] != "nvidia" and "None" in info["gpu_name"]:
                     _detect_non_nvidia_gpu_name(info, cfg["vendor"])
@@ -208,18 +229,35 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
 
 
 def _detect_non_nvidia_gpu_name(info: dict, vendor: str):
-    """Try to detect Intel/AMD GPU name from lspci."""
+    """Try to detect Intel/AMD GPU name from lspci (Linux) or WMIC (Windows)."""
     try:
-        result = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
-        for line in result.stdout.split("\n"):
-            lower = line.lower()
-            if "vga" in lower or "3d controller" in lower or "display" in lower:
+        if _IS_WINDOWS:
+            # Use WMIC to enumerate display adapters on Windows
+            result = subprocess.run(
+                ["wmic", "path", "win32_VideoController", "get", "Name"],
+                capture_output=True, text=True, timeout=10,
+            )
+            for line in result.stdout.split("\n"):
+                lower = line.strip().lower()
+                if not lower or "name" in lower:
+                    continue
                 if vendor == "intel" and "intel" in lower:
-                    info["gpu_name"] = line.split(": ", 1)[-1].strip() if ": " in line else "Intel GPU"
+                    info["gpu_name"] = line.strip()
                     break
                 elif vendor == "amd" and ("amd" in lower or "radeon" in lower):
-                    info["gpu_name"] = line.split(": ", 1)[-1].strip() if ": " in line else "AMD GPU"
+                    info["gpu_name"] = line.strip()
                     break
+        else:
+            result = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split("\n"):
+                lower = line.lower()
+                if "vga" in lower or "3d controller" in lower or "display" in lower:
+                    if vendor == "intel" and "intel" in lower:
+                        info["gpu_name"] = line.split(": ", 1)[-1].strip() if ": " in line else "Intel GPU"
+                        break
+                    elif vendor == "amd" and ("amd" in lower or "radeon" in lower):
+                        info["gpu_name"] = line.split(": ", 1)[-1].strip() if ": " in line else "AMD GPU"
+                        break
     except Exception:
         pass
 
@@ -243,7 +281,25 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
     gpu = detect_gpu_capabilities()
     crf = quality_preset.get("crf", 23)
 
+    # Use HEVC for 4K exports when the GPU supports it — HEVC delivers
+    # ~40% better compression at 4K than H.264 with similar quality.
+    use_hevc = (
+        export_quality == "4k"
+        and gpu.get("hevc_encoder")
+        and app_settings.GPU_HEVC_FOR_4K
+    )
+
     if gpu["encoder"] == "h264_nvenc":
+        if use_hevc:
+            return [
+                "-c:v", "hevc_nvenc",
+                "-preset", "p5",
+                "-rc", "vbr",
+                "-cq", str(max(crf - 2, 0)),  # HEVC CQ is slightly different
+                "-b:v", "0",
+                "-pix_fmt", "yuv420p",
+                "-tag:v", "hvc1",  # Apple/browser compatibility
+            ]
         return [
             "-c:v", "h264_nvenc",
             "-preset", "p5",
@@ -260,6 +316,13 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
             "-pix_fmt", "vaapi",
         ]
     elif gpu["encoder"] == "h264_qsv":
+        if use_hevc:
+            return [
+                "-c:v", "hevc_qsv",
+                "-global_quality", str(max(crf - 2, 0)),
+                "-preset", "medium",
+                "-pix_fmt", "yuv420p",
+            ]
         return [
             "-c:v", "h264_qsv",
             "-global_quality", str(crf),
@@ -273,6 +336,75 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
             "-preset", quality_preset.get("preset", "medium"),
             "-crf", str(quality_preset.get("crf", 23)),
         ]
+
+
+def _gpu_decode_args() -> list[str]:
+    """Return FFmpeg input-side args for hardware-accelerated decoding.
+
+    These args must be placed BEFORE the -i input flag.  When GPU
+    acceleration is disabled or no suitable decoder is available,
+    returns an empty list (software decode).
+
+    Supported paths:
+    - NVIDIA CUDA/CUVID: ``-hwaccel cuda -hwaccel_output_format cuda``
+      (on Windows uses D3D11VA under the hood via CUDA interop)
+    - Intel QSV: ``-hwaccel qsv`` (DXVA2 on Windows, VAAPI on Linux)
+    - Intel/AMD VAAPI (Linux only): ``-hwaccel vaapi -hwaccel_device /dev/dri/renderD128``
+
+    Note: When using filter chains (subtitles, crop, scale, speed) the
+    decoded frames must be downloaded back to system memory for the
+    filters to work.  We intentionally omit ``-hwaccel_output_format``
+    for the CUDA path when filters are likely, and let FFmpeg handle the
+    automatic download.  For simple encode-only paths (no complex
+    filters) we keep frames on the GPU for maximum throughput.
+    """
+    if not app_settings.GPU_ACCELERATION_ENABLED:
+        return []
+    if not app_settings.GPU_HWDECODE_ENABLED:
+        return []
+
+    gpu = detect_gpu_capabilities()
+
+    if gpu["hwaccel"] == "cuda":
+        # CUDA hardware decoding — works on both Windows (DXVA2/D3D11VA
+        # backed) and Linux.  We omit -hwaccel_output_format here so
+        # frames are auto-downloaded to system memory for filter
+        # compatibility.  The encode side (_gpu_encode_args) uses NVENC
+        # which can accept system memory input efficiently.
+        return ["-hwaccel", "cuda"]
+    elif gpu["hwaccel"] == "qsv":
+        args = ["-hwaccel", "qsv"]
+        # On Linux, QSV needs an explicit device path
+        if gpu["hwaccel_device"]:
+            args += ["-hwaccel_device", gpu["hwaccel_device"]]
+        return args
+    elif gpu["hwaccel"] == "d3d11va":
+        # Windows Direct3D 11 Video Acceleration — works with Intel
+        # iGPU and NVIDIA dGPU on Windows for hardware decoding even
+        # when no GPU encoder is available.
+        return ["-hwaccel", "d3d11va"]
+    elif gpu["hwaccel"] == "vaapi" and gpu["hwaccel_device"]:
+        return ["-hwaccel", "vaapi", "-hwaccel_device", gpu["hwaccel_device"]]
+
+    # On Windows, try D3D11VA as a universal fallback for decoding even
+    # if no GPU encoder was detected — all modern Windows GPUs (Intel,
+    # NVIDIA, AMD) support DXVA2/D3D11VA for video decoding.
+    if _IS_WINDOWS and gpu["vendor"] == "none":
+        return ["-hwaccel", "d3d11va"]
+
+    return []
+
+
+def _gpu_decode_args_for_filter() -> list[str]:
+    """Like _gpu_decode_args but ensures frames end up in system memory.
+
+    Used when the FFmpeg command includes filter chains (crop, scale,
+    subtitles, speed) that require software-accessible frames.
+    Identical to _gpu_decode_args() — both paths already output to
+    system memory — but kept as a distinct function for clarity and
+    future optimization (e.g. hwdownload insertion for VAAPI).
+    """
+    return _gpu_decode_args()
 
 
 async def _validate_export(
@@ -2598,13 +2730,16 @@ async def export_clip(
                 _has_audio = bool(_probe_out.strip())
 
                 # --- Build multi-input args: one -ss/-t/-i per segment ---
+                # HW decode args go before each -i so the decoder is
+                # initialised per-input (required for multi-input).
+                _hw_dec = _gpu_decode_args_for_filter()
                 input_args: list[str] = []
                 for i, tl in enumerate(timeline):
                     abs_start = start + tl["start"]
                     seg_dur = tl["end"] - tl["start"]
                     # Add 1s buffer for keyframe alignment; trim in filter
                     # ensures exact segment duration
-                    input_args += [
+                    input_args += _hw_dec + [
                         "-ss", f"{abs_start:.3f}",
                         "-t", f"{seg_dur + 1.0:.3f}",
                         "-i", video_path,
@@ -2671,7 +2806,7 @@ async def export_clip(
                 ] + input_args + [
                     "-filter_complex", full_fc,
                 ] + map_args + [
-                    *_gpu_encode_args(qp),
+                    *_gpu_encode_args(qp, export_quality),
                     "-threads", str(app_settings.FFMPEG_THREADS),
                 ]
                 if _has_audio:
@@ -2725,6 +2860,7 @@ async def export_clip(
                 output_dur = (end - start) / speed if has_speed else (end - start)
                 cmd = [
                     "ffmpeg", "-y",
+                    *_gpu_decode_args_for_filter(),
                     "-ss", str(start),
                     "-i", video_path,
                     "-t", str(output_dur),
@@ -2737,7 +2873,7 @@ async def export_clip(
                 if af:
                     cmd += ["-af", af]
                 cmd += [
-                    *_gpu_encode_args(qp),
+                    *_gpu_encode_args(qp, export_quality),
                     "-threads", str(app_settings.FFMPEG_THREADS),
                     "-c:a", "aac",
                     "-avoid_negative_ts", "make_zero",
@@ -2861,6 +2997,7 @@ async def export_clip(
                 fb_qp = QUALITY_PRESETS.get(export_quality, QUALITY_PRESETS["1080p"])
                 cmd = [
                     "ffmpeg", "-y",
+                    *_gpu_decode_args_for_filter(),
                     "-ss", str(start),
                     "-i", video_path,
                     "-t", str(end - start),
@@ -2874,7 +3011,7 @@ async def export_clip(
                 else:
                     cmd += ["-vf", "setsar=1"]
                 cmd += [
-                    *_gpu_encode_args(fb_qp),
+                    *_gpu_encode_args(fb_qp, export_quality),
                     "-threads", str(app_settings.FFMPEG_THREADS),
                     "-c:a", "aac",
                     "-avoid_negative_ts", "make_zero",

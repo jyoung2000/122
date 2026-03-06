@@ -1408,10 +1408,13 @@ async def get_gpu_acceleration():
     return {
         "enabled": settings.GPU_ACCELERATION_ENABLED,
         "vendor_override": settings.GPU_VENDOR_OVERRIDE,
+        "hwdecode_enabled": settings.GPU_HWDECODE_ENABLED,
+        "hevc_for_4k": settings.GPU_HEVC_FOR_4K,
         "detected": {
             "vendor": gpu_info["vendor"],
             "gpu_name": gpu_info.get("gpu_name", "Unknown"),
             "encoder": gpu_info["encoder"],
+            "hevc_encoder": gpu_info.get("hevc_encoder"),
             "decoder": gpu_info["decoder"],
             "hwaccel": gpu_info["hwaccel"],
             "capabilities": gpu_info.get("capabilities", []),

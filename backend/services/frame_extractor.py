@@ -150,9 +150,19 @@ async def extract_frames(
     rate = sample_rate or settings.FRAME_SAMPLE_RATE
     os.makedirs(output_dir, exist_ok=True)
 
+    # Use GPU-accelerated decoding if available (speeds up long video
+    # frame extraction significantly on NVIDIA/Intel hardware).
+    _hw_dec: list[str] = []
+    try:
+        from backend.services.clip_exporter import _gpu_decode_args_for_filter
+        _hw_dec = _gpu_decode_args_for_filter()
+    except Exception:
+        pass
+
     cmd = [
         "ffmpeg", "-y",
         "-threads", "0",
+        *_hw_dec,
         "-i", video_path,
         "-an",  # skip audio decoding — only extracting video frames
         "-vf", f"fps=1/{rate},scale='min(1024,iw)':'min(576,ih)':force_original_aspect_ratio=decrease",
