@@ -1710,14 +1710,14 @@ export default function Settings() {
                 </div>
                 <button
                   onClick={() => handleToggleClientGpu(!clientGpuEnabled)}
-                  disabled={clientGpuScanning || (!clientGpuInfo?.webgpuSupported && !clientGpuEnabled)}
+                  disabled={clientGpuScanning || (!clientGpuInfo && !clientGpuEnabled)}
                   style={{
                     width: 44, height: 24, borderRadius: 12, border: 'none', position: 'relative',
                     background: clientGpuEnabled ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
-                    cursor: (clientGpuScanning || (!clientGpuInfo?.webgpuSupported && !clientGpuEnabled)) ? 'default' : 'pointer',
+                    cursor: (clientGpuScanning || (!clientGpuInfo && !clientGpuEnabled)) ? 'default' : 'pointer',
                     flexShrink: 0, marginLeft: 16,
                     transition: 'background 0.2s',
-                    opacity: (clientGpuScanning || (!clientGpuInfo?.webgpuSupported && !clientGpuEnabled)) ? 0.5 : 1,
+                    opacity: (clientGpuScanning || (!clientGpuInfo && !clientGpuEnabled)) ? 0.5 : 1,
                   }}
                 >
                   <div style={{
@@ -1732,17 +1732,55 @@ export default function Settings() {
               <div style={{
                 marginTop: 8, fontSize: 10, fontFamily: 'var(--font-mono)',
                 color: clientGpuScanning ? 'var(--text-muted)' :
-                       !clientGpuInfo?.webgpuSupported ? 'var(--warning)' :
-                       clientGpuEnabled ? 'var(--accent-cyan)' : 'var(--text-muted)',
+                       clientGpuEnabled ? 'var(--accent-cyan)' :
+                       clientGpuInfo?.gpus?.length > 0 ? 'var(--success)' :
+                       'var(--text-muted)',
               }}>
                 {clientGpuScanning ? 'Scanning browser GPU capabilities...' :
-                 !clientGpuInfo?.webgpuSupported ? 'WebGPU not available in this browser — see instructions below' :
                  clientGpuEnabled ? `Enabled — using ${clientGpuInfo?.gpus?.find(g => g.id === selectedClientGpuId)?.name || 'detected GPU'}` :
+                 clientGpuInfo?.gpus?.length > 0 ? `${clientGpuInfo.gpus.length} GPU(s) detected — toggle on to enable` :
                  'Disabled — all processing runs on the server'}
               </div>
 
-              {/* WebGPU Not Supported — browser setup instructions */}
-              {!clientGpuScanning && clientGpuInfo && !clientGpuInfo.webgpuSupported && (
+              {/* Detected GPUs summary — shown before toggle enabled so user can see what was found */}
+              {!clientGpuScanning && !clientGpuEnabled && clientGpuInfo?.gpus?.length > 0 && (
+                <div style={{
+                  marginTop: 12, padding: '12px 16px',
+                  background: 'rgba(0, 217, 255, 0.05)',
+                  border: '1px solid rgba(0, 217, 255, 0.2)',
+                  borderRadius: 'var(--radius-sm)',
+                }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Detected GPUs</div>
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    {clientGpuInfo.gpus.map(gpu => (
+                      <div key={gpu.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                        <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{gpu.name}</span>
+                        <span style={{
+                          fontSize: 10, padding: '1px 6px', borderRadius: 3,
+                          background: gpu.backend === 'webgpu' ? 'rgba(0, 217, 255, 0.15)' : 'rgba(255, 255, 255, 0.08)',
+                          color: gpu.backend === 'webgpu' ? 'var(--accent-cyan)' : 'var(--text-muted)',
+                          fontFamily: 'var(--font-mono)',
+                        }}>
+                          {gpu.backend === 'webgpu' ? 'WebGPU' : 'WebGL'} · {gpu.type === 'discrete' ? 'Discrete' : gpu.type === 'integrated' ? 'Integrated' : 'GPU'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  {clientGpuInfo.webcodecs?.h264HardwareEncode && (
+                    <div style={{ marginTop: 8, fontSize: 10, color: 'var(--success)', fontFamily: 'var(--font-mono)' }}>
+                      H.264 hardware encoding available via WebCodecs
+                    </div>
+                  )}
+                  {!clientGpuInfo.webgpuSupported && (
+                    <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                      WebGPU not available — Whisper transcription will use CPU. Video encoding can still use hardware via WebCodecs.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* WebGPU Not Supported — browser setup instructions (only when no GPUs detected at all) */}
+              {!clientGpuScanning && clientGpuInfo && !clientGpuInfo.webgpuSupported && clientGpuInfo.gpus?.length === 0 && (
                 <div style={{
                   marginTop: 12, padding: '14px 16px',
                   background: 'rgba(255, 165, 0, 0.06)',
@@ -1883,7 +1921,7 @@ export default function Settings() {
               )}
 
               {/* GPU Details + Selection (when enabled) */}
-              {clientGpuEnabled && clientGpuInfo && clientGpuInfo.webgpuSupported && (
+              {clientGpuEnabled && clientGpuInfo && (
                 <div style={{
                   marginTop: 12, padding: '12px 16px',
                   background: clientGpuInfo.gpus.length > 0 ? 'rgba(0, 217, 255, 0.05)' : 'rgba(255, 165, 0, 0.05)',
@@ -1953,7 +1991,7 @@ export default function Settings() {
                             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
                               <span style={{ color: 'var(--text-muted)' }}>Whisper Ready</span>
                               <span style={{ fontFamily: 'var(--font-mono)', color: gpu.whisperCapable ? 'var(--success)' : 'var(--warning)' }}>
-                                {gpu.whisperCapable ? 'Yes' : 'No (insufficient buffer size)'}
+                                {gpu.whisperCapable ? 'Yes' : gpu.backend === 'webgl-only' ? 'No (requires WebGPU)' : 'No (insufficient buffer size)'}
                               </span>
                             </div>
                           </div>
