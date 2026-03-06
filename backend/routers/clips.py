@@ -17,6 +17,67 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["clips"])
 
+
+def _seg_attr(seg, key: str, default=None):
+    """Get attribute from a segment (dict or Pydantic model)."""
+    if isinstance(seg, dict):
+        return seg.get(key, default)
+    return getattr(seg, key, default)
+
+
+def _compute_output_duration(
+    start: float,
+    end: float,
+    global_speed: float,
+    segments: list | None = None,
+) -> float:
+    """Compute expected output duration accounting for per-segment speeds.
+
+    When segments have individual speed overrides, each segment's output
+    duration is its input duration divided by its speed.  Gap regions
+    (not covered by any segment) use the global speed.
+
+    This matches the logic in clip_exporter._build_speed_timeline so the
+    stored duration record matches the actual exported file.
+    """
+    clip_dur = end - start
+    speed = global_speed if global_speed else 1.0
+    if not segments:
+        return clip_dur / speed
+
+    # Check if any segment has a per-segment speed override
+    has_seg_speed = any(
+        abs(_seg_attr(s, "speed", 1.0) - 1.0) > 0.001
+        for s in segments
+    )
+    if not has_seg_speed:
+        return clip_dur / speed
+
+    # Walk through segments and compute output duration per region
+    sorted_segs = sorted(segments, key=lambda s: _seg_attr(s, "start", 0))
+    total_output = 0.0
+    pos = 0.0  # clip-relative position
+
+    for seg in sorted_segs:
+        seg_start = max(0.0, _seg_attr(seg, "start", 0) - start)
+        seg_end = min(clip_dur, _seg_attr(seg, "end", 0) - start)
+        if seg_end <= seg_start:
+            continue
+
+        # Gap before this segment — uses global speed
+        if seg_start > pos + 0.01:
+            total_output += (seg_start - pos) / speed
+
+        seg_speed = _seg_attr(seg, "speed", speed)
+        total_output += (seg_end - seg_start) / seg_speed
+        pos = seg_end
+
+    # Gap after last segment
+    if pos < clip_dur - 0.01:
+        total_output += (clip_dur - pos) / speed
+
+    return total_output
+
 # Track active clip generation tasks per job so we can cancel on re-trigger
 _active_clip_tasks: dict[str, asyncio.Task] = {}
 _clip_cancel_events: dict[str, asyncio.Event] = {}
@@ -236,7 +297,9 @@ async def export_clip_endpoint(
                     "start": actual_start,
                     "end": actual_end,
                     "exported_at": datetime.now(timezone.utc).isoformat(),
-                    "duration": round((actual_end - actual_start) / req.speed, 2),
+                    "duration": round(_compute_output_duration(
+                        actual_start, actual_end, req.speed, req.segments,
+                    ), 2),
                     "export_quality": req.export_quality or "1080p",
                     "aspect_ratio": req.aspect_ratio,
                     "subtitles_enabled": req.subtitles_enabled,
@@ -401,10 +464,12 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                     "path": output_path,
                     "filename": os.path.basename(output_path),
                     "title": os.path.splitext(job.filename or "full_video")[0],
-                    "start": 0,
-                    "end": job.duration,
+                    "start": fv_start,
+                    "end": fv_end,
                     "exported_at": datetime.now(timezone.utc).isoformat(),
-                    "duration": round(job.duration / req.speed, 2) if req.speed and req.speed != 1.0 else round(job.duration, 2),
+                    "duration": round(_compute_output_duration(
+                        fv_start, fv_end, req.speed, req.segments,
+                    ), 2),
                     "export_quality": req.export_quality or "1080p",
                     "aspect_ratio": req.aspect_ratio,
                     "subtitles_enabled": req.subtitles_enabled,
