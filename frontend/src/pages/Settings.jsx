@@ -163,6 +163,17 @@ export default function Settings() {
         }
       } catch (e) {
         console.warn('Client GPU scan failed:', e);
+        // CRITICAL: Set a fallback so the toggle isn't permanently disabled.
+        // Without this, clientGpuInfo stays null and the toggle is greyed out
+        // with no error message, leaving users unable to enable GPU processing.
+        setClientGpuInfo({
+          webgpuSupported: !!(typeof navigator !== 'undefined' && navigator?.gpu),
+          webcodecSupported: typeof VideoEncoder !== 'undefined',
+          gpus: [],
+          webcodecs: { h264HardwareEncode: false, hevcHardwareEncode: false, h264Decode: false, hevcDecode: false },
+          recommended: null,
+          scanErrors: [e?.message || 'GPU scan failed — check browser console for details'],
+        });
       }
       setClientGpuScanning(false);
     })();
@@ -1838,12 +1849,23 @@ export default function Settings() {
                         const { scanClientGPU } = await import('../utils/clientGpu.js');
                         const info = await scanClientGPU();
                         setClientGpuInfo(info);
-                        if (info.webgpuSupported) {
-                          showToast(`WebGPU detected — found ${info.gpus.length} GPU(s)`, 'success');
+                        if (info.gpus.length > 0) {
+                          showToast(`Found ${info.gpus.length} GPU(s): ${info.gpus.map(g => g.name).join(', ')}`, 'success');
+                        } else if (info.webgpuSupported) {
+                          showToast(`WebGPU available but no adapters returned${info.scanErrors ? ' — ' + info.scanErrors[0] : ''}`, 'warning');
                         } else {
                           showToast('WebGPU still not available — check the instructions above', 'warning');
                         }
-                      } catch { showToast('GPU scan failed', 'error'); }
+                      } catch (e) {
+                        showToast(`GPU scan failed: ${e?.message || 'unknown error'}`, 'error');
+                        setClientGpuInfo({
+                          webgpuSupported: !!navigator?.gpu,
+                          gpus: [],
+                          webcodecs: { h264HardwareEncode: false, hevcHardwareEncode: false, h264Decode: false, hevcDecode: false },
+                          recommended: null,
+                          scanErrors: [e?.message || 'Scan failed'],
+                        });
+                      }
                       setClientGpuScanning(false);
                     }}
                     disabled={clientGpuScanning}
@@ -2026,8 +2048,8 @@ export default function Settings() {
                             const { scanClientGPU } = await import('../utils/clientGpu.js');
                             const info = await scanClientGPU();
                             setClientGpuInfo(info);
-                            showToast(`Found ${info.gpus.length} GPU(s)`, 'success');
-                          } catch { showToast('GPU scan failed', 'error'); }
+                            showToast(`Found ${info.gpus.length} GPU(s): ${info.gpus.map(g => g.name).join(', ')}`, 'success');
+                          } catch (e) { showToast(`GPU scan failed: ${e?.message || 'unknown error'}`, 'error'); }
                           setClientGpuScanning(false);
                         }}
                         disabled={clientGpuScanning}
@@ -2048,6 +2070,21 @@ export default function Settings() {
                       <div style={{ fontSize: 12, color: 'var(--warning)', marginBottom: 8, fontWeight: 600 }}>
                         No WebGPU-compatible GPU adapter detected
                       </div>
+                      {clientGpuInfo?.scanErrors?.length > 0 && (
+                        <div style={{
+                          marginBottom: 10, padding: '8px 10px',
+                          background: 'rgba(255, 100, 100, 0.08)',
+                          border: '1px solid rgba(255, 100, 100, 0.2)',
+                          borderRadius: 'var(--radius-sm)',
+                        }}>
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4, fontWeight: 600 }}>Scan errors:</div>
+                          {clientGpuInfo.scanErrors.map((err, i) => (
+                            <div key={i} style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--warning)', lineHeight: 1.5 }}>
+                              {err}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                       <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
                         WebGPU is supported by your browser but no GPU adapter was returned. This usually means:<br/><br/>
                         <strong style={{ color: 'var(--text-secondary)' }}>Driver Issues</strong><br/>
@@ -2062,7 +2099,10 @@ export default function Settings() {
                         {'• '}Remote desktop sessions (RDP, VNC, Parsec) may not expose the GPU to the browser<br/>
                         {'• '}Virtual machines need GPU passthrough configured<br/>
                         {'• '}Some enterprise group policies disable GPU access in the browser<br/>
-                        {'• '}On Linux, ensure Vulkan is working: run <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--text-secondary)' }}>vulkaninfo</code> in a terminal
+                        {'• '}On Linux, ensure Vulkan is working: run <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--text-secondary)' }}>vulkaninfo</code> in a terminal<br/><br/>
+                        <strong style={{ color: 'var(--text-secondary)' }}>Debugging</strong><br/>
+                        {'• '}Open browser DevTools (F12) {'>'} Console tab to see detailed GPU detection logs<br/>
+                        {'• '}Try running in the Console: <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--text-secondary)' }}>await navigator.gpu.requestAdapter()</code> to test WebGPU directly
                       </div>
                     </div>
                   )}
