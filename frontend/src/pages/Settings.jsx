@@ -1698,12 +1698,14 @@ export default function Settings() {
                 </div>
                 <button
                   onClick={() => handleToggleClientGpu(!clientGpuEnabled)}
-                  disabled={clientGpuScanning}
+                  disabled={clientGpuScanning || (!clientGpuInfo?.webgpuSupported && !clientGpuEnabled)}
                   style={{
                     width: 44, height: 24, borderRadius: 12, border: 'none', position: 'relative',
                     background: clientGpuEnabled ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
-                    cursor: clientGpuScanning ? 'default' : 'pointer', flexShrink: 0, marginLeft: 16,
-                    transition: 'background 0.2s', opacity: clientGpuScanning ? 0.5 : 1,
+                    cursor: (clientGpuScanning || (!clientGpuInfo?.webgpuSupported && !clientGpuEnabled)) ? 'default' : 'pointer',
+                    flexShrink: 0, marginLeft: 16,
+                    transition: 'background 0.2s',
+                    opacity: (clientGpuScanning || (!clientGpuInfo?.webgpuSupported && !clientGpuEnabled)) ? 0.5 : 1,
                   }}
                 >
                   <div style={{
@@ -1717,16 +1719,148 @@ export default function Settings() {
               {/* Status line */}
               <div style={{
                 marginTop: 8, fontSize: 10, fontFamily: 'var(--font-mono)',
-                color: clientGpuEnabled ? 'var(--accent-cyan)' : 'var(--text-muted)',
+                color: clientGpuScanning ? 'var(--text-muted)' :
+                       !clientGpuInfo?.webgpuSupported ? 'var(--warning)' :
+                       clientGpuEnabled ? 'var(--accent-cyan)' : 'var(--text-muted)',
               }}>
                 {clientGpuScanning ? 'Scanning browser GPU capabilities...' :
-                 !clientGpuInfo?.webgpuSupported ? 'WebGPU not available in this browser' :
+                 !clientGpuInfo?.webgpuSupported ? 'WebGPU not available in this browser — see instructions below' :
                  clientGpuEnabled ? `Enabled — using ${clientGpuInfo?.gpus?.find(g => g.id === selectedClientGpuId)?.name || 'detected GPU'}` :
                  'Disabled — all processing runs on the server'}
               </div>
 
+              {/* WebGPU Not Supported — browser setup instructions */}
+              {!clientGpuScanning && clientGpuInfo && !clientGpuInfo.webgpuSupported && (
+                <div style={{
+                  marginTop: 12, padding: '14px 16px',
+                  background: 'rgba(255, 165, 0, 0.06)',
+                  border: '1px solid rgba(255, 165, 0, 0.25)',
+                  borderRadius: 'var(--radius-sm)',
+                }}>
+                  <div style={{ fontSize: 13, color: 'var(--warning)', marginBottom: 10, fontWeight: 600 }}>
+                    WebGPU is not enabled in your browser
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.7, marginBottom: 12 }}>
+                    Client-side GPU processing requires WebGPU, a modern browser API for GPU compute.
+                    Follow the steps below for your browser to enable it.
+                  </div>
+
+                  {/* Chrome */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 600, marginBottom: 4 }}>
+                      Google Chrome (Recommended)
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                      {'1. '}Update to <strong style={{ color: 'var(--text-secondary)' }}>Chrome 113+</strong> (WebGPU is enabled by default on Windows and macOS)<br/>
+                      {'2. '}Visit <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>chrome://gpu</code> and
+                      look for <strong style={{ color: 'var(--text-secondary)' }}>"WebGPU: Hardware accelerated"</strong><br/>
+                      {'3. '}If it says "Disabled" or "Software only", go to <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>chrome://flags/#enable-unsafe-webgpu</code> and set it to <strong style={{ color: 'var(--text-secondary)' }}>Enabled</strong><br/>
+                      {'4. '}Relaunch Chrome and reload this page
+                    </div>
+                  </div>
+
+                  {/* Chrome on Linux */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 600, marginBottom: 4 }}>
+                      Chrome on Linux
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                      WebGPU on Linux requires extra flags:<br/>
+                      {'1. '}Enable <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>chrome://flags/#enable-unsafe-webgpu</code><br/>
+                      {'2. '}Enable <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>chrome://flags/#enable-vulkan</code> (WebGPU uses Vulkan on Linux)<br/>
+                      {'3. '}Ensure your GPU drivers support Vulkan (NVIDIA 470+, Mesa 21.0+ for AMD/Intel)<br/>
+                      {'4. '}Relaunch Chrome with: <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--text-secondary)' }}>google-chrome --enable-features=Vulkan,UseSkiaRenderer</code>
+                    </div>
+                  </div>
+
+                  {/* Edge */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 600, marginBottom: 4 }}>
+                      Microsoft Edge
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                      {'1. '}Update to <strong style={{ color: 'var(--text-secondary)' }}>Edge 113+</strong><br/>
+                      {'2. '}Visit <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>edge://flags/#enable-unsafe-webgpu</code> and set to <strong style={{ color: 'var(--text-secondary)' }}>Enabled</strong><br/>
+                      {'3. '}Relaunch Edge and reload this page
+                    </div>
+                  </div>
+
+                  {/* Firefox */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 600, marginBottom: 4 }}>
+                      Firefox
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                      {'1. '}Update to <strong style={{ color: 'var(--text-secondary)' }}>Firefox 141+</strong> (Nightly has the best support)<br/>
+                      {'2. '}Go to <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>about:config</code><br/>
+                      {'3. '}Set <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--text-secondary)' }}>dom.webgpu.enabled</code> to <strong style={{ color: 'var(--text-secondary)' }}>true</strong><br/>
+                      {'4. '}Restart Firefox and reload this page<br/>
+                      <span style={{ fontSize: 10, color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                        Note: Firefox WebGPU support is experimental and may have limited compatibility.
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Safari */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 600, marginBottom: 4 }}>
+                      Safari (macOS)
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                      {'1. '}Update to <strong style={{ color: 'var(--text-secondary)' }}>Safari 18+</strong> (macOS Sequoia) — WebGPU is enabled by default<br/>
+                      {'2. '}On older versions: Safari {'>'} Settings {'>'} Advanced {'>'} check "Show features for web developers"<br/>
+                      {'3. '}Then: Develop menu {'>'} Feature Flags {'>'} enable <strong style={{ color: 'var(--text-secondary)' }}>WebGPU</strong><br/>
+                      <span style={{ fontSize: 10, color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                        Note: Chrome is recommended for best WebGPU + WebCodecs support.
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* General troubleshooting */}
+                  <div style={{
+                    padding: '8px 12px', background: 'var(--bg-elevated)',
+                    borderRadius: 'var(--radius-sm)', fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6,
+                  }}>
+                    <strong style={{ color: 'var(--text-secondary)' }}>Troubleshooting:</strong><br/>
+                    {'• '}Make sure your GPU drivers are up to date (NVIDIA GeForce Experience / AMD Adrenalin / Intel Arc Control)<br/>
+                    {'• '}Verify hardware acceleration is on: Chrome Settings {'>'} System {'>'} "Use hardware acceleration when available"<br/>
+                    {'• '}In <code style={{ fontSize: 10, background: 'var(--bg-base)', padding: '1px 4px', borderRadius: 3 }}>chrome://gpu</code>, check that "Graphics Feature Status" shows "Hardware accelerated" for most features<br/>
+                    {'• '}Virtual machines, remote desktop, and some enterprise policies may block WebGPU<br/>
+                    {'• '}After enabling flags, you must fully relaunch the browser (not just refresh)
+                  </div>
+
+                  {/* Rescan button */}
+                  <button
+                    onClick={async () => {
+                      setClientGpuScanning(true);
+                      try {
+                        const { scanClientGPU } = await import('../utils/clientGpu.js');
+                        const info = await scanClientGPU();
+                        setClientGpuInfo(info);
+                        if (info.webgpuSupported) {
+                          showToast(`WebGPU detected — found ${info.gpus.length} GPU(s)`, 'success');
+                        } else {
+                          showToast('WebGPU still not available — check the instructions above', 'warning');
+                        }
+                      } catch { showToast('GPU scan failed', 'error'); }
+                      setClientGpuScanning(false);
+                    }}
+                    disabled={clientGpuScanning}
+                    style={{
+                      marginTop: 12, padding: '6px 16px', fontSize: 11,
+                      fontFamily: 'var(--font-mono)',
+                      background: 'var(--bg-panel)', color: 'var(--accent-cyan)',
+                      border: '1px solid var(--accent-cyan)', borderRadius: 'var(--radius-sm)',
+                      cursor: 'pointer', opacity: clientGpuScanning ? 0.5 : 1,
+                    }}
+                  >
+                    {clientGpuScanning ? 'Scanning...' : 'Rescan after enabling WebGPU'}
+                  </button>
+                </div>
+              )}
+
               {/* GPU Details + Selection (when enabled) */}
-              {clientGpuEnabled && clientGpuInfo && (
+              {clientGpuEnabled && clientGpuInfo && clientGpuInfo.webgpuSupported && (
                 <div style={{
                   marginTop: 12, padding: '12px 16px',
                   background: clientGpuInfo.gpus.length > 0 ? 'rgba(0, 217, 255, 0.05)' : 'rgba(255, 165, 0, 0.05)',
@@ -1908,17 +2042,26 @@ export default function Settings() {
                       </button>
                     </div>
                   ) : (
-                    /* No GPU detected */
+                    /* WebGPU available but no GPU adapter returned */
                     <div>
-                      <div style={{ fontSize: 12, color: 'var(--warning)', marginBottom: 6, fontWeight: 600 }}>
-                        No WebGPU-compatible GPU detected
+                      <div style={{ fontSize: 12, color: 'var(--warning)', marginBottom: 8, fontWeight: 600 }}>
+                        No WebGPU-compatible GPU adapter detected
                       </div>
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
-                        Requirements for client-side GPU:<br/>
-                        {'• '}Chrome 113+ on Windows or macOS (WebGPU is enabled by default)<br/>
-                        {'• '}A discrete or integrated GPU (NVIDIA, AMD, or Intel)<br/>
-                        {'• '}Check <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>chrome://gpu</code> to verify "WebGPU: Hardware accelerated"<br/>
-                        {'• '}On Linux: enable <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>chrome://flags/#enable-unsafe-webgpu</code>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                        WebGPU is supported by your browser but no GPU adapter was returned. This usually means:<br/><br/>
+                        <strong style={{ color: 'var(--text-secondary)' }}>Driver Issues</strong><br/>
+                        {'• '}Update your GPU drivers to the latest version (NVIDIA GeForce Experience, AMD Adrenalin, or Intel Arc Control)<br/>
+                        {'• '}NVIDIA: requires driver version 470+ for Vulkan/WebGPU support<br/>
+                        {'• '}AMD: requires Mesa 21.0+ on Linux or latest Adrenalin on Windows<br/><br/>
+                        <strong style={{ color: 'var(--text-secondary)' }}>Hardware Acceleration Disabled</strong><br/>
+                        {'• '}Check Chrome Settings {'>'} System {'>'} ensure "Use hardware acceleration when available" is ON<br/>
+                        {'• '}Visit <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>chrome://gpu</code> and
+                        verify "WebGPU" shows "Hardware accelerated" (not "Disabled" or "Software only")<br/><br/>
+                        <strong style={{ color: 'var(--text-secondary)' }}>Environment Issues</strong><br/>
+                        {'• '}Remote desktop sessions (RDP, VNC, Parsec) may not expose the GPU to the browser<br/>
+                        {'• '}Virtual machines need GPU passthrough configured<br/>
+                        {'• '}Some enterprise group policies disable GPU access in the browser<br/>
+                        {'• '}On Linux, ensure Vulkan is working: run <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--text-secondary)' }}>vulkaninfo</code> in a terminal
                       </div>
                     </div>
                   )}
