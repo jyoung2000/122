@@ -3,6 +3,9 @@ import react from '@vitejs/plugin-react';
 
 export default defineConfig({
   plugins: [react()],
+  optimizeDeps: {
+    exclude: ['@huggingface/transformers'],
+  },
   server: {
     proxy: {
       '/api': 'http://localhost:1353',
@@ -10,6 +13,10 @@ export default defineConfig({
         target: 'ws://localhost:1353',
         ws: true,
       },
+    },
+    headers: {
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+      'Cross-Origin-Opener-Policy': 'same-origin',
     },
   },
 });

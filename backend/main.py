@@ -7,6 +7,7 @@ import threading
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from backend.routers import upload, jobs, clips, fonts, presets, settings as settings_router, ws
 from backend.routers import agent as agent_router
@@ -30,6 +31,18 @@ logging.getLogger().addHandler(_file_handler)
 logger = logging.getLogger("clipai")
 
 app = FastAPI(title="ClipAI", version="1.0.0")
+
+
+class CrossOriginIsolationMiddleware(BaseHTTPMiddleware):
+    """Add COOP/COEP headers for SharedArrayBuffer support (WebGPU/ONNX Runtime)."""
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["Cross-Origin-Embedder-Policy"] = "credentialless"
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        return response
+
+
+app.add_middleware(CrossOriginIsolationMiddleware)
 
 
 @app.on_event("startup")

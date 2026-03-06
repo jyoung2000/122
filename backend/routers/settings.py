@@ -1465,6 +1465,39 @@ async def set_gpu_acceleration(req: GpuAccelerationRequest):
     }
 
 
+# ── Client GPU (Browser) Report ──────────────────────────────────
+
+
+class ClientGpuReport(BaseModel):
+    """Reported by the browser after GPU detection."""
+    webgpu_supported: bool = False
+    webcodec_supported: bool = False
+    gpu_name: str = ""
+    gpu_vendor: str = ""
+    has_fp16: bool = False
+    whisper_capable: bool = False
+    h264_hw_encode: bool = False
+    hevc_hw_encode: bool = False
+    client_whisper_enabled: bool = False
+    client_encoding_enabled: bool = False
+
+
+@router.post("/client-gpu-report")
+async def report_client_gpu(req: ClientGpuReport):
+    """Store client GPU capabilities so the pipeline can decide where to process.
+
+    The server uses this to skip server-side transcription if the client will
+    handle it, or to prepare server-side fallback if the client can't.
+    """
+    logger.info(
+        "Client GPU report: webgpu=%s gpu=%s whisper_capable=%s "
+        "client_whisper=%s client_encoding=%s",
+        req.webgpu_supported, req.gpu_name, req.whisper_capable,
+        req.client_whisper_enabled, req.client_encoding_enabled,
+    )
+    return {"status": "received"}
+
+
 # ── Prompt Management ──────────────────────────────────────────────
 
 

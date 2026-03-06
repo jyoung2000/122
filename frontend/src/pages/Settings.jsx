@@ -110,6 +110,14 @@ export default function Settings() {
   const [gpuInfo, setGpuInfo] = useState(null);
   const [gpuLoading, setGpuLoading] = useState(false);
 
+  // Client-side GPU (browser) state
+  const [clientGpuEnabled, setClientGpuEnabled] = useState(false);
+  const [clientGpuInfo, setClientGpuInfo] = useState(null);
+  const [clientGpuScanning, setClientGpuScanning] = useState(false);
+  const [selectedClientGpuId, setSelectedClientGpuId] = useState('');
+  const [clientWhisperEnabled, setClientWhisperEnabled] = useState(true);
+  const [clientEncodingEnabled, setClientEncodingEnabled] = useState(true);
+
   // Load provider statuses
   useEffect(() => {
     fetch('/api/providers/status')
@@ -127,6 +135,37 @@ export default function Settings() {
         setGpuInfo(data.detected);
       })
       .catch(() => {});
+  }, []);
+
+  // Load client GPU preferences and scan browser GPUs
+  useEffect(() => {
+    const saved = localStorage.getItem('clipai_client_gpu');
+    let savedGpuId = '';
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        setClientGpuEnabled(parsed.enabled || false);
+        savedGpuId = parsed.selectedGpuId || '';
+        setSelectedClientGpuId(savedGpuId);
+        setClientWhisperEnabled(parsed.whisperEnabled ?? true);
+        setClientEncodingEnabled(parsed.encodingEnabled ?? true);
+      } catch { /* ignore corrupt data */ }
+    }
+
+    (async () => {
+      setClientGpuScanning(true);
+      try {
+        const { scanClientGPU } = await import('../utils/clientGpu.js');
+        const info = await scanClientGPU();
+        setClientGpuInfo(info);
+        if (!savedGpuId && info.recommended) {
+          setSelectedClientGpuId(info.recommended.id);
+        }
+      } catch (e) {
+        console.warn('Client GPU scan failed:', e);
+      }
+      setClientGpuScanning(false);
+    })();
   }, []);
 
   // Load site customisation
@@ -526,6 +565,28 @@ export default function Settings() {
       }
     } catch { showToast('Failed to update GPU acceleration', 'error'); }
     finally { setGpuSaving(false); setGpuLoading(false); }
+  };
+
+  const handleSaveClientGpu = (overrides = {}) => {
+    const state = {
+      enabled: overrides.enabled ?? clientGpuEnabled,
+      selectedGpuId: overrides.selectedGpuId ?? selectedClientGpuId,
+      whisperEnabled: overrides.whisperEnabled ?? clientWhisperEnabled,
+      encodingEnabled: overrides.encodingEnabled ?? clientEncodingEnabled,
+    };
+    localStorage.setItem('clipai_client_gpu', JSON.stringify(state));
+  };
+
+  const handleToggleClientGpu = (enabled) => {
+    setClientGpuEnabled(enabled);
+    handleSaveClientGpu({ enabled });
+    if (enabled && clientGpuInfo?.gpus?.length > 0) {
+      showToast(`Client GPU enabled — ${clientGpuInfo.recommended?.name || 'GPU detected'}`, 'success');
+    } else if (enabled) {
+      showToast('Client GPU enabled but no WebGPU-compatible GPU found', 'warning');
+    } else {
+      showToast('Client GPU disabled — processing will use the server', 'success');
+    }
   };
 
   const handleRenamePreset = async (presetId) => {
@@ -1607,6 +1668,257 @@ export default function Settings() {
                         {'• '}NVIDIA: Install nvidia-container-toolkit on the host<br/>
                         {'• '}Intel/AMD: Pass <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>/dev/dri</code> device to the container<br/>
                         {'• '}Rebuild with <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>Dockerfile.gpu</code> for hardware encoder support
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* ── Client GPU (Browser) ── */}
+            <div style={{ marginBottom: 32 }}>
+              <h3 style={{ fontSize: 14, marginBottom: 4, color: 'var(--text-secondary)' }}>Client GPU (Browser)</h3>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.5 }}>
+                Use your desktop PC's GPU directly through Chrome for transcription and video encoding.
+                This uses WebGPU and WebCodecs APIs — processing happens in your browser, not on the server.
+              </p>
+
+              {/* Main toggle */}
+              <div style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '12px 16px', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+              }}>
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>Enable Client-Side GPU Processing</span>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                    Leverages your local GPU via Chrome WebGPU for Whisper transcription
+                    and WebCodecs for hardware video encoding (NVENC/VAAPI).
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleToggleClientGpu(!clientGpuEnabled)}
+                  disabled={clientGpuScanning}
+                  style={{
+                    width: 44, height: 24, borderRadius: 12, border: 'none', position: 'relative',
+                    background: clientGpuEnabled ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+                    cursor: clientGpuScanning ? 'default' : 'pointer', flexShrink: 0, marginLeft: 16,
+                    transition: 'background 0.2s', opacity: clientGpuScanning ? 0.5 : 1,
+                  }}
+                >
+                  <div style={{
+                    position: 'absolute', top: 3, left: clientGpuEnabled ? 23 : 3,
+                    width: 18, height: 18, borderRadius: '50%', background: 'var(--nav-active-icon-text)',
+                    transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }} />
+                </button>
+              </div>
+
+              {/* Status line */}
+              <div style={{
+                marginTop: 8, fontSize: 10, fontFamily: 'var(--font-mono)',
+                color: clientGpuEnabled ? 'var(--accent-cyan)' : 'var(--text-muted)',
+              }}>
+                {clientGpuScanning ? 'Scanning browser GPU capabilities...' :
+                 !clientGpuInfo?.webgpuSupported ? 'WebGPU not available in this browser' :
+                 clientGpuEnabled ? `Enabled — using ${clientGpuInfo?.gpus?.find(g => g.id === selectedClientGpuId)?.name || 'detected GPU'}` :
+                 'Disabled — all processing runs on the server'}
+              </div>
+
+              {/* GPU Details + Selection (when enabled) */}
+              {clientGpuEnabled && clientGpuInfo && (
+                <div style={{
+                  marginTop: 12, padding: '12px 16px',
+                  background: clientGpuInfo.gpus.length > 0 ? 'rgba(0, 217, 255, 0.05)' : 'rgba(255, 165, 0, 0.05)',
+                  border: `1px solid ${clientGpuInfo.gpus.length > 0 ? 'rgba(0, 217, 255, 0.2)' : 'rgba(255, 165, 0, 0.2)'}`,
+                  borderRadius: 'var(--radius-sm)',
+                }}>
+                  {clientGpuScanning ? (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                      Scanning GPUs...
+                    </div>
+                  ) : clientGpuInfo.gpus.length > 0 ? (
+                    <div style={{ display: 'grid', gap: 10 }}>
+                      {/* GPU selector (if multiple GPUs detected) */}
+                      {clientGpuInfo.gpus.length > 1 && (
+                        <div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Select GPU</div>
+                          <select
+                            value={selectedClientGpuId}
+                            onChange={(e) => {
+                              setSelectedClientGpuId(e.target.value);
+                              handleSaveClientGpu({ selectedGpuId: e.target.value });
+                            }}
+                            style={{
+                              width: '100%', padding: '6px 10px', fontSize: 12,
+                              fontFamily: 'var(--font-mono)',
+                              background: 'var(--bg-base)', color: 'var(--text-primary)',
+                              border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                            }}
+                          >
+                            {clientGpuInfo.gpus.map(gpu => (
+                              <option key={gpu.id} value={gpu.id}>
+                                {gpu.name} ({gpu.type === 'discrete' ? 'Discrete' : gpu.type === 'integrated' ? 'Integrated' : 'GPU'})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
+                      {/* Selected GPU info */}
+                      {(() => {
+                        const gpu = clientGpuInfo.gpus.find(g => g.id === selectedClientGpuId) || clientGpuInfo.gpus[0];
+                        if (!gpu) return null;
+                        return (
+                          <div style={{ display: 'grid', gap: 6 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                              <span style={{ color: 'var(--text-muted)' }}>GPU</span>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{gpu.name}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                              <span style={{ color: 'var(--text-muted)' }}>Type</span>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
+                                {gpu.type === 'discrete' ? 'Discrete GPU' : gpu.type === 'integrated' ? 'Integrated GPU' : 'GPU'}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                              <span style={{ color: 'var(--text-muted)' }}>Backend</span>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: gpu.backend === 'webgpu' ? 'var(--success)' : 'var(--text-muted)' }}>
+                                {gpu.backend === 'webgpu' ? 'WebGPU' : 'WebGL only'}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                              <span style={{ color: 'var(--text-muted)' }}>FP16 Shaders</span>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: gpu.hasFP16 ? 'var(--success)' : 'var(--text-muted)' }}>
+                                {gpu.hasFP16 ? 'Supported (2-3x ML speedup)' : 'Not available'}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                              <span style={{ color: 'var(--text-muted)' }}>Whisper Ready</span>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: gpu.whisperCapable ? 'var(--success)' : 'var(--warning)' }}>
+                                {gpu.whisperCapable ? 'Yes' : 'No (insufficient buffer size)'}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* WebCodecs capabilities */}
+                      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 4 }}>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>WebCodecs (Video Encoding)</div>
+                        <div style={{ display: 'grid', gap: 4 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                            <span style={{ color: 'var(--text-muted)' }}>H.264 Hardware Encode</span>
+                            <span style={{ fontFamily: 'var(--font-mono)', color: clientGpuInfo.webcodecs.h264HardwareEncode ? 'var(--success)' : 'var(--text-muted)' }}>
+                              {clientGpuInfo.webcodecs.h264HardwareEncode ? 'NVENC / Hardware' : 'Software only'}
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                            <span style={{ color: 'var(--text-muted)' }}>H.265/HEVC Hardware Encode</span>
+                            <span style={{ fontFamily: 'var(--font-mono)', color: clientGpuInfo.webcodecs.hevcHardwareEncode ? 'var(--success)' : 'var(--text-muted)' }}>
+                              {clientGpuInfo.webcodecs.hevcHardwareEncode ? 'Supported' : 'Not available'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Task toggles */}
+                      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 4 }}>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Client-Side Tasks</div>
+
+                        {/* Whisper toggle */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                          <div>
+                            <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>Transcription (Whisper WebGPU)</span>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                              Runs Whisper speech-to-text in your browser via Transformers.js
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              const val = !clientWhisperEnabled;
+                              setClientWhisperEnabled(val);
+                              handleSaveClientGpu({ whisperEnabled: val });
+                            }}
+                            style={{
+                              width: 36, height: 20, borderRadius: 10, border: 'none', position: 'relative',
+                              background: clientWhisperEnabled ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+                              cursor: 'pointer', flexShrink: 0, marginLeft: 12, transition: 'background 0.2s',
+                            }}
+                          >
+                            <div style={{
+                              position: 'absolute', top: 2, left: clientWhisperEnabled ? 18 : 2,
+                              width: 16, height: 16, borderRadius: '50%', background: 'var(--nav-active-icon-text)',
+                              transition: 'left 0.2s', boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+                            }} />
+                          </button>
+                        </div>
+
+                        {/* Encoding toggle */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div>
+                            <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>Video Encoding (WebCodecs)</span>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                              Uses H.264/NVENC hardware encoding in the browser for clip export
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              const val = !clientEncodingEnabled;
+                              setClientEncodingEnabled(val);
+                              handleSaveClientGpu({ encodingEnabled: val });
+                            }}
+                            style={{
+                              width: 36, height: 20, borderRadius: 10, border: 'none', position: 'relative',
+                              background: clientEncodingEnabled ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+                              cursor: 'pointer', flexShrink: 0, marginLeft: 12, transition: 'background 0.2s',
+                            }}
+                          >
+                            <div style={{
+                              position: 'absolute', top: 2, left: clientEncodingEnabled ? 18 : 2,
+                              width: 16, height: 16, borderRadius: '50%', background: 'var(--nav-active-icon-text)',
+                              transition: 'left 0.2s', boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+                            }} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Rescan button */}
+                      <button
+                        onClick={async () => {
+                          setClientGpuScanning(true);
+                          try {
+                            const { scanClientGPU } = await import('../utils/clientGpu.js');
+                            const info = await scanClientGPU();
+                            setClientGpuInfo(info);
+                            showToast(`Found ${info.gpus.length} GPU(s)`, 'success');
+                          } catch { showToast('GPU scan failed', 'error'); }
+                          setClientGpuScanning(false);
+                        }}
+                        disabled={clientGpuScanning}
+                        style={{
+                          marginTop: 4, padding: '4px 12px', fontSize: 10,
+                          fontFamily: 'var(--font-mono)',
+                          background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {clientGpuScanning ? 'Scanning...' : 'Rescan GPUs'}
+                      </button>
+                    </div>
+                  ) : (
+                    /* No GPU detected */
+                    <div>
+                      <div style={{ fontSize: 12, color: 'var(--warning)', marginBottom: 6, fontWeight: 600 }}>
+                        No WebGPU-compatible GPU detected
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                        Requirements for client-side GPU:<br/>
+                        {'• '}Chrome 113+ on Windows or macOS (WebGPU is enabled by default)<br/>
+                        {'• '}A discrete or integrated GPU (NVIDIA, AMD, or Intel)<br/>
+                        {'• '}Check <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>chrome://gpu</code> to verify "WebGPU: Hardware accelerated"<br/>
+                        {'• '}On Linux: enable <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>chrome://flags/#enable-unsafe-webgpu</code>
                       </div>
                     </div>
                   )}
