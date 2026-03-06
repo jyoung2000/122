@@ -46,8 +46,8 @@ class Settings(BaseSettings):
 
     # GPU Hardware Acceleration — user toggle persisted to user_settings.json
     GPU_ACCELERATION_ENABLED: bool = False   # Toggle in Settings > Advanced
-    GPU_VENDOR_OVERRIDE: str = ""            # Empty = auto-detect; "nvidia", "intel", "amd" to force
-    GPU_HWDECODE_ENABLED: bool = True        # Use GPU for video decoding (NVDEC/DXVA2/VAAPI)
+    GPU_VENDOR_OVERRIDE: str = ""            # Empty = auto-detect; "nvidia", "intel", "amd", "apple" to force
+    GPU_HWDECODE_ENABLED: bool = True        # Use GPU for video decoding (NVDEC/DXVA2/VAAPI/VideoToolbox)
     GPU_HEVC_FOR_4K: bool = True             # Use HEVC encoder for 4K exports when available
 
     @property
