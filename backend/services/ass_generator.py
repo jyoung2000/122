@@ -401,6 +401,29 @@ def generate_ass(
             f"{bold_flag},0,0,0,100,100,0,0,{border_style},{ol_width},{style_shadow},{alignment},{margin_h},{margin_h},{margin_v},1"
         )
 
+    # When background (BorderStyle=3) + active word highlighting are both
+    # enabled, per-word \c color overrides cause libass to segment the
+    # background box at every tag boundary — each word gets its own box,
+    # and adjacent boxes overlap creating visible black bar borders.
+    #
+    # Fix: create a separate ASS style for the color overlay layer (Layer 1)
+    # that uses BorderStyle=1 with Outline=0 and Shadow=0.  This style
+    # renders ONLY the colored text fill with zero box/border/shadow.
+    # BorderStyle is a STYLE-LEVEL setting that CANNOT be overridden by
+    # inline tags, so a separate style is the only robust solution.
+    if background_enabled and active_word_enabled:
+        for sp in speakers_seen:
+            color_hex = speaker_color_map[sp]
+            ass_color = _hex_to_ass_color(color_hex)
+            sn = _sanitize_style_name(sp)
+            # _AW style: identical layout (font, size, bold, alignment, margins)
+            # but BorderStyle=1, Outline=0, Shadow=0, transparent OutlineColour
+            # and BackColour.  Renders text fill only — no box, no border.
+            lines.append(
+                f"Style: {sn}_AW,{font},{size_px},{ass_color},&H000000FF&,&HFF000000&,&HFF000000&,"
+                f"{bold_flag},0,0,0,100,100,0,0,1,0,0,{alignment},{margin_h},{margin_h},{margin_v},1"
+            )
+
     lines.append("")
     lines.append("[Events]")
     lines.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
@@ -433,7 +456,15 @@ def generate_ass(
         aw_nobord_tag = "\\bord0\\shad0\\3a&HFF&"
     else:
         bord_tag = ""
-        aw_nobord_tag = ""
+        # Background mode: Layer 1 uses the _AW style (BorderStyle=1) so
+        # the box is disabled at the style level.  These inline tags are
+        # belt-and-suspenders: \bord0 = no padding, \shad0 = no shadow,
+        # \3a&HFF& = transparent outline, \4a&HFF& = transparent back color.
+        aw_nobord_tag = "\\bord0\\shad0\\3a&HFF&\\4a&HFF&"
+
+    # Style suffix for Layer 1 events: "_AW" in background mode uses the
+    # box-free overlay style; "" in outline mode uses the same base style.
+    aw_style_suffix = "_AW" if background_enabled and active_word_enabled else ""
 
     # Add dialogue events
     # Two-layer architecture for active-word mode:
@@ -484,14 +515,28 @@ def generate_ass(
             if len(words) <= 1:
                 # Single word — no color transitions, so no segmentation
                 # issue.  Just use a single layer with active word color.
-                bord_prefix = f"{{{bord_tag}}}" if bord_tag else ""
-                aw_tags = f"\\c{aw_color}"
-                event_text = f"{bord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
-                pending_word_events.append((clip_start, clip_end, style_name, event_text))
+                if background_enabled:
+                    # Background mode: Layer 0 = box, Layer 1 = colored text
+                    base_text_events.append((clip_start, clip_end, style_name, f"{prefix}{safe_text}"))
+                    nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
+                    event_text = f"{nobord_prefix}{prefix}{{\\c{aw_color}}}{safe_text}"
+                    pending_word_events.append((clip_start, clip_end, style_name + aw_style_suffix, event_text))
+                else:
+                    bord_prefix = f"{{{bord_tag}}}" if bord_tag else ""
+                    aw_tags = f"\\c{aw_color}"
+                    event_text = f"{bord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
+                    pending_word_events.append((clip_start, clip_end, style_name, event_text))
             elif seg_word_ts and len(seg_word_ts) == len(words):
                 # Real per-word timestamps from Whisper.
                 _WORD_ANTICIPATION_S = 0.10
                 base_color = _hex_to_ass_color(speaker_color_map[speaker])
+
+                # Background mode: ONE Layer 0 event per segment = one
+                # continuous background box.  Per-word Layer 0 events are
+                # only needed for outline mode (BorderStyle=1) where each
+                # per-word event carries its own \bord tags.
+                if background_enabled:
+                    base_text_events.append((clip_start, clip_end, style_name, f"{prefix}{safe_text}"))
 
                 for word_idx in range(len(words)):
                     w_start, w_end, _ = seg_word_ts[word_idx]
@@ -507,12 +552,15 @@ def generate_ass(
 
                     # Layer 0: Border layer — full text, uniform color,
                     # WITH border/shadow.  No \c overrides → seamless border.
-                    border_prefix = f"{{{bord_tag}}}" if bord_tag else ""
-                    border_event_text = f"{border_prefix}{prefix}{safe_text}"
-                    base_text_events.append((w_start, w_end, style_name, border_event_text))
+                    # Skipped for background mode (single per-segment event above).
+                    if not background_enabled:
+                        border_prefix = f"{{{bord_tag}}}" if bord_tag else ""
+                        border_event_text = f"{border_prefix}{prefix}{safe_text}"
+                        base_text_events.append((w_start, w_end, style_name, border_event_text))
 
                     # Layer 1: Color layer — full text, per-word colors,
-                    # NO border (\bord0\shad0\3a&HFF&).  Only text fill.
+                    # NO border/box.  In outline mode: \bord0\shad0\3a&HFF&.
+                    # In background mode: _AW style (BorderStyle=1, no box).
                     before = " ".join(words[:word_idx])
                     active = words[word_idx]
                     after = " ".join(words[word_idx + 1:])
@@ -526,7 +574,7 @@ def generate_ass(
                     if after:
                         parts.append(f" {base_tag}{after}")
                     color_event_text = nobord_prefix + prefix + "".join(parts)
-                    pending_word_events.append((w_start, w_end, style_name, color_event_text))
+                    pending_word_events.append((w_start, w_end, style_name + aw_style_suffix, color_event_text))
             else:
                 # Fallback: character-proportional estimation with natural
                 # speech rhythm.  Uses punctuation-aware, speaker-rate-scaled
@@ -591,6 +639,10 @@ def generate_ass(
                     norm = duration / total_raw
                     raw_durations = [d * norm for d in raw_durations]
 
+                # Background mode: ONE Layer 0 event per segment (continuous box)
+                if background_enabled:
+                    base_text_events.append((clip_start, clip_end, style_name, f"{prefix}{safe_text}"))
+
                 current_time = clip_start
                 for word_idx in range(len(words)):
                     word_dur = raw_durations[word_idx]
@@ -604,11 +656,13 @@ def generate_ass(
                     shifted_start = max(clip_start, current_time - anticipation)
 
                     # Layer 0: Border layer — uniform color, continuous outline
-                    border_prefix = f"{{{bord_tag}}}" if bord_tag else ""
-                    border_event_text = f"{border_prefix}{prefix}{safe_text}"
-                    base_text_events.append((shifted_start, word_end, style_name, border_event_text))
+                    # Skipped for background mode (single per-segment event above).
+                    if not background_enabled:
+                        border_prefix = f"{{{bord_tag}}}" if bord_tag else ""
+                        border_event_text = f"{border_prefix}{prefix}{safe_text}"
+                        base_text_events.append((shifted_start, word_end, style_name, border_event_text))
 
-                    # Layer 1: Color layer — per-word coloring, no border
+                    # Layer 1: Color layer — per-word coloring, no border/box.
                     before = " ".join(words[:word_idx])
                     active = words[word_idx]
                     after = " ".join(words[word_idx + 1:])
@@ -622,7 +676,7 @@ def generate_ass(
                     if after:
                         parts.append(f" {base_tag}{after}")
                     color_event_text = nobord_prefix + prefix + "".join(parts)
-                    pending_word_events.append((shifted_start, word_end, style_name, color_event_text))
+                    pending_word_events.append((shifted_start, word_end, style_name + aw_style_suffix, color_event_text))
                     current_time = word_end
         else:
             # Standard: single event with plain text + explicit outline override
