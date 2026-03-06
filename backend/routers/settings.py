@@ -50,6 +50,7 @@ _PERSISTABLE_KEYS = [
     "OPENROUTER_SUMMARY_MODEL", "WHISPER_MODEL", "WHISPER_BEAM_SIZE",
     "WHISPER_VAD_FILTER", "FRAME_SAMPLE_RATE", "SUBJECT_TRACKING_ENABLED",
     "FFMPEG_PRESET", "FFMPEG_CRF", "FFMPEG_THREADS", "FFMPEG_FASTSTART",
+    "GPU_ACCELERATION_ENABLED", "GPU_VENDOR_OVERRIDE",
     "AI_FALLBACK_CHAIN",
 ]
 
@@ -1388,6 +1389,80 @@ async def set_subject_tracking(req: SubjectTrackingRequest):
     settings.SUBJECT_TRACKING_ENABLED = req.enabled
     _persist_user_settings()
     return {"status": "saved", "enabled": settings.SUBJECT_TRACKING_ENABLED}
+
+
+# ── GPU Hardware Acceleration ────────────────────────────────────
+
+
+@router.get("/gpu-acceleration")
+async def get_gpu_acceleration():
+    """Return current GPU acceleration toggle state and detected GPU info.
+
+    When enabled, runs GPU detection and returns full hardware details.
+    When disabled, returns minimal info with vendor='none'.
+    """
+    from backend.services.clip_exporter import detect_gpu_capabilities
+
+    gpu_info = detect_gpu_capabilities(force_redetect=settings.GPU_ACCELERATION_ENABLED)
+
+    return {
+        "enabled": settings.GPU_ACCELERATION_ENABLED,
+        "vendor_override": settings.GPU_VENDOR_OVERRIDE,
+        "detected": {
+            "vendor": gpu_info["vendor"],
+            "gpu_name": gpu_info.get("gpu_name", "Unknown"),
+            "encoder": gpu_info["encoder"],
+            "decoder": gpu_info["decoder"],
+            "hwaccel": gpu_info["hwaccel"],
+            "capabilities": gpu_info.get("capabilities", []),
+            "vram_mb": gpu_info.get("vram_mb", 0),
+            "driver_version": gpu_info.get("driver_version", ""),
+            "cuda_available": gpu_info.get("cuda_available", False),
+            "whisper_device": gpu_info.get("whisper_device", "cpu"),
+        },
+    }
+
+
+class GpuAccelerationRequest(BaseModel):
+    enabled: bool
+    vendor_override: Optional[str] = None
+
+
+@router.post("/gpu-acceleration")
+async def set_gpu_acceleration(req: GpuAccelerationRequest):
+    """Toggle GPU acceleration on/off and optionally set vendor override.
+
+    When toggled ON: clears cached GPU info, re-scans for available GPUs,
+    runs test-encodes to confirm the encoder works, returns full GPU details.
+    When toggled OFF: clears cache, returns CPU fallback info.
+    """
+    from backend.services.clip_exporter import detect_gpu_capabilities, _gpu_info_cache_clear
+
+    settings.GPU_ACCELERATION_ENABLED = req.enabled
+    if req.vendor_override is not None:
+        settings.GPU_VENDOR_OVERRIDE = req.vendor_override
+
+    _persist_user_settings()
+
+    # Force re-detection so the response includes fresh GPU info
+    _gpu_info_cache_clear()
+    gpu_info = detect_gpu_capabilities(force_redetect=True)
+
+    return {
+        "status": "saved",
+        "enabled": settings.GPU_ACCELERATION_ENABLED,
+        "detected": {
+            "vendor": gpu_info["vendor"],
+            "gpu_name": gpu_info.get("gpu_name", "Unknown"),
+            "encoder": gpu_info["encoder"],
+            "decoder": gpu_info["decoder"],
+            "hwaccel": gpu_info["hwaccel"],
+            "vram_mb": gpu_info.get("vram_mb", 0),
+            "driver_version": gpu_info.get("driver_version", ""),
+            "cuda_available": gpu_info.get("cuda_available", False),
+            "whisper_device": gpu_info.get("whisper_device", "cpu"),
+        },
+    }
 
 
 # ── Prompt Management ──────────────────────────────────────────────

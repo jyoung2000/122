@@ -32,129 +32,218 @@ logger = logging.getLogger(__name__)
 _gpu_info: dict | None = None
 
 
-def detect_gpu_capabilities() -> dict:
+def _gpu_info_cache_clear():
+    """Clear the cached GPU info so next detect_gpu_capabilities() call re-scans."""
+    global _gpu_info
+    _gpu_info = None
+
+
+def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
     """Detect available GPU hardware encoders/decoders.
 
-    Returns dict with keys:
-        vendor: 'nvidia' | 'intel' | 'amd' | 'none'
-        encoder: 'h264_nvenc' | 'h264_vaapi' | 'h264_qsv' | 'libx264'
-        decoder: 'h264_cuvid' | 'h264_vaapi' | 'h264_qsv' | None
-        hwaccel: 'cuda' | 'vaapi' | 'qsv' | None
-        hwaccel_device: '/dev/dri/renderD128' | None (for VAAPI)
-        scale_filter: 'scale_npp' | 'scale_vaapi' | 'scale'
+    Called when:
+    - User toggles GPU acceleration ON in Settings (force_redetect=True)
+    - First FFmpeg export after container start (lazy init from _gpu_encode_args)
+    - GET /api/gpu-acceleration endpoint
+
+    Detection steps:
+    1. Check GPU_ACCELERATION_ENABLED — if False, return CPU fallback immediately
+    2. Run nvidia-smi to detect NVIDIA GPU (name, VRAM, driver version)
+    3. Probe FFmpeg for compiled-in encoders (h264_nvenc, h264_vaapi, h264_qsv)
+    4. Test-encode a tiny null video with each detected encoder to confirm it works
+    5. Check CUDA availability for faster-whisper transcription
+    6. Return best available encoder + full GPU info dict
     """
     global _gpu_info
-    if _gpu_info is not None:
+
+    if _gpu_info is not None and not force_redetect:
         return _gpu_info
 
+    # Default: CPU-only fallback
     info = {
         "vendor": "none",
+        "gpu_name": "None (CPU only)",
         "encoder": "libx264",
         "decoder": None,
         "hwaccel": None,
         "hwaccel_device": None,
         "scale_filter": "scale",
+        "capabilities": ["encode_cpu"],
+        "vram_mb": 0,
+        "driver_version": "",
+        "cuda_available": False,
+        "whisper_device": "cpu",
     }
 
-    if not app_settings.GPU_ENABLED:
+    # Gate on user toggle — if GPU acceleration is toggled OFF in Settings,
+    # return CPU immediately.  Zero overhead: no nvidia-smi, no FFmpeg probes.
+    if not app_settings.GPU_ACCELERATION_ENABLED:
         _gpu_info = info
         return info
 
-    forced_vendor = app_settings.GPU_VENDOR
+    forced_vendor = (app_settings.GPU_VENDOR_OVERRIDE or "").lower().strip() or "auto"
 
-    # Check NVIDIA NVENC
+    # ── Step 1: Detect NVIDIA GPU via nvidia-smi ──
+    nvidia_detected = False
     if forced_vendor in ("auto", "nvidia"):
         try:
-            result = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-encoders"],
+            smi = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
+                 "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=10,
             )
-            if "h264_nvenc" in result.stdout:
-                # Verify NVENC actually works with a test encode
-                test = subprocess.run(
-                    [
-                        "ffmpeg", "-hide_banner", "-f", "lavfi", "-i",
-                        "nullsrc=s=256x256:d=0.1", "-c:v", "h264_nvenc",
-                        "-f", "null", "-",
-                    ],
-                    capture_output=True, text=True, timeout=15,
-                )
-                if test.returncode == 0:
-                    info.update({
-                        "vendor": "nvidia",
-                        "encoder": "h264_nvenc",
-                        "decoder": "h264_cuvid",
-                        "hwaccel": "cuda",
-                        "hwaccel_device": None,
-                        "scale_filter": "scale",
-                    })
-                    logger.info("GPU detected: NVIDIA NVENC available")
-                    _gpu_info = info
-                    return info
-        except Exception as e:
-            logger.debug("NVENC detection failed: %s", e)
+            if smi.returncode == 0 and smi.stdout.strip():
+                parts = [p.strip() for p in smi.stdout.strip().split("\n")[0].split(",")]
+                gpu_name = parts[0] if len(parts) > 0 else "NVIDIA GPU"
+                vram = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                driver = parts[2] if len(parts) > 2 else ""
+                nvidia_detected = True
+                info.update({"gpu_name": gpu_name, "vram_mb": vram, "driver_version": driver})
+                logger.info("NVIDIA GPU detected: %s (%d MB VRAM, driver %s)", gpu_name, vram, driver)
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            logger.debug("nvidia-smi not available: %s", e)
 
-    # Check Intel QSV
-    if forced_vendor in ("auto", "intel"):
+    # ── Step 2: Check CUDA for Whisper ──
+    try:
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() > 0:
+            info["cuda_available"] = True
+            info["whisper_device"] = "cuda"
+            if "whisper_cuda" not in info["capabilities"]:
+                info["capabilities"].append("whisper_cuda")
+            logger.info("CUDA available for Whisper transcription")
+    except Exception:
+        pass
+
+    # ── Step 3: Probe FFmpeg for available HW encoders ──
+    available_encoders: set[str] = set()
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=10,
+        )
+        for enc in ("h264_nvenc", "h264_vaapi", "h264_qsv", "hevc_nvenc", "hevc_vaapi"):
+            if enc in result.stdout:
+                available_encoders.add(enc)
+        logger.info("FFmpeg HW encoders available: %s", available_encoders or "none")
+    except Exception as e:
+        logger.warning("FFmpeg encoder probe failed: %s", e)
+
+    # ── Step 4: Test each encoder (priority: NVENC > QSV > VAAPI) ──
+    encoder_configs = []
+
+    if "h264_nvenc" in available_encoders and (forced_vendor in ("auto", "nvidia") or nvidia_detected):
+        encoder_configs.append({
+            "vendor": "nvidia", "encoder": "h264_nvenc", "decoder": "h264_cuvid",
+            "hwaccel": "cuda", "hwaccel_device": None,
+            "test_cmd": [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1",
+                "-c:v", "h264_nvenc", "-f", "null", "-",
+            ],
+        })
+
+    if "h264_qsv" in available_encoders and forced_vendor in ("auto", "intel"):
+        encoder_configs.append({
+            "vendor": "intel", "encoder": "h264_qsv", "decoder": "h264_qsv",
+            "hwaccel": "qsv", "hwaccel_device": "/dev/dri/renderD128",
+            "test_cmd": [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1",
+                "-c:v", "h264_qsv", "-f", "null", "-",
+            ],
+        })
+
+    if "h264_vaapi" in available_encoders and forced_vendor in ("auto", "intel", "amd"):
+        vaapi_dev = "/dev/dri/renderD128"
+        if os.path.exists(vaapi_dev):
+            encoder_configs.append({
+                "vendor": "amd" if forced_vendor == "amd" else "intel",
+                "encoder": "h264_vaapi", "decoder": "h264_vaapi",
+                "hwaccel": "vaapi", "hwaccel_device": vaapi_dev,
+                "test_cmd": [
+                    "ffmpeg", "-hide_banner", "-loglevel", "error",
+                    "-vaapi_device", vaapi_dev,
+                    "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1",
+                    "-vf", "format=nv12,hwupload",
+                    "-c:v", "h264_vaapi", "-f", "null", "-",
+                ],
+            })
+
+    for cfg in encoder_configs:
         try:
-            result = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-encoders"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if "h264_qsv" in result.stdout:
+            test = subprocess.run(cfg["test_cmd"], capture_output=True, text=True, timeout=15)
+            if test.returncode == 0:
                 info.update({
-                    "vendor": "intel",
-                    "encoder": "h264_qsv",
-                    "decoder": "h264_qsv",
-                    "hwaccel": "qsv",
-                    "hwaccel_device": "/dev/dri/renderD128",
-                    "scale_filter": "scale",
+                    "vendor": cfg["vendor"], "encoder": cfg["encoder"],
+                    "decoder": cfg["decoder"], "hwaccel": cfg["hwaccel"],
+                    "hwaccel_device": cfg["hwaccel_device"],
+                    "capabilities": ["encode_gpu", "decode_gpu"],
                 })
-                logger.info("GPU detected: Intel QSV available")
+                if info["cuda_available"]:
+                    info["capabilities"].append("whisper_cuda")
+                # Detect GPU name for Intel/AMD if not set by nvidia-smi
+                if cfg["vendor"] != "nvidia" and "None" in info["gpu_name"]:
+                    _detect_non_nvidia_gpu_name(info, cfg["vendor"])
+                logger.info("GPU acceleration active: %s encoder=%s", cfg["vendor"].upper(), cfg["encoder"])
                 _gpu_info = info
                 return info
-        except Exception:
-            pass
+            else:
+                logger.debug("Encoder %s test failed: %s", cfg["encoder"], test.stderr[:200])
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.debug("Encoder %s test error: %s", cfg["encoder"], e)
 
-    # Check VA-API (Intel iGPU or AMD)
-    if forced_vendor in ("auto", "intel", "amd"):
-        try:
-            result = subprocess.run(
-                ["ffmpeg", "-hide_banner", "-encoders"],
-                capture_output=True, text=True, timeout=10,
-            )
-            if "h264_vaapi" in result.stdout:
-                vaapi_dev = "/dev/dri/renderD128"
-                if os.path.exists(vaapi_dev):
-                    info.update({
-                        "vendor": "amd" if forced_vendor == "amd" else "intel",
-                        "encoder": "h264_vaapi",
-                        "decoder": "h264_vaapi",
-                        "hwaccel": "vaapi",
-                        "hwaccel_device": vaapi_dev,
-                        "scale_filter": "scale",
-                    })
-                    logger.info("GPU detected: VA-API available at %s", vaapi_dev)
-                    _gpu_info = info
-                    return info
-        except Exception:
-            pass
+    # No working GPU encoder
+    if nvidia_detected:
+        logger.warning(
+            "NVIDIA GPU detected (%s) but NVENC encoding unavailable. "
+            "Rebuild with Dockerfile.gpu for hardware encoding. "
+            "CUDA Whisper transcription will still work if available.",
+            info["gpu_name"],
+        )
 
-    logger.info("No GPU acceleration available, using CPU encoding (libx264)")
+    logger.info("No GPU encoder available — using CPU encoding (libx264)")
     _gpu_info = info
     return info
 
 
-def _gpu_encode_args(quality_preset: dict) -> list[str]:
-    """Return FFmpeg encoder arguments based on detected GPU.
+def _detect_non_nvidia_gpu_name(info: dict, vendor: str):
+    """Try to detect Intel/AMD GPU name from lspci."""
+    try:
+        result = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
+        for line in result.stdout.split("\n"):
+            lower = line.lower()
+            if "vga" in lower or "3d controller" in lower or "display" in lower:
+                if vendor == "intel" and "intel" in lower:
+                    info["gpu_name"] = line.split(": ", 1)[-1].strip() if ": " in line else "Intel GPU"
+                    break
+                elif vendor == "amd" and ("amd" in lower or "radeon" in lower):
+                    info["gpu_name"] = line.split(": ", 1)[-1].strip() if ": " in line else "AMD GPU"
+                    break
+    except Exception:
+        pass
 
-    Falls back to libx264 if GPU is unavailable.
-    Returns list of args to extend the FFmpeg command with.
+
+def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> list[str]:
+    """Return FFmpeg encoder arguments based on user toggle + detected GPU.
+
+    Critical: checks GPU_ACCELERATION_ENABLED first. If the user has the
+    toggle OFF in Settings, always returns libx264 CPU args regardless of
+    what GPUs are available. Only when ON does it use the detected GPU encoder.
     """
-    gpu = detect_gpu_capabilities()
+    # Respect user toggle — if OFF, always CPU
+    if not app_settings.GPU_ACCELERATION_ENABLED:
+        return [
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-preset", quality_preset.get("preset", "medium"),
+            "-crf", str(quality_preset.get("crf", 23)),
+        ]
 
-    if gpu["vendor"] == "nvidia":
-        crf = quality_preset.get("crf", 23)
+    gpu = detect_gpu_capabilities()
+    crf = quality_preset.get("crf", 23)
+
+    if gpu["encoder"] == "h264_nvenc":
         return [
             "-c:v", "h264_nvenc",
             "-preset", "p5",
@@ -163,27 +252,21 @@ def _gpu_encode_args(quality_preset: dict) -> list[str]:
             "-b:v", "0",
             "-pix_fmt", "yuv420p",
         ]
-
-    elif gpu["vendor"] in ("intel", "amd") and gpu["encoder"] == "h264_vaapi":
-        crf = quality_preset.get("crf", 23)
+    elif gpu["encoder"] == "h264_vaapi":
         return [
             "-vaapi_device", gpu["hwaccel_device"],
             "-c:v", "h264_vaapi",
             "-qp", str(crf),
             "-pix_fmt", "vaapi",
         ]
-
     elif gpu["encoder"] == "h264_qsv":
-        crf = quality_preset.get("crf", 23)
         return [
             "-c:v", "h264_qsv",
             "-global_quality", str(crf),
             "-preset", "medium",
             "-pix_fmt", "yuv420p",
         ]
-
     else:
-        # CPU fallback
         return [
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
@@ -1950,10 +2033,11 @@ def _build_filter_chain(
         filters.append(sub)
 
     # VA-API needs frames uploaded to GPU after CPU-side subtitle filter
-    gpu = detect_gpu_capabilities()
-    if gpu["encoder"] == "h264_vaapi" and filters:
-        filters.append("format=nv12")
-        filters.append("hwupload")
+    if app_settings.GPU_ACCELERATION_ENABLED:
+        gpu = detect_gpu_capabilities()
+        if gpu["encoder"] == "h264_vaapi" and filters:
+            filters.append("format=nv12")
+            filters.append("hwupload")
 
     return (",".join(filters) if filters else None, False)
 

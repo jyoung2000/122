@@ -104,8 +104,11 @@ export default function Settings() {
   const faviconInputRef = useRef(null);
   const logoInputRef = useRef(null);
 
-  // GPU status
-  const [gpuStatus, setGpuStatus] = useState(null);
+  // GPU Hardware Acceleration toggle
+  const [gpuEnabled, setGpuEnabled] = useState(false);
+  const [gpuSaving, setGpuSaving] = useState(false);
+  const [gpuInfo, setGpuInfo] = useState(null);
+  const [gpuLoading, setGpuLoading] = useState(false);
 
   // Load provider statuses
   useEffect(() => {
@@ -115,11 +118,14 @@ export default function Settings() {
       .catch(() => {});
   }, []);
 
-  // Load GPU status
+  // Load GPU acceleration state
   useEffect(() => {
-    fetch('/api/gpu-status')
+    fetch('/api/gpu-acceleration')
       .then((r) => r.json())
-      .then(setGpuStatus)
+      .then((data) => {
+        setGpuEnabled(data.enabled);
+        setGpuInfo(data.detected);
+      })
       .catch(() => {});
   }, []);
 
@@ -495,6 +501,31 @@ export default function Settings() {
       }
     } catch { showToast('Failed to update subject tracking', 'error'); }
     finally { setSubjectTrackingSaving(false); }
+  };
+
+  const handleToggleGpu = async (enabled) => {
+    setGpuSaving(true);
+    setGpuLoading(true);
+    try {
+      const res = await fetch('/api/gpu-acceleration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setGpuEnabled(data.enabled);
+        setGpuInfo(data.detected);
+        if (enabled && data.detected?.vendor !== 'none') {
+          showToast(`GPU acceleration enabled — ${data.detected.gpu_name} (${data.detected.encoder})`, 'success');
+        } else if (enabled && data.detected?.vendor === 'none') {
+          showToast('GPU acceleration enabled but no compatible GPU detected — using CPU', 'warning');
+        } else {
+          showToast('GPU acceleration disabled — using CPU encoding', 'success');
+        }
+      }
+    } catch { showToast('Failed to update GPU acceleration', 'error'); }
+    finally { setGpuSaving(false); setGpuLoading(false); }
   };
 
   const handleRenamePreset = async (presetId) => {
@@ -1470,6 +1501,119 @@ export default function Settings() {
       {settingsTab === 4 && (
         <div>
           <div style={{ maxWidth: isMobile ? '100%' : 480 }}>
+
+            {/* ── GPU Hardware Acceleration ── */}
+            <div style={{ marginBottom: 32 }}>
+              <h3 style={{ fontSize: 14, marginBottom: 16, color: 'var(--text-secondary)' }}>GPU Hardware Acceleration</h3>
+
+              {/* Toggle row */}
+              <div style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '12px 16px', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+              }}>
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>Enable GPU Acceleration</span>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                    Uses your GPU for faster video encoding, decoding, and transcription.
+                    Requires a compatible NVIDIA, AMD, or Intel GPU passed through to the container.
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleToggleGpu(!gpuEnabled)}
+                  disabled={gpuSaving}
+                  style={{
+                    width: 44, height: 24, borderRadius: 12, border: 'none', position: 'relative',
+                    background: gpuEnabled ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+                    cursor: gpuSaving ? 'default' : 'pointer', flexShrink: 0, marginLeft: 16,
+                    transition: 'background 0.2s', opacity: gpuSaving ? 0.5 : 1,
+                  }}
+                >
+                  <div style={{
+                    position: 'absolute', top: 3, left: gpuEnabled ? 23 : 3,
+                    width: 18, height: 18, borderRadius: '50%', background: 'var(--nav-active-icon-text)',
+                    transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }} />
+                </button>
+              </div>
+
+              {/* Status text */}
+              <div style={{
+                marginTop: 8, fontSize: 10, fontFamily: 'var(--font-mono)',
+                color: gpuEnabled ? 'var(--accent-cyan)' : 'var(--text-muted)',
+              }}>
+                {gpuSaving ? 'Detecting GPU...' :
+                 gpuEnabled ? 'Enabled — GPU will be used for encoding, decoding, and transcription' :
+                 'Disabled — using CPU for all processing'}
+              </div>
+
+              {/* GPU Info Card — shown when enabled */}
+              {gpuEnabled && gpuInfo && (
+                <div style={{
+                  marginTop: 12, padding: '12px 16px',
+                  background: gpuInfo.vendor !== 'none' ? 'rgba(0, 217, 255, 0.05)' : 'rgba(255, 165, 0, 0.05)',
+                  border: `1px solid ${gpuInfo.vendor !== 'none' ? 'rgba(0, 217, 255, 0.2)' : 'rgba(255, 165, 0, 0.2)'}`,
+                  borderRadius: 'var(--radius-sm)',
+                }}>
+                  {gpuLoading ? (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                      Scanning for GPU hardware...
+                    </div>
+                  ) : gpuInfo.vendor !== 'none' ? (
+                    /* GPU detected — show details */
+                    <div style={{ display: 'grid', gap: 6 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                        <span style={{ color: 'var(--text-muted)' }}>GPU</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{gpuInfo.gpu_name}</span>
+                      </div>
+                      {gpuInfo.vram_mb > 0 && (
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                          <span style={{ color: 'var(--text-muted)' }}>VRAM</span>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{gpuInfo.vram_mb} MB</span>
+                        </div>
+                      )}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                        <span style={{ color: 'var(--text-muted)' }}>Video Encoder</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--success)' }}>{gpuInfo.encoder}</span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                        <span style={{ color: 'var(--text-muted)' }}>Video Decoder</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', color: gpuInfo.decoder ? 'var(--success)' : 'var(--text-muted)' }}>
+                          {gpuInfo.decoder || 'N/A'}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                        <span style={{ color: 'var(--text-muted)' }}>Whisper (Transcription)</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', color: gpuInfo.cuda_available ? 'var(--success)' : 'var(--text-muted)' }}>
+                          {gpuInfo.cuda_available ? 'CUDA (GPU)' : 'CPU'}
+                        </span>
+                      </div>
+                      {gpuInfo.driver_version && (
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                          <span style={{ color: 'var(--text-muted)' }}>Driver</span>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{gpuInfo.driver_version}</span>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    /* No GPU detected — show setup instructions */
+                    <div>
+                      <div style={{ fontSize: 12, color: 'var(--warning)', marginBottom: 6, fontWeight: 600 }}>
+                        No compatible GPU detected
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                        To use GPU acceleration:<br/>
+                        {'• '}Pass your GPU to the container via <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>docker-compose.gpu.yml</code><br/>
+                        {'• '}NVIDIA: Install nvidia-container-toolkit on the host<br/>
+                        {'• '}Intel/AMD: Pass <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>/dev/dri</code> device to the container<br/>
+                        {'• '}Rebuild with <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>Dockerfile.gpu</code> for hardware encoder support
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             <h3 style={{ fontSize: 14, marginBottom: 16, color: 'var(--text-secondary)' }}>Model Override</h3>
             <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
               Browse all OpenRouter models and select custom overrides.
@@ -1554,24 +1698,6 @@ export default function Settings() {
               </div>
             </div>
 
-            <h3 style={{ fontSize: 14, marginTop: 24, marginBottom: 16, color: 'var(--text-secondary)' }}>GPU Acceleration</h3>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
-              <span style={{ fontSize: 13 }}>Video Encoding</span>
-              {gpuStatus ? (
-                <span style={{
-                  fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 600,
-                  padding: '2px 8px', borderRadius: 9999,
-                  background: gpuStatus.gpu_enabled ? 'rgba(34,197,94,0.15)' : 'rgba(156,163,175,0.15)',
-                  color: gpuStatus.gpu_enabled ? 'var(--success)' : 'var(--text-muted)',
-                }}>
-                  {gpuStatus.gpu_enabled
-                    ? `${gpuStatus.vendor.toUpperCase()} ${gpuStatus.encoder}`
-                    : 'CPU (libx264)'}
-                </span>
-              ) : (
-                <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>Loading...</span>
-              )}
-            </div>
           </div>
         </div>
       )}

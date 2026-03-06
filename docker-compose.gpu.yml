@@ -1,3 +1,4 @@
+# GPU override — use: docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
 services:
   app:
     build:
@@ -7,8 +8,6 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
-      - CLIPAI_GPU_ENABLED=true
-      - CLIPAI_GPU_VENDOR=auto
     devices:
       # Intel/AMD VA-API support (passthrough DRI devices)
       - /dev/dri:/dev/dri

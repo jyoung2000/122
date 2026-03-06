@@ -140,20 +140,6 @@ if _symlinked:
     logger.info("Symlinked %d system fonts into /data/fonts for FFmpeg fontsdir", _symlinked)
 
 
-@app.get("/api/gpu-status")
-async def gpu_status():
-    """Return GPU hardware acceleration status."""
-    from backend.services.clip_exporter import detect_gpu_capabilities
-    gpu = detect_gpu_capabilities()
-    return {
-        "gpu_enabled": gpu["vendor"] != "none",
-        "vendor": gpu["vendor"],
-        "encoder": gpu["encoder"],
-        "decoder": gpu["decoder"],
-        "hwaccel": gpu["hwaccel"],
-    }
-
-
 @app.get("/api/files/{job_id}/{path:path}")
 async def serve_file(job_id: str, path: str, request: Request):
     """Serve video files and exported clips with range request support."""

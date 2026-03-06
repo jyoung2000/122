@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     unzip wget software-properties-common \
     # VA-API libraries for Intel/AMD GPU support
     libva-dev libva-drm2 libva-x11-2 vainfo \
-    libdrm-dev mesa-va-drivers intel-media-va-driver-non-free \
+    libdrm-dev mesa-va-drivers \
     # FFmpeg build dependencies
     nasm yasm \
     libass-dev libfreetype6-dev libfontconfig1-dev libfribidi-dev \
