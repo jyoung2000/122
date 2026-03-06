@@ -2107,6 +2107,41 @@ def _subtitle_filter(ass_path: str, force_style: str = "") -> str:
     return f"subtitles=filename='{safe_path}':fontsdir='{safe_fonts_dir}'"
 
 
+def _detect_crop(video_path: str, start: float = 0, duration: float = 5.0) -> tuple[int, int, int, int] | None:
+    """Use FFmpeg cropdetect to find baked-in black bars in the source video.
+
+    Returns (crop_w, crop_h, crop_x, crop_y) of the detected content area,
+    or None if detection fails or the entire frame is content.
+    """
+    try:
+        # Sample a few seconds from the middle-ish of the clip
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-ss", str(start),
+            "-i", video_path,
+            "-t", str(duration),
+            "-vf", "cropdetect=24:2:0",
+            "-f", "null", "-",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        # Parse the last cropdetect line (most stable after initial frames)
+        crop_line = None
+        for line in result.stderr.split("\n"):
+            if "crop=" in line:
+                crop_line = line
+        if not crop_line:
+            return None
+        # Extract crop=W:H:X:Y
+        match = re.search(r"crop=(\d+):(\d+):(\d+):(\d+)", crop_line)
+        if not match:
+            return None
+        cw, ch, cx, cy = int(match.group(1)), int(match.group(2)), int(match.group(3)), int(match.group(4))
+        return (cw, ch, cx, cy)
+    except Exception as e:
+        logger.debug("cropdetect failed: %s", e)
+        return None
+
+
 def _atempo_chain(spd: float) -> str:
     """Build chained atempo filters for a given speed value.
 
@@ -2183,6 +2218,8 @@ def _build_filter_chain(
     subject_keyframes: list[tuple[float, int]] | None = None,
     export_quality: str = "1080p",
     subtitle_force_style: str = "",
+    video_path: str | None = None,
+    start_time: float = 0,
 ) -> tuple[str | None, bool]:
     """Build FFmpeg video filter chain.
 
@@ -2195,24 +2232,63 @@ def _build_filter_chain(
     content.  Passed to the subtitles filter to guarantee outline
     rendering regardless of libass build quirks.
 
+    video_path / start_time: used for cropdetect to remove baked-in
+    black bars (pillarboxing/letterboxing) from the source video.
+
     Returns (filter_string, is_complex_graph).
     """
     # Determine if quality requires resolution scaling (even without aspect ratio)
     target_h = QUALITY_MAX_HEIGHT.get(export_quality, 1080)
     needs_quality_scale = (src_h != target_h)
 
-    if not aspect_ratio and not ass_path and not needs_quality_scale:
+    # Detect and remove baked-in black bars from the source video.
+    # Many source videos (screen recordings, re-encoded clips) have
+    # pillarboxing or letterboxing baked into the pixel data.  Without
+    # this, the exported video inherits those black bars, and subtitles
+    # span the full frame (including the bars) instead of the content.
+    effective_w, effective_h = src_w, src_h
+    precrop_filter = None
+    if video_path:
+        crop_result = _detect_crop(video_path, start=start_time, duration=3.0)
+        if crop_result:
+            cw, ch, cx, cy = crop_result
+            # Only apply if cropdetect found significant black bars
+            # (at least 4% removed from any dimension)
+            w_removed_pct = (src_w - cw) / src_w * 100 if src_w > 0 else 0
+            h_removed_pct = (src_h - ch) / src_h * 100 if src_h > 0 else 0
+            if w_removed_pct >= 4 or h_removed_pct >= 4:
+                # Ensure even dimensions
+                cw = cw - (cw % 2)
+                ch = ch - (ch % 2)
+                precrop_filter = f"crop={cw}:{ch}:{cx}:{cy}"
+                effective_w, effective_h = cw, ch
+                logger.info(
+                    "Detected baked-in black bars: source %dx%d → content %dx%d "
+                    "(removed %.1f%% width, %.1f%% height)",
+                    src_w, src_h, cw, ch, w_removed_pct, h_removed_pct,
+                )
+
+    # Recompute after precrop may have changed effective dimensions
+    needs_quality_scale = (effective_h != target_h)
+
+    if not aspect_ratio and not ass_path and not needs_quality_scale and not precrop_filter:
         return None, False
 
-    out_w, out_h = src_w, src_h
+    out_w, out_h = effective_w, effective_h
     sub = _subtitle_filter(ass_path, force_style=subtitle_force_style) if ass_path else ""
 
-    # Simple linear chain: setsar → crop → scale → subtitles
+    # Simple linear chain: setsar → precrop → crop → scale → subtitles
     # Start with setsar=1 to normalize non-square pixels (SAR != 1:1).
     # Many source videos have non-square SAR which causes FFmpeg's crop
     # and scale filters to produce slightly wrong dimensions, resulting
     # in thin black bars at the edges of the exported video.
     filters = ["setsar=1"]
+
+    # Remove baked-in black bars before any aspect ratio cropping
+    if precrop_filter:
+        filters.append(precrop_filter)
+        # Update src dimensions for subsequent aspect ratio calculations
+        src_w, src_h = effective_w, effective_h
 
     if aspect_ratio and aspect_ratio in ASPECT_RATIO_VALUES:
         target_ratio = ASPECT_RATIO_VALUES[aspect_ratio]
@@ -2467,24 +2543,38 @@ async def export_clip(
                 for s in transcript
             ]
 
-            # Determine output dimensions for subtitle positioning
+            # Determine output dimensions for subtitle positioning.
             # Must match the actual output resolution (quality-aware) so
             # subtitle font sizes and margins are correct in the final video.
+            #
+            # When the source has baked-in black bars (pillarboxing), use
+            # the detected content dimensions instead of the container size.
+            # Otherwise subtitles span the full frame including black bars.
+            eff_w, eff_h = video_width, video_height
+            crop_result = _detect_crop(video_path, start=start, duration=3.0)
+            if crop_result:
+                cw, ch, _, _ = crop_result
+                w_rem = (video_width - cw) / video_width * 100 if video_width > 0 else 0
+                h_rem = (video_height - ch) / video_height * 100 if video_height > 0 else 0
+                if w_rem >= 4 or h_rem >= 4:
+                    eff_w = cw - (cw % 2)
+                    eff_h = ch - (ch % 2)
+
             dims_table = ASPECT_RATIO_DIMS_BY_QUALITY.get(export_quality, ASPECT_RATIO_DIMS)
             if aspect_ratio and aspect_ratio in dims_table:
                 out_w, out_h = dims_table[aspect_ratio]
             elif not aspect_ratio:
                 # No aspect ratio — use quality-scaled height, derive width
                 quality_h = QUALITY_MAX_HEIGHT.get(export_quality, 1080)
-                if video_height != quality_h and video_height > 0:
-                    scale_factor = quality_h / video_height
-                    out_w = int(video_width * scale_factor)
+                if eff_h != quality_h and eff_h > 0:
+                    scale_factor = quality_h / eff_h
+                    out_w = int(eff_w * scale_factor)
                     out_w = out_w - (out_w % 2)  # ensure even
                     out_h = quality_h
                 else:
-                    out_w, out_h = video_width, video_height
+                    out_w, out_h = eff_w, eff_h
             else:
-                out_w, out_h = video_width, video_height
+                out_w, out_h = eff_w, eff_h
 
             ass_content = generate_ass(
                 segments=transcript_segments,
@@ -2722,6 +2812,8 @@ async def export_clip(
                 subject_keyframes=keyframes,
                 export_quality=export_quality,
                 subtitle_force_style=subtitle_force_style,
+                video_path=video_path,
+                start_time=start,
             )
 
             # QA: validate subject tracking is correctly applied in filter chain

@@ -281,9 +281,12 @@ def generate_ass(
                 seg_words = None
         clip_segments.append((clip_start, clip_end, seg.text.strip(), seg.speaker, seg_words))
 
-    # Apply max_words splitting
-    if max_words > 0:
-        clip_segments = split_segments_by_max_words(clip_segments, max_words)
+    # Apply max_words splitting.
+    # When max_words is 0 (user didn't set a limit), enforce a sensible
+    # default of 14 words to prevent Whisper's often-huge segments from
+    # creating enormous subtitle blocks that overflow the video frame.
+    effective_max_words = max_words if max_words > 0 else 14
+    clip_segments = split_segments_by_max_words(clip_segments, effective_max_words)
 
     # --- Eliminate inter-segment temporal overlap ---
     # Transcript segments (especially from Whisper) often have overlapping
