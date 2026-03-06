@@ -586,6 +586,28 @@ export default function Settings() {
       encodingEnabled: overrides.encodingEnabled ?? clientEncodingEnabled,
     };
     localStorage.setItem('clipai_client_gpu', JSON.stringify(state));
+
+    // Report selected GPU to the server so FFmpeg can use the right device
+    const gpuId = state.selectedGpuId;
+    const selectedGpu = clientGpuInfo?.gpus?.find(g => g.id === gpuId);
+    if (selectedGpu) {
+      fetch('/api/client-gpu-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          webgpu_supported: clientGpuInfo?.webgpuSupported || false,
+          webcodec_supported: clientGpuInfo?.webcodecSupported || false,
+          gpu_name: selectedGpu.name || '',
+          gpu_vendor: selectedGpu.vendor || '',
+          estimated_vram_mb: selectedGpu.estimatedVRAM_MB || 0,
+          whisper_capable: selectedGpu.whisperCapable || false,
+          h264_hardware_encode: clientGpuInfo?.webcodecs?.h264HardwareEncode || false,
+          hevc_hardware_encode: clientGpuInfo?.webcodecs?.hevcHardwareEncode || false,
+          gpu_index: selectedGpu.serverIndex || '0',
+          gpu_backend: selectedGpu.backend || '',
+        }),
+      }).catch(() => {});
+    }
   };
 
   const handleToggleClientGpu = (enabled) => {
@@ -1658,6 +1680,41 @@ export default function Settings() {
                               </span>
                             </div>
                           ))}
+                          {/* GPU device selector for FFmpeg — shown when multiple GPUs available */}
+                          {gpuInfo.gpus.length > 1 && (
+                            <div style={{ marginTop: 8 }}>
+                              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Select GPU for Encoding</div>
+                              <select
+                                defaultValue={gpuInfo.gpus[0]?.index || '0'}
+                                onChange={async (e) => {
+                                  try {
+                                    await fetch('/api/client-gpu-report', {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({
+                                        gpu_index: e.target.value,
+                                        gpu_name: gpuInfo.gpus.find(g => g.index === e.target.value)?.name || '',
+                                        gpu_vendor: gpuInfo.gpus.find(g => g.index === e.target.value)?.vendor || '',
+                                      }),
+                                    });
+                                    showToast(`GPU ${e.target.value} selected for encoding`, 'success');
+                                  } catch { showToast('Failed to update GPU selection', 'error'); }
+                                }}
+                                style={{
+                                  width: '100%', padding: '6px 10px', fontSize: 12,
+                                  fontFamily: 'var(--font-mono)',
+                                  background: 'var(--bg-base)', color: 'var(--text-primary)',
+                                  border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                                }}
+                              >
+                                {gpuInfo.gpus.map((gpu) => (
+                                  <option key={gpu.index} value={gpu.index}>
+                                    GPU {gpu.index}: {gpu.name} ({gpu.vendor.toUpperCase()}{gpu.vram_mb > 0 ? ` · ${gpu.vram_mb} MB` : ''})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
                         </>
                       ) : (
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
@@ -1779,11 +1836,15 @@ export default function Settings() {
                         <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{gpu.name}</span>
                         <span style={{
                           fontSize: 10, padding: '1px 6px', borderRadius: 3,
-                          background: gpu.backend === 'webgpu' ? 'rgba(0, 217, 255, 0.15)' : 'rgba(255, 255, 255, 0.08)',
-                          color: gpu.backend === 'webgpu' ? 'var(--accent-cyan)' : 'var(--text-muted)',
+                          background: gpu.backend === 'webgpu' ? 'rgba(0, 217, 255, 0.15)' :
+                                     gpu.backend === 'server-detected' ? 'rgba(118, 185, 0, 0.15)' : 'rgba(255, 255, 255, 0.08)',
+                          color: gpu.backend === 'webgpu' ? 'var(--accent-cyan)' :
+                                 gpu.backend === 'server-detected' ? '#76b900' : 'var(--text-muted)',
                           fontFamily: 'var(--font-mono)',
                         }}>
-                          {gpu.backend === 'webgpu' ? 'WebGPU' : 'WebGL'} · {gpu.type === 'discrete' ? 'Discrete' : gpu.type === 'integrated' ? 'Integrated' : 'GPU'}
+                          {gpu.backend === 'webgpu' ? 'WebGPU' : gpu.backend === 'webgpu-software' ? 'Software' : gpu.backend === 'server-detected' ? 'Server' : 'WebGL'}
+                          {' · '}{gpu.type === 'discrete' ? 'Discrete' : gpu.type === 'integrated' ? 'Integrated' : gpu.type === 'software' ? 'Software' : 'GPU'}
+                          {gpu.estimatedVRAM_MB > 0 ? ` · ${gpu.estimatedVRAM_MB} MB` : ''}
                         </span>
                       </div>
                     ))}
@@ -1956,31 +2017,33 @@ export default function Settings() {
                     </div>
                   ) : clientGpuInfo.gpus.length > 0 ? (
                     <div style={{ display: 'grid', gap: 10 }}>
-                      {/* GPU selector (if multiple GPUs detected) */}
-                      {clientGpuInfo.gpus.length > 1 && (
-                        <div>
-                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>Select GPU</div>
-                          <select
-                            value={selectedClientGpuId}
-                            onChange={(e) => {
-                              setSelectedClientGpuId(e.target.value);
-                              handleSaveClientGpu({ selectedGpuId: e.target.value });
-                            }}
-                            style={{
-                              width: '100%', padding: '6px 10px', fontSize: 12,
-                              fontFamily: 'var(--font-mono)',
-                              background: 'var(--bg-base)', color: 'var(--text-primary)',
-                              border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
-                            }}
-                          >
-                            {clientGpuInfo.gpus.map(gpu => (
-                              <option key={gpu.id} value={gpu.id}>
-                                {gpu.name} ({gpu.type === 'discrete' ? 'Discrete' : gpu.type === 'integrated' ? 'Integrated' : 'GPU'})
-                              </option>
-                            ))}
-                          </select>
+                      {/* GPU selector — always shown so user can pick their preferred GPU */}
+                      <div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                          Select GPU for Passthrough ({clientGpuInfo.gpus.length} detected)
                         </div>
-                      )}
+                        <select
+                          value={selectedClientGpuId}
+                          onChange={(e) => {
+                            setSelectedClientGpuId(e.target.value);
+                            handleSaveClientGpu({ selectedGpuId: e.target.value });
+                          }}
+                          style={{
+                            width: '100%', padding: '6px 10px', fontSize: 12,
+                            fontFamily: 'var(--font-mono)',
+                            background: 'var(--bg-base)', color: 'var(--text-primary)',
+                            border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                          }}
+                        >
+                          {clientGpuInfo.gpus.map(gpu => (
+                            <option key={gpu.id} value={gpu.id}>
+                              {gpu.name} ({gpu.type === 'discrete' ? 'Discrete' : gpu.type === 'integrated' ? 'Integrated' : gpu.type === 'software' ? 'Software' : 'GPU'}
+                              {gpu.backend === 'server-detected' ? ' · Server' : ''}
+                              {gpu.estimatedVRAM_MB > 0 ? ` · ${gpu.estimatedVRAM_MB} MB` : ''})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
 
                       {/* Selected GPU info */}
                       {(() => {

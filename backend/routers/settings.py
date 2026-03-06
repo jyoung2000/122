@@ -1403,13 +1403,16 @@ async def get_gpu_acceleration():
     """
     from backend.services.clip_exporter import detect_gpu_capabilities
 
-    gpu_info = detect_gpu_capabilities(force_redetect=settings.GPU_ACCELERATION_ENABLED)
+    # Always detect GPUs so the UI can show all available devices,
+    # even when GPU acceleration is toggled off.
+    gpu_info = detect_gpu_capabilities(force_redetect=True)
 
     return {
         "enabled": settings.GPU_ACCELERATION_ENABLED,
         "vendor_override": settings.GPU_VENDOR_OVERRIDE,
         "hwdecode_enabled": settings.GPU_HWDECODE_ENABLED,
         "hevc_for_4k": settings.GPU_HEVC_FOR_4K,
+        "gpu_device_index": settings.GPU_DEVICE_INDEX,
         "detected": {
             "vendor": gpu_info["vendor"],
             "gpu_name": gpu_info.get("gpu_name", "Unknown"),
@@ -1479,12 +1482,17 @@ class ClientGpuReport(BaseModel):
     webcodec_supported: bool = False
     gpu_name: str = ""
     gpu_vendor: str = ""
+    estimated_vram_mb: int = 0
     has_fp16: bool = False
     whisper_capable: bool = False
+    h264_hardware_encode: bool = False
+    hevc_hardware_encode: bool = False
     h264_hw_encode: bool = False
     hevc_hw_encode: bool = False
     client_whisper_enabled: bool = False
     client_encoding_enabled: bool = False
+    gpu_index: str = "0"
+    gpu_backend: str = ""
 
 
 @router.post("/client-gpu-report")
@@ -1493,12 +1501,18 @@ async def report_client_gpu(req: ClientGpuReport):
 
     The server uses this to skip server-side transcription if the client will
     handle it, or to prepare server-side fallback if the client can't.
+    Also stores the user's selected GPU index for FFmpeg device selection.
     """
+    # Store the selected GPU index so FFmpeg can target the right device
+    if req.gpu_index:
+        settings.GPU_DEVICE_INDEX = req.gpu_index
+        logger.info("GPU device index set to %s (%s)", req.gpu_index, req.gpu_name)
+
     logger.info(
-        "Client GPU report: webgpu=%s gpu=%s whisper_capable=%s "
-        "client_whisper=%s client_encoding=%s",
-        req.webgpu_supported, req.gpu_name, req.whisper_capable,
-        req.client_whisper_enabled, req.client_encoding_enabled,
+        "Client GPU report: webgpu=%s gpu=%s vendor=%s whisper_capable=%s "
+        "client_whisper=%s client_encoding=%s gpu_index=%s",
+        req.webgpu_supported, req.gpu_name, req.gpu_vendor, req.whisper_capable,
+        req.client_whisper_enabled, req.client_encoding_enabled, req.gpu_index,
     )
     return {"status": "received"}
 

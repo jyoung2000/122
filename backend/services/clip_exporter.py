@@ -534,9 +534,14 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
         and app_settings.GPU_HEVC_FOR_4K
     )
 
+    # GPU device index — lets the user pick which GPU to encode on
+    gpu_device = (app_settings.GPU_DEVICE_INDEX or "").strip()
+
     if gpu["encoder"] == "h264_nvenc":
+        # NVENC supports --gpu N to select a specific NVIDIA GPU
+        device_args = ["-gpu", gpu_device] if gpu_device else []
         if use_hevc:
-            return [
+            return device_args + [
                 "-c:v", "hevc_nvenc",
                 "-preset", "p5",
                 "-rc", "vbr",
@@ -545,7 +550,7 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
                 "-pix_fmt", "yuv420p",
                 "-tag:v", "hvc1",  # Apple/browser compatibility
             ]
-        return [
+        return device_args + [
             "-c:v", "h264_nvenc",
             "-preset", "p5",
             "-rc", "vbr",

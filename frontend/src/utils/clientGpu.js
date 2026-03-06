@@ -12,12 +12,22 @@ export async function detectClientGPUs() {
   const errors = [];
 
   // ── WebGPU Detection ──
+  // Try multiple adapter request strategies to find all GPUs:
+  //   1. 'high-performance' — usually the discrete GPU (NVIDIA/AMD)
+  //   2. 'low-power' — usually the integrated GPU (Intel/Apple)
+  //   3. no preference — browser's default choice (may differ from above)
+  //   4. forceFallbackAdapter — software renderer (e.g. Microsoft Basic Render)
   if (typeof navigator !== 'undefined' && navigator.gpu) {
-    for (const powerPref of ['high-performance', 'low-power']) {
+    const adapterRequests = [
+      { powerPreference: 'high-performance' },
+      { powerPreference: 'low-power' },
+      {},                                    // default — may return a different adapter
+      { forceFallbackAdapter: true },        // software renderer
+    ];
+
+    for (const reqOpts of adapterRequests) {
       try {
-        const adapter = await navigator.gpu.requestAdapter({
-          powerPreference: powerPref,
-        });
+        const adapter = await navigator.gpu.requestAdapter(reqOpts);
         if (!adapter) continue;
 
         // adapter.info is a synchronous property in Chrome 121+.
@@ -48,9 +58,17 @@ export async function detectClientGPUs() {
           features = [];
         }
 
-        // Build a stable ID to deduplicate (same physical GPU across power preferences)
+        const isFallback = adapter.isFallbackAdapter || reqOpts.forceFallbackAdapter;
+        const powerPref = reqOpts.powerPreference || (isFallback ? 'fallback' : 'default');
+
+        // Build a stable ID to deduplicate (same physical GPU across request strategies)
         const gpuId = `${info.vendor || 'unknown'}-${info.architecture || 'unknown'}-${info.device || powerPref}`;
         if (gpus.some(g => g.id === gpuId)) continue;
+
+        const guessedType = isFallback ? 'software' :
+          powerPref === 'high-performance' ? 'discrete' :
+          powerPref === 'low-power' ? 'integrated' :
+          _guessGPUTypeFromInfo(info);
 
         gpus.push({
           id: gpuId,
@@ -59,8 +77,8 @@ export async function detectClientGPUs() {
           architecture: info.architecture || '',
           device: info.device || '',
           description: info.description || '',
-          type: powerPref === 'high-performance' ? 'discrete' : 'integrated',
-          backend: 'webgpu',
+          type: guessedType,
+          backend: isFallback ? 'webgpu-software' : 'webgpu',
           hasFP16: features.includes('shader-f16'),
           hasTimestampQuery: features.includes('timestamp-query'),
           maxBufferSize: limits.maxBufferSize || 0,
@@ -68,11 +86,13 @@ export async function detectClientGPUs() {
           estimatedVRAM_MB: Math.round((limits.maxBufferSize || 0) / (1024 * 1024)),
           features,
           powerPreference: powerPref,
-          whisperCapable: features.includes('shader-f16') && (limits.maxStorageBufferBindingSize || 0) >= 128 * 1024 * 1024,
+          isFallbackAdapter: !!isFallback,
+          whisperCapable: !isFallback && features.includes('shader-f16') && (limits.maxStorageBufferBindingSize || 0) >= 128 * 1024 * 1024,
         });
       } catch (e) {
-        console.warn(`WebGPU adapter request (${powerPref}) failed:`, e);
-        errors.push(`WebGPU ${powerPref}: ${e?.message || e}`);
+        const label = reqOpts.forceFallbackAdapter ? 'fallback' : (reqOpts.powerPreference || 'default');
+        console.warn(`WebGPU adapter request (${label}) failed:`, e);
+        errors.push(`WebGPU ${label}: ${e?.message || e}`);
       }
     }
   }
@@ -194,6 +214,15 @@ function _guessGPUType(renderer) {
   return 'unknown';
 }
 
+function _guessGPUTypeFromInfo(info) {
+  const v = ((info.vendor || '') + ' ' + (info.device || '') + ' ' + (info.description || '')).toLowerCase();
+  if (/geforce|radeon|rx\s?\d|rtx|gtx/i.test(v)) return 'discrete';
+  if (/intel|uhd|iris|hd graphics/i.test(v)) return 'integrated';
+  if (/apple m\d/i.test(v)) return 'integrated';
+  if (/microsoft|basic render|swiftshader/i.test(v)) return 'software';
+  return 'unknown';
+}
+
 function _formatGPUName(info) {
   if (info.device && info.device !== '') return info.device;
   if (info.description && info.description !== '') return info.description;
@@ -255,12 +284,69 @@ export async function detectWebCodecsCapabilities() {
 }
 
 /**
+ * Fetch server-detected GPUs from the backend and merge any that the browser
+ * didn't find.  Server detection uses nvidia-smi, lspci, sysfs, WMIC, etc.
+ * and is more reliable for enumerating all physical GPUs.
+ */
+async function _fetchAndMergeServerGPUs(browserGpus) {
+  try {
+    const res = await fetch('/api/gpu-acceleration');
+    if (!res.ok) return;
+    const data = await res.json();
+    const serverGpus = data.detected?.gpus || data.gpus || [];
+    if (!serverGpus.length) return;
+
+    for (const sg of serverGpus) {
+      const nameLower = (sg.name || '').toLowerCase().replace(/\(r\)/g, '').replace(/\(tm\)/g, '').replace(/\s+/g, ' ').trim();
+      // Check if this server GPU is already in the browser list (fuzzy name match)
+      const alreadyFound = browserGpus.some(bg => {
+        const bgName = (bg.name || '').toLowerCase().replace(/\(r\)/g, '').replace(/\(tm\)/g, '').replace(/\s+/g, ' ').trim();
+        // Match if one name contains the other, or they share significant words
+        if (bgName.includes(nameLower) || nameLower.includes(bgName)) return true;
+        const bgWords = bgName.split(/\s+/).filter(w => w.length > 2);
+        const sgWords = nameLower.split(/\s+/).filter(w => w.length > 2);
+        const shared = bgWords.filter(w => sgWords.includes(w));
+        return shared.length >= 2;
+      });
+      if (alreadyFound) continue;
+
+      browserGpus.push({
+        id: `server-${sg.vendor || 'unknown'}-${sg.index || browserGpus.length}`,
+        name: sg.name || 'Unknown GPU',
+        vendor: sg.vendor || 'unknown',
+        architecture: '',
+        device: '',
+        description: '',
+        type: sg.type || (sg.vendor === 'intel' ? 'integrated' : 'discrete'),
+        backend: 'server-detected',
+        hasFP16: false,
+        hasTimestampQuery: false,
+        maxBufferSize: 0,
+        maxStorageBufferBindingSize: 0,
+        estimatedVRAM_MB: sg.vram_mb || 0,
+        features: [],
+        powerPreference: null,
+        isFallbackAdapter: false,
+        whisperCapable: false,
+        serverIndex: sg.index,
+        serverVendor: sg.vendor,
+      });
+    }
+  } catch (e) {
+    console.warn('Failed to fetch server GPU list:', e);
+  }
+}
+
+/**
  * Full client GPU capability scan — call once on mount.
  */
 export async function scanClientGPU() {
   const gpus = await detectClientGPUs();
   const scanErrors = gpus._errors || [];
   delete gpus._errors;
+
+  // Merge server-detected GPUs that the browser didn't find
+  await _fetchAndMergeServerGPUs(gpus);
 
   const webcodecs = await detectWebCodecsCapabilities();
 
@@ -269,7 +355,7 @@ export async function scanClientGPU() {
     webcodecSupported: typeof VideoEncoder !== 'undefined',
     gpus,
     webcodecs,
-    recommended: gpus.find(g => g.type === 'discrete') || gpus[0] || null,
+    recommended: gpus.find(g => g.type === 'discrete' && g.backend === 'webgpu') || gpus.find(g => g.type === 'discrete') || gpus[0] || null,
     scanErrors: scanErrors.length > 0 ? scanErrors : undefined,
   };
 }
