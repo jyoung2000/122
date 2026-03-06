@@ -516,6 +516,7 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
     """
     # Respect user toggle — if OFF, always CPU
     if not app_settings.GPU_ACCELERATION_ENABLED:
+        logger.info("Video encoding: GPU acceleration OFF — using libx264 (CPU)")
         return [
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
@@ -536,6 +537,13 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
 
     # GPU device index — lets the user pick which GPU to encode on
     gpu_device = (app_settings.GPU_DEVICE_INDEX or "").strip()
+
+    logger.info(
+        "Video encoding: encoder=%s, gpu_name=%s, device_index=%s, quality=%s%s",
+        gpu.get("encoder", "none"), gpu.get("gpu_name", "Unknown"),
+        gpu_device or "auto", export_quality,
+        " (HEVC)" if use_hevc else "",
+    )
 
     if gpu["encoder"] == "h264_nvenc":
         # NVENC supports --gpu N to select a specific NVIDIA GPU
@@ -598,6 +606,7 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
             "-pix_fmt", "yuv420p",
         ]
     else:
+        logger.info("Video encoding: no GPU encoder matched — falling back to libx264 (CPU)")
         return [
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",

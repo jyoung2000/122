@@ -62,12 +62,26 @@ function shortModel(modelId) {
 export default function Layout({ children }) {
   const [collapsed, setCollapsed] = useState(false);
   const [activeModel, setActiveModel] = useState(null);
+  const [gpuStatus, setGpuStatus] = useState(null);
   const location = useLocation();
   const navigate = useNavigate();
   const { isMobile } = useResponsive();
   const { isDark, toggleTheme } = useTheme();
   const connStatus = useConnectionStatus();
   const { activeCount, latestActivity } = useEncodingManager();
+
+  // Fetch GPU status for header display
+  useEffect(() => {
+    const fetchGpu = async () => {
+      try {
+        const res = await fetch('/api/settings/gpu-acceleration');
+        if (res.ok) setGpuStatus(await res.json());
+      } catch { /* silent */ }
+    };
+    fetchGpu();
+    const interval = setInterval(fetchGpu, 60000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Detect if this is a sub-page that should show a back button
   const isSubPage = location.pathname.startsWith('/analysis') || location.pathname.startsWith('/seo');
@@ -445,6 +459,42 @@ export default function Layout({ children }) {
                 <span><span style={{ color: 'var(--accent-cyan)' }}>V:</span> {activeModel.vision_model ? shortModel(activeModel.vision_model) : '\u2014'}</span>
                 <span style={{ color: 'var(--border-strong)' }}>|</span>
                 <span><span style={{ color: 'var(--success)' }}>Tx:</span> {activeModel.text_model ? shortModel(activeModel.text_model) : '\u2014'}</span>
+              </Link>
+            )}
+            {/* GPU status indicator */}
+            {gpuStatus && (
+              <Link
+                to="/settings"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 8,
+                  padding: '4px 10px',
+                  background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)',
+                  textDecoration: 'none',
+                  fontSize: 10,
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--text-secondary)',
+                  transition: 'border-color 0.2s',
+                }}
+                title={`GPU: ${gpuStatus.detected?.gpu_name || 'Unknown'}${gpuStatus.detected?.vram_mb ? ' (' + gpuStatus.detected.vram_mb + ' MB)' : ''}`}
+              >
+                <div style={{
+                  width: 6, height: 6, borderRadius: '50%',
+                  background: gpuStatus.enabled ? 'var(--accent-amber)' : 'var(--text-muted)',
+                  flexShrink: 0,
+                }} />
+                <span>
+                  <span style={{ color: 'var(--accent-amber)' }}>ENC:</span>{' '}
+                  {gpuStatus.enabled ? (gpuStatus.detected?.encoder || 'none') : 'cpu'}
+                </span>
+                <span style={{ color: 'var(--border-strong)' }}>|</span>
+                <span>
+                  <span style={{ color: 'var(--accent-cyan)' }}>WHI:</span>{' '}
+                  {gpuStatus.detected?.whisper_device || 'cpu'}
+                </span>
               </Link>
             )}
             {/* Connection status is shown by the system dot in the center ticker */}

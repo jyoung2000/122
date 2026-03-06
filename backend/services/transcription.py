@@ -37,17 +37,36 @@ def _get_whisper_model():
             # Pick best device and compute type automatically
             device = "cpu"
             compute_type = "int8"
+            gpu_name = ""
             try:
-                if ctranslate2.get_cuda_device_count() > 0:
+                cuda_count = ctranslate2.get_cuda_device_count()
+                if cuda_count > 0:
                     device = "cuda"
                     compute_type = "float16"
-                    logger.info("CUDA GPU detected — using float16 for Whisper")
+                    # Try to get GPU name for logging
+                    try:
+                        import subprocess
+                        nv = subprocess.run(
+                            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        if nv.returncode == 0 and nv.stdout.strip():
+                            gpu_name = nv.stdout.strip().split('\n')[0]
+                    except Exception:
+                        pass
+                    logger.info(
+                        "CUDA GPU detected for Whisper transcription — device=cuda, "
+                        "compute=float16, gpu_count=%d%s",
+                        cuda_count, f", gpu={gpu_name}" if gpu_name else "",
+                    )
+                else:
+                    logger.info("No CUDA GPUs found — Whisper will use CPU (device=cpu, compute=int8)")
             except Exception:
-                pass
+                logger.info("CUDA not available — Whisper will use CPU (device=cpu, compute=int8)")
 
             logger.info(
-                f"Loading Whisper model: {settings.WHISPER_MODEL} "
-                f"(device={device}, compute={compute_type})"
+                "Loading Whisper model: %s (device=%s, compute=%s)",
+                settings.WHISPER_MODEL, device, compute_type,
             )
             _whisper_model = WhisperModel(
                 settings.WHISPER_MODEL,
@@ -190,6 +209,12 @@ def _transcribe_sync(
     progress_lock: Optional[threading.Lock] = None,
 ) -> list[TranscriptSegment]:
     model = _get_whisper_model()
+    # Log which device Whisper is running on for this transcription
+    model_device = getattr(model, 'device', 'unknown')
+    logger.info(
+        "Starting Whisper transcription on device=%s for %s",
+        model_device, audio_path,
+    )
     transcribe_kwargs = {
         "beam_size": settings.WHISPER_BEAM_SIZE,
         "best_of": 1,  # single pass — skip temperature fallback sampling

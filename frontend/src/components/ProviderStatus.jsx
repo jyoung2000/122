@@ -21,6 +21,7 @@ function shortModel(modelId) {
 
 export default function ProviderStatus({ collapsed, onActiveChange }) {
   const [statuses, setStatuses] = useState({});
+  const [gpuInfo, setGpuInfo] = useState(null);
 
   useEffect(() => {
     const fetchStatus = async () => {
@@ -37,9 +38,22 @@ export default function ProviderStatus({ collapsed, onActiveChange }) {
         // silent
       }
     };
+    const fetchGpu = async () => {
+      try {
+        const res = await fetch('/api/settings/gpu-acceleration');
+        if (res.ok) {
+          const data = await res.json();
+          setGpuInfo(data);
+        }
+      } catch {
+        // silent
+      }
+    };
     fetchStatus();
+    fetchGpu();
     const interval = setInterval(fetchStatus, 30000);
-    return () => clearInterval(interval);
+    const gpuInterval = setInterval(fetchGpu, 60000);
+    return () => { clearInterval(interval); clearInterval(gpuInterval); };
   }, []);
 
   const providers = ['ollama', 'openrouter', 'anthropic', 'gemini', 'groq'];
@@ -74,6 +88,28 @@ export default function ProviderStatus({ collapsed, onActiveChange }) {
               }}
             >
               {active.provider.charAt(0).toUpperCase()}
+            </div>
+          )}
+          {/* GPU indicator */}
+          {gpuInfo && (
+            <div
+              title={`GPU: ${gpuInfo.enabled ? (gpuInfo.detected?.encoder || 'none') : 'off'} | Whisper: ${gpuInfo.detected?.whisper_device || 'cpu'}${gpuInfo.detected?.gpu_name && gpuInfo.detected.gpu_name !== 'Unknown' ? ' | ' + gpuInfo.detected.gpu_name : ''}`}
+              style={{
+                width: 20,
+                height: 20,
+                borderRadius: 'var(--radius-sm)',
+                background: gpuInfo.enabled ? 'var(--accent-amber)' : 'var(--text-muted)',
+                color: 'var(--bg-base)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 8,
+                fontWeight: 700,
+                fontFamily: 'var(--font-mono)',
+                marginBottom: 4,
+              }}
+            >
+              GPU
             </div>
           )}
           {providers.map((name) => {
@@ -140,6 +176,55 @@ export default function ProviderStatus({ collapsed, onActiveChange }) {
                   <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', lineHeight: 1.5 }}>
                     <span style={{ color: 'var(--success)', fontWeight: 600 }}>text:</span>{' '}
                     <span style={{ color: 'var(--text-secondary)' }}>{shortModel(active.text_model)}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* GPU Status */}
+          {gpuInfo && (
+            <div style={{ marginBottom: 12 }}>
+              <div
+                style={{
+                  fontSize: 10,
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--text-muted)',
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.1em',
+                  marginBottom: 6,
+                }}
+              >
+                GPU
+              </div>
+              <div
+                style={{
+                  background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '8px 10px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                }}
+              >
+                <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', lineHeight: 1.5 }}>
+                  <span style={{ color: 'var(--accent-amber)', fontWeight: 600 }}>encode:</span>{' '}
+                  <span style={{ color: 'var(--text-secondary)' }}>
+                    {gpuInfo.enabled
+                      ? (gpuInfo.detected?.encoder || 'none')
+                      : 'cpu (off)'}
+                  </span>
+                </div>
+                <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', lineHeight: 1.5 }}>
+                  <span style={{ color: 'var(--accent-cyan)', fontWeight: 600 }}>whisper:</span>{' '}
+                  <span style={{ color: 'var(--text-secondary)' }}>
+                    {gpuInfo.detected?.whisper_device || 'cpu'}
+                  </span>
+                </div>
+                {gpuInfo.detected?.gpu_name && gpuInfo.detected.gpu_name !== 'Unknown' && (
+                  <div style={{ fontSize: 9, fontFamily: 'var(--font-mono)', lineHeight: 1.4, color: 'var(--text-muted)' }}>
+                    {gpuInfo.detected.gpu_name}
                   </div>
                 )}
               </div>
