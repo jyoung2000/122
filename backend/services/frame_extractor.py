@@ -101,6 +101,28 @@ async def get_video_metadata(video_path: str) -> dict:
     if video_stream:
         w = video_stream.get("width", 0)
         h = video_stream.get("height", 0)
+
+        # Account for non-square pixels (SAR != 1:1).  Many cameras and
+        # encoding tools produce videos where coded dimensions differ from
+        # the actual display dimensions.  FFprobe reports SAR as "N:M";
+        # the display width = coded_width * (SAR_num / SAR_den).
+        sar_str = video_stream.get("sample_aspect_ratio", "1:1")
+        try:
+            sar_parts = sar_str.split(":")
+            sar_num = int(sar_parts[0])
+            sar_den = int(sar_parts[1]) if len(sar_parts) > 1 else 1
+            if sar_num > 0 and sar_den > 0 and sar_num != sar_den:
+                display_w = round(w * sar_num / sar_den)
+                # Ensure even dimensions for video encoding
+                display_w = display_w - (display_w % 2)
+                logger.info(
+                    "SAR correction: coded=%dx%d, SAR=%s, display=%dx%d",
+                    w, h, sar_str, display_w, h,
+                )
+                w = display_w
+        except (ValueError, IndexError, ZeroDivisionError):
+            pass  # Malformed SAR — keep coded dimensions
+
         resolution = f"{w}x{h}"
         r_frame_rate = video_stream.get("r_frame_rate", "0/1")
         try:

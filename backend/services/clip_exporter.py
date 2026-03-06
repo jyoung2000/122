@@ -1999,8 +1999,12 @@ def _build_filter_chain(
     out_w, out_h = src_w, src_h
     sub = _subtitle_filter(ass_path, force_style=subtitle_force_style) if ass_path else ""
 
-    # Simple linear chain: crop + scale + subtitles
-    filters = []
+    # Simple linear chain: setsar → crop → scale → subtitles
+    # Start with setsar=1 to normalize non-square pixels (SAR != 1:1).
+    # Many source videos have non-square SAR which causes FFmpeg's crop
+    # and scale filters to produce slightly wrong dimensions, resulting
+    # in thin black bars at the edges of the exported video.
+    filters = ["setsar=1"]
 
     if aspect_ratio and aspect_ratio in ASPECT_RATIO_VALUES:
         target_ratio = ASPECT_RATIO_VALUES[aspect_ratio]
@@ -2841,10 +2845,14 @@ async def export_clip(
                     "-i", video_path,
                     "-t", str(end - start),
                 ]
-                # Apply quality scale if source height differs from target
+                # Apply quality scale if source height differs from target.
+                # Always normalize SAR to 1:1 to prevent black bars from
+                # non-square pixel aspect ratios in the source video.
                 fb_target_h = QUALITY_MAX_HEIGHT.get(export_quality, 1080)
                 if video_height != fb_target_h:
-                    cmd += ["-vf", f"scale=-2:{fb_target_h}"]
+                    cmd += ["-vf", f"setsar=1,scale=-2:{fb_target_h}"]
+                else:
+                    cmd += ["-vf", "setsar=1"]
                 cmd += [
                     *_gpu_encode_args(fb_qp),
                     "-threads", str(app_settings.FFMPEG_THREADS),
