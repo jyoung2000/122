@@ -1,4 +1,5 @@
 import asyncio
+import glob
 import json
 import logging
 import math
@@ -351,26 +352,114 @@ def _detect_all_gpus() -> list[dict]:
         pass
 
     # ── All GPUs via lspci (Linux) — catches Intel iGPU and AMD GPUs ──
+    lspci_found = False
     if not _IS_MACOS and not _IS_WINDOWS:
         try:
             result = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
-            for line in result.stdout.split("\n"):
-                lower = line.lower()
-                if not ("vga" in lower or "3d controller" in lower or "display" in lower):
-                    continue
-                gpu_name = line.split(": ", 1)[-1].strip() if ": " in line else "Unknown GPU"
-                # Skip if already found via nvidia-smi (avoid duplicates)
-                if any(sn in gpu_name.lower() for sn in seen_names):
-                    continue
-                if "nvidia" in lower and any(sn in lower for sn in seen_names):
-                    continue
-                vendor = "intel" if "intel" in lower else "amd" if ("amd" in lower or "radeon" in lower) else "nvidia" if "nvidia" in lower else "unknown"
-                gpu_type = "integrated" if vendor == "intel" else "discrete"
-                gpus.append({
-                    "index": str(len(gpus)), "name": gpu_name, "vendor": vendor,
-                    "vram_mb": 0, "driver_version": "", "type": gpu_type,
-                })
+            if result.returncode == 0:
+                lspci_found = True
+                for line in result.stdout.split("\n"):
+                    lower = line.lower()
+                    if not ("vga" in lower or "3d controller" in lower or "display" in lower):
+                        continue
+                    gpu_name = line.split(": ", 1)[-1].strip() if ": " in line else "Unknown GPU"
+                    # Skip if already found via nvidia-smi (avoid duplicates)
+                    if any(sn in gpu_name.lower() for sn in seen_names):
+                        continue
+                    if "nvidia" in lower and any(sn in lower for sn in seen_names):
+                        continue
+                    vendor = "intel" if "intel" in lower else "amd" if ("amd" in lower or "radeon" in lower) else "nvidia" if "nvidia" in lower else "unknown"
+                    gpu_type = "integrated" if vendor == "intel" else "discrete"
+                    gpus.append({
+                        "index": str(len(gpus)), "name": gpu_name, "vendor": vendor,
+                        "vram_mb": 0, "driver_version": "", "type": gpu_type,
+                    })
+                    seen_names.add(gpu_name.lower())
         except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    # ── Fallback: /sys/class/drm/ (Linux containers without lspci) ──
+    # Docker containers often lack lspci (pciutils package).  This fallback
+    # reads directly from sysfs to discover Intel/AMD/NVIDIA GPUs that the
+    # kernel exposes to the container.
+    if not _IS_MACOS and not _IS_WINDOWS and not lspci_found:
+        _PCI_GPU_VENDORS = {
+            "0x10de": "nvidia", "0x8086": "intel", "0x1002": "amd",
+        }
+        try:
+            for card_dir in sorted(glob.glob("/sys/class/drm/card[0-9]*/device")):
+                try:
+                    vendor_path = os.path.join(card_dir, "vendor")
+                    if not os.path.isfile(vendor_path):
+                        continue
+                    vendor_id = open(vendor_path).read().strip().lower()
+                    vendor = _PCI_GPU_VENDORS.get(vendor_id)
+                    if not vendor:
+                        continue
+                    # Try to read device name from uevent or construct one
+                    gpu_name = f"{vendor.upper()} GPU"
+                    uevent_path = os.path.join(card_dir, "uevent")
+                    if os.path.isfile(uevent_path):
+                        for ue_line in open(uevent_path):
+                            if ue_line.startswith("PCI_SLOT_NAME="):
+                                slot = ue_line.strip().split("=", 1)[1]
+                                gpu_name = f"{vendor.upper()} GPU ({slot})"
+                                break
+                    # Try to read VRAM from resource (BAR sizes)
+                    vram_mb = 0
+                    resource_path = os.path.join(card_dir, "resource")
+                    if os.path.isfile(resource_path):
+                        try:
+                            for res_line in open(resource_path):
+                                parts = res_line.strip().split()
+                                if len(parts) >= 2:
+                                    start = int(parts[0], 16)
+                                    end = int(parts[1], 16)
+                                    size_mb = (end - start + 1) // (1024 * 1024)
+                                    if size_mb > vram_mb:
+                                        vram_mb = size_mb
+                        except (ValueError, IndexError):
+                            pass
+                    # Skip if already detected (e.g., NVIDIA via nvidia-smi)
+                    if vendor == "nvidia" and any(g["vendor"] == "nvidia" for g in gpus):
+                        continue
+                    if gpu_name.lower() in seen_names:
+                        continue
+                    gpu_type = "integrated" if vendor == "intel" else "discrete"
+                    gpus.append({
+                        "index": str(len(gpus)), "name": gpu_name, "vendor": vendor,
+                        "vram_mb": vram_mb, "driver_version": "", "type": gpu_type,
+                    })
+                    seen_names.add(gpu_name.lower())
+                except (OSError, IOError):
+                    continue
+        except Exception:
+            pass
+
+    # ── Fallback: /proc/driver/nvidia/gpus/ (multi-NVIDIA without nvidia-smi) ──
+    # Some containers have the NVIDIA kernel module loaded but nvidia-smi
+    # is not installed.  /proc/driver/nvidia/gpus/ lists all NVIDIA GPUs.
+    if not gpus or (not any(g["vendor"] == "nvidia" for g in gpus)):
+        try:
+            nv_gpu_dirs = sorted(glob.glob("/proc/driver/nvidia/gpus/*/information"))
+            for info_path in nv_gpu_dirs:
+                try:
+                    content = open(info_path).read()
+                    gpu_name = "NVIDIA GPU"
+                    for line in content.split("\n"):
+                        if line.startswith("Model:"):
+                            gpu_name = line.split(":", 1)[1].strip()
+                            break
+                    if gpu_name.lower() in seen_names:
+                        continue
+                    gpus.append({
+                        "index": str(len(gpus)), "name": gpu_name, "vendor": "nvidia",
+                        "vram_mb": 0, "driver_version": "", "type": "discrete",
+                    })
+                    seen_names.add(gpu_name.lower())
+                except (OSError, IOError):
+                    continue
+        except Exception:
             pass
 
     # ── macOS GPUs via system_profiler ──

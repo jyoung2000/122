@@ -364,11 +364,55 @@ export default function Analysis() {
   const [markSceneSaving, setMarkSceneSaving] = useState(false);
   const [inlineCustomFonts, setInlineCustomFonts] = useState([]);
 
-  // Fetch custom fonts for the inline subtitle settings panel
+  // Fetch custom fonts for the inline subtitle settings panel and register
+  // @font-face so they render in the dropdown and subtitle preview.
   useEffect(() => {
+    // Register builtin fonts via @font-face (same mapping as ClipSettingsPanel)
+    const BUILTIN_FONT_FILES = {
+      'DM Sans': '/api/fonts/builtin/DMSans.ttf',
+      'Montserrat': '/api/fonts/builtin/Montserrat.ttf',
+      'Open Sans': '/api/fonts/builtin/OpenSans.ttf',
+      'Roboto': '/api/fonts/builtin/Roboto.ttf',
+      'Poppins': '/api/fonts/builtin/Poppins-Regular.ttf',
+      'Inter': '/api/fonts/builtin/Inter.ttf',
+      'Nunito': '/api/fonts/builtin/Nunito.ttf',
+      'Lato': '/api/fonts/builtin/Lato-Regular.ttf',
+      'Oswald': '/api/fonts/builtin/Oswald.ttf',
+      'Playfair Display': '/api/fonts/builtin/PlayfairDisplay.ttf',
+      'Bebas Neue': '/api/fonts/builtin/BebasNeue-Regular.ttf',
+      'Liberation Sans': '/api/fonts/builtin/LiberationSans-Regular.ttf',
+      'Liberation Serif': '/api/fonts/builtin/LiberationSerif-Regular.ttf',
+      'Liberation Mono': '/api/fonts/builtin/LiberationMono-Regular.ttf',
+      'DejaVu Sans': '/api/fonts/builtin/DejaVuSans.ttf',
+      'DejaVu Serif': '/api/fonts/builtin/DejaVuSerif.ttf',
+      'DejaVu Sans Mono': '/api/fonts/builtin/DejaVuSansMono.ttf',
+      'FreeSans': '/api/fonts/builtin/FreeSans.ttf',
+    };
+    Object.entries(BUILTIN_FONT_FILES).forEach(([name, url]) => {
+      const id = `custom-font-${name.replace(/\s+/g, '-')}`;
+      if (!document.getElementById(id)) {
+        const style = document.createElement('style');
+        style.id = id;
+        style.textContent = `@font-face { font-family: '${name}'; src: url('${url}'); font-weight: 100 900; font-display: swap; }`;
+        document.head.appendChild(style);
+      }
+    });
+    // Fetch user-uploaded custom fonts
     fetch('/api/fonts')
       .then((r) => r.ok ? r.json() : [])
-      .then(setInlineCustomFonts)
+      .then((fonts) => {
+        setInlineCustomFonts(fonts);
+        // Register @font-face for each custom font
+        fonts.forEach((f) => {
+          const id = `custom-font-${f.name.replace(/\s+/g, '-')}`;
+          if (!document.getElementById(id)) {
+            const style = document.createElement('style');
+            style.id = id;
+            style.textContent = `@font-face { font-family: '${f.name}'; src: url('${f.url}'); font-weight: 100 900; font-display: swap; }`;
+            document.head.appendChild(style);
+          }
+        });
+      })
       .catch(() => {});
   }, []);
   const [isGeneratingClips, setIsGeneratingClips] = useState(false);
@@ -967,7 +1011,12 @@ export default function Analysis() {
   });
 
   // ── Inline subtitle settings toolbar + panel (shared by both editors) ──
-  const builtinFonts = ['DM Sans', 'Montserrat', 'Open Sans', 'Roboto', 'Poppins', 'Inter', 'Nunito', 'Lato', 'Oswald', 'Playfair Display', 'Bebas Neue'];
+  const builtinFonts = [
+    'DM Sans', 'Montserrat', 'Open Sans', 'Roboto', 'Poppins', 'Inter',
+    'Nunito', 'Lato', 'Oswald', 'Playfair Display', 'Bebas Neue',
+    'Liberation Sans', 'Liberation Serif', 'Liberation Mono',
+    'DejaVu Sans', 'DejaVu Serif', 'DejaVu Sans Mono', 'FreeSans',
+  ];
   const inlineLabelStyle = { fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' };
   const inlineFieldStyle = { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 80 };
   const inlineChipStyle = (active) => ({
