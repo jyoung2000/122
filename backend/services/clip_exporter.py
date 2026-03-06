@@ -315,12 +315,24 @@ async def _validate_export(
     if not video_streams:
         raise RuntimeError("Export QA failed: no video stream in output")
 
-    # Duration tolerance check (within 2 seconds)
+    # Duration validation — two-tier check:
+    # 1. Warning for >5% or >0.5s drift (soft mismatch, often harmless
+    #    keyframe alignment or container overhead).
+    # 2. Hard failure for >20% or >5s drift, which indicates a real bug
+    #    (e.g. speed not applied, -t truncation, wrong segment math).
     fmt_duration = float(probe.get("format", {}).get("duration", 0))
-    if abs(fmt_duration - expected_duration) > 2.0:
+    dur_diff = abs(fmt_duration - expected_duration)
+    dur_pct = (dur_diff / expected_duration * 100) if expected_duration > 0 else 0
+    if dur_diff > 5.0 or (expected_duration > 0 and dur_pct > 20):
+        raise RuntimeError(
+            f"Export QA failed: duration mismatch — expected {expected_duration:.1f}s, "
+            f"got {fmt_duration:.1f}s (diff={dur_diff:.1f}s, {dur_pct:.0f}%). "
+            f"This likely indicates a speed or trimming bug."
+        )
+    elif dur_diff > 0.5 or (expected_duration > 0 and dur_pct > 5):
         logger.warning(
-            "Export QA: duration mismatch — expected %.1fs, got %.1fs",
-            expected_duration, fmt_duration,
+            "Export QA: duration drift — expected %.1fs, got %.1fs (diff=%.2fs, %.1f%%)",
+            expected_duration, fmt_duration, dur_diff, dur_pct,
         )
 
     # Resolution check against target aspect ratio and quality
@@ -2703,11 +2715,19 @@ async def export_clip(
                     af_parts.append(f"volume='{expr}':eval=frame")
                 af = ",".join(af_parts) if af_parts else None
 
+                # -t is an OUTPUT option (placed after -i), so it caps
+                # the output duration.  When speed != 1.0, the output
+                # duration differs from the input duration: a 10s clip at
+                # 0.5x produces 20s of output, at 2x produces 5s.
+                # Use the speed-adjusted duration so slow-motion clips
+                # aren't truncated and fast clips don't have trailing
+                # silence.
+                output_dur = (end - start) / speed if has_speed else (end - start)
                 cmd = [
                     "ffmpeg", "-y",
                     "-ss", str(start),
                     "-i", video_path,
-                    "-t", str(end - start),
+                    "-t", str(output_dur),
                 ]
                 if vf:
                     if is_complex:
