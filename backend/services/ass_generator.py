@@ -415,6 +415,14 @@ def generate_ass(
                 active_word_bg_color, active_word_bg_opacity
             )
 
+        # Smooth fade-in for Layer 1 word events (milliseconds).
+        # In the browser preview, requestAnimationFrame updates at 60fps
+        # giving sub-frame color transitions.  In the exported video, ASS
+        # events hard-cut between words — this looks choppy and robotic.
+        # Adding a brief \fad(fade_in, 0) to each Layer 1 event creates a
+        # smooth color sweep that mimics the fluid browser rendering.
+        _WORD_FADE_IN_MS = 60  # 60ms fade-in, no fade-out
+
     # Explicit border override tags for every Dialogue event.
     # Even though the Style already sets Outline, some libass builds and
     # FFmpeg versions lose the outline through style caching / fallback.
@@ -487,7 +495,16 @@ def generate_ass(
                 pending_word_events.append((clip_start, clip_end, style_name, event_text))
             elif seg_word_ts and len(seg_word_ts) == len(words):
                 # Real per-word timestamps from Whisper.
-                _WORD_ANTICIPATION_S = 0.10
+                # In the browser preview, anticipation (0.10s) minus audio-buffer
+                # compensation (0.12s) gives a net offset of -0.02s.  But browser
+                # audio output latency (~120ms) means the user hears the word
+                # ~120ms after video.currentTime, so the effective perceived lead
+                # is ≈0.10s.  In the exported video there is no audio buffer —
+                # audio and video are perfectly muxed — so we need a larger
+                # anticipation (0.15s) to achieve the same perceptual "reading
+                # ahead" feel and to compensate for Whisper timestamps that
+                # typically lag the actual audio onset by 50-150ms.
+                _WORD_ANTICIPATION_S = 0.15
                 base_color = _hex_to_ass_color(speaker_color_map[speaker])
 
                 for word_idx in range(len(words)):
@@ -510,10 +527,13 @@ def generate_ass(
 
                     # Layer 1: Color layer — full text, per-word colors,
                     # NO border (\bord0\shad0\3a&HFF&).  Only text fill.
+                    # \fad creates a smooth color transition mimicking 60fps
+                    # browser rendering instead of hard-cutting between words.
                     before = " ".join(words[:word_idx])
                     active = words[word_idx]
                     after = " ".join(words[word_idx + 1:])
-                    nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
+                    fade_tag = f"\\fad({_WORD_FADE_IN_MS},0)"
+                    nobord_prefix = "{" + aw_nobord_tag + fade_tag + "}" if aw_nobord_tag else "{" + fade_tag + "}"
                     base_tag = "{" + f"\\c{base_color}" + "}"
                     aw_tag = "{" + f"\\c{aw_color}" + "}"
                     parts = []
@@ -529,7 +549,10 @@ def generate_ass(
                 # speech rhythm.  Uses punctuation-aware, speaker-rate-scaled
                 # timing that matches the frontend getCurrentWordIndex().
                 _BASE_OVERHEAD_S = 0.04
-                _ANTICIPATION_S = 0.10  # must match frontend _ANTICIPATION_S
+                # Higher anticipation than frontend (0.10) to compensate for
+                # the absence of browser audio buffer (~120ms) in exported
+                # video and Whisper timestamp lag.
+                _ANTICIPATION_S = 0.15
                 _PUNCT_PAUSE = {
                     ",": 0.15, ";": 0.16, ":": 0.12,
                     ".": 0.22, "!": 0.22, "?": 0.24,
@@ -605,11 +628,14 @@ def generate_ass(
                     border_event_text = f"{border_prefix}{prefix}{safe_text}"
                     base_text_events.append((shifted_start, word_end, style_name, border_event_text))
 
-                    # Layer 1: Color layer — per-word coloring, no border
+                    # Layer 1: Color layer — per-word coloring, no border.
+                    # \fad creates a smooth color transition mimicking 60fps
+                    # browser rendering instead of hard-cutting between words.
                     before = " ".join(words[:word_idx])
                     active = words[word_idx]
                     after = " ".join(words[word_idx + 1:])
-                    nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
+                    fade_tag = f"\\fad({_WORD_FADE_IN_MS},0)"
+                    nobord_prefix = "{" + aw_nobord_tag + fade_tag + "}" if aw_nobord_tag else "{" + fade_tag + "}"
                     base_tag = "{" + f"\\c{base_color}" + "}"
                     aw_tag = "{" + f"\\c{aw_color}" + "}"
                     parts = []
