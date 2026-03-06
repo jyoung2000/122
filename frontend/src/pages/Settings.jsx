@@ -1645,8 +1645,8 @@ export default function Settings() {
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
                         <span style={{ color: 'var(--text-muted)' }}>Whisper (Transcription)</span>
-                        <span style={{ fontFamily: 'var(--font-mono)', color: gpuInfo.cuda_available ? 'var(--success)' : 'var(--text-muted)' }}>
-                          {gpuInfo.cuda_available ? 'CUDA (GPU)' : 'CPU'}
+                        <span style={{ fontFamily: 'var(--font-mono)', color: (gpuInfo.cuda_available || gpuInfo.vendor === 'apple') ? 'var(--success)' : 'var(--text-muted)' }}>
+                          {gpuInfo.cuda_available ? 'CUDA (GPU)' : gpuInfo.vendor === 'apple' ? 'Core ML (GPU)' : 'CPU'}
                         </span>
                       </div>
                       {gpuInfo.driver_version && (
@@ -1667,7 +1667,8 @@ export default function Settings() {
                         {'• '}Pass your GPU to the container via <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>docker-compose.gpu.yml</code><br/>
                         {'• '}NVIDIA: Install nvidia-container-toolkit on the host<br/>
                         {'• '}Intel/AMD: Pass <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>/dev/dri</code> device to the container<br/>
-                        {'• '}Rebuild with <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>Dockerfile.gpu</code> for hardware encoder support
+                        {'• '}macOS (Apple Silicon): Run natively (not Docker) — VideoToolbox requires direct macOS access<br/>
+                        {'• '}Rebuild with <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>Dockerfile.gpu</code> for hardware encoder support (Linux/NVIDIA)
                       </div>
                     </div>
                   )}
@@ -1693,7 +1694,7 @@ export default function Settings() {
                   <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>Enable Client-Side GPU Processing</span>
                   <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
                     Leverages your local GPU via Chrome WebGPU for Whisper transcription
-                    and WebCodecs for hardware video encoding (NVENC/VAAPI).
+                    and WebCodecs for hardware video encoding (NVENC/VideoToolbox/VAAPI).
                   </div>
                 </div>
                 <button
@@ -1944,7 +1945,7 @@ export default function Settings() {
                           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
                             <span style={{ color: 'var(--text-muted)' }}>H.264 Hardware Encode</span>
                             <span style={{ fontFamily: 'var(--font-mono)', color: clientGpuInfo.webcodecs.h264HardwareEncode ? 'var(--success)' : 'var(--text-muted)' }}>
-                              {clientGpuInfo.webcodecs.h264HardwareEncode ? 'NVENC / Hardware' : 'Software only'}
+                              {clientGpuInfo.webcodecs.h264HardwareEncode ? 'Hardware Accelerated' : 'Software only'}
                             </span>
                           </div>
                           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
@@ -1993,7 +1994,7 @@ export default function Settings() {
                           <div>
                             <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>Video Encoding (WebCodecs)</span>
                             <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-                              Uses H.264/NVENC hardware encoding in the browser for clip export
+                              Uses H.264 hardware encoding in the browser for clip export (NVENC/VideoToolbox/VAAPI)
                             </div>
                           </div>
                           <button

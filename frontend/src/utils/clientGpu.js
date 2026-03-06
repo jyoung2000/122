@@ -61,16 +61,27 @@ export async function detectClientGPUs() {
           if (!gpu.webglRenderer) {
             gpu.webglRenderer = renderer;
             gpu.webglVendor = vendor;
-            if (renderer && (renderer.includes('RTX') || renderer.includes('GTX') || renderer.includes('Radeon') || renderer.includes('Arc'))) {
-              gpu.name = renderer;
+            if (renderer && (
+              renderer.includes('RTX') || renderer.includes('GTX') ||
+              renderer.includes('Radeon') || renderer.includes('Arc') ||
+              renderer.includes('Apple M') || renderer.includes('Apple GPU')
+            )) {
+              // Extract clean GPU name from ANGLE renderer strings
+              // e.g. "ANGLE (Apple, ANGLE Metal Renderer: Apple M3 Pro, ...)" → "Apple M3 Pro"
+              const appleMatch = renderer.match(/Apple (M\d[\w\s]*?)(?:,|$)/);
+              gpu.name = appleMatch ? `Apple ${appleMatch[1].trim()}` : renderer;
             }
           }
         }
         // If no WebGPU adapters found, add a WebGL-only entry
         if (gpus.length === 0) {
+          // Extract clean name from ANGLE renderer for Apple Silicon
+          let gpuName = renderer || 'Unknown GPU';
+          const appleMatch = renderer && renderer.match(/Apple (M\d[\w\s]*?)(?:,|$)/);
+          if (appleMatch) gpuName = `Apple ${appleMatch[1].trim()}`;
           gpus.push({
             id: `webgl-${vendor}-${renderer}`,
-            name: renderer || 'Unknown GPU',
+            name: gpuName,
             vendor: vendor || 'unknown',
             architecture: '',
             device: '',

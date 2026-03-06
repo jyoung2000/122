@@ -728,7 +728,7 @@ class OpenRouterProvider(AIProvider):
         prompt_size = len(system_prompt) + len(user_prompt)
         logger.info(
             "Clip detection prompt size: %d chars (transcript=%d, scenes=%d, hot=%d)",
-            prompt_size, len(transcript_text), len(scene_text), len(hot_text),
+            prompt_size, len(transcript_text), len(scene_text), len(energy_text) if energy_text else 0,
         )
 
         for attempt in range(3):
