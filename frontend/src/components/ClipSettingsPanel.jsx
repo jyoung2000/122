@@ -155,7 +155,7 @@ function saveSettings(settings) {
   } catch {}
 }
 
-export default function ClipSettingsPanel({ speakers, speakerNames, videoResolution, onSettingsChange, onApplySettings, onPresetsLoaded, serverSettings }) {
+export default function ClipSettingsPanel({ speakers, speakerNames, videoResolution, onSettingsChange, onApplySettings, onPresetsLoaded, serverSettings, currentSettings }) {
   const { isMobile } = useResponsive();
   const [settings, setSettings] = useState(() => {
     // Prefer server-provided settings over localStorage (server is source of truth)
@@ -166,6 +166,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
     return loaded;
   });
   const serverSettingsApplied = useRef(false);
+  const skipExternalSync = useRef(false);
 
   // When serverSettings prop arrives (async from job fetch), apply it once
   useEffect(() => {
@@ -174,6 +175,26 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
       setSettings(prev => ({ ...DEFAULT_SETTINGS, ...serverSettings }));
     }
   }, [serverSettings]);
+
+  // Sync internal state when parent's currentSettings changes externally
+  // (e.g., from inline toolbar updateCS() or VideoEditor speaker color picker).
+  // Skip the echo-back to avoid infinite loops: when WE change settings
+  // internally, we set skipExternalSync=true so this effect doesn't re-apply
+  // our own outgoing update.
+  useEffect(() => {
+    if (!currentSettings || skipExternalSync.current) {
+      skipExternalSync.current = false;
+      return;
+    }
+    setSettings(prev => {
+      // Only update if there's an actual difference to avoid loops
+      const merged = { ...DEFAULT_SETTINGS, ...currentSettings };
+      const changed = Object.keys(merged).some(k => merged[k] !== prev[k]);
+      if (!changed) return prev;
+      return merged;
+    });
+  }, [currentSettings]);
+
   const [customFonts, setCustomFonts] = useState([]);
   const [fontUploading, setFontUploading] = useState(false);
   const fontInputRef = useRef(null);
@@ -235,6 +256,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
 
   // Notify parent of settings changes and persist
   useEffect(() => {
+    skipExternalSync.current = true;
     onSettingsChange?.(settings);
     saveSettings(settings);
   }, [settings, onSettingsChange]);
