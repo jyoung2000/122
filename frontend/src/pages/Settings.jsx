@@ -1634,17 +1634,39 @@ export default function Settings() {
                   ) : gpuInfo.vendor !== 'none' ? (
                     /* GPU detected — show details */
                     <div style={{ display: 'grid', gap: 6 }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-                        <span style={{ color: 'var(--text-muted)' }}>GPU</span>
-                        <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{gpuInfo.gpu_name}</span>
-                      </div>
-                      {gpuInfo.vram_mb > 0 && (
+                      {/* All detected GPUs */}
+                      {gpuInfo.gpus?.length > 0 ? (
+                        <>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>
+                            Detected GPUs ({gpuInfo.gpus.length})
+                          </div>
+                          {gpuInfo.gpus.map((gpu, i) => (
+                            <div key={i} style={{
+                              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                              fontSize: 12, padding: '4px 8px',
+                              background: 'rgba(255, 255, 255, 0.03)', borderRadius: 4,
+                            }}>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{gpu.name}</span>
+                              <span style={{
+                                fontSize: 10, padding: '1px 6px', borderRadius: 3,
+                                fontFamily: 'var(--font-mono)',
+                                background: gpu.vendor === 'nvidia' ? 'rgba(118, 185, 0, 0.15)' : 'rgba(0, 114, 198, 0.15)',
+                                color: gpu.vendor === 'nvidia' ? '#76b900' : '#0072c6',
+                              }}>
+                                {gpu.vendor.toUpperCase()} · {gpu.type === 'discrete' ? 'Discrete' : gpu.type === 'integrated' ? 'Integrated' : 'GPU'}
+                                {gpu.vram_mb > 0 ? ` · ${gpu.vram_mb} MB` : ''}
+                              </span>
+                            </div>
+                          ))}
+                        </>
+                      ) : (
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-                          <span style={{ color: 'var(--text-muted)' }}>VRAM</span>
-                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{gpuInfo.vram_mb} MB</span>
+                          <span style={{ color: 'var(--text-muted)' }}>GPU</span>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{gpuInfo.gpu_name}</span>
                         </div>
                       )}
-                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                      {/* Active encoder/decoder info */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginTop: 4 }}>
                         <span style={{ color: 'var(--text-muted)' }}>Video Encoder</span>
                         <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--success)' }}>{gpuInfo.encoder}</span>
                       </div>

@@ -1422,6 +1422,7 @@ async def get_gpu_acceleration():
             "driver_version": gpu_info.get("driver_version", ""),
             "cuda_available": gpu_info.get("cuda_available", False),
             "whisper_device": gpu_info.get("whisper_device", "cpu"),
+            "gpus": gpu_info.get("gpus", []),
         },
     }
 
@@ -1464,6 +1465,7 @@ async def set_gpu_acceleration(req: GpuAccelerationRequest):
             "driver_version": gpu_info.get("driver_version", ""),
             "cuda_available": gpu_info.get("cuda_available", False),
             "whisper_device": gpu_info.get("whisper_device", "cpu"),
+            "gpus": gpu_info.get("gpus", []),
         },
     }
 

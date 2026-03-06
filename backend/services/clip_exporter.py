@@ -81,30 +81,48 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
     }
 
     # Gate on user toggle — if GPU acceleration is toggled OFF in Settings,
-    # return CPU immediately.  Zero overhead: no nvidia-smi, no FFmpeg probes.
+    # return CPU immediately but still detect GPUs so the UI can show them.
     if not app_settings.GPU_ACCELERATION_ENABLED:
+        info["gpus"] = _detect_all_gpus()
         _gpu_info = info
         return info
 
     forced_vendor = (app_settings.GPU_VENDOR_OVERRIDE or "").lower().strip() or "auto"
 
-    # ── Step 1: Detect NVIDIA GPU via nvidia-smi ──
+    # ── Step 1: Detect NVIDIA GPU(s) via nvidia-smi ──
     nvidia_detected = False
+    nvidia_gpus = []
     if forced_vendor in ("auto", "nvidia"):
         try:
             smi = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
+                ["nvidia-smi", "--query-gpu=index,name,memory.total,driver_version",
                  "--format=csv,noheader,nounits"],
                 capture_output=True, text=True, timeout=10,
             )
             if smi.returncode == 0 and smi.stdout.strip():
-                parts = [p.strip() for p in smi.stdout.strip().split("\n")[0].split(",")]
-                gpu_name = parts[0] if len(parts) > 0 else "NVIDIA GPU"
-                vram = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-                driver = parts[2] if len(parts) > 2 else ""
-                nvidia_detected = True
-                info.update({"gpu_name": gpu_name, "vram_mb": vram, "driver_version": driver})
-                logger.info("NVIDIA GPU detected: %s (%d MB VRAM, driver %s)", gpu_name, vram, driver)
+                for line in smi.stdout.strip().split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    parts = [p.strip() for p in line.split(",")]
+                    gpu_idx = parts[0] if len(parts) > 0 else "0"
+                    gpu_name = parts[1] if len(parts) > 1 else "NVIDIA GPU"
+                    vram = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                    driver = parts[3] if len(parts) > 3 else ""
+                    nvidia_gpus.append({
+                        "index": gpu_idx, "name": gpu_name,
+                        "vram_mb": vram, "driver_version": driver,
+                        "vendor": "nvidia",
+                    })
+                    logger.info("NVIDIA GPU %s detected: %s (%d MB VRAM, driver %s)", gpu_idx, gpu_name, vram, driver)
+                if nvidia_gpus:
+                    nvidia_detected = True
+                    # Primary GPU info uses first NVIDIA GPU for encoder selection
+                    info.update({
+                        "gpu_name": nvidia_gpus[0]["name"],
+                        "vram_mb": nvidia_gpus[0]["vram_mb"],
+                        "driver_version": nvidia_gpus[0]["driver_version"],
+                    })
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             logger.debug("nvidia-smi not available: %s", e)
 
@@ -229,6 +247,7 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
                 if cfg["vendor"] != "nvidia" and "None" in info["gpu_name"]:
                     _detect_non_nvidia_gpu_name(info, cfg["vendor"])
                 logger.info("GPU acceleration active: %s encoder=%s", cfg["vendor"].upper(), cfg["encoder"])
+                info["gpus"] = _detect_all_gpus()
                 _gpu_info = info
                 return info
             else:
@@ -246,6 +265,7 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
         )
 
     logger.info("No GPU encoder available — using CPU encoding (libx264)")
+    info["gpus"] = _detect_all_gpus()
     _gpu_info = info
     return info
 
@@ -294,6 +314,108 @@ def _detect_non_nvidia_gpu_name(info: dict, vendor: str):
                         break
     except Exception:
         pass
+
+
+def _detect_all_gpus() -> list[dict]:
+    """Detect ALL GPUs visible to the container (NVIDIA, Intel, AMD).
+
+    Returns a list of dicts with: name, vendor, vram_mb, driver_version, type.
+    This is called alongside detect_gpu_capabilities() to populate the gpus[] list.
+    """
+    gpus = []
+    seen_names = set()
+
+    # ── NVIDIA GPUs via nvidia-smi ──
+    try:
+        smi = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,name,memory.total,driver_version",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if smi.returncode == 0 and smi.stdout.strip():
+            for line in smi.stdout.strip().split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                parts = [p.strip() for p in line.split(",")]
+                gpu_idx = parts[0] if len(parts) > 0 else "0"
+                gpu_name = parts[1] if len(parts) > 1 else "NVIDIA GPU"
+                vram = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+                driver = parts[3] if len(parts) > 3 else ""
+                gpus.append({
+                    "index": gpu_idx, "name": gpu_name, "vendor": "nvidia",
+                    "vram_mb": vram, "driver_version": driver, "type": "discrete",
+                })
+                seen_names.add(gpu_name.lower())
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # ── All GPUs via lspci (Linux) — catches Intel iGPU and AMD GPUs ──
+    if not _IS_MACOS and not _IS_WINDOWS:
+        try:
+            result = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5)
+            for line in result.stdout.split("\n"):
+                lower = line.lower()
+                if not ("vga" in lower or "3d controller" in lower or "display" in lower):
+                    continue
+                gpu_name = line.split(": ", 1)[-1].strip() if ": " in line else "Unknown GPU"
+                # Skip if already found via nvidia-smi (avoid duplicates)
+                if any(sn in gpu_name.lower() for sn in seen_names):
+                    continue
+                if "nvidia" in lower and any(sn in lower for sn in seen_names):
+                    continue
+                vendor = "intel" if "intel" in lower else "amd" if ("amd" in lower or "radeon" in lower) else "nvidia" if "nvidia" in lower else "unknown"
+                gpu_type = "integrated" if vendor == "intel" else "discrete"
+                gpus.append({
+                    "index": str(len(gpus)), "name": gpu_name, "vendor": vendor,
+                    "vram_mb": 0, "driver_version": "", "type": gpu_type,
+                })
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    # ── macOS GPUs via system_profiler ──
+    if _IS_MACOS:
+        try:
+            result = subprocess.run(
+                ["system_profiler", "SPDisplaysDataType", "-detailLevel", "mini"],
+                capture_output=True, text=True, timeout=10,
+            )
+            for line in result.stdout.split("\n"):
+                stripped = line.strip()
+                if stripped.startswith("Chipset Model:"):
+                    gpu_name = stripped.split(":", 1)[1].strip()
+                    gpus.append({
+                        "index": str(len(gpus)), "name": gpu_name, "vendor": "apple",
+                        "vram_mb": 0, "driver_version": "", "type": "integrated",
+                    })
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    # ── Windows GPUs via WMIC ──
+    if _IS_WINDOWS:
+        try:
+            result = subprocess.run(
+                ["wmic", "path", "win32_VideoController", "get", "Name"],
+                capture_output=True, text=True, timeout=10,
+            )
+            for line in result.stdout.split("\n"):
+                name = line.strip()
+                lower = name.lower()
+                if not lower or "name" in lower:
+                    continue
+                if any(sn in lower for sn in seen_names):
+                    continue
+                vendor = "intel" if "intel" in lower else "amd" if ("amd" in lower or "radeon" in lower) else "nvidia" if "nvidia" in lower else "unknown"
+                gpu_type = "integrated" if vendor == "intel" else "discrete"
+                gpus.append({
+                    "index": str(len(gpus)), "name": name, "vendor": vendor,
+                    "vram_mb": 0, "driver_version": "", "type": gpu_type,
+                })
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    logger.info("All GPUs detected: %s", [g["name"] for g in gpus])
+    return gpus
 
 
 def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> list[str]:
