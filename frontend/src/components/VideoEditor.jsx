@@ -238,6 +238,7 @@ export default function VideoEditor({
   const initFromClip = useTimelineStore((s) => s.initFromClip);
   const timelineStoreItems = useTimelineStore((s) => s.items);
   const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
+  const updateTimelineItem = useTimelineStore((s) => s.updateItem);
   const { recovered } = useTimelinePersistence(jobId, clipId);
 
   // Initialize timeline store when clip data changes
@@ -400,6 +401,64 @@ export default function VideoEditor({
 
   // Segment delete confirmation
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
+
+  // Video item properties from multi-track timeline (opacity, effects)
+  const [videoItemOpacity, setVideoItemOpacity] = useState(1);
+  const [videoItemFilter, setVideoItemFilter] = useState('');
+
+  // Sync video timeline item properties → actual video element
+  const videoTimelineItem = useMemo(
+    () => timelineStoreItems.find((it) => it.type === 'video') || null,
+    [timelineStoreItems],
+  );
+  useEffect(() => {
+    if (!videoTimelineItem) return;
+    // Volume
+    if (videoTimelineItem.volume != null) {
+      const vol = Math.round(Math.max(0, Math.min(2, videoTimelineItem.volume)) * 100);
+      if (Math.abs(vol - volume) > 1) {
+        setVolume(vol);
+        if (vol === 0) setIsMuted(true);
+        else if (isMuted && vol > 0) setIsMuted(false);
+      }
+    }
+    // Speed
+    if (videoTimelineItem.speed != null && Math.abs(videoTimelineItem.speed - speed) > 0.001) {
+      setSpeed(videoTimelineItem.speed);
+      if (videoRef.current) videoRef.current.playbackRate = videoTimelineItem.speed;
+    }
+    // Opacity
+    setVideoItemOpacity(videoTimelineItem.opacity ?? 1);
+    // Effects → CSS filter
+    const eff = videoTimelineItem.effects || {};
+    const filters = [];
+    if (eff.brightness) filters.push(`brightness(${1 + eff.brightness / 100})`);
+    if (eff.contrast) filters.push(`contrast(${1 + eff.contrast / 100})`);
+    if (eff.saturation) filters.push(`saturate(${1 + eff.saturation / 100})`);
+    if (eff.blur) filters.push(`blur(${eff.blur}px)`);
+    if (eff.hueRotate) filters.push(`hue-rotate(${eff.hueRotate}deg)`);
+    if (eff.sepia) filters.push(`sepia(${eff.sepia / 100})`);
+    setVideoItemFilter(filters.length ? filters.join(' ') : '');
+  }, [videoTimelineItem]);
+
+  // Reverse sync: write VideoEditor volume/speed back to the video timeline item
+  // so the PropertiesPanel stays in sync with the playback controls.
+  useEffect(() => {
+    if (!videoTimelineItem) return;
+    const itemVol = videoTimelineItem.volume ?? 1;
+    const editorVol = volume / 100;
+    if (Math.abs(itemVol - editorVol) > 0.02) {
+      updateTimelineItem(videoTimelineItem.id, { volume: editorVol });
+    }
+  }, [volume, videoTimelineItem?.id]);
+
+  useEffect(() => {
+    if (!videoTimelineItem) return;
+    const itemSpd = videoTimelineItem.speed ?? 1;
+    if (Math.abs(itemSpd - speed) > 0.001) {
+      updateTimelineItem(videoTimelineItem.id, { speed });
+    }
+  }, [speed, videoTimelineItem?.id]);
 
   // Derived: the currently selected segment object (or null)
   const selectedSegment = useMemo(
@@ -1758,6 +1817,9 @@ export default function VideoEditor({
           style={{
             objectFit: isCrop ? 'cover' : 'contain',
             objectPosition: initialObjectPosition,
+            opacity: videoItemOpacity,
+            filter: videoItemFilter || undefined,
+            transition: 'opacity 0.1s, filter 0.1s',
           }}
         />
 

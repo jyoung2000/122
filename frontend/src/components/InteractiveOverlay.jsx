@@ -135,9 +135,11 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
       startH: size.h,
       containerW: rect.width,
       containerH: rect.height,
+      startFontSize: item.textStyle?.fontSize || 48,
+      isTextItem: item.type === 'text',
     };
     setIsResizing(true);
-  }, [pos, size, getContainerRect, onInteraction]);
+  }, [pos, size, item, getContainerRect, onInteraction]);
 
   // ── ROTATE ────────────────────────────────────────────
   const handleRotateStart = useCallback((e) => {
@@ -233,7 +235,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
           }
         }
 
-        onUpdate({
+        const updates = {
           position: {
             x: Math.round(newX * 10) / 10,
             y: Math.round(newY * 10) / 10,
@@ -242,7 +244,16 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
             w: Math.round(Math.max(2, newW) * 10) / 10,
             h: Math.round(Math.max(2, newH) * 10) / 10,
           },
-        });
+        };
+
+        // Scale font size for text items on corner (diagonal) drags
+        if (ds.isTextItem && h.length === 2 && ds.startW > 0) {
+          const scale = newW / ds.startW;
+          const newFontSize = Math.max(8, Math.min(400, Math.round(ds.startFontSize * scale)));
+          updates.textStyle = { ...(item.textStyle || {}), fontSize: newFontSize };
+        }
+
+        onUpdate(updates);
       }
 
       if (ds.type === 'rotate') {
@@ -322,12 +333,15 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
 
   // Determine the bounding box style.
   // Elements use percentage-based position (center) and size.
+  // Text items get extra padding so the bounding box isn't cramped
+  const boxPad = isText ? 12 : 0;
   const boxStyle = {
     position: 'absolute',
     left: `${pos.x}%`,
     top: `${pos.y}%`,
     width: `${size.w}%`,
     height: isAutoHeight ? 'auto' : `${size.h}%`,
+    padding: boxPad > 0 ? boxPad : undefined,
     transform: `translate(-50%, -50%) ${rotation ? `rotate(${rotation}deg)` : ''}`,
     cursor: isDragging ? 'grabbing' : 'grab',
     pointerEvents: 'auto',

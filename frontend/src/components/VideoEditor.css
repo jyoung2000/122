@@ -1950,8 +1950,33 @@ input.ve-timecode--input {
   font-size: 10px;
   font-family: var(--font-mono, monospace);
   color: var(--ve-text-muted);
-  min-width: 32px;
+  min-width: 38px;
   text-align: right;
+}
+.ve-properties__slider-value--clickable {
+  cursor: text;
+  border-radius: 3px;
+  padding: 1px 3px;
+  transition: background 0.15s;
+}
+.ve-properties__slider-value--clickable:hover {
+  background: var(--ve-track-bg, rgba(0,0,0,0.08));
+  color: var(--ve-text);
+}
+.ve-properties__slider-value--editing {
+  width: 48px;
+  padding: 1px 3px;
+  border: 1px solid var(--ve-accent, #0A84FF);
+  border-radius: 3px;
+  background: var(--ve-chrome, #1a1a1a);
+  color: var(--ve-text);
+  outline: none;
+  -moz-appearance: textfield;
+}
+.ve-properties__slider-value--editing::-webkit-inner-spin-button,
+.ve-properties__slider-value--editing::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .ve-properties__speed-pills {

@@ -31,8 +31,20 @@ function formatTime(s) {
   return `${m}:${sec.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
 }
 
-/* Reusable slider row */
+/* Reusable slider row with editable number input */
 function SliderRow({ label, value, min, max, step = 1, unit = '', onChange }) {
+  const [editing, setEditing] = useState(false);
+  const [editVal, setEditVal] = useState('');
+  const displayVal = typeof value === 'number' ? (Number.isInteger(value) ? String(value) : value.toFixed(1)) : String(value);
+
+  const commitEdit = () => {
+    setEditing(false);
+    const parsed = parseFloat(editVal);
+    if (!isNaN(parsed)) {
+      onChange(Math.max(min, Math.min(max, parsed)));
+    }
+  };
+
   return (
     <div className="ve-properties__slider-row">
       <span className="ve-properties__field-label" style={{ minWidth: 55 }}>{label}</span>
@@ -41,7 +53,26 @@ function SliderRow({ label, value, min, max, step = 1, unit = '', onChange }) {
         onChange={(e) => onChange(parseFloat(e.target.value))}
         className="ve-properties__slider"
       />
-      <span className="ve-properties__slider-value">{typeof value === 'number' ? (Number.isInteger(value) ? value : value.toFixed(1)) : value}{unit}</span>
+      {editing ? (
+        <input
+          type="number"
+          min={min} max={max} step={step}
+          value={editVal}
+          onChange={(e) => setEditVal(e.target.value)}
+          onBlur={commitEdit}
+          onKeyDown={(e) => { if (e.key === 'Enter') commitEdit(); if (e.key === 'Escape') setEditing(false); }}
+          autoFocus
+          className="ve-properties__slider-value ve-properties__slider-value--editing"
+        />
+      ) : (
+        <span
+          className="ve-properties__slider-value ve-properties__slider-value--clickable"
+          onClick={() => { setEditVal(displayVal); setEditing(true); }}
+          title="Click to type a value"
+        >
+          {displayVal}{unit}
+        </span>
+      )}
     </div>
   );
 }
