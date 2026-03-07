@@ -8,6 +8,7 @@ export function useClientGpuPreferences() {
   const [prefs, setPrefs] = useState({
     enabled: false,
     selectedGpuId: '',
+    selectedGpuName: '',
     whisperEnabled: true,
     encodingEnabled: true,
   });
@@ -21,9 +22,13 @@ export function useClientGpuPreferences() {
     };
     load();
 
-    // Listen for changes from other tabs/components
+    // Listen for changes from other tabs and same-tab updates
     window.addEventListener('storage', load);
-    return () => window.removeEventListener('storage', load);
+    window.addEventListener('clientgpu-changed', load);
+    return () => {
+      window.removeEventListener('storage', load);
+      window.removeEventListener('clientgpu-changed', load);
+    };
   }, []);
 
   const shouldUseClientWhisper = prefs.enabled && prefs.whisperEnabled;

@@ -585,11 +585,14 @@ export default function Settings() {
       whisperEnabled: overrides.whisperEnabled ?? clientWhisperEnabled,
       encodingEnabled: overrides.encodingEnabled ?? clientEncodingEnabled,
     };
-    localStorage.setItem('clipai_client_gpu', JSON.stringify(state));
-
-    // Report selected GPU to the server so FFmpeg can use the right device
+    // Include GPU name so other components (Layout top bar) can display it
     const gpuId = state.selectedGpuId;
     const selectedGpu = clientGpuInfo?.gpus?.find(g => g.id === gpuId);
+    state.selectedGpuName = selectedGpu?.name || '';
+    localStorage.setItem('clipai_client_gpu', JSON.stringify(state));
+    window.dispatchEvent(new Event('clientgpu-changed'));
+
+    // Report selected GPU to the server so FFmpeg can use the right device
     if (selectedGpu) {
       fetch('/api/client-gpu-report', {
         method: 'POST',

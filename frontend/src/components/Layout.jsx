@@ -6,6 +6,7 @@ import useResponsive from '../hooks/useResponsive';
 import useTheme from '../hooks/useTheme';
 import useConnectionStatus from '../hooks/useConnectionStatus';
 import useEncodingManager from '../hooks/useEncodingManager';
+import { useClientGpuPreferences } from '../hooks/useClientGpu';
 
 const NAV_ITEMS = [
   { path: '/', label: 'Home', icon: 'D', mobileIcon: 'home' },
@@ -68,6 +69,7 @@ export default function Layout({ children }) {
   const { isDark, toggleTheme } = useTheme();
   const connStatus = useConnectionStatus();
   const { activeCount, latestActivity } = useEncodingManager();
+  const clientGpu = useClientGpuPreferences();
 
   // Detect if this is a sub-page that should show a back button
   const isSubPage = location.pathname.startsWith('/analysis') || location.pathname.startsWith('/seo');
@@ -445,6 +447,28 @@ export default function Layout({ children }) {
                 <span><span style={{ color: 'var(--accent-cyan)' }}>V:</span> {activeModel.vision_model ? shortModel(activeModel.vision_model) : '\u2014'}</span>
                 <span style={{ color: 'var(--border-strong)' }}>|</span>
                 <span><span style={{ color: 'var(--success)' }}>Tx:</span> {activeModel.text_model ? shortModel(activeModel.text_model) : '\u2014'}</span>
+              </Link>
+            )}
+            {clientGpu.enabled && clientGpu.selectedGpuName && (
+              <Link
+                to="/settings"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 6,
+                  padding: '4px 10px',
+                  background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)',
+                  textDecoration: 'none',
+                  fontSize: 10,
+                  fontFamily: 'var(--font-mono)',
+                  color: 'var(--text-secondary)',
+                  transition: 'border-color 0.2s',
+                }}
+                title="Client GPU — click to configure"
+              >
+                <span style={{ color: 'var(--accent-cyan)' }}>GPU:</span> {clientGpu.selectedGpuName}
               </Link>
             )}
             {/* Connection status is shown by the system dot in the center ticker */}
