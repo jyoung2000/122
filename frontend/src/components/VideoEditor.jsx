@@ -2705,14 +2705,24 @@ export default function VideoEditor({
             <div className="ve-multitrack__toolbar-actions">
               <button
                 className={`ve-btn ve-btn--small${showEffectsPanel ? ' ve-btn--active' : ''}`}
-                onClick={() => setShowEffectsPanel(v => !v)}
+                onClick={() => {
+                  setShowEffectsPanel(v => {
+                    if (!v) setShowProperties(true); // auto-open sidebar
+                    return !v;
+                  });
+                }}
                 title="Effects"
               >
                 Effects
               </button>
               <button
                 className={`ve-btn ve-btn--small${showTransitions ? ' ve-btn--active' : ''}`}
-                onClick={() => setShowTransitions(v => !v)}
+                onClick={() => {
+                  setShowTransitions(v => {
+                    if (!v) setShowProperties(true); // auto-open sidebar
+                    return !v;
+                  });
+                }}
                 title="Transitions"
               >
                 Transitions
@@ -2746,30 +2756,8 @@ export default function VideoEditor({
               </div>
             )}
 
-            {/* Center area: effects/transitions panel + timeline */}
+            {/* Center area: timeline always fills available space */}
             <div className="ve-multitrack__center">
-              {/* Effects Panel (collapsible) */}
-              {showEffectsPanel && (
-                <div className="ve-multitrack__effects-panel">
-                  <div className="ve-multitrack__sidebar-header">
-                    <span>Effects</span>
-                    <button className="ve-btn" onClick={() => setShowEffectsPanel(false)} style={{ minWidth: 24, minHeight: 24, fontSize: 12 }}>✕</button>
-                  </div>
-                  <EffectsPanel />
-                </div>
-              )}
-
-              {/* Transitions Panel (collapsible) */}
-              {showTransitions && (
-                <div className="ve-multitrack__effects-panel">
-                  <div className="ve-multitrack__sidebar-header">
-                    <span>Transitions</span>
-                    <button className="ve-btn" onClick={() => setShowTransitions(false)} style={{ minWidth: 24, minHeight: 24, fontSize: 12 }}>✕</button>
-                  </div>
-                  <TransitionPicker />
-                </div>
-              )}
-
               {/* Timeline */}
               <div className="ve-multitrack__timeline">
                 <Timeline
@@ -2787,7 +2775,7 @@ export default function VideoEditor({
               </div>
             </div>
 
-            {/* Properties Sidebar */}
+            {/* Right Sidebar: Properties + Effects + Transitions stacked */}
             {showProperties && (
               <div className="ve-multitrack__sidebar ve-multitrack__sidebar--right">
                 <div className="ve-multitrack__sidebar-header">
@@ -2800,7 +2788,29 @@ export default function VideoEditor({
                     ✕
                   </button>
                 </div>
-                <PropertiesPanel compact={compact} />
+                <PropertiesPanel compact={compact} settings={settings} onSettingsChange={onSettingsChange} />
+
+                {/* Effects Section (collapsible, inside sidebar) */}
+                {showEffectsPanel && (
+                  <div className="ve-multitrack__sidebar-section">
+                    <div className="ve-multitrack__sidebar-header">
+                      <span>Effects</span>
+                      <button className="ve-btn" onClick={() => setShowEffectsPanel(false)} style={{ minWidth: 24, minHeight: 24, fontSize: 12 }}>✕</button>
+                    </div>
+                    <EffectsPanel />
+                  </div>
+                )}
+
+                {/* Transitions Section (collapsible, inside sidebar) */}
+                {showTransitions && (
+                  <div className="ve-multitrack__sidebar-section">
+                    <div className="ve-multitrack__sidebar-header">
+                      <span>Transitions</span>
+                      <button className="ve-btn" onClick={() => setShowTransitions(false)} style={{ minWidth: 24, minHeight: 24, fontSize: 12 }}>✕</button>
+                    </div>
+                    <TransitionPicker />
+                  </div>
+                )}
               </div>
             )}
           </div>

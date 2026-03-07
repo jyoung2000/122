@@ -26,7 +26,7 @@ function formatTime(s) {
   return `${m}:${sec.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
 }
 
-export default function PropertiesPanel({ compact = false }) {
+export default function PropertiesPanel({ compact = false, settings = null, onSettingsChange = null }) {
   const selectedItemId = useTimelineStore((s) => s.selectedItemId);
   const items = useTimelineStore((s) => s.items);
   const updateItem = useTimelineStore((s) => s.updateItem);
@@ -573,6 +573,64 @@ export default function PropertiesPanel({ compact = false }) {
                 />
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Clip Settings (apply global settings to this timeline item) ── */}
+      {(item.type === 'video') && settings && (
+        <div className="ve-properties__section">
+          <label className="ve-properties__label">Clip Settings</label>
+          <p style={{ fontSize: 10, color: 'var(--ve-text-muted, #888)', margin: '0 0 8px', lineHeight: 1.4 }}>
+            Apply your subtitle and export settings from the main editor to this clip.
+          </p>
+          <div className="ve-properties__row" style={{ flexDirection: 'column', gap: 6 }}>
+            <button
+              className="ve-properties__preset-btn"
+              onClick={() => {
+                updateItem(item.id, {
+                  clipSettings: { ...settings },
+                });
+              }}
+            >
+              Apply Current Settings
+            </button>
+            {item.clipSettings && (
+              <span style={{ fontSize: 9, color: 'var(--ve-accent, #0A84FF)', fontFamily: 'var(--ve-font-mono, monospace)' }}>
+                Settings applied ({item.clipSettings.exportQuality || '1080p'}, subs {item.clipSettings.subtitlesEnabled ? 'on' : 'off'})
+              </span>
+            )}
+          </div>
+          {/* Export quality override */}
+          <div className="ve-properties__row" style={{ marginTop: 8 }}>
+            <div className="ve-properties__field">
+              <span className="ve-properties__field-label">Quality</span>
+              <select
+                value={item.clipSettings?.exportQuality || settings?.exportQuality || '1080p'}
+                onChange={(e) => {
+                  const cs = { ...(item.clipSettings || settings || {}), exportQuality: e.target.value };
+                  updateItem(item.id, { clipSettings: cs });
+                }}
+                className="ve-properties__select"
+              >
+                <option value="720p">720p</option>
+                <option value="1080p">1080p</option>
+                <option value="4k">4K</option>
+              </select>
+            </div>
+          </div>
+          {/* Subtitles toggle */}
+          <div className="ve-properties__slider-row" style={{ marginTop: 6 }}>
+            <span className="ve-properties__field-label">Subtitles</span>
+            <button
+              className={`ve-properties__speed-pill${(item.clipSettings?.subtitlesEnabled ?? settings?.subtitlesEnabled) ? ' ve-properties__speed-pill--active' : ''}`}
+              onClick={() => {
+                const cs = { ...(item.clipSettings || settings || {}), subtitlesEnabled: !(item.clipSettings?.subtitlesEnabled ?? settings?.subtitlesEnabled) };
+                updateItem(item.id, { clipSettings: cs });
+              }}
+            >
+              {(item.clipSettings?.subtitlesEnabled ?? settings?.subtitlesEnabled) ? 'On' : 'Off'}
+            </button>
           </div>
         </div>
       )}

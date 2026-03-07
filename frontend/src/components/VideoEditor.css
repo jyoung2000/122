@@ -1457,11 +1457,9 @@ input.ve-timecode--input {
   overflow: hidden;
 }
 
-.ve-multitrack__effects-panel {
-  flex-shrink: 0;
-  border-bottom: 1px solid var(--ve-chrome-border);
-  max-height: 240px;
-  overflow-y: auto;
+/* Sections within the right sidebar (effects, transitions, clip settings) */
+.ve-multitrack__sidebar-section {
+  border-top: 1px solid var(--ve-chrome-border);
 }
 
 .ve-multitrack__sidebar {
@@ -1985,6 +1983,22 @@ input.ve-timecode--input {
   font-weight: 600;
 }
 
+.ve-properties__preset-btn {
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  background: var(--ve-accent, #0A84FF);
+  color: #fff;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+.ve-properties__preset-btn:hover {
+  opacity: 0.85;
+}
+
 .ve-properties__textarea {
   width: 100%;
   padding: 4px 6px;
@@ -2020,7 +2034,7 @@ input.ve-timecode--input {
     border-top: 1px solid var(--ve-chrome-border);
     width: 100%;
     max-width: none;
-    max-height: 200px;
+    max-height: 50vh;
   }
   .ve-multitrack-toggle {
     flex-wrap: wrap;
