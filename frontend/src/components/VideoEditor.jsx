@@ -237,6 +237,7 @@ export default function VideoEditor({
   const canvasPreviewRef = useRef(null);
   const initFromClip = useTimelineStore((s) => s.initFromClip);
   const timelineStoreItems = useTimelineStore((s) => s.items);
+  const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
   const { recovered } = useTimelinePersistence(jobId, clipId);
 
   // Initialize timeline store when clip data changes
@@ -1748,7 +1749,7 @@ export default function VideoEditor({
           width: '100%',
           margin: '0 auto',
         }}
-        onClick={() => { if (!overlayInteracting) togglePlay(); }}
+        onClick={() => { if (!overlayInteracting) { setSelectedItemId(null); togglePlay(); } }}
       >
         <video
           ref={videoRef}

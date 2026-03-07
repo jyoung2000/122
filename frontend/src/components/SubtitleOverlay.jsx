@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { outlineTextShadow } from '../utils/textOutline';
+import useTimelineStore from '../stores/timelineStore';
 
 // ── Backend-matching constants (ass_generator.py / clip_exporter.py) ──────
 const ASPECT_RATIO_DIMS = {
@@ -197,6 +198,13 @@ export default function SubtitleOverlay({
   const containerRef = useRef(null);
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
   const [currentWordIdx, setCurrentWordIdx] = useState(-1);
+  const [isEditing, setIsEditing] = useState(false);
+  const editRef = useRef(null);
+
+  // Timeline store access for click-to-select subtitle items
+  const timelineItems = useTimelineStore((s) => s.items);
+  const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
+  const updateItem = useTimelineStore((s) => s.updateItem);
 
   const subtitlesEnabledGlobal = settings.subtitlesEnabled || false;
 
@@ -302,6 +310,58 @@ export default function SubtitleOverlay({
     if (!subtitlesEnabled || clipSegments.length === 0) return null;
     return clipSegments.find((seg) => seg.start <= relTime && relTime < seg.end) || null;
   }, [subtitlesEnabled, clipSegments, relTime]);
+
+  // Click-to-select: find the matching subtitle timeline item for the current subtitle
+  const handleSubtitleClick = useCallback((e) => {
+    e.stopPropagation(); // Prevent togglePlay on viewport
+    if (!currentSubtitle) return;
+    // Match by overlapping time range (subtitle items use absolute times)
+    const absStart = currentSubtitle.start + clipStart;
+    const absEnd = currentSubtitle.end + clipStart;
+    const match = timelineItems.find(
+      (it) => it.type === 'subtitle' && Math.abs(it.start - absStart) < 0.15 && Math.abs(it.end - absEnd) < 0.15
+    );
+    if (match) {
+      setSelectedItemId(match.id);
+    }
+  }, [currentSubtitle, clipStart, timelineItems, setSelectedItemId]);
+
+  const handleSubtitleDoubleClick = useCallback((e) => {
+    e.stopPropagation();
+    if (!currentSubtitle) return;
+    // Find matching item first
+    const absStart = currentSubtitle.start + clipStart;
+    const absEnd = currentSubtitle.end + clipStart;
+    const match = timelineItems.find(
+      (it) => it.type === 'subtitle' && Math.abs(it.start - absStart) < 0.15 && Math.abs(it.end - absEnd) < 0.15
+    );
+    if (match) {
+      setSelectedItemId(match.id);
+      setIsEditing(true);
+      setTimeout(() => editRef.current?.focus(), 50);
+    }
+  }, [currentSubtitle, clipStart, timelineItems, setSelectedItemId]);
+
+  const handleEditBlur = useCallback(() => {
+    setIsEditing(false);
+  }, []);
+
+  const handleEditChange = useCallback((e) => {
+    if (!currentSubtitle) return;
+    const absStart = currentSubtitle.start + clipStart;
+    const absEnd = currentSubtitle.end + clipStart;
+    const match = timelineItems.find(
+      (it) => it.type === 'subtitle' && Math.abs(it.start - absStart) < 0.15 && Math.abs(it.end - absEnd) < 0.15
+    );
+    if (match) {
+      updateItem(match.id, { subtitleText: e.target.value });
+    }
+  }, [currentSubtitle, clipStart, timelineItems, updateItem]);
+
+  const handleEditKeyDown = useCallback((e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') setIsEditing(false);
+  }, []);
 
   // Active word tracking
   const activeWordEnabled = settings.activeWordEnabled || false;
@@ -490,6 +550,17 @@ export default function SubtitleOverlay({
     textContent = text;
   }
 
+  // Find the matching subtitle text for editing (may differ from transcript if user edited)
+  const editingText = useMemo(() => {
+    if (!currentSubtitle) return '';
+    const absStart = currentSubtitle.start + clipStart;
+    const absEnd = currentSubtitle.end + clipStart;
+    const match = timelineItems.find(
+      (it) => it.type === 'subtitle' && Math.abs(it.start - absStart) < 0.15 && Math.abs(it.end - absEnd) < 0.15
+    );
+    return match?.subtitleText || currentSubtitle.text;
+  }, [currentSubtitle, clipStart, timelineItems]);
+
   return (
     <div ref={containerRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5 }}>
       {/* Constrain subtitles to the actual video content area (handles letterboxing) */}
@@ -510,24 +581,62 @@ export default function SubtitleOverlay({
           pointerEvents: 'none',
           ...positionStyle,
         }}>
-          <span style={{
-            display: 'inline-block',
-            fontFamily,
-            fontSize: subtitleFontSize,
-            fontWeight,
-            color,
-            lineHeight: 1.4,
-            wordWrap: 'break-word',
-            overflowWrap: 'break-word',
-            whiteSpace: 'pre-wrap',
-            ...outlineStyle,
-            ...(bgEnabled ? {
-              background: hexToRgba(bgColor, bgOpacity / 100),
-              padding: `${Math.max(1, Math.max(Math.floor(4 * backendFontScale), 2) * subtitleScale)}px`,
-            } : {}),
-          }}>
+          {/* Clickable subtitle text */}
+          <span
+            style={{
+              display: 'inline-block',
+              fontFamily,
+              fontSize: subtitleFontSize,
+              fontWeight,
+              color,
+              lineHeight: 1.4,
+              wordWrap: 'break-word',
+              overflowWrap: 'break-word',
+              whiteSpace: 'pre-wrap',
+              cursor: 'pointer',
+              pointerEvents: 'auto',
+              ...outlineStyle,
+              ...(bgEnabled ? {
+                background: hexToRgba(bgColor, bgOpacity / 100),
+                padding: `${Math.max(1, Math.max(Math.floor(4 * backendFontScale), 2) * subtitleScale)}px`,
+              } : {}),
+            }}
+            onClick={handleSubtitleClick}
+            onDoubleClick={handleSubtitleDoubleClick}
+          >
             {textContent}
           </span>
+
+          {/* Inline editing overlay (double-click to edit) */}
+          {isEditing && (
+            <textarea
+              ref={editRef}
+              value={editingText}
+              onChange={handleEditChange}
+              onBlur={handleEditBlur}
+              onKeyDown={handleEditKeyDown}
+              onMouseDown={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              style={{
+                display: 'block',
+                width: '100%',
+                minHeight: 40,
+                marginTop: 4,
+                background: 'rgba(0,0,0,0.75)',
+                color: '#fff',
+                border: '2px solid #0A84FF',
+                borderRadius: 6,
+                padding: '8px 10px',
+                fontSize: Math.max(12, subtitleFontSize * 0.7),
+                fontFamily,
+                resize: 'vertical',
+                outline: 'none',
+                pointerEvents: 'auto',
+                zIndex: 50,
+                backdropFilter: 'blur(4px)',
+              }}
+            />
+          )}
         </div>
       </div>
     </div>

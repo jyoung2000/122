@@ -987,21 +987,21 @@ export default function Analysis() {
 
   // Auto-initialize speaker colors from palette when speakers are detected
   // This ensures each speaker gets a unique color even before ClipSettingsPanel mounts
-  const speakerColorsInitRef = useRef(false);
-  if (speakers.length > 0 && !speakerColorsInitRef.current) {
-    const currentColors = clipSettings.speakerColors || {};
-    const needsInit = speakers.some((sp) => !currentColors[sp]);
-    if (needsInit) {
+  useEffect(() => {
+    if (speakers.length === 0) return;
+    setClipSettings((prev) => {
+      const currentColors = prev.speakerColors || {};
+      const needsInit = speakers.some((sp) => !currentColors[sp]);
+      if (!needsInit) return prev;
       const newColors = { ...currentColors };
       speakers.forEach((sp, i) => {
         if (!newColors[sp]) {
           newColors[sp] = DEFAULT_SPEAKER_PALETTE[i % DEFAULT_SPEAKER_PALETTE.length];
         }
       });
-      setClipSettings((prev) => ({ ...prev, speakerColors: newColors }));
-      speakerColorsInitRef.current = true;
-    }
-  }
+      return { ...prev, speakerColors: newColors };
+    });
+  }, [speakers.join(',')]);
 
   // Always use ClipPreview when a clip is selected so it responds to
   // aspect ratio and subtitle settings changes in real time.

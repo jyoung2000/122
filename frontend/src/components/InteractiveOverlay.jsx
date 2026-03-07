@@ -29,21 +29,7 @@ export default function InteractiveOverlay({ currentTime = 0, clipStart = 0, con
     });
   }, [items, absTime]);
 
-  const selectedItem = useMemo(
-    () => items.find((i) => i.id === selectedItemId) || null,
-    [items, selectedItemId],
-  );
-
-  // Deselect when clicking the overlay background (not on an item)
-  // Let the click through to the viewport (togglePlay) by not stopping propagation
-  const handleBackgroundClick = useCallback((e) => {
-    if (e.target === e.currentTarget) {
-      setSelectedItemId(null);
-      // Don't stopPropagation – allow togglePlay to fire on the viewport
-    }
-  }, [setSelectedItemId]);
-
-  if (visible.length === 0 && !selectedItem) return null;
+  if (visible.length === 0) return null;
 
   return (
     <div
@@ -51,10 +37,10 @@ export default function InteractiveOverlay({ currentTime = 0, clipStart = 0, con
         position: 'absolute',
         inset: 0,
         zIndex: 10,
-        // Allow clicks through to items, but capture on items themselves
-        pointerEvents: 'auto',
+        // Container is transparent to clicks — only individual elements capture.
+        // This lets clicks pass through to SubtitleOverlay and viewport below.
+        pointerEvents: 'none',
       }}
-      onMouseDown={handleBackgroundClick}
     >
       {visible.map((item) => (
         <InteractiveElement
@@ -344,6 +330,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
     height: isAutoHeight ? 'auto' : `${size.h}%`,
     transform: `translate(-50%, -50%) ${rotation ? `rotate(${rotation}deg)` : ''}`,
     cursor: isDragging ? 'grabbing' : 'grab',
+    pointerEvents: 'auto',
     // Make hitbox slightly bigger for small elements
     minWidth: 20,
     minHeight: 20,
