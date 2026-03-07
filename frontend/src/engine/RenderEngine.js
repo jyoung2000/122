@@ -158,6 +158,9 @@ export default class RenderEngine {
     // Collect visible clips at currentTime, sorted by track order (bottom-to-top)
     const visibleClips = [];
     for (const clip of clips) {
+      // Subtitle items are rendered by SubtitleOverlay (the "Subs ON" system),
+      // not by the canvas engine — skip them to avoid duplicate subtitles.
+      if (clip.type === 'subtitle') continue;
       if (currentTime >= clip.start && currentTime < clip.end) {
         const track = tracks.find(t => t.id === clip.trackId);
         if (track && track.visible !== false && !track.muted) {
