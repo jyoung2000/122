@@ -1426,6 +1426,7 @@ async def get_gpu_acceleration():
             "cuda_available": gpu_info.get("cuda_available", False),
             "whisper_device": gpu_info.get("whisper_device", "cpu"),
             "gpus": gpu_info.get("gpus", []),
+            "gpu_issues": gpu_info.get("gpu_issues", []),
         },
     }
 
@@ -1469,6 +1470,7 @@ async def set_gpu_acceleration(req: GpuAccelerationRequest):
             "cuda_available": gpu_info.get("cuda_available", False),
             "whisper_device": gpu_info.get("whisper_device", "cpu"),
             "gpus": gpu_info.get("gpus", []),
+            "gpu_issues": gpu_info.get("gpu_issues", []),
         },
     }
 
@@ -1502,11 +1504,31 @@ async def report_client_gpu(req: ClientGpuReport):
     The server uses this to skip server-side transcription if the client will
     handle it, or to prepare server-side fallback if the client can't.
     Also stores the user's selected GPU index for FFmpeg device selection.
+
+    When the client reports an NVIDIA GPU and server-side GPU acceleration
+    is not yet enabled, this triggers auto-detection and enables it.
     """
     # Store the selected GPU index so FFmpeg can target the right device
     if req.gpu_index:
         settings.GPU_DEVICE_INDEX = req.gpu_index
         logger.info("GPU device index set to %s (%s)", req.gpu_index, req.gpu_name)
+
+    # Auto-enable server GPU acceleration if client reports NVIDIA GPU
+    # and server hasn't enabled it yet
+    if req.gpu_vendor and "nvidia" in req.gpu_vendor.lower() and not settings.GPU_ACCELERATION_ENABLED:
+        logger.info(
+            "Client reports NVIDIA GPU (%s) — auto-enabling server GPU acceleration",
+            req.gpu_name,
+        )
+        settings.GPU_ACCELERATION_ENABLED = True
+        settings.GPU_VENDOR_OVERRIDE = "nvidia"
+        _persist_user_settings()
+        # Force GPU re-detection
+        try:
+            from backend.services.clip_exporter import _gpu_info_cache_clear
+            _gpu_info_cache_clear()
+        except Exception:
+            pass
 
     logger.info(
         "Client GPU report: webgpu=%s gpu=%s vendor=%s whisper_capable=%s "

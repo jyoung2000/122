@@ -49,9 +49,12 @@ app.add_middleware(CrossOriginIsolationMiddleware)
 @app.on_event("startup")
 async def _startup_preload():
     """Auto-detect GPU and preload Whisper model at startup."""
-    # Auto-enable GPU acceleration if an NVIDIA GPU is detected and the user
-    # hasn't explicitly configured the setting yet.
     from backend.config import settings as cfg
+
+    nvidia_found = False
+    gpu_name = ""
+
+    # Method 1: nvidia-smi (most reliable when installed)
     try:
         smi = subprocess.run(
             ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
@@ -59,18 +62,94 @@ async def _startup_preload():
         )
         if smi.returncode == 0 and smi.stdout.strip():
             gpu_name = smi.stdout.strip().split("\n")[0].strip()
-            logger.info("NVIDIA GPU detected at startup: %s", gpu_name)
-            # Auto-enable GPU acceleration
-            cfg.GPU_ACCELERATION_ENABLED = True
-            cfg.GPU_VENDOR_OVERRIDE = "nvidia"
-            logger.info("GPU acceleration auto-enabled for encoding and Whisper")
-            # Also force re-detect by clearing the cache
-            try:
-                from backend.services.clip_exporter import _gpu_info_cache_clear
-                _gpu_info_cache_clear()
-            except Exception:
-                pass
+            nvidia_found = True
+            logger.info("NVIDIA GPU detected via nvidia-smi: %s", gpu_name)
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Method 2: Check /dev/nvidia* device nodes (GPU passthrough without nvidia-smi)
+    if not nvidia_found:
+        try:
+            import glob as _glob
+            nvidia_devs = _glob.glob("/dev/nvidia[0-9]*")
+            if nvidia_devs:
+                nvidia_found = True
+                gpu_name = f"NVIDIA GPU ({len(nvidia_devs)} device{'s' if len(nvidia_devs) > 1 else ''})"
+                logger.info("NVIDIA GPU detected via /dev/nvidia* devices: %s", nvidia_devs)
+        except Exception:
+            pass
+
+    # Method 3: Check /proc/driver/nvidia/gpus/ (kernel module loaded)
+    if not nvidia_found:
+        try:
+            import glob as _glob
+            nv_infos = _glob.glob("/proc/driver/nvidia/gpus/*/information")
+            for info_path in nv_infos:
+                try:
+                    content = open(info_path).read()
+                    for line in content.split("\n"):
+                        if line.startswith("Model:"):
+                            gpu_name = line.split(":", 1)[1].strip()
+                            nvidia_found = True
+                            break
+                except (OSError, IOError):
+                    continue
+            if nvidia_found:
+                logger.info("NVIDIA GPU detected via /proc/driver/nvidia: %s", gpu_name)
+        except Exception:
+            pass
+
+    # Method 4: Check sysfs for NVIDIA vendor ID (0x10de)
+    if not nvidia_found:
+        try:
+            import glob as _glob
+            for vendor_path in _glob.glob("/sys/class/drm/card[0-9]*/device/vendor"):
+                try:
+                    vendor_id = open(vendor_path).read().strip().lower()
+                    if vendor_id == "0x10de":
+                        nvidia_found = True
+                        # Try to get PCI slot name for identification
+                        uevent_path = os.path.join(os.path.dirname(vendor_path), "uevent")
+                        if os.path.isfile(uevent_path):
+                            for line in open(uevent_path):
+                                if line.startswith("PCI_SLOT_NAME="):
+                                    slot = line.strip().split("=", 1)[1]
+                                    gpu_name = gpu_name or f"NVIDIA GPU ({slot})"
+                        if not gpu_name:
+                            gpu_name = "NVIDIA GPU (sysfs)"
+                        logger.info("NVIDIA GPU detected via sysfs: %s", gpu_name)
+                        break
+                except (OSError, IOError):
+                    continue
+        except Exception:
+            pass
+
+    # Method 5: Check if CUDA libraries are loadable
+    if not nvidia_found:
+        try:
+            import ctypes
+            for lib_name in ["libcuda.so.1", "libcuda.so", "nvcuda.dll"]:
+                try:
+                    ctypes.cdll.LoadLibrary(lib_name)
+                    nvidia_found = True
+                    gpu_name = gpu_name or "NVIDIA GPU (CUDA library)"
+                    logger.info("NVIDIA GPU detected via CUDA library: %s", lib_name)
+                    break
+                except OSError:
+                    continue
+        except Exception:
+            pass
+
+    if nvidia_found:
+        cfg.GPU_ACCELERATION_ENABLED = True
+        cfg.GPU_VENDOR_OVERRIDE = "nvidia"
+        logger.info("GPU acceleration auto-enabled: %s", gpu_name)
+        try:
+            from backend.services.clip_exporter import _gpu_info_cache_clear
+            _gpu_info_cache_clear()
+        except Exception:
+            pass
+    else:
         logger.info("No NVIDIA GPU detected — using CPU for encoding and Whisper")
 
     from backend.services.transcription import preload_model

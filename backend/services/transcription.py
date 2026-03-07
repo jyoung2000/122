@@ -30,36 +30,122 @@ _MODEL_LOAD_TIMEOUT = 600  # 10 minutes
 _SEGMENT_STALL_TIMEOUT = 120  # 2 minutes
 
 
+def _detect_cuda_available() -> tuple[bool, int, str]:
+    """Try multiple methods to detect CUDA GPU availability.
+
+    Returns (cuda_available, device_count, gpu_name).
+    """
+    # Method 1: ctranslate2 (used by faster-whisper)
+    try:
+        import ctranslate2
+        cuda_count = ctranslate2.get_cuda_device_count()
+        if cuda_count > 0:
+            gpu_name = _get_gpu_name_from_nvidia_smi() or f"CUDA GPU ({cuda_count} device{'s' if cuda_count > 1 else ''})"
+            return True, cuda_count, gpu_name
+    except Exception:
+        pass
+
+    # Method 2: PyTorch CUDA (if torch is installed)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            count = torch.cuda.device_count()
+            name = torch.cuda.get_device_name(0) if count > 0 else "CUDA GPU"
+            return True, count, name
+    except Exception:
+        pass
+
+    # Method 3: Check for NVIDIA device nodes (GPU passed through but libraries incomplete)
+    try:
+        import glob
+        nvidia_devs = glob.glob("/dev/nvidia[0-9]*")
+        if nvidia_devs:
+            gpu_name = _get_gpu_name_from_nvidia_smi() or _get_gpu_name_from_sysfs() or f"NVIDIA GPU ({len(nvidia_devs)} devices)"
+            logger.info(
+                "NVIDIA device nodes found (%s) but CUDA runtime not available. "
+                "Install CUDA toolkit (apt install nvidia-cuda-toolkit) or use a CUDA-enabled "
+                "container image for GPU-accelerated Whisper.",
+                nvidia_devs,
+            )
+            # Devices exist but CUDA runtime isn't loadable - can't use GPU for Whisper
+            return False, 0, gpu_name
+    except Exception:
+        pass
+
+    # Method 4: Try loading CUDA library directly
+    try:
+        import ctypes
+        for lib in ["libcuda.so.1", "libcuda.so", "nvcuda.dll"]:
+            try:
+                ctypes.cdll.LoadLibrary(lib)
+                gpu_name = _get_gpu_name_from_nvidia_smi() or _get_gpu_name_from_sysfs() or "NVIDIA GPU"
+                logger.info("CUDA library %s is loadable — GPU may be available for Whisper", lib)
+                return True, 1, gpu_name
+            except OSError:
+                continue
+    except Exception:
+        pass
+
+    return False, 0, ""
+
+
+def _get_gpu_name_from_nvidia_smi() -> str:
+    """Try to get GPU name from nvidia-smi."""
+    try:
+        import subprocess
+        smi = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if smi.returncode == 0 and smi.stdout.strip():
+            return smi.stdout.strip().split("\n")[0].strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _get_gpu_name_from_sysfs() -> str:
+    """Try to get GPU name from /proc/driver/nvidia or sysfs."""
+    try:
+        import glob
+        for info_path in glob.glob("/proc/driver/nvidia/gpus/*/information"):
+            try:
+                for line in open(info_path):
+                    if line.startswith("Model:"):
+                        return line.split(":", 1)[1].strip()
+            except (OSError, IOError):
+                continue
+    except Exception:
+        pass
+    return ""
+
+
 def _get_whisper_model():
     global _whisper_model, whisper_device_info
     with _model_lock:
         if _whisper_model is None:
             from faster_whisper import WhisperModel
-            import ctranslate2
 
-            # Pick best device and compute type automatically
+            # Pick best device and compute type using multi-method detection
             device = "cpu"
             compute_type = "int8"
             gpu_name = ""
-            try:
-                cuda_count = ctranslate2.get_cuda_device_count()
-                if cuda_count > 0:
-                    device = "cuda"
-                    compute_type = "float16"
-                    # Try to get GPU name via nvidia-smi for user-facing logs
-                    try:
-                        import subprocess
-                        smi = subprocess.run(
-                            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
-                            capture_output=True, text=True, timeout=5,
-                        )
-                        if smi.returncode == 0 and smi.stdout.strip():
-                            gpu_name = smi.stdout.strip().split("\n")[0].strip()
-                    except Exception:
-                        gpu_name = f"CUDA GPU ({cuda_count} device{'s' if cuda_count > 1 else ''})"
-                    logger.info("CUDA GPU detected: %s — using float16 for Whisper", gpu_name or "unknown")
-            except Exception:
-                pass
+
+            cuda_available, cuda_count, detected_name = _detect_cuda_available()
+            if cuda_available and cuda_count > 0:
+                device = "cuda"
+                compute_type = "float16"
+                gpu_name = detected_name
+                logger.info("CUDA GPU detected: %s — using float16 for Whisper", gpu_name or "unknown")
+            elif detected_name:
+                # GPU detected but CUDA runtime not available
+                logger.warning(
+                    "GPU detected (%s) but CUDA runtime not available for Whisper. "
+                    "Falling back to CPU. For GPU acceleration, ensure CUDA toolkit "
+                    "is installed and the container has --gpus all.",
+                    detected_name,
+                )
+                gpu_name = detected_name  # Record name even if can't use it
 
             whisper_device_info = {
                 "device": device,
@@ -71,11 +157,29 @@ def _get_whisper_model():
                 f"Loading Whisper model: {settings.WHISPER_MODEL} "
                 f"(device={device}, compute={compute_type})"
             )
-            _whisper_model = WhisperModel(
-                settings.WHISPER_MODEL,
-                device=device,
-                compute_type=compute_type,
-            )
+            try:
+                _whisper_model = WhisperModel(
+                    settings.WHISPER_MODEL,
+                    device=device,
+                    compute_type=compute_type,
+                )
+            except Exception as e:
+                if device == "cuda":
+                    logger.warning(
+                        "Failed to load Whisper on CUDA (%s), falling back to CPU: %s",
+                        gpu_name, e,
+                    )
+                    device = "cpu"
+                    compute_type = "int8"
+                    whisper_device_info.update({"device": device, "compute_type": compute_type})
+                    _whisper_model = WhisperModel(
+                        settings.WHISPER_MODEL,
+                        device=device,
+                        compute_type=compute_type,
+                    )
+                else:
+                    raise
+
             logger.info(f"Whisper model '{settings.WHISPER_MODEL}' loaded successfully on {device}" +
                          (f" ({gpu_name})" if gpu_name else ""))
     return _whisper_model

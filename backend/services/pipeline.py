@@ -257,9 +257,18 @@ async def _run_analysis_inner(job_id: str):
         if _gpu.get("cuda_available"):
             _gpu_parts.append(f"Whisper: CUDA ({_gpu.get('gpu_name', 'GPU')})")
         else:
-            _gpu_parts.append("Whisper: CPU")
+            # Check if GPU is detected but CUDA isn't available
+            _gpu_name = _gpu.get("gpu_name", "")
+            if _gpu_name and _gpu_name != "None (CPU only)":
+                _gpu_parts.append(f"Whisper: CPU (GPU detected: {_gpu_name} — CUDA runtime not available)")
+            else:
+                _gpu_parts.append("Whisper: CPU")
         _enc_label = get_encoder_label()
         _gpu_parts.append(f"Encoding: {_enc_label}")
+        # Add issues hint if GPU detected but encoder fell back to CPU
+        _gpu_issues = _gpu.get("gpu_issues", [])
+        if _gpu_issues:
+            _gpu_parts.append("(GPU passthrough incomplete — check Settings > Advanced)")
         await broadcast_ws(job_id, {
             "type": "status",
             "status": "processing",

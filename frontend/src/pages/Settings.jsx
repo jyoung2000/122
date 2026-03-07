@@ -1828,6 +1828,36 @@ export default function Settings() {
                           <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{gpuInfo.driver_version}</span>
                         </div>
                       )}
+                      {/* GPU Issues / Setup Guidance */}
+                      {gpuInfo.gpu_issues && gpuInfo.gpu_issues.length > 0 && (
+                        <div style={{
+                          marginTop: 10, padding: '8px 10px',
+                          background: 'rgba(255, 159, 10, 0.08)',
+                          border: '1px solid rgba(255, 159, 10, 0.2)',
+                          borderRadius: 'var(--radius-sm)',
+                        }}>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--warning)', marginBottom: 4 }}>
+                            GPU detected but not fully available for encoding
+                          </div>
+                          {gpuInfo.gpu_issues.map((issue, i) => (
+                            <div key={i} style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 2 }}>
+                              {'• '}{issue}
+                            </div>
+                          ))}
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.5, marginTop: 6, borderTop: '1px solid rgba(255,159,10,0.1)', paddingTop: 6 }}>
+                            <strong>Docker GPU Passthrough Setup:</strong><br/>
+                            {'1. '}Install nvidia-container-toolkit on host:<br/>
+                            <code style={{ fontSize: 9, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3, display: 'inline-block', marginLeft: 12 }}>
+                              apt install nvidia-container-toolkit && systemctl restart docker
+                            </code><br/>
+                            {'2. '}Run with GPU access:<br/>
+                            <code style={{ fontSize: 9, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3, display: 'inline-block', marginLeft: 12 }}>
+                              docker run --gpus all --runtime=nvidia ...
+                            </code><br/>
+                            {'3. '}Use a CUDA-enabled image with FFmpeg NVENC support
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     /* No GPU detected — show setup instructions */

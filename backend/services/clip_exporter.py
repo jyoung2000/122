@@ -122,10 +122,11 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
 
     forced_vendor = (app_settings.GPU_VENDOR_OVERRIDE or "").lower().strip() or "auto"
 
-    # ── Step 1: Detect NVIDIA GPU(s) via nvidia-smi ──
+    # ── Step 1: Detect NVIDIA GPU(s) via multiple methods ──
     nvidia_detected = False
     nvidia_gpus = []
     if forced_vendor in ("auto", "nvidia"):
+        # Method 1a: nvidia-smi (most reliable)
         try:
             smi = subprocess.run(
                 ["nvidia-smi", "--query-gpu=index,name,memory.total,driver_version",
@@ -150,14 +151,96 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
                     logger.info("NVIDIA GPU %s detected: %s (%d MB VRAM, driver %s)", gpu_idx, gpu_name, vram, driver)
                 if nvidia_gpus:
                     nvidia_detected = True
-                    # Primary GPU info uses first NVIDIA GPU for encoder selection
-                    info.update({
-                        "gpu_name": nvidia_gpus[0]["name"],
-                        "vram_mb": nvidia_gpus[0]["vram_mb"],
-                        "driver_version": nvidia_gpus[0]["driver_version"],
-                    })
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
             logger.debug("nvidia-smi not available: %s", e)
+
+        # Method 1b: /dev/nvidia* device nodes (GPU passthrough without nvidia-smi)
+        if not nvidia_detected:
+            try:
+                nvidia_devs = sorted(glob.glob("/dev/nvidia[0-9]*"))
+                if nvidia_devs:
+                    nvidia_detected = True
+                    for i, dev in enumerate(nvidia_devs):
+                        gpu_name = _get_proc_nvidia_name(i) or f"NVIDIA GPU ({os.path.basename(dev)})"
+                        nvidia_gpus.append({
+                            "index": str(i), "name": gpu_name,
+                            "vram_mb": 0, "driver_version": "", "vendor": "nvidia",
+                        })
+                        logger.info("NVIDIA GPU %d detected via device node: %s", i, gpu_name)
+            except Exception:
+                pass
+
+        # Method 1c: /proc/driver/nvidia/gpus/ (kernel module loaded)
+        if not nvidia_detected:
+            try:
+                nv_info_paths = sorted(glob.glob("/proc/driver/nvidia/gpus/*/information"))
+                for i, info_path in enumerate(nv_info_paths):
+                    try:
+                        content = open(info_path).read()
+                        gpu_name = "NVIDIA GPU"
+                        for line in content.split("\n"):
+                            if line.startswith("Model:"):
+                                gpu_name = line.split(":", 1)[1].strip()
+                                break
+                        nvidia_gpus.append({
+                            "index": str(i), "name": gpu_name,
+                            "vram_mb": 0, "driver_version": "", "vendor": "nvidia",
+                        })
+                        nvidia_detected = True
+                        logger.info("NVIDIA GPU %d detected via /proc: %s", i, gpu_name)
+                    except (OSError, IOError):
+                        continue
+            except Exception:
+                pass
+
+        # Method 1d: sysfs vendor ID check (container with kernel access)
+        if not nvidia_detected:
+            try:
+                for vendor_path in sorted(glob.glob("/sys/class/drm/card[0-9]*/device/vendor")):
+                    try:
+                        vendor_id = open(vendor_path).read().strip().lower()
+                        if vendor_id == "0x10de":
+                            device_dir = os.path.dirname(vendor_path)
+                            gpu_name = "NVIDIA GPU"
+                            uevent_path = os.path.join(device_dir, "uevent")
+                            if os.path.isfile(uevent_path):
+                                for line in open(uevent_path):
+                                    if line.startswith("PCI_SLOT_NAME="):
+                                        slot = line.strip().split("=", 1)[1]
+                                        gpu_name = f"NVIDIA GPU ({slot})"
+                                        break
+                            # Read VRAM from BAR sizes
+                            vram_mb = 0
+                            resource_path = os.path.join(device_dir, "resource")
+                            if os.path.isfile(resource_path):
+                                try:
+                                    for res_line in open(resource_path):
+                                        parts = res_line.strip().split()
+                                        if len(parts) >= 2:
+                                            start = int(parts[0], 16)
+                                            end = int(parts[1], 16)
+                                            size_mb = (end - start + 1) // (1024 * 1024)
+                                            if size_mb > vram_mb:
+                                                vram_mb = size_mb
+                                except (ValueError, IndexError):
+                                    pass
+                            nvidia_gpus.append({
+                                "index": str(len(nvidia_gpus)), "name": gpu_name,
+                                "vram_mb": vram_mb, "driver_version": "", "vendor": "nvidia",
+                            })
+                            nvidia_detected = True
+                            logger.info("NVIDIA GPU detected via sysfs: %s (%d MB)", gpu_name, vram_mb)
+                    except (OSError, IOError):
+                        continue
+            except Exception:
+                pass
+
+        if nvidia_detected and nvidia_gpus:
+            info.update({
+                "gpu_name": nvidia_gpus[0]["name"],
+                "vram_mb": nvidia_gpus[0].get("vram_mb", 0),
+                "driver_version": nvidia_gpus[0].get("driver_version", ""),
+            })
 
     # ── Step 2: Check CUDA for Whisper ──
     try:
@@ -288,19 +371,65 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
         except (subprocess.TimeoutExpired, FileNotFoundError) as e:
             logger.debug("Encoder %s test error: %s", cfg["encoder"], e)
 
-    # No working GPU encoder
+    # No working GPU encoder — provide actionable guidance
     if nvidia_detected:
+        # Check specifically what's missing
+        missing_parts = []
+        if not available_encoders:
+            missing_parts.append("FFmpeg is not compiled with NVENC support (need --enable-nvenc --enable-cuda-llvm)")
+        elif "h264_nvenc" not in available_encoders:
+            missing_parts.append("h264_nvenc encoder not found in FFmpeg")
+        else:
+            missing_parts.append("NVENC test-encode failed (GPU may not be accessible to FFmpeg)")
+
+        # Check for nvidia device access
+        nv_devs = glob.glob("/dev/nvidia*")
+        if not nv_devs:
+            missing_parts.append(
+                "No /dev/nvidia* devices found — run Docker with: "
+                "--gpus all --runtime=nvidia (or add deploy.resources.reservations.devices in docker-compose)"
+            )
+
+        # Check for nvidia driver library
+        try:
+            import ctypes
+            ctypes.cdll.LoadLibrary("libnvidia-encode.so.1")
+        except OSError:
+            missing_parts.append(
+                "libnvidia-encode.so.1 not found — install NVIDIA driver libraries "
+                "(apt install libnvidia-encode-XXX or use nvidia/cuda base image)"
+            )
+        except Exception:
+            pass
+
         logger.warning(
-            "NVIDIA GPU detected (%s) but NVENC encoding unavailable. "
-            "Rebuild with Dockerfile.gpu for hardware encoding. "
-            "CUDA Whisper transcription will still work if available.",
+            "NVIDIA GPU detected (%s) but NVENC encoding unavailable. Issues:\n  - %s\n"
+            "CUDA Whisper transcription will still work if CUDA runtime is available.",
             info["gpu_name"],
+            "\n  - ".join(missing_parts),
         )
 
-    logger.info("No GPU encoder available — using CPU encoding (libx264)")
+        # Store diagnostics for the API response
+        info["gpu_issues"] = missing_parts
+    else:
+        logger.info("No GPU detected — using CPU encoding (libx264)")
+
     info["gpus"] = _detect_all_gpus()
     _gpu_info = info
     return info
+
+
+def _get_proc_nvidia_name(index: int = 0) -> str:
+    """Try to read NVIDIA GPU model name from /proc/driver/nvidia/gpus/."""
+    try:
+        nv_info_paths = sorted(glob.glob("/proc/driver/nvidia/gpus/*/information"))
+        if index < len(nv_info_paths):
+            for line in open(nv_info_paths[index]):
+                if line.startswith("Model:"):
+                    return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return ""
 
 
 def _detect_non_nvidia_gpu_name(info: dict, vendor: str):
