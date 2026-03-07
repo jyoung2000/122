@@ -62,6 +62,31 @@ export default function sanitizeJob(job) {
     });
   }
 
+  // exported_clips — ensure filename and other display fields are strings
+  if (Array.isArray(safe.exported_clips)) {
+    safe.exported_clips = safe.exported_clips.map((ec) => {
+      if (!ec || typeof ec !== 'object') return ec;
+      const s = { ...ec };
+      if (s.filename != null && typeof s.filename !== 'string') s.filename = String(s.filename);
+      return s;
+    });
+  }
+
+  // speaker_names — ensure all values are strings
+  if (safe.speaker_names && typeof safe.speaker_names === 'object') {
+    const sn = {};
+    for (const [k, v] of Object.entries(safe.speaker_names)) {
+      sn[k] = typeof v === 'string' ? v : String(v);
+    }
+    safe.speaker_names = sn;
+  }
+
+  // subtitle_settings — ensure all scalar display fields are primitives
+  // (objects like speakerColors are allowed to remain as objects)
+  if (safe.subtitle_settings && typeof safe.subtitle_settings === 'object') {
+    safe.subtitle_settings = sanitizeSubtitleSettings(safe.subtitle_settings);
+  }
+
   return safe;
 }
 
@@ -82,6 +107,44 @@ export function sanitizeClip(c) {
     sc.seo_tags = sc.seo_tags.map((t) => (typeof t === 'string' ? t : String(t)));
   }
   return sc;
+}
+
+/**
+ * Sanitize subtitle settings to ensure no objects leak into JSX.
+ * Fields like speakerColors are intentionally left as objects.
+ */
+export function sanitizeSubtitleSettings(ss) {
+  if (!ss || typeof ss !== 'object') return ss;
+  const s = { ...ss };
+  // All string fields that may be rendered in JSX
+  const stringFields = [
+    'subtitleFont', 'subtitleFontColor', 'subtitleFontWeight',
+    'subtitleOutlineColor', 'subtitlePosition', 'activeWordColor',
+    'activeWordOutlineColor', 'activeWordBgColor', 'subtitleBgColor',
+    'aspectRatio', 'exportQuality',
+    // snake_case variants from backend
+    'font', 'font_color', 'font_weight', 'outline_color', 'position',
+    'active_word_color', 'active_word_outline_color', 'active_word_bg_color',
+    'background_color',
+  ];
+  for (const f of stringFields) {
+    if (s[f] != null && typeof s[f] === 'object') s[f] = String(s[f]);
+  }
+  // Numeric fields — coerce objects to number
+  const numFields = [
+    'subtitleSize', 'subtitleBgOpacity', 'subtitleBgRadius',
+    'subtitleOutlineOpacity', 'subtitleOutlineWidth', 'subtitleMaxWidth',
+    'subtitleOffsetV', 'subtitleMaxWords', 'activeWordBgOpacity',
+    'playbackVolume', 'playbackSpeed',
+    // snake_case variants
+    'size', 'background_opacity', 'background_radius',
+    'outline_opacity', 'outline_width', 'max_width', 'offset_v',
+    'max_words', 'active_word_bg_opacity',
+  ];
+  for (const f of numFields) {
+    if (s[f] != null && typeof s[f] === 'object') s[f] = Number(s[f]) || 0;
+  }
+  return s;
 }
 
 /**

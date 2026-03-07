@@ -6,7 +6,7 @@ import ClipSettingsPanel from '../components/ClipSettingsPanel';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
-import sanitizeJob from '../utils/sanitizeJob';
+import sanitizeJob, { sanitizeSubtitleSettings } from '../utils/sanitizeJob';
 
 function formatDuration(seconds) {
   if (!seconds) return '-';
@@ -112,7 +112,7 @@ const DEFAULT_SETTINGS = {
 function loadExportSettings() {
   try {
     const saved = localStorage.getItem(SETTINGS_KEY);
-    if (saved) return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+    if (saved) return { ...DEFAULT_SETTINGS, ...sanitizeSubtitleSettings(JSON.parse(saved)) };
   } catch {}
   return { ...DEFAULT_SETTINGS };
 }

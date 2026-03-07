@@ -8,7 +8,7 @@ import ProgressBar from '../components/ProgressBar';
 import SceneCard from '../components/SceneCard';
 import TranscriptViewer from '../components/TranscriptViewer';
 import ClipCard from '../components/ClipCard';
-import sanitizeJob from '../utils/sanitizeJob';
+import sanitizeJob, { sanitizeSubtitleSettings } from '../utils/sanitizeJob';
 import { sendNotification, requestNotificationPermission } from '../utils/notifications';
 import ClipSettingsPanel from '../components/ClipSettingsPanel';
 import { showToast } from '../components/Toast';
@@ -288,7 +288,7 @@ export default function Analysis() {
     if (job.subtitle_settings && Object.keys(job.subtitle_settings).length > 0) {
       // Server has canonical settings — use them, merged over defaults
       skipNextServerSave.current = true; // Don't echo back to server
-      setClipSettings({ ...CLIP_SETTINGS_DEFAULTS, ...job.subtitle_settings });
+      setClipSettings({ ...CLIP_SETTINGS_DEFAULTS, ...sanitizeSubtitleSettings(job.subtitle_settings) });
       clipSettingsLoadedFromServer.current = true;
     } else if (!clipSettingsLoadedFromServer.current) {
       // No server settings yet — fall back to localStorage for first-time migration
@@ -296,7 +296,7 @@ export default function Analysis() {
         const saved = localStorage.getItem('clipai_clip_settings');
         if (saved) {
           const parsed = JSON.parse(saved);
-          setClipSettings({ ...CLIP_SETTINGS_DEFAULTS, ...parsed });
+          setClipSettings({ ...CLIP_SETTINGS_DEFAULTS, ...sanitizeSubtitleSettings(parsed) });
         }
       } catch {}
     }
@@ -1096,7 +1096,7 @@ export default function Analysis() {
     if (!presetId) return;
     const preset = clipPresets.find(p => p.id === presetId);
     if (!preset) return;
-    const merged = { ...clipSettings, ...preset.settings, speakerColors: clipSettings.speakerColors };
+    const merged = { ...clipSettings, ...sanitizeSubtitleSettings(preset.settings), speakerColors: clipSettings.speakerColors };
     setClipSettings(merged);
     setInlineActivePreset(preset.name);
     showToast(`Preset "${preset.name}" loaded — speed: ${merged.playbackSpeed || 1}x, volume: ${merged.playbackVolume ?? 100}%`, 'info');
@@ -1108,7 +1108,7 @@ export default function Analysis() {
       return;
     }
     const preset = presetId ? clipPresets.find(p => p.id === presetId) : null;
-    const settingsToApply = preset ? { ...clipSettings, ...preset.settings, speakerColors: clipSettings.speakerColors } : clipSettings;
+    const settingsToApply = preset ? { ...clipSettings, ...sanitizeSubtitleSettings(preset.settings), speakerColors: clipSettings.speakerColors } : clipSettings;
     setEditorSegments(prev =>
       prev.map(s => s.id === activeSegment.id ? {
         ...s,
@@ -1164,7 +1164,7 @@ export default function Analysis() {
       >
         <option value="">Load preset...</option>
         {clipPresets.map(p => (
-          <option key={p.id} value={p.id}>{p.name}</option>
+          <option key={p.id} value={p.id}>{String(p.name || '')}</option>
         ))}
       </select>
 
@@ -1207,7 +1207,7 @@ export default function Analysis() {
           fontSize: 10, fontFamily: 'var(--font-mono)',
           color: 'var(--accent-cyan)', whiteSpace: 'nowrap',
         }}>
-          Active: {inlineActivePreset}
+          Active: {String(inlineActivePreset || '')}
         </span>
       )}
 
@@ -1227,7 +1227,7 @@ export default function Analysis() {
         >
           <option value="">Delete...</option>
           {clipPresets.map(p => (
-            <option key={p.id} value={p.id}>{p.name}</option>
+            <option key={p.id} value={p.id}>{String(p.name || '')}</option>
           ))}
         </select>
       )}
@@ -1495,7 +1495,7 @@ export default function Analysis() {
               <input type="range" min="20" max="100" step="5" value={Math.min(100, Math.max(20, clipSettings.subtitleMaxWidth))}
                 onChange={e => updateCS('subtitleMaxWidth', parseInt(e.target.value))}
                 style={{ flex: 1, accentColor: 'var(--accent-cyan)', minWidth: 60 }} />
-              <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 28, textAlign: 'right' }}>{clipSettings.subtitleMaxWidth}%</span>
+              <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 28, textAlign: 'right' }}>{String(clipSettings.subtitleMaxWidth ?? '')}%</span>
             </div>
           </div>
           <div style={{ ...inlineFieldStyle, minWidth: 100 }}>
@@ -1979,7 +1979,7 @@ export default function Analysis() {
       {/* Metadata bar */}
       <div style={{ display: 'flex', gap: 16, padding: '12px 0', flexWrap: 'wrap', fontSize: 12, color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)', marginBottom: 16 }}>
         {job.duration > 0 && <span style={{ fontFamily: 'var(--font-mono)' }}>Duration: {formatDuration(job.duration)}</span>}
-        {job.resolution && <span style={{ fontFamily: 'var(--font-mono)' }}>{job.resolution}</span>}
+        {job.resolution && <span style={{ fontFamily: 'var(--font-mono)' }}>{String(job.resolution)}</span>}
         {job.fps > 0 && <span style={{ fontFamily: 'var(--font-mono)' }}>{job.fps} FPS</span>}
         {job.file_size_mb > 0 && <span style={{ fontFamily: 'var(--font-mono)' }}>{job.file_size_mb.toFixed(1)} MB</span>}
         {Object.keys(job.provider_used || {}).length > 0 && (
@@ -2663,7 +2663,7 @@ export default function Analysis() {
                     </div>
                     <div style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.4 }}>
                       {clipSettings?.aspectRatio ? (
-                        <span>Aspect ratio: <strong style={{ color: 'var(--text-secondary)' }}>{clipSettings.aspectRatio}</strong></span>
+                        <span>Aspect ratio: <strong style={{ color: 'var(--text-secondary)' }}>{String(clipSettings.aspectRatio || '')}</strong></span>
                       ) : (
                         <span>Original aspect ratio</span>
                       )}
@@ -2857,7 +2857,7 @@ export default function Analysis() {
                       >
                         <option value="">Pick preset...</option>
                         {clipPresets.map((p) => (
-                          <option key={p.id} value={p.id}>{p.name}</option>
+                          <option key={p.id} value={p.id}>{String(p.name || '')}</option>
                         ))}
                       </select>
                       <button
@@ -2868,7 +2868,7 @@ export default function Analysis() {
                           // Merge preset settings with current (preserve speaker colors)
                           const merged = {
                             ...clipSettings,
-                            ...preset.settings,
+                            ...sanitizeSubtitleSettings(preset.settings),
                             speakerColors: clipSettings.speakerColors,
                           };
                           // Update UI settings panel to reflect the preset
@@ -2965,7 +2965,7 @@ export default function Analysis() {
                           color: 'var(--accent-cyan)',
                         }}
                       >
-                        {ec.filename}
+                        {String(ec.filename || '')}
                       </a>
                     ))}
                   </div>

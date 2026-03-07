@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { outlineTextShadow } from '../utils/textOutline';
+import { sanitizeSubtitleSettings } from '../utils/sanitizeJob';
 import useResponsive from '../hooks/useResponsive';
 
 const STORAGE_KEY = 'clipai_clip_settings';
@@ -144,7 +145,7 @@ function getAspectDimensions(ratio) {
 function loadSettings() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+    if (saved) return { ...DEFAULT_SETTINGS, ...sanitizeSubtitleSettings(JSON.parse(saved)) };
   } catch {}
   return { ...DEFAULT_SETTINGS };
 }
@@ -160,7 +161,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
   const [settings, setSettings] = useState(() => {
     // Prefer server-provided settings over localStorage (server is source of truth)
     if (serverSettings && Object.keys(serverSettings).length > 0) {
-      return { ...DEFAULT_SETTINGS, ...serverSettings };
+      return { ...DEFAULT_SETTINGS, ...sanitizeSubtitleSettings(serverSettings) };
     }
     const loaded = loadSettings();
     return loaded;
@@ -171,7 +172,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
   useEffect(() => {
     if (serverSettings && Object.keys(serverSettings).length > 0 && !serverSettingsApplied.current) {
       serverSettingsApplied.current = true;
-      setSettings(prev => ({ ...DEFAULT_SETTINGS, ...serverSettings }));
+      setSettings(prev => ({ ...DEFAULT_SETTINGS, ...sanitizeSubtitleSettings(serverSettings) }));
     }
   }, [serverSettings]);
   const [customFonts, setCustomFonts] = useState([]);
@@ -812,7 +813,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                           }}
                         />
                         <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
-                          {settings.subtitleFontColor}
+                            {String(settings.subtitleFontColor || '')}
                         </span>
                       </div>
                     </div>
@@ -838,7 +839,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                             }}
                           />
                           <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
-                            {settings.subtitleOutlineColor}
+                            {String(settings.subtitleOutlineColor || '')}
                           </span>
                         </div>
                       </div>
@@ -1068,7 +1069,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                                 }}
                               />
                               <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
-                                {settings.activeWordColor}
+                                {String(settings.activeWordColor || '')}
                               </span>
                             </div>
                           </div>
@@ -1087,7 +1088,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                                 }}
                               />
                               <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
-                                {settings.activeWordOutlineColor}
+                                {String(settings.activeWordOutlineColor || '')}
                               </span>
                             </div>
                           </div>
@@ -1181,7 +1182,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                                       background: 'var(--bg-elevated)',
                                     }}
                                   />
-                                  <span style={{ fontSize: 12, color }}>{displayName}</span>
+                                  <span style={{ fontSize: 12, color }}>{String(displayName || '')}</span>
                                 </div>
                               );
                             })}
@@ -1362,7 +1363,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                         padding: '1px 4px',
                         borderRadius: 2,
                       }}>
-                        {settings.aspectRatio}
+                        {String(settings.aspectRatio || '')}
                       </div>
                     </div>
                   )}
