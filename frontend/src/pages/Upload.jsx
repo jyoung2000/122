@@ -161,9 +161,20 @@ export default function Upload() {
     }
   };
 
+  // After upload completes, show a post-upload countdown/spinner so the user
+  // knows the page isn't stuck — analysis pipeline initialization takes a moment.
+  const [postUploadSeconds, setPostUploadSeconds] = useState(0);
+  useEffect(() => {
+    if (!uploadDone) { setPostUploadSeconds(0); return; }
+    const interval = setInterval(() => setPostUploadSeconds(s => s + 1), 1000);
+    return () => clearInterval(interval);
+  }, [uploadDone]);
+
   const uploadMessage = uploadDone
-    ? 'Upload complete — starting analysis...'
-    : 'Uploading...';
+    ? 'Upload complete — preparing analysis pipeline...'
+    : progress >= 95
+      ? 'Finishing upload...'
+      : 'Uploading...';
 
   return (
     <div style={{ maxWidth: isMobile ? '100%' : 640, margin: '0 auto' }}>
@@ -250,16 +261,27 @@ export default function Upload() {
       {uploadDone && (
         <div style={{
           marginTop: 16,
-          padding: '12px 16px',
+          padding: '16px 20px',
           background: 'var(--success-dim)',
           border: '1px solid var(--success-border)',
-          color: 'var(--success)',
-          fontSize: 14,
-          fontWeight: 600,
-          textAlign: 'center',
           borderRadius: 'var(--radius-sm)',
+          textAlign: 'center',
         }}>
-          Upload complete — redirecting to analysis...
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 8 }}>
+            <div style={{
+              width: 16, height: 16, border: '2px solid var(--success)',
+              borderTopColor: 'transparent', borderRadius: '50%',
+              animation: 'spin 0.8s linear infinite',
+            }} />
+            <span style={{ color: 'var(--success)', fontSize: 14, fontWeight: 600 }}>
+              Upload complete — starting analysis pipeline...
+            </span>
+          </div>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+            Redirecting to analysis page{postUploadSeconds > 0 ? ` (${postUploadSeconds}s)` : ''}...
+            The AI will extract frames, transcribe audio, and analyze scenes.
+          </p>
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
         </div>
       )}
 

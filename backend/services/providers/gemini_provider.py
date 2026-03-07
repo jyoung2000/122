@@ -315,8 +315,9 @@ class GeminiProvider(AIProvider):
 
     async def generate_seo(
         self, clip_title: str, clip_transcript: str, video_summary: str,
-        platform: str, cancel_check=None,
+        platform: str, cancel_check=None, custom_prompt=None,
     ) -> ClipSEO:
+        seo_instruction = custom_prompt if custom_prompt else DEFAULT_SEO_PROMPT
         is_description = video_summary.startswith("DESCRIPTION_OVERRIDE")
         if is_description:
             prompt = (
@@ -327,7 +328,7 @@ class GeminiProvider(AIProvider):
             )
         else:
             prompt = (
-                f"{DEFAULT_SEO_PROMPT}\n\n"
+                f"{seo_instruction}\n\n"
                 f"CLIP TITLE: {clip_title}\n"
                 f"TARGET PLATFORM: {platform}\n\n"
                 f"VIDEO SUMMARY:\n{video_summary}\n\n"

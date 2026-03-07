@@ -1004,8 +1004,9 @@ async def generate_seo_endpoint(job_id: str, clip_id: int):
 
     try:
         from backend.services.ai_orchestrator import AIOrchestrator
+        from backend.services.prompts import load_prompts
 
-        orchestrator = AIOrchestrator(ws_broadcast=broadcast_ws)
+        orchestrator = AIOrchestrator(ws_broadcast=broadcast_ws, custom_prompts=load_prompts())
 
         seo, provider = await orchestrator.generate_seo(
             clip_title=clip.title,
@@ -1183,8 +1184,9 @@ async def generate_description_endpoint(
 
     try:
         from backend.services.ai_orchestrator import AIOrchestrator
+        from backend.services.prompts import load_prompts
 
-        orchestrator = AIOrchestrator(ws_broadcast=broadcast_ws)
+        orchestrator = AIOrchestrator(ws_broadcast=broadcast_ws, custom_prompts=load_prompts())
 
         seo_result, provider = await orchestrator.generate_seo(
             clip_title=clip.title,

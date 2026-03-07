@@ -273,6 +273,7 @@ class AIProvider(ABC):
         video_summary: str,
         platform: str,
         cancel_check: Optional[Callable] = None,
+        custom_prompt: Optional[str] = None,
     ) -> ClipSEO:
         """Generate SEO-optimized title, description, and tags for a clip."""
         pass

@@ -835,8 +835,9 @@ class OpenRouterProvider(AIProvider):
 
     async def generate_seo(
         self, clip_title: str, clip_transcript: str, video_summary: str,
-        platform: str, cancel_check=None,
+        platform: str, cancel_check=None, custom_prompt=None,
     ) -> ClipSEO:
+        seo_instruction = custom_prompt if custom_prompt else DEFAULT_SEO_PROMPT
         # Detect description-generation override: the enriched summary starts
         # with a marker so we can skip the default SEO prompt (whose short
         # character limits conflict with description generation).
@@ -852,7 +853,7 @@ class OpenRouterProvider(AIProvider):
             summary_budget = min(len(video_summary), int(data_budget * 0.6))
             transcript_cap = data_budget - summary_budget
         else:
-            overhead = len(DEFAULT_SEO_PROMPT) + 200
+            overhead = len(seo_instruction) + 200
             data_budget = max(1000, context_budget - overhead)
             summary_budget = min(len(video_summary), int(data_budget * 0.4))
             transcript_cap = data_budget - summary_budget
@@ -868,7 +869,7 @@ class OpenRouterProvider(AIProvider):
             )
         else:
             prompt = (
-                f"{DEFAULT_SEO_PROMPT}\n\n"
+                f"{seo_instruction}\n\n"
                 f"CLIP TITLE: {clip_title}\n"
                 f"TARGET PLATFORM: {platform}\n\n"
                 f"VIDEO SUMMARY:\n{capped_summary}\n\n"

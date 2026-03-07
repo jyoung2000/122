@@ -333,6 +333,7 @@ class AIOrchestrator:
         job_id: str,
     ) -> tuple[ClipSEO, str]:
         """Returns (seo, provider_name_used)."""
+        seo_prompt = self._custom_prompts.seo if self._custom_prompts else None
         for provider in self._get_active_chain():
             try:
                 await self._notify_attempt(job_id, provider.provider_name, "SEO generation")
@@ -340,6 +341,7 @@ class AIOrchestrator:
                 result = await provider.generate_seo(
                     clip_title, clip_transcript, video_summary,
                     platform, cancel_check=self._cancel_check,
+                    custom_prompt=seo_prompt,
                 )
                 elapsed = time.monotonic() - t0
                 logger.info("SEO generation via %s completed in %.1fs", provider.provider_name, elapsed)

@@ -1112,6 +1112,8 @@ export default function Analysis() {
       display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px',
       background: 'var(--bg-panel)', borderTop: '1px solid var(--border)',
       flexWrap: 'wrap', marginTop: -1,
+      opacity: isProcessing ? 0.4 : 1,
+      pointerEvents: isProcessing ? 'none' : 'auto',
     }}>
       {/* Label */}
       <span style={{
@@ -1242,6 +1244,8 @@ export default function Analysis() {
       background: 'var(--bg-panel)', borderRadius: '0 0 var(--radius-md) var(--radius-md)',
       borderTop: '1px solid var(--border)', flexWrap: 'wrap', marginTop: -1,
       justifyContent: isMobile ? 'center' : undefined,
+      opacity: isProcessing ? 0.4 : 1,
+      pointerEvents: isProcessing ? 'none' : 'auto',
     }}>
       {extraLeft}
       <button

@@ -1525,6 +1525,7 @@ class SavePromptsRequest(BaseModel):
     viral_clip_detection: Optional[str] = None
     subject_tracking: Optional[str] = None
     summary: Optional[str] = None
+    seo: Optional[str] = None
 
 
 @router.get("/prompts")
@@ -1579,6 +1580,15 @@ async def update_prompts(req: SavePromptsRequest):
                 "message": f"Summary prompt exceeds {MAX_PROMPT_LENGTH} characters",
             }
         current.summary = text if text else defaults.summary
+
+    if req.seo is not None:
+        text = req.seo.strip()
+        if len(text) > MAX_PROMPT_LENGTH:
+            return {
+                "status": "error",
+                "message": f"SEO prompt exceeds {MAX_PROMPT_LENGTH} characters",
+            }
+        current.seo = text if text else defaults.seo
 
     save_prompts(current)
     return {"status": "saved", "prompts": current.model_dump()}
