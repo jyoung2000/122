@@ -70,7 +70,10 @@ function schedulePush() {
 /** Fetch server state and write into localStorage. Returns true on success. */
 export async function pullFromCloud() {
   try {
-    const res = await fetch('/api/ui-state');
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const res = await fetch('/api/ui-state', { signal: controller.signal });
+    clearTimeout(timeout);
     if (!res.ok) return false;
     const state = await res.json();
     if (!state || typeof state !== 'object') return false;

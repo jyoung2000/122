@@ -13,12 +13,16 @@ self.onmessage = async ({ data }) => {
       // Detect WebGPU availability inside worker
       let device = 'wasm';
       let dtype = 'q8';
-      if (navigator.gpu) {
-        const adapter = await navigator.gpu.requestAdapter();
-        if (adapter) {
-          device = 'webgpu';
-          dtype = { encoder_model: 'fp32', decoder_model_merged: 'q4' };
+      try {
+        if (navigator.gpu) {
+          const adapter = await navigator.gpu.requestAdapter();
+          if (adapter) {
+            device = 'webgpu';
+            dtype = { encoder_model: 'fp32', decoder_model_merged: 'q4' };
+          }
         }
+      } catch (gpuErr) {
+        console.warn('WebGPU detection failed in worker, falling back to WASM:', gpuErr);
       }
 
       transcriber = await pipeline('automatic-speech-recognition', model, {

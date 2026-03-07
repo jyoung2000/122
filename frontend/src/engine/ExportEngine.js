@@ -130,6 +130,7 @@ export default class ExportEngine {
         height: this.height,
         bitrate: this.videoBitrate,
         framerate: this.fps,
+        hardwareAcceleration: 'prefer-hardware',
       });
 
       // Step through time and encode each frame

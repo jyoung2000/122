@@ -6,7 +6,7 @@ import useResponsive from '../hooks/useResponsive';
 import useTheme from '../hooks/useTheme';
 import useConnectionStatus from '../hooks/useConnectionStatus';
 import useEncodingManager from '../hooks/useEncodingManager';
-import { useClientGpuPreferences } from '../hooks/useClientGpu';
+import { useClientGpuPreferences, useAutoDetectGpu } from '../hooks/useClientGpu';
 
 const NAV_ITEMS = [
   { path: '/', label: 'Home', icon: 'D', mobileIcon: 'home' },
@@ -76,6 +76,7 @@ export default function Layout({ children }) {
   const connStatus = useConnectionStatus();
   const { activeCount, latestActivity } = useEncodingManager();
   const clientGpu = useClientGpuPreferences();
+  useAutoDetectGpu(); // Auto-detect and enable WebGPU on first visit
 
   // Detect if this is a sub-page that should show a back button
   const isSubPage = location.pathname.startsWith('/analysis') || location.pathname.startsWith('/seo');

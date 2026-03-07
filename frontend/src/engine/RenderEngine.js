@@ -98,7 +98,10 @@ const TRANSITIONS = {
 export default class RenderEngine {
   constructor(canvas, options = {}) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext('2d');
+    // Request GPU-accelerated canvas — willReadFrequently: false lets Chrome
+    // keep the canvas on the GPU (hardware composited) instead of forcing
+    // software readback on every frame.
+    this.ctx = canvas.getContext('2d', { willReadFrequently: false, desynchronized: true });
     this.width = options.width || 1920;
     this.height = options.height || 1080;
     this._fontCache = new Set();
@@ -577,12 +580,12 @@ export default class RenderEngine {
     }
 
     // Render outgoing to buffer 1
-    const ctx1 = this._transitionBuffer1.getContext('2d');
+    const ctx1 = this._transitionBuffer1.getContext('2d', { willReadFrequently: false });
     ctx1.clearRect(0, 0, this.width, this.height);
     this._renderClipToCtx(ctx1, outgoingClip, currentTime, settings, mediaElements);
 
     // Render incoming to buffer 2
-    const ctx2 = this._transitionBuffer2.getContext('2d');
+    const ctx2 = this._transitionBuffer2.getContext('2d', { willReadFrequently: false });
     ctx2.clearRect(0, 0, this.width, this.height);
     this._renderClipToCtx(ctx2, incomingClip, currentTime, settings, mediaElements);
 
