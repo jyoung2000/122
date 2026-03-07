@@ -2,7 +2,6 @@ import React, { useCallback, useMemo, useState } from 'react';
 import useTimelineStore from '../stores/timelineStore';
 
 const SPEED_PRESETS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0];
-const BLEND_MODES = ['Normal', 'Multiply', 'Screen', 'Overlay'];
 const FONT_OPTIONS = [
   'DM Sans', 'Montserrat', 'Open Sans', 'Roboto', 'Poppins', 'Inter',
   'Nunito', 'Lato', 'Oswald', 'Playfair Display', 'Bebas Neue',
@@ -16,7 +15,13 @@ const TEXT_ANIMATIONS = [
   { id: 'pop', label: 'Pop' },
   { id: 'bounce', label: 'Bounce' },
 ];
-const SHAPE_TYPES = ['rectangle', 'circle', 'ellipse', 'arrow', 'line'];
+const SHAPE_TYPES = [
+  { id: 'rectangle', label: 'Rectangle', icon: '▬' },
+  { id: 'circle', label: 'Circle', icon: '●' },
+  { id: 'ellipse', label: 'Ellipse', icon: '⬮' },
+  { id: 'arrow', label: 'Arrow', icon: '➜' },
+  { id: 'line', label: 'Line', icon: '╱' },
+];
 
 function formatTime(s) {
   if (!s || isNaN(s) || s < 0) return '0:00.00';
@@ -26,12 +31,55 @@ function formatTime(s) {
   return `${m}:${sec.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
 }
 
+/* Reusable slider row */
+function SliderRow({ label, value, min, max, step = 1, unit = '', onChange }) {
+  return (
+    <div className="ve-properties__slider-row">
+      <span className="ve-properties__field-label" style={{ minWidth: 55 }}>{label}</span>
+      <input
+        type="range" min={min} max={max} step={step} value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        className="ve-properties__slider"
+      />
+      <span className="ve-properties__slider-value">{typeof value === 'number' ? (Number.isInteger(value) ? value : value.toFixed(1)) : value}{unit}</span>
+    </div>
+  );
+}
+
+/* Reusable number field */
+function NumField({ label, value, min, max, step = 1, onChange }) {
+  return (
+    <div className="ve-properties__field">
+      <span className="ve-properties__field-label">{label}</span>
+      <input
+        type="number" min={min} max={max} step={step} value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+        className="ve-properties__input"
+      />
+    </div>
+  );
+}
+
+/* Reusable color field */
+function ColorField({ label, value, onChange }) {
+  return (
+    <div className="ve-properties__field">
+      <span className="ve-properties__field-label">{label}</span>
+      <input
+        type="color" value={value || '#FFFFFF'}
+        onChange={(e) => onChange(e.target.value)}
+        className="ve-properties__color"
+      />
+    </div>
+  );
+}
+
 export default function PropertiesPanel({ compact = false, settings = null, onSettingsChange = null }) {
   const selectedItemId = useTimelineStore((s) => s.selectedItemId);
   const items = useTimelineStore((s) => s.items);
   const updateItem = useTimelineStore((s) => s.updateItem);
   const removeItem = useTimelineStore((s) => s.removeItem);
-  const [activeSection, setActiveSection] = useState(null);
+  const [expandedSections, setExpandedSections] = useState({});
 
   const item = useMemo(
     () => items.find((i) => i.id === selectedItemId) || null,
@@ -55,6 +103,8 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
     [item, updateItem],
   );
 
+  const toggleSection = (name) => setExpandedSections(prev => ({ ...prev, [name]: !prev[name] }));
+
   if (!item) {
     return (
       <div className="ve-properties ve-properties--empty">
@@ -66,9 +116,13 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
   }
 
   const duration = item.end - item.start;
+  const isVisual = item.type !== 'audio';
+  const isMediaClip = item.type === 'video' || item.type === 'audio';
+  const isOverlay = item.type === 'text' || item.type === 'shape' || item.type === 'image' || item.type === 'overlay';
 
   return (
     <div className={`ve-properties${compact ? ' ve-properties--compact' : ''}`}>
+      {/* Header */}
       <div className="ve-properties__header">
         <span className="ve-properties__type-badge" data-type={item.type}>
           {item.type}
@@ -101,85 +155,37 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
         </div>
       </div>
 
+      {/* ── Position & Size (all visual overlay items) ── */}
+      {isOverlay && (
+        <div className="ve-properties__section">
+          <label className="ve-properties__label">Position & Size</label>
+          <SliderRow label="X" value={item.position?.x ?? 50} min={0} max={100} step={0.5} unit="%" onChange={(v) => update('position', { ...item.position, x: v })} />
+          <SliderRow label="Y" value={item.position?.y ?? 50} min={0} max={100} step={0.5} unit="%" onChange={(v) => update('position', { ...item.position, y: v })} />
+          <SliderRow label="Width" value={item.size?.w ?? 50} min={1} max={200} step={0.5} unit="%" onChange={(v) => update('size', { ...item.size, w: v })} />
+          <SliderRow label="Height" value={item.size?.h ?? 50} min={1} max={200} step={0.5} unit="%" onChange={(v) => update('size', { ...item.size, h: v })} />
+          <SliderRow label="Rotation" value={item.transform?.rotation ?? 0} min={-360} max={360} step={1} unit="°" onChange={(v) => updateNested('transform', 'rotation', v)} />
+        </div>
+      )}
+
       {/* ── Fades ── */}
       <div className="ve-properties__section">
         <label className="ve-properties__label">Fades</label>
         <div className="ve-properties__row">
-          <div className="ve-properties__field">
-            <span className="ve-properties__field-label">Fade In</span>
-            <input
-              type="number"
-              min="0"
-              max={duration}
-              step="0.1"
-              value={item.fadeIn}
-              onChange={(e) => update('fadeIn', parseFloat(e.target.value) || 0)}
-              className="ve-properties__input"
-            />
-          </div>
-          <div className="ve-properties__field">
-            <span className="ve-properties__field-label">Fade Out</span>
-            <input
-              type="number"
-              min="0"
-              max={duration}
-              step="0.1"
-              value={item.fadeOut}
-              onChange={(e) => update('fadeOut', parseFloat(e.target.value) || 0)}
-              className="ve-properties__input"
-            />
-          </div>
+          <NumField label="Fade In" value={item.fadeIn || 0} min={0} max={duration} step={0.1} onChange={(v) => update('fadeIn', v)} />
+          <NumField label="Fade Out" value={item.fadeOut || 0} min={0} max={duration} step={0.1} onChange={(v) => update('fadeOut', v)} />
         </div>
       </div>
 
       {/* ── Volume (video & audio) ── */}
-      {(item.type === 'video' || item.type === 'audio') && (
+      {isMediaClip && (
         <div className="ve-properties__section">
           <label className="ve-properties__label">Audio</label>
-          <div className="ve-properties__slider-row">
-            <span className="ve-properties__field-label">Volume</span>
-            <input
-              type="range"
-              min="0"
-              max="2"
-              step="0.01"
-              value={item.volume}
-              onChange={(e) => update('volume', parseFloat(e.target.value))}
-              className="ve-properties__slider"
-            />
-            <span className="ve-properties__slider-value">{Math.round(item.volume * 100)}%</span>
-          </div>
-          <div className="ve-properties__row">
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Audio Fade In</span>
-              <input
-                type="number"
-                min="0"
-                max="5"
-                step="0.1"
-                value={item.fadeIn || 0}
-                onChange={(e) => update('fadeIn', parseFloat(e.target.value) || 0)}
-                className="ve-properties__input"
-              />
-            </div>
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Audio Fade Out</span>
-              <input
-                type="number"
-                min="0"
-                max="5"
-                step="0.1"
-                value={item.fadeOut || 0}
-                onChange={(e) => update('fadeOut', parseFloat(e.target.value) || 0)}
-                className="ve-properties__input"
-              />
-            </div>
-          </div>
+          <SliderRow label="Volume" value={item.volume ?? 1} min={0} max={2} step={0.01} onChange={(v) => update('volume', v)} />
         </div>
       )}
 
       {/* ── Speed (video & audio) ── */}
-      {(item.type === 'video' || item.type === 'audio') && (
+      {isMediaClip && (
         <div className="ve-properties__section">
           <label className="ve-properties__label">Speed</label>
           <div className="ve-properties__speed-pills">
@@ -197,318 +203,241 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
       )}
 
       {/* ── Opacity (all visual items) ── */}
-      {(item.type !== 'audio') && (
+      {isVisual && (
         <div className="ve-properties__section">
           <label className="ve-properties__label">Opacity</label>
-          <div className="ve-properties__slider-row">
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.01"
-              value={item.opacity}
-              onChange={(e) => update('opacity', parseFloat(e.target.value))}
-              className="ve-properties__slider"
-            />
-            <span className="ve-properties__slider-value">{Math.round(item.opacity * 100)}%</span>
-          </div>
+          <SliderRow label="" value={item.opacity ?? 1} min={0} max={1} step={0.01} onChange={(v) => update('opacity', v)} />
         </div>
       )}
 
-      {/* ── Transform (position, scale, rotation) ── */}
-      {(item.type === 'image' || item.type === 'overlay' || item.type === 'text' || item.type === 'shape') && (
+      {/* ── Transform (video items with position override) ── */}
+      {(item.type === 'video' || item.type === 'image' || item.type === 'overlay') && !isOverlay && (
         <div className="ve-properties__section">
           <label className="ve-properties__label">Transform</label>
           <div className="ve-properties__row">
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">X %</span>
-              <input
-                type="number"
-                min="0"
-                max="100"
-                value={item.position?.x || 0}
-                onChange={(e) => update('position', { ...item.position, x: parseFloat(e.target.value) || 0 })}
-                className="ve-properties__input"
-              />
-            </div>
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Y %</span>
-              <input
-                type="number"
-                min="0"
-                max="100"
-                value={item.position?.y || 0}
-                onChange={(e) => update('position', { ...item.position, y: parseFloat(e.target.value) || 0 })}
-                className="ve-properties__input"
-              />
-            </div>
+            <NumField label="X %" value={item.position?.x || 0} min={0} max={100} onChange={(v) => update('position', { ...item.position, x: v })} />
+            <NumField label="Y %" value={item.position?.y || 0} min={0} max={100} onChange={(v) => update('position', { ...item.position, y: v })} />
           </div>
           <div className="ve-properties__row">
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">W %</span>
-              <input
-                type="number"
-                min="1"
-                max="200"
-                value={item.size?.w || 100}
-                onChange={(e) => update('size', { ...item.size, w: parseFloat(e.target.value) || 100 })}
-                className="ve-properties__input"
-              />
-            </div>
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">H %</span>
-              <input
-                type="number"
-                min="1"
-                max="200"
-                value={item.size?.h || 100}
-                onChange={(e) => update('size', { ...item.size, h: parseFloat(e.target.value) || 100 })}
-                className="ve-properties__input"
-              />
-            </div>
+            <NumField label="W %" value={item.size?.w || 100} min={1} max={200} onChange={(v) => update('size', { ...item.size, w: v })} />
+            <NumField label="H %" value={item.size?.h || 100} min={1} max={200} onChange={(v) => update('size', { ...item.size, h: v })} />
           </div>
           <div className="ve-properties__row">
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Rotation</span>
-              <input
-                type="number"
-                min="-360"
-                max="360"
-                value={item.transform?.rotation || 0}
-                onChange={(e) => updateNested('transform', 'rotation', parseFloat(e.target.value) || 0)}
-                className="ve-properties__input"
-              />
-            </div>
+            <NumField label="Rotation" value={item.transform?.rotation || 0} min={-360} max={360} onChange={(v) => updateNested('transform', 'rotation', v)} />
           </div>
         </div>
       )}
 
-      {/* ── Effects (video & image) ── */}
+      {/* ── Effects (video, image, overlay) ── */}
       {(item.type === 'video' || item.type === 'image' || item.type === 'overlay') && (
         <div className="ve-properties__section">
-          <label className="ve-properties__label">Effects</label>
-          {[
-            { key: 'brightness', label: 'Brightness', min: -100, max: 100 },
-            { key: 'contrast', label: 'Contrast', min: -100, max: 100 },
-            { key: 'saturation', label: 'Saturation', min: -100, max: 100 },
-            { key: 'blur', label: 'Blur', min: 0, max: 20 },
-          ].map(ctrl => {
-            const effects = item.effects || {};
-            const val = effects[ctrl.key] ?? 0;
-            return (
-              <div key={ctrl.key} className="ve-properties__slider-row">
-                <span className="ve-properties__field-label" style={{ minWidth: 60 }}>{ctrl.label}</span>
-                <input
-                  type="range"
+          <label className="ve-properties__label" onClick={() => toggleSection('effects')} style={{ cursor: 'pointer' }}>
+            Effects {expandedSections.effects === false ? '▸' : '▾'}
+          </label>
+          {expandedSections.effects !== false && (
+            <>
+              {[
+                { key: 'brightness', label: 'Brightness', min: -100, max: 100 },
+                { key: 'contrast', label: 'Contrast', min: -100, max: 100 },
+                { key: 'saturation', label: 'Saturation', min: -100, max: 100 },
+                { key: 'blur', label: 'Blur', min: 0, max: 20, step: 0.5 },
+                { key: 'hueRotate', label: 'Hue', min: 0, max: 360 },
+                { key: 'sepia', label: 'Sepia', min: 0, max: 100 },
+              ].map(ctrl => (
+                <SliderRow
+                  key={ctrl.key}
+                  label={ctrl.label}
+                  value={(item.effects || {})[ctrl.key] ?? 0}
                   min={ctrl.min}
                   max={ctrl.max}
-                  step={ctrl.key === 'blur' ? '0.5' : '1'}
-                  value={val}
-                  onChange={(e) => {
-                    const effects = { ...(item.effects || {}), [ctrl.key]: parseFloat(e.target.value) };
-                    update('effects', effects);
-                  }}
-                  className="ve-properties__slider"
+                  step={ctrl.step || 1}
+                  onChange={(v) => update('effects', { ...(item.effects || {}), [ctrl.key]: v })}
                 />
-                <span className="ve-properties__slider-value">{val}</span>
-              </div>
-            );
-          })}
+              ))}
+            </>
+          )}
         </div>
       )}
 
-      {/* ── Text styling ── */}
+      {/* ══════════════════════════════════════════════
+          TEXT STYLING — comprehensive controls
+         ══════════════════════════════════════════════ */}
       {item.type === 'text' && (
-        <div className="ve-properties__section">
-          <label className="ve-properties__label">Text</label>
-          <textarea
-            value={item.textContent || ''}
-            onChange={(e) => update('textContent', e.target.value)}
-            className="ve-properties__textarea"
-            rows={2}
-            placeholder="Enter text..."
-          />
-          <div className="ve-properties__row">
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Font</span>
-              <select
-                value={item.textStyle?.fontFamily || 'DM Sans'}
-                onChange={(e) => updateNested('textStyle', 'fontFamily', e.target.value)}
-                className="ve-properties__select"
-              >
-                {FONT_OPTIONS.map(f => <option key={f} value={f}>{f}</option>)}
-              </select>
-            </div>
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Size</span>
-              <input
-                type="number"
-                min="8"
-                max="200"
-                value={item.textStyle?.fontSize || 48}
-                onChange={(e) => updateNested('textStyle', 'fontSize', parseInt(e.target.value) || 48)}
-                className="ve-properties__input"
-              />
-            </div>
+        <>
+          {/* Text Content */}
+          <div className="ve-properties__section">
+            <label className="ve-properties__label">Text Content</label>
+            <textarea
+              value={item.textContent || ''}
+              onChange={(e) => update('textContent', e.target.value)}
+              className="ve-properties__textarea"
+              rows={3}
+              placeholder="Enter text..."
+            />
           </div>
-          <div className="ve-properties__row">
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Color</span>
-              <input
-                type="color"
-                value={item.textStyle?.color || '#FFFFFF'}
-                onChange={(e) => updateNested('textStyle', 'color', e.target.value)}
-                className="ve-properties__color"
-              />
-            </div>
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Weight</span>
-              <select
-                value={item.textStyle?.fontWeight || 400}
-                onChange={(e) => updateNested('textStyle', 'fontWeight', parseInt(e.target.value))}
-                className="ve-properties__select"
-              >
-                <option value={400}>Regular</option>
-                <option value={700}>Bold</option>
-                <option value={900}>Black</option>
-              </select>
-            </div>
-          </div>
-          <div className="ve-properties__row">
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Align</span>
-              <select
-                value={item.textStyle?.textAlign || 'center'}
-                onChange={(e) => updateNested('textStyle', 'textAlign', e.target.value)}
-                className="ve-properties__select"
-              >
-                <option value="left">Left</option>
-                <option value="center">Center</option>
-                <option value="right">Right</option>
-              </select>
-            </div>
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Animation</span>
-              <select
-                value={item.textStyle?.animation || 'none'}
-                onChange={(e) => updateNested('textStyle', 'animation', e.target.value)}
-                className="ve-properties__select"
-              >
-                {TEXT_ANIMATIONS.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
-              </select>
-            </div>
-          </div>
-          {/* Outline */}
-          <div className="ve-properties__row">
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Outline</span>
-              <input
-                type="number"
-                min="0"
-                max="10"
-                value={item.textStyle?.outlineWidth || 0}
-                onChange={(e) => updateNested('textStyle', 'outlineWidth', parseFloat(e.target.value) || 0)}
-                className="ve-properties__input"
-              />
-            </div>
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Outline Color</span>
-              <input
-                type="color"
-                value={item.textStyle?.outlineColor || '#000000'}
-                onChange={(e) => updateNested('textStyle', 'outlineColor', e.target.value)}
-                className="ve-properties__color"
-              />
-            </div>
-          </div>
-          {/* Background */}
-          <div className="ve-properties__row">
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">BG Color</span>
-              <input
-                type="color"
-                value={item.textStyle?.bgColor || '#000000'}
-                onChange={(e) => updateNested('textStyle', 'bgColor', e.target.value)}
-                className="ve-properties__color"
-              />
-            </div>
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">BG Opacity</span>
-              <input
-                type="number"
-                min="0"
-                max="100"
-                value={item.textStyle?.bgOpacity || 0}
-                onChange={(e) => updateNested('textStyle', 'bgOpacity', parseInt(e.target.value) || 0)}
-                className="ve-properties__input"
-              />
-            </div>
-          </div>
-        </div>
-      )}
 
-      {/* ── Shape styling ── */}
-      {item.type === 'shape' && (
-        <div className="ve-properties__section">
-          <label className="ve-properties__label">Shape</label>
-          <div className="ve-properties__row">
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Type</span>
-              <select
-                value={item.shapeType || 'rectangle'}
-                onChange={(e) => update('shapeType', e.target.value)}
-                className="ve-properties__select"
-              >
-                {SHAPE_TYPES.map(s => <option key={s} value={s}>{s}</option>)}
-              </select>
-            </div>
-          </div>
-          <div className="ve-properties__row">
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Fill</span>
-              <input
-                type="color"
-                value={item.shapeStyle?.fillColor || '#FF3B30'}
-                onChange={(e) => updateNested('shapeStyle', 'fillColor', e.target.value)}
-                className="ve-properties__color"
-              />
-            </div>
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Stroke</span>
-              <input
-                type="color"
-                value={item.shapeStyle?.strokeColor || '#FFFFFF'}
-                onChange={(e) => updateNested('shapeStyle', 'strokeColor', e.target.value)}
-                className="ve-properties__color"
-              />
-            </div>
-          </div>
-          <div className="ve-properties__row">
-            <div className="ve-properties__field">
-              <span className="ve-properties__field-label">Stroke Width</span>
-              <input
-                type="number"
-                min="0"
-                max="20"
-                value={item.shapeStyle?.strokeWidth || 2}
-                onChange={(e) => updateNested('shapeStyle', 'strokeWidth', parseFloat(e.target.value) || 0)}
-                className="ve-properties__input"
-              />
-            </div>
-            {item.shapeType === 'rectangle' && (
-              <div className="ve-properties__field">
-                <span className="ve-properties__field-label">Radius</span>
-                <input
-                  type="number"
-                  min="0"
-                  max="100"
-                  value={item.shapeStyle?.cornerRadius || 0}
-                  onChange={(e) => updateNested('shapeStyle', 'cornerRadius', parseFloat(e.target.value) || 0)}
-                  className="ve-properties__input"
-                />
+          {/* Font */}
+          <div className="ve-properties__section">
+            <label className="ve-properties__label">Font</label>
+            <div className="ve-properties__row">
+              <div className="ve-properties__field" style={{ flex: 2 }}>
+                <span className="ve-properties__field-label">Family</span>
+                <select
+                  value={item.textStyle?.fontFamily || 'DM Sans'}
+                  onChange={(e) => updateNested('textStyle', 'fontFamily', e.target.value)}
+                  className="ve-properties__select"
+                >
+                  {FONT_OPTIONS.map(f => <option key={f} value={f}>{f}</option>)}
+                </select>
               </div>
+              <div className="ve-properties__field">
+                <span className="ve-properties__field-label">Weight</span>
+                <select
+                  value={item.textStyle?.fontWeight || 700}
+                  onChange={(e) => updateNested('textStyle', 'fontWeight', parseInt(e.target.value))}
+                  className="ve-properties__select"
+                >
+                  <option value={300}>Light</option>
+                  <option value={400}>Regular</option>
+                  <option value={600}>Semi</option>
+                  <option value={700}>Bold</option>
+                  <option value={900}>Black</option>
+                </select>
+              </div>
+            </div>
+            <SliderRow label="Size" value={item.textStyle?.fontSize || 48} min={8} max={200} step={1} unit="px" onChange={(v) => updateNested('textStyle', 'fontSize', v)} />
+            <div className="ve-properties__row">
+              <ColorField label="Color" value={item.textStyle?.color || '#FFFFFF'} onChange={(v) => updateNested('textStyle', 'color', v)} />
+              <div className="ve-properties__field">
+                <span className="ve-properties__field-label">Align</span>
+                <div style={{ display: 'flex', gap: 2 }}>
+                  {['left', 'center', 'right'].map(a => (
+                    <button
+                      key={a}
+                      className={`ve-properties__speed-pill${(item.textStyle?.textAlign || 'center') === a ? ' ve-properties__speed-pill--active' : ''}`}
+                      onClick={() => updateNested('textStyle', 'textAlign', a)}
+                      style={{ padding: '3px 7px', fontSize: 9, textTransform: 'capitalize' }}
+                    >
+                      {a === 'left' ? '◀' : a === 'right' ? '▶' : '◆'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Outline & Shadow */}
+          <div className="ve-properties__section">
+            <label className="ve-properties__label" onClick={() => toggleSection('textOutline')} style={{ cursor: 'pointer' }}>
+              Outline & Shadow {expandedSections.textOutline === false ? '▸' : '▾'}
+            </label>
+            {expandedSections.textOutline !== false && (
+              <>
+                <div className="ve-properties__row">
+                  <NumField label="Outline" value={item.textStyle?.outlineWidth || 0} min={0} max={10} step={0.5} onChange={(v) => updateNested('textStyle', 'outlineWidth', v)} />
+                  <ColorField label="Stroke" value={item.textStyle?.outlineColor || '#000000'} onChange={(v) => updateNested('textStyle', 'outlineColor', v)} />
+                </div>
+                <SliderRow label="Shadow" value={item.textStyle?.shadowBlur || 0} min={0} max={20} step={0.5} unit="px" onChange={(v) => updateNested('textStyle', 'shadowBlur', v)} />
+                <div className="ve-properties__row">
+                  <NumField label="Shd X" value={item.textStyle?.shadowOffsetX || 0} min={-20} max={20} onChange={(v) => updateNested('textStyle', 'shadowOffsetX', v)} />
+                  <NumField label="Shd Y" value={item.textStyle?.shadowOffsetY || 0} min={-20} max={20} onChange={(v) => updateNested('textStyle', 'shadowOffsetY', v)} />
+                </div>
+                <div className="ve-properties__row">
+                  <ColorField label="Shadow" value={item.textStyle?.shadowColor || 'rgba(0,0,0,0.5)'} onChange={(v) => updateNested('textStyle', 'shadowColor', v)} />
+                </div>
+              </>
             )}
           </div>
+
+          {/* Background Box */}
+          <div className="ve-properties__section">
+            <label className="ve-properties__label" onClick={() => toggleSection('textBg')} style={{ cursor: 'pointer' }}>
+              Background Box {expandedSections.textBg === false ? '▸' : '▾'}
+            </label>
+            {expandedSections.textBg !== false && (
+              <>
+                <div className="ve-properties__row">
+                  <ColorField label="BG Color" value={item.textStyle?.bgColor || '#000000'} onChange={(v) => updateNested('textStyle', 'bgColor', v)} />
+                  <NumField label="Opacity" value={item.textStyle?.bgOpacity || 0} min={0} max={100} onChange={(v) => updateNested('textStyle', 'bgOpacity', v)} />
+                </div>
+                <div className="ve-properties__row">
+                  <NumField label="Padding" value={item.textStyle?.bgPadding || 8} min={0} max={40} onChange={(v) => updateNested('textStyle', 'bgPadding', v)} />
+                  <NumField label="Radius" value={item.textStyle?.bgRadius || 4} min={0} max={40} onChange={(v) => updateNested('textStyle', 'bgRadius', v)} />
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Animation */}
+          <div className="ve-properties__section">
+            <label className="ve-properties__label">Animation</label>
+            <div className="ve-properties__speed-pills">
+              {TEXT_ANIMATIONS.map(a => (
+                <button
+                  key={a.id}
+                  className={`ve-properties__speed-pill${(item.textStyle?.animation || 'none') === a.id ? ' ve-properties__speed-pill--active' : ''}`}
+                  onClick={() => updateNested('textStyle', 'animation', a.id)}
+                  style={{ fontSize: 9 }}
+                >
+                  {a.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ══════════════════════════════════════════════
+          SHAPE STYLING — comprehensive controls
+         ══════════════════════════════════════════════ */}
+      {item.type === 'shape' && (
+        <>
+          <div className="ve-properties__section">
+            <label className="ve-properties__label">Shape Type</label>
+            <div className="ve-properties__speed-pills">
+              {SHAPE_TYPES.map(s => (
+                <button
+                  key={s.id}
+                  className={`ve-properties__speed-pill${(item.shapeType || 'rectangle') === s.id ? ' ve-properties__speed-pill--active' : ''}`}
+                  onClick={() => update('shapeType', s.id)}
+                  title={s.label}
+                  style={{ fontSize: 12, padding: '4px 8px' }}
+                >
+                  {s.icon}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="ve-properties__section">
+            <label className="ve-properties__label">Colors</label>
+            <div className="ve-properties__row">
+              <ColorField label="Fill" value={item.shapeStyle?.fillColor || '#FF3B30'} onChange={(v) => updateNested('shapeStyle', 'fillColor', v)} />
+              <ColorField label="Stroke" value={item.shapeStyle?.strokeColor || '#FFFFFF'} onChange={(v) => updateNested('shapeStyle', 'strokeColor', v)} />
+            </div>
+            <SliderRow label="Stroke W" value={item.shapeStyle?.strokeWidth ?? 2} min={0} max={20} step={0.5} unit="px" onChange={(v) => updateNested('shapeStyle', 'strokeWidth', v)} />
+            {(item.shapeType === 'rectangle' || !item.shapeType) && (
+              <SliderRow label="Radius" value={item.shapeStyle?.cornerRadius ?? 0} min={0} max={100} step={1} unit="px" onChange={(v) => updateNested('shapeStyle', 'cornerRadius', v)} />
+            )}
+          </div>
+        </>
+      )}
+
+      {/* ══════════════════════════════════════════════
+          IMAGE/OVERLAY — media controls
+         ══════════════════════════════════════════════ */}
+      {(item.type === 'image' || item.type === 'overlay') && (
+        <div className="ve-properties__section">
+          <label className="ve-properties__label">Media</label>
+          {item.mediaSrc || item.mediaRef ? (
+            <div style={{ fontSize: 10, color: 'var(--ve-text-muted)', wordBreak: 'break-all', marginBottom: 6 }}>
+              {(item.mediaSrc || item.mediaRef || '').split('/').pop() || 'Media file'}
+            </div>
+          ) : (
+            <div style={{ fontSize: 10, color: 'var(--ve-text-muted)', marginBottom: 6, fontStyle: 'italic' }}>
+              No media source — drag from Media Library
+            </div>
+          )}
         </div>
       )}
 
@@ -557,21 +486,7 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
               </select>
             </div>
             {item.transition && (
-              <div className="ve-properties__field">
-                <span className="ve-properties__field-label">Duration</span>
-                <input
-                  type="number"
-                  min="0.1"
-                  max="3"
-                  step="0.1"
-                  value={item.transition?.duration || 0.5}
-                  onChange={(e) => update('transition', {
-                    ...item.transition,
-                    duration: parseFloat(e.target.value) || 0.5,
-                  })}
-                  className="ve-properties__input"
-                />
-              </div>
+              <NumField label="Duration" value={item.transition?.duration || 0.5} min={0.1} max={3} step={0.1} onChange={(v) => update('transition', { ...item.transition, duration: v })} />
             )}
           </div>
         </div>

@@ -5,6 +5,7 @@ import useTimelineStore from '../stores/timelineStore';
 import useTimelinePersistence from '../hooks/useTimelinePersistence';
 import useKeyboardShortcuts from '../hooks/useKeyboardShortcuts';
 import Timeline from './Timeline';
+import TimelineOverlay from './TimelineOverlay';
 import MediaUploader from './MediaUploader';
 import PropertiesPanel from './PropertiesPanel';
 import ToolBar from './ToolBar';
@@ -1741,6 +1742,14 @@ export default function VideoEditor({
         />
 
         {subtitleOverlay}
+
+        {/* Multi-track timeline overlay: text, shapes, images */}
+        {showMultiTrack && (
+          <TimelineOverlay
+            currentTime={currentTime - clipStart}
+            clipStart={clipStart}
+          />
+        )}
 
         {/* Segment entry indicator */}
         {segEntryIndicator && (
