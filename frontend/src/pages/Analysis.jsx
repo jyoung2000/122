@@ -1504,7 +1504,7 @@ export default function Analysis() {
               <input type="range" min="0" max="40" step="1" value={clipSettings.subtitleOffsetV ?? 4}
                 onChange={e => updateCS('subtitleOffsetV', parseInt(e.target.value))}
                 style={{ flex: 1, accentColor: 'var(--accent-cyan)', minWidth: 60 }} />
-              <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 28, textAlign: 'right' }}>{clipSettings.subtitleOffsetV ?? 4}%</span>
+              <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 28, textAlign: 'right' }}>{String(clipSettings.subtitleOffsetV ?? 4)}%</span>
             </div>
           </div>
           <div style={{ ...inlineFieldStyle, minWidth: 100 }}>
@@ -1523,7 +1523,7 @@ export default function Analysis() {
               <input type="range" min="0" max="12" step="1" value={clipSettings.subtitleMaxWords ?? 0}
                 onChange={e => updateCS('subtitleMaxWords', parseInt(e.target.value))}
                 style={{ flex: 1, accentColor: 'var(--accent-cyan)', minWidth: 50 }} />
-              <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 20, textAlign: 'right' }}>{clipSettings.subtitleMaxWords || 'Off'}</span>
+              <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 20, textAlign: 'right' }}>{typeof clipSettings.subtitleMaxWords === 'number' ? (clipSettings.subtitleMaxWords || 'Off') : 'Off'}</span>
             </div>
           </div>
         </div>
@@ -1803,7 +1803,7 @@ export default function Analysis() {
               </span>{' '}
               {best.description.length > 150 ? best.description.slice(0, 150) + '...' : best.description}
               <span style={{ marginLeft: 6, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--accent-cyan)' }}>
-                x={best.subject_x ?? 50}%
+                x={typeof best.subject_x === 'number' ? best.subject_x : 50}%
               </span>
             </div>
           );
@@ -1947,7 +1947,7 @@ export default function Analysis() {
                     <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{entry.ts}</span>
                     {entry.progress !== undefined && (
                       <span style={{ color: 'var(--accent-cyan)', flexShrink: 0, minWidth: 30, textAlign: 'right' }}>
-                        {entry.progress}%
+                        {typeof entry.progress === 'number' ? entry.progress : String(entry.progress ?? '')}%
                       </span>
                     )}
                     <span style={{ color: colors[entry.type] || colors.status }}>
