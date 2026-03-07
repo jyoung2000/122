@@ -197,6 +197,147 @@ def build_fallback_summary(raw: str) -> dict:
     }
 
 
+_PLACEHOLDER_PATTERNS = {
+    "...", "…", "<paragraph>", "<topic1>", "<topic2>", "<topic3>",
+    "<tone>", "<audience>", "<category>", "n/a", "N/A", "none",
+    "placeholder", "undefined", "null",
+}
+
+
+def _is_placeholder(value: str) -> bool:
+    """Check if a string value is a placeholder rather than real content."""
+    stripped = value.strip()
+    if not stripped or len(stripped) < 3:
+        return True
+    if stripped in _PLACEHOLDER_PATTERNS:
+        return True
+    # Strings that are all dots/ellipsis
+    if all(c in '.…' for c in stripped):
+        return True
+    # Angle-bracket placeholders like <something>
+    if stripped.startswith('<') and stripped.endswith('>'):
+        return True
+    return False
+
+
+def has_real_summary_content(data: dict) -> bool:
+    """Check if a parsed summary dict contains actual content, not placeholders."""
+    overview = data.get("overview", "")
+    if _is_placeholder(overview):
+        return False
+    key_topics = data.get("key_topics", [])
+    # At minimum, overview must be substantial
+    if len(overview.strip()) < 20:
+        return False
+    # Check that at least some topics exist and aren't placeholders
+    real_topics = [t for t in key_topics if not _is_placeholder(t)]
+    if not real_topics:
+        return False
+    return True
+
+
+def build_summary_from_transcript(
+    transcript: list["TranscriptSegment"],
+    scenes: list["SceneDescription"],
+) -> dict:
+    """Build a basic human-readable summary directly from transcript and scene data.
+
+    This is a deterministic last-resort fallback that always produces
+    meaningful content without requiring an LLM call.
+    """
+    # Build overview from first several transcript segments
+    overview_parts = []
+    speakers_seen = set()
+    total_chars = 0
+    for seg in transcript:
+        speakers_seen.add(seg.speaker)
+        overview_parts.append(seg.text)
+        total_chars += len(seg.text)
+        if total_chars > 600:
+            break
+
+    num_speakers = len(speakers_seen)
+    duration_mins = 0
+    if transcript:
+        duration_mins = round((transcript[-1].end - transcript[0].start) / 60)
+
+    if overview_parts:
+        combined_text = " ".join(overview_parts)
+        # Truncate to ~300 chars at word boundary
+        if len(combined_text) > 300:
+            combined_text = combined_text[:300].rsplit(" ", 1)[0] + "..."
+        if num_speakers > 1:
+            overview = (
+                f"A {duration_mins}-minute video featuring {num_speakers} speakers. "
+                f"The conversation covers: {combined_text}"
+            )
+        else:
+            overview = (
+                f"A {duration_mins}-minute video. "
+                f"The content covers: {combined_text}"
+            )
+    else:
+        overview = "Video analysis completed but no transcript was available to generate a detailed summary."
+
+    # Extract key topics from high-importance scenes
+    topics = []
+    seen_topic_words = set()
+    for scene in sorted(scenes, key=lambda s: s.importance_score, reverse=True):
+        if len(topics) >= 5:
+            break
+        desc = scene.description.strip()
+        if not desc:
+            continue
+        # Use first sentence or first 60 chars as topic
+        topic = desc.split(".")[0].strip()
+        if len(topic) > 60:
+            topic = topic[:60].rsplit(" ", 1)[0]
+        # Deduplicate by checking for word overlap
+        topic_words = set(topic.lower().split())
+        if topic_words & seen_topic_words and len(topic_words & seen_topic_words) > 2:
+            continue
+        seen_topic_words |= topic_words
+        topics.append(topic)
+
+    # If no scene topics, extract from transcript
+    if not topics and transcript:
+        # Use unique first words of segments as rough topics
+        for seg in transcript[:20]:
+            text = seg.text.strip()
+            if len(text) > 15 and len(topics) < 4:
+                topic = text.split(".")[0].strip()
+                if len(topic) > 60:
+                    topic = topic[:60].rsplit(" ", 1)[0]
+                if topic and topic not in topics:
+                    topics.append(topic)
+
+    if not topics:
+        topics = ["video content"]
+
+    # Determine tone from scene importance scores
+    if scenes:
+        avg_score = sum(s.importance_score for s in scenes) / len(scenes)
+        if avg_score >= 7:
+            tone = "engaging and dynamic"
+        elif avg_score >= 5:
+            tone = "conversational"
+        else:
+            tone = "casual"
+    else:
+        tone = "conversational"
+
+    audience = "general viewers"
+    category = "video content"
+
+    return {
+        "overview": overview,
+        "key_topics": topics,
+        "tone": tone,
+        "estimated_audience": audience,
+        "content_category": category,
+    }
+
+
 def normalize_seo_data(data: dict) -> dict:
     """Merge legacy 'hashtags' field into 'tags' and ensure all tags have # prefix."""
     tags = list(data.get("tags", []))

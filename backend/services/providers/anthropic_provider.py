@@ -10,7 +10,7 @@ from backend.config import settings
 from backend.models import (
     FrameData, SceneDescription, TranscriptSegment, VideoSummary, ClipCandidate, ClipSEO,
 )
-from backend.services.providers.base import AIProvider, ProviderError, ProviderRateLimitError, extract_json, extract_description_fallback, normalize_seo_data, build_fallback_summary
+from backend.services.providers.base import AIProvider, ProviderError, ProviderRateLimitError, extract_json, extract_description_fallback, normalize_seo_data, build_fallback_summary, has_real_summary_content, build_summary_from_transcript
 from backend.services.prompts import DEFAULT_FRAME_ANALYSIS_PROMPT, DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT, DEFAULT_SUMMARY_PROMPT
 from backend.services.transcript_utils import analyze_transcript_energy, correlate_scenes_with_transcript, derive_content_guidance
 
@@ -186,10 +186,17 @@ class AnthropicProvider(AIProvider):
         raw = await self._call(messages)
         try:
             data = extract_json(raw)
+            if not has_real_summary_content(data):
+                logger.warning("Summary JSON has placeholder values, trying fallback extraction")
+                raise ValueError("Placeholder values detected in summary")
             return VideoSummary(**data)
         except Exception:
             logger.warning("Failed to parse summary JSON, using fallback extraction. Raw (first 300): %s", raw[:300])
-            return VideoSummary(**build_fallback_summary(raw))
+            fb = build_fallback_summary(raw)
+            if not has_real_summary_content(fb):
+                logger.warning("Fallback extraction also produced placeholders, building from transcript")
+                fb = build_summary_from_transcript(transcript, scenes)
+            return VideoSummary(**fb)
 
     async def detect_viral_clips(
         self,

@@ -18,6 +18,7 @@ from backend.services.frame_extractor import (
 from backend.services.transcription import transcribe_audio
 from backend.services.ai_orchestrator import AIOrchestrator
 from backend.services.prompts import load_prompts
+from backend.services.providers.base import build_summary_from_transcript, has_real_summary_content
 
 logger = logging.getLogger(__name__)
 
@@ -602,14 +603,9 @@ async def _run_analysis_inner(job_id: str):
         except CancelledError:
             raise
         except Exception as e:
-            logger.exception("[%s] Summary generation failed", job_id)
-            summary = VideoSummary(
-                overview="We couldn't generate a summary for this video. Try re-analyzing or check your AI provider settings.",
-                key_topics=[],
-                tone="unknown",
-                estimated_audience="general",
-                content_category="uncategorized",
-            )
+            logger.exception("[%s] Summary generation failed, building from transcript", job_id)
+            fb = build_summary_from_transcript(transcript, scenes)
+            summary = VideoSummary(**fb)
             summary_provider = "none"
         finally:
             heartbeat_task.cancel()
@@ -670,13 +666,9 @@ async def _run_analysis_inner(job_id: str):
             logger.error(
                 "[%s] Summary+clip detection timed out after %ds", job_id, _SUMMARY_CLIP_TIMEOUT,
             )
-            # Use fallback values so the pipeline can still complete
-            summary = VideoSummary(
-                overview="Summary generation timed out. The video may be too long or the AI provider was slow. Try re-analyzing with a faster provider.",
-                key_topics=[], tone="unknown",
-                estimated_audience="general",
-                content_category="uncategorized",
-            )
+            # Use transcript-based fallback so the pipeline produces real content
+            fb = build_summary_from_transcript(transcript, scenes)
+            summary = VideoSummary(**fb)
             summary_provider = "none"
             clips = []
             clips_provider = "none"
