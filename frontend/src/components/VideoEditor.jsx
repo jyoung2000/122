@@ -3,9 +3,14 @@ import { processKeyframes, interpolateSubjectX, isDynamic, safeSubjectX } from '
 import useResponsive from '../hooks/useResponsive';
 import useTimelineStore from '../stores/timelineStore';
 import useTimelinePersistence from '../hooks/useTimelinePersistence';
+import useKeyboardShortcuts from '../hooks/useKeyboardShortcuts';
 import Timeline from './Timeline';
 import MediaUploader from './MediaUploader';
 import PropertiesPanel from './PropertiesPanel';
+import ToolBar from './ToolBar';
+import EffectsPanel from './EffectsPanel';
+import TransitionPicker from './TransitionPicker';
+import ExportDialog from './ExportDialog';
 import './VideoEditor.css';
 
 // ── Segment Color Palette ────────────────────────────────────────────────────
@@ -219,6 +224,10 @@ export default function VideoEditor({
   const [showMultiTrack, setShowMultiTrack] = useState(false);
   const [showMediaLibrary, setShowMediaLibrary] = useState(false);
   const [showProperties, setShowProperties] = useState(false);
+  const [showExportDialog, setShowExportDialog] = useState(false);
+  const [showEffectsPanel, setShowEffectsPanel] = useState(false);
+  const [showTransitions, setShowTransitions] = useState(false);
+  const canvasPreviewRef = useRef(null);
   const initFromClip = useTimelineStore((s) => s.initFromClip);
   const timelineStoreItems = useTimelineStore((s) => s.items);
   const { recovered } = useTimelinePersistence(jobId, clipId);
@@ -1099,6 +1108,35 @@ export default function VideoEditor({
       el.requestFullscreen().catch(() => {});
     }
   }, []);
+
+  // ── NLE keyboard shortcuts (only active in multi-track mode) ──
+  useKeyboardShortcuts({
+    enabled: showMultiTrack,
+    onTogglePlay: togglePlay,
+    onSeek: seekTo,
+    onSkipTime: skipTime,
+    onToggleMute: toggleMute,
+    onShuttleSpeed: (dir) => {
+      if (dir === 'stop') {
+        setShuttleSpeed(0);
+        if (videoRef.current) { videoRef.current.pause(); setPlaying(false); }
+      } else if (dir === 'reverse') {
+        setShuttleSpeed(prev => {
+          if (prev > 0) return 0;
+          const steps = [0, -1, -2, -4];
+          const idx = steps.indexOf(prev);
+          return steps[Math.min(idx + 1, steps.length - 1)] ?? -1;
+        });
+      } else if (dir === 'forward') {
+        setShuttleSpeed(prev => {
+          if (prev < 0) return 0;
+          const steps = [0, 1, 2, 4];
+          const idx = steps.indexOf(prev);
+          return steps[Math.min(idx + 1, steps.length - 1)] ?? 1;
+        });
+      }
+    },
+  });
 
   // ── Apply trim ────────────────────────────────────
   const handleApplyTrim = useCallback(() => {
@@ -2611,56 +2649,121 @@ export default function VideoEditor({
       {/* ── Multi-Track Editor Panels ── */}
       {showMultiTrack && (
         <div className="ve-multitrack">
-          {/* Media Library Sidebar */}
-          {showMediaLibrary && (
-            <div className="ve-multitrack__sidebar ve-multitrack__sidebar--left">
-              <div className="ve-multitrack__sidebar-header">
-                <span>Media Library</span>
-                <button
-                  className="ve-btn"
-                  onClick={() => setShowMediaLibrary(false)}
-                  style={{ minWidth: 24, minHeight: 24, fontSize: 12 }}
-                >
-                  ✕
-                </button>
-              </div>
-              <MediaUploader jobId={jobId} />
+          {/* ToolBar */}
+          <div className="ve-multitrack__toolbar">
+            <ToolBar />
+            <div className="ve-multitrack__toolbar-actions">
+              <button
+                className={`ve-btn ve-btn--small${showEffectsPanel ? ' ve-btn--active' : ''}`}
+                onClick={() => setShowEffectsPanel(v => !v)}
+                title="Effects"
+              >
+                Effects
+              </button>
+              <button
+                className={`ve-btn ve-btn--small${showTransitions ? ' ve-btn--active' : ''}`}
+                onClick={() => setShowTransitions(v => !v)}
+                title="Transitions"
+              >
+                Transitions
+              </button>
+              <button
+                className="ve-btn ve-btn--small ve-btn--export"
+                onClick={() => setShowExportDialog(true)}
+                title="Export"
+              >
+                Export
+              </button>
             </div>
-          )}
-
-          {/* Timeline */}
-          <div className="ve-multitrack__timeline">
-            <Timeline
-              compact={compact}
-              onSeek={(time) => {
-                const video = videoRef.current;
-                if (video) {
-                  const absTime = clipStart + time;
-                  video.currentTime = absTime;
-                  setCurrentTime(absTime);
-                  onTimeUpdate?.(absTime);
-                }
-              }}
-            />
           </div>
 
-          {/* Properties Sidebar */}
-          {showProperties && (
-            <div className="ve-multitrack__sidebar ve-multitrack__sidebar--right">
-              <div className="ve-multitrack__sidebar-header">
-                <span>Properties</span>
-                <button
-                  className="ve-btn"
-                  onClick={() => setShowProperties(false)}
-                  style={{ minWidth: 24, minHeight: 24, fontSize: 12 }}
-                >
-                  ✕
-                </button>
+          {/* Main content area */}
+          <div className="ve-multitrack__content">
+            {/* Media Library Sidebar */}
+            {showMediaLibrary && (
+              <div className="ve-multitrack__sidebar ve-multitrack__sidebar--left">
+                <div className="ve-multitrack__sidebar-header">
+                  <span>Media Library</span>
+                  <button
+                    className="ve-btn"
+                    onClick={() => setShowMediaLibrary(false)}
+                    style={{ minWidth: 24, minHeight: 24, fontSize: 12 }}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <MediaUploader jobId={jobId} />
               </div>
-              <PropertiesPanel compact={compact} />
+            )}
+
+            {/* Center area: effects/transitions panel + timeline */}
+            <div className="ve-multitrack__center">
+              {/* Effects Panel (collapsible) */}
+              {showEffectsPanel && (
+                <div className="ve-multitrack__effects-panel">
+                  <div className="ve-multitrack__sidebar-header">
+                    <span>Effects</span>
+                    <button className="ve-btn" onClick={() => setShowEffectsPanel(false)} style={{ minWidth: 24, minHeight: 24, fontSize: 12 }}>✕</button>
+                  </div>
+                  <EffectsPanel />
+                </div>
+              )}
+
+              {/* Transitions Panel (collapsible) */}
+              {showTransitions && (
+                <div className="ve-multitrack__effects-panel">
+                  <div className="ve-multitrack__sidebar-header">
+                    <span>Transitions</span>
+                    <button className="ve-btn" onClick={() => setShowTransitions(false)} style={{ minWidth: 24, minHeight: 24, fontSize: 12 }}>✕</button>
+                  </div>
+                  <TransitionPicker />
+                </div>
+              )}
+
+              {/* Timeline */}
+              <div className="ve-multitrack__timeline">
+                <Timeline
+                  compact={compact}
+                  onSeek={(time) => {
+                    const video = videoRef.current;
+                    if (video) {
+                      const absTime = clipStart + time;
+                      video.currentTime = absTime;
+                      setCurrentTime(absTime);
+                      onTimeUpdate?.(absTime);
+                    }
+                  }}
+                />
+              </div>
             </div>
-          )}
+
+            {/* Properties Sidebar */}
+            {showProperties && (
+              <div className="ve-multitrack__sidebar ve-multitrack__sidebar--right">
+                <div className="ve-multitrack__sidebar-header">
+                  <span>Properties</span>
+                  <button
+                    className="ve-btn"
+                    onClick={() => setShowProperties(false)}
+                    style={{ minWidth: 24, minHeight: 24, fontSize: 12 }}
+                  >
+                    ✕
+                  </button>
+                </div>
+                <PropertiesPanel compact={compact} />
+              </div>
+            )}
+          </div>
         </div>
+      )}
+
+      {/* ── Export Dialog ── */}
+      {showExportDialog && (
+        <ExportDialog
+          onClose={() => setShowExportDialog(false)}
+          jobId={jobId}
+          clipId={clipId}
+        />
       )}
 
       {/* ── Keyboard shortcuts hint ── */}

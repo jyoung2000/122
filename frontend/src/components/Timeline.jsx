@@ -2,20 +2,30 @@ import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import useTimelineStore from '../stores/timelineStore';
 
 // ── Constants ────────────────────────────────────────────────────────────────
-const TRACK_HEIGHT = 40;
-const TRACK_GAP = 2;
-const LABEL_WIDTH = 60;
+const TRACK_HEIGHT = 44;
+const TRACK_GAP = 1;
+const LABEL_WIDTH = 72;
 const HANDLE_WIDTH = 6;
 const HANDLE_HIT_AREA = 12;
 const SNAP_THRESHOLD_PX = 5;
-const MIN_PPS = 10;  // min pixels per second
-const MAX_PPS = 200; // max pixels per second
+const RULER_HEIGHT = 24;
 
 const TRACK_COLORS = {
   video: '#3B82F6',
   overlay: '#F59E0B',
   audio: '#10B981',
   subtitle: '#8B5CF6',
+  text: '#EC4899',
+  shape: '#F97316',
+};
+
+const TRACK_ICONS = {
+  video: '\uD83C\uDFAC',
+  overlay: '\uD83D\uDDBC',
+  audio: '\uD83C\uDFB5',
+  subtitle: '\uD83D\uDCAC',
+  text: 'T',
+  shape: '\u25A1',
 };
 
 function formatTime(s) {
@@ -25,42 +35,47 @@ function formatTime(s) {
   return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
+function formatTimeMs(s) {
+  if (!s || isNaN(s) || s < 0) return '0:00.00';
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  const ms = Math.floor((s % 1) * 100);
+  return `${m}:${sec.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
+}
+
 export default function Timeline({ compact = false, onSeek }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
-  const animRef = useRef(null);
 
   const tracks = useTimelineStore((s) => s.tracks);
   const items = useTimelineStore((s) => s.items);
   const playhead = useTimelineStore((s) => s.playhead);
   const duration = useTimelineStore((s) => s.duration);
   const zoom = useTimelineStore((s) => s.zoom);
+  const scrollX = useTimelineStore((s) => s.scrollX);
   const snapEnabled = useTimelineStore((s) => s.snapEnabled);
   const selectedItemId = useTimelineStore((s) => s.selectedItemId);
+  const activeTool = useTimelineStore((s) => s.activeTool);
   const isPlaying = useTimelineStore((s) => s.isPlaying);
   const setPlayhead = useTimelineStore((s) => s.setPlayhead);
   const setZoom = useTimelineStore((s) => s.setZoom);
+  const setScrollX = useTimelineStore((s) => s.setScrollX);
   const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
   const updateItem = useTimelineStore((s) => s.updateItem);
-  const updateItemWithSnapshot = useTimelineStore((s) => s.updateItemWithSnapshot);
   const addItem = useTimelineStore((s) => s.addItem);
   const splitItem = useTimelineStore((s) => s.splitItem);
   const removeItem = useTimelineStore((s) => s.removeItem);
   const toggleSnap = useTimelineStore((s) => s.toggleSnap);
+  const addTrack = useTimelineStore((s) => s.addTrack);
 
-  const [scrollX, setScrollX] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
   const [dragInfo, setDragInfo] = useState(null);
   const [hoverTime, setHoverTime] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
+  const [showAddTrack, setShowAddTrack] = useState(false);
 
-  const basePPS = compact ? 40 : 60; // base pixels per second
+  const basePPS = compact ? 40 : 60;
   const pps = basePPS * zoom;
-  const totalWidth = Math.max((duration || 30) * pps, 400);
-  const trackAreaWidth = useMemo(() => {
-    const container = containerRef.current;
-    return container ? container.clientWidth - LABEL_WIDTH : 600;
-  }, []);
 
   // ── Canvas rendering ──────────────────────────────────────────────────────
   const draw = useCallback(() => {
@@ -79,16 +94,16 @@ export default function Timeline({ compact = false, onSeek }) {
     const isDark = document.documentElement.dataset?.theme === 'dark';
     const contentLeft = LABEL_WIDTH;
     const contentWidth = canvasW - LABEL_WIDTH;
+    const sx = scrollX;
 
     // ── Ruler ──
-    ctx.fillStyle = isDark ? 'rgba(255,255,255,0.03)' : 'rgba(0,0,0,0.02)';
-    ctx.fillRect(0, 0, canvasW, 20);
+    ctx.fillStyle = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)';
+    ctx.fillRect(0, 0, canvasW, RULER_HEIGHT);
 
-    ctx.fillStyle = isDark ? 'rgba(255,255,255,0.4)' : 'rgba(0,0,0,0.4)';
-    ctx.font = '9px monospace';
+    ctx.fillStyle = isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)';
+    ctx.font = '10px "SF Mono", "Menlo", monospace';
     ctx.textAlign = 'center';
 
-    // Determine ruler interval based on zoom
     let interval = 1;
     if (pps < 15) interval = 10;
     else if (pps < 30) interval = 5;
@@ -97,13 +112,21 @@ export default function Timeline({ compact = false, onSeek }) {
 
     const maxTime = duration || 30;
     for (let t = 0; t <= maxTime; t += interval) {
-      const x = contentLeft + t * pps - scrollX;
+      const x = contentLeft + t * pps - sx;
       if (x < contentLeft - 10 || x > canvasW + 10) continue;
-      ctx.fillText(formatTime(t), x, 14);
+      ctx.fillText(formatTime(t), x, 16);
 
-      ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
+      // Tick marks
+      ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.08)' : 'rgba(0,0,0,0.06)';
       ctx.beginPath();
-      ctx.moveTo(x, 18);
+      ctx.moveTo(x, RULER_HEIGHT - 4);
+      ctx.lineTo(x, RULER_HEIGHT);
+      ctx.stroke();
+
+      // Grid lines
+      ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)';
+      ctx.beginPath();
+      ctx.moveTo(x, RULER_HEIGHT);
       ctx.lineTo(x, canvasH);
       ctx.stroke();
     }
@@ -111,92 +134,125 @@ export default function Timeline({ compact = false, onSeek }) {
     // ── Track lanes ──
     const visibleTracks = tracks.filter((t) => t.visible !== false);
     visibleTracks.forEach((track, idx) => {
-      const y = 22 + idx * (TRACK_HEIGHT + TRACK_GAP);
+      const y = RULER_HEIGHT + idx * (TRACK_HEIGHT + TRACK_GAP);
 
       // Track label background
-      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)';
-      ctx.fillRect(0, y, LABEL_WIDTH - 2, TRACK_HEIGHT);
+      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)';
+      ctx.fillRect(0, y, LABEL_WIDTH - 1, TRACK_HEIGHT);
 
-      // Track label text
-      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.5)' : 'rgba(0,0,0,0.5)';
-      ctx.font = '8px sans-serif';
+      // Track label
+      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.6)';
+      ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
       ctx.textAlign = 'left';
-      const typeIcon = track.type === 'video' || track.type === 'overlay' ? '🎬' : track.type === 'audio' ? '🎵' : '💬';
-      ctx.fillText(`${typeIcon} ${track.name}`, 4, y + TRACK_HEIGHT / 2 + 3);
+      const icon = TRACK_ICONS[track.type] || '';
+      ctx.fillText(`${icon} ${track.name}`, 6, y + TRACK_HEIGHT / 2 + 4);
 
-      // Track lane bg
-      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.02)';
+      // Lock/mute indicators
+      if (track.locked) {
+        ctx.fillStyle = isDark ? 'rgba(255,59,48,0.3)' : 'rgba(255,59,48,0.15)';
+        ctx.fillText('\uD83D\uDD12', LABEL_WIDTH - 18, y + 12);
+      }
+      if (track.muted) {
+        ctx.fillStyle = isDark ? 'rgba(255,59,48,0.3)' : 'rgba(255,59,48,0.15)';
+        ctx.fillText('M', LABEL_WIDTH - 18, y + TRACK_HEIGHT - 6);
+      }
+
+      // Track lane background
+      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.015)';
       ctx.fillRect(contentLeft, y, contentWidth, TRACK_HEIGHT);
 
       // Track border
-      ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.06)';
+      ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)';
       ctx.strokeRect(contentLeft, y, contentWidth, TRACK_HEIGHT);
 
-      // Muted indicator
+      // Muted overlay
       if (track.muted) {
-        ctx.fillStyle = isDark ? 'rgba(255,59,48,0.08)' : 'rgba(255,59,48,0.06)';
+        ctx.fillStyle = isDark ? 'rgba(255,59,48,0.06)' : 'rgba(255,59,48,0.04)';
         ctx.fillRect(contentLeft, y, contentWidth, TRACK_HEIGHT);
       }
     });
 
-    // ── Items ──
+    // ── Items (clips) ──
     items.forEach((item) => {
       const trackIdx = visibleTracks.findIndex((t) => t.id === item.trackId);
       if (trackIdx < 0) return;
-      const y = 22 + trackIdx * (TRACK_HEIGHT + TRACK_GAP);
-      const x1 = contentLeft + item.start * pps - scrollX;
-      const x2 = contentLeft + item.end * pps - scrollX;
+      const y = RULER_HEIGHT + trackIdx * (TRACK_HEIGHT + TRACK_GAP);
+      const x1 = contentLeft + item.start * pps - sx;
+      const x2 = contentLeft + item.end * pps - sx;
       const w = x2 - x1;
 
-      if (x2 < contentLeft || x1 > canvasW) return; // off-screen
+      if (x2 < contentLeft || x1 > canvasW) return;
 
       const color = TRACK_COLORS[item.type] || TRACK_COLORS.video;
       const isSelected = item.id === selectedItemId;
 
-      // Item body
-      ctx.fillStyle = isSelected ? color + 'CC' : color + '66';
-      const rr = 3;
+      // Clip body
+      ctx.fillStyle = isSelected ? color + 'DD' : color + '77';
+      const rr = 4;
       ctx.beginPath();
-      ctx.roundRect(x1, y + 2, w, TRACK_HEIGHT - 4, rr);
+      ctx.roundRect(Math.max(x1, contentLeft), y + 2, Math.min(w, canvasW - Math.max(x1, contentLeft)), TRACK_HEIGHT - 4, rr);
       ctx.fill();
 
       // Selected border
       if (isSelected) {
-        ctx.strokeStyle = color;
+        ctx.strokeStyle = '#FFFFFF';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.roundRect(x1, y + 2, w, TRACK_HEIGHT - 4, rr);
+        ctx.roundRect(Math.max(x1, contentLeft), y + 2, Math.min(w, canvasW - Math.max(x1, contentLeft)), TRACK_HEIGHT - 4, rr);
         ctx.stroke();
         ctx.lineWidth = 1;
       }
 
-      // Item label
-      if (w > 30) {
+      // Transition indicator
+      if (item.transition) {
+        const transDur = item.transition.duration || 0.5;
+        const transW = transDur * pps;
+        ctx.fillStyle = 'rgba(255,255,255,0.25)';
+        ctx.beginPath();
+        ctx.moveTo(x1, y + 2);
+        ctx.lineTo(x1 + transW, y + 2);
+        ctx.lineTo(x1, y + TRACK_HEIGHT - 2);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // Clip label
+      if (w > 35) {
         ctx.fillStyle = '#fff';
-        ctx.font = '9px sans-serif';
+        ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
         ctx.textAlign = 'left';
-        const label = item.subtitleText
-          ? item.subtitleText.slice(0, 20)
-          : item.type;
-        ctx.fillText(label, x1 + 6, y + TRACK_HEIGHT / 2 + 3, w - 12);
+        const label = item.textContent
+          ? item.textContent.slice(0, 25)
+          : item.subtitleText
+            ? item.subtitleText.slice(0, 25)
+            : item.type;
+        ctx.fillText(label, Math.max(x1 + 8, contentLeft + 4), y + TRACK_HEIGHT / 2 + 4, w - 16);
       }
 
-      // Trim handles (visual only, hit detection is in pointer handler)
-      if (isSelected) {
-        ctx.fillStyle = color;
-        ctx.fillRect(x1, y + 2, HANDLE_WIDTH, TRACK_HEIGHT - 4);
-        ctx.fillRect(x2 - HANDLE_WIDTH, y + 2, HANDLE_WIDTH, TRACK_HEIGHT - 4);
+      // Trim handles (visual, for selected items)
+      if (isSelected && w > 20) {
+        ctx.fillStyle = '#FFFFFF';
+        ctx.globalAlpha = 0.8;
+        ctx.fillRect(x1, y + 4, HANDLE_WIDTH, TRACK_HEIGHT - 8);
+        ctx.fillRect(x2 - HANDLE_WIDTH, y + 4, HANDLE_WIDTH, TRACK_HEIGHT - 8);
+        ctx.globalAlpha = 1;
       }
 
-      // Opacity indicator
-      if (item.opacity < 1) {
-        ctx.fillStyle = isDark ? 'rgba(0,0,0,0.3)' : 'rgba(255,255,255,0.3)';
-        ctx.fillRect(x1, y + 2, w, TRACK_HEIGHT - 4);
+      // Effects indicator dot
+      const effects = item.effects;
+      if (effects && typeof effects === 'object' && !Array.isArray(effects)) {
+        const hasEffects = Object.entries(effects).some(([k, v]) => v !== 0 && v !== undefined && v !== null);
+        if (hasEffects) {
+          ctx.fillStyle = '#FFD700';
+          ctx.beginPath();
+          ctx.arc(x2 - 12, y + 8, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     });
 
     // ── Playhead ──
-    const phX = contentLeft + playhead * pps - scrollX;
+    const phX = contentLeft + playhead * pps - sx;
     if (phX >= contentLeft && phX <= canvasW) {
       ctx.strokeStyle = '#FF3B30';
       ctx.lineWidth = 2;
@@ -206,55 +262,64 @@ export default function Timeline({ compact = false, onSeek }) {
       ctx.stroke();
       ctx.lineWidth = 1;
 
-      // Playhead triangle
+      // Playhead diamond
       ctx.fillStyle = '#FF3B30';
       ctx.beginPath();
-      ctx.moveTo(phX - 6, 0);
-      ctx.lineTo(phX + 6, 0);
-      ctx.lineTo(phX, 8);
+      ctx.moveTo(phX - 7, 0);
+      ctx.lineTo(phX + 7, 0);
+      ctx.lineTo(phX, 9);
       ctx.closePath();
       ctx.fill();
     }
 
-    // ── Hover time indicator ──
+    // ── Hover indicator ──
     if (hoverTime !== null) {
-      const hx = contentLeft + hoverTime * pps - scrollX;
+      const hx = contentLeft + hoverTime * pps - sx;
       if (hx >= contentLeft && hx <= canvasW) {
         ctx.strokeStyle = isDark ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.2)';
         ctx.setLineDash([3, 3]);
         ctx.beginPath();
-        ctx.moveTo(hx, 20);
+        ctx.moveTo(hx, RULER_HEIGHT);
         ctx.lineTo(hx, canvasH);
         ctx.stroke();
         ctx.setLineDash([]);
 
         // Tooltip
-        ctx.fillStyle = 'rgba(0,0,0,0.8)';
-        const tooltipText = formatTime(hoverTime);
-        const tw = ctx.measureText(tooltipText).width + 8;
+        ctx.fillStyle = 'rgba(0,0,0,0.85)';
+        const tooltipText = formatTimeMs(hoverTime);
+        const tw = ctx.measureText(tooltipText).width + 10;
         ctx.beginPath();
-        ctx.roundRect(hx - tw / 2, 2, tw, 14, 3);
+        ctx.roundRect(Math.min(hx - tw / 2, canvasW - tw - 4), 3, tw, 16, 4);
         ctx.fill();
         ctx.fillStyle = '#fff';
-        ctx.font = '9px monospace';
+        ctx.font = '10px "SF Mono", monospace';
         ctx.textAlign = 'center';
-        ctx.fillText(tooltipText, hx, 12);
+        ctx.fillText(tooltipText, Math.min(hx, canvasW - tw / 2 - 4), 14);
       }
     }
 
-    // ── Snap guideline ──
-    // (rendered during drag by the drag handler)
-
-  }, [tracks, items, playhead, duration, zoom, scrollX, selectedItemId, hoverTime, pps, compact]);
+    // ── Razor cursor indicator ──
+    if (activeTool === 'razor' && hoverTime !== null) {
+      const rx = contentLeft + hoverTime * pps - sx;
+      if (rx >= contentLeft && rx <= canvasW) {
+        ctx.strokeStyle = '#FF9500';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([6, 3]);
+        ctx.beginPath();
+        ctx.moveTo(rx, RULER_HEIGHT);
+        ctx.lineTo(rx, canvasH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.lineWidth = 1;
+      }
+    }
+  }, [tracks, items, playhead, duration, zoom, scrollX, selectedItemId, hoverTime, pps, compact, activeTool]);
 
   // Continuous redraw during playback
   useEffect(() => {
     if (!isPlaying) return;
     let rafId;
-    const tick = () => {
-      draw();
-      rafId = requestAnimationFrame(tick);
-    };
+    const tick = () => { draw(); rafId = requestAnimationFrame(tick); };
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
   }, [isPlaying, draw]);
@@ -284,7 +349,7 @@ export default function Timeline({ compact = false, onSeek }) {
     const canvas = canvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
-    const y = clientY - rect.top - 22;
+    const y = clientY - rect.top - RULER_HEIGHT;
     const visibleTracks = tracks.filter((t) => t.visible !== false);
     const idx = Math.floor(y / (TRACK_HEIGHT + TRACK_GAP));
     return visibleTracks[idx] || null;
@@ -307,7 +372,6 @@ export default function Timeline({ compact = false, onSeek }) {
       const x1 = LABEL_WIDTH + item.start * pps - scrollX;
       const x2 = LABEL_WIDTH + item.end * pps - scrollX;
 
-      // Check trim handles
       if (Math.abs(px - x1) < HANDLE_HIT_AREA) return { item, edge: 'left' };
       if (Math.abs(px - x2) < HANDLE_HIT_AREA) return { item, edge: 'right' };
       return { item, edge: 'body' };
@@ -337,12 +401,21 @@ export default function Timeline({ compact = false, onSeek }) {
 
     setContextMenu(null);
 
+    // Razor tool: split on click
+    if (activeTool === 'razor') {
+      const time = getTimeFromX(e.clientX);
+      const hit = hitTestItem(e.clientX, e.clientY);
+      if (hit?.item) {
+        splitItem(hit.item.id, time);
+      }
+      return;
+    }
+
     const hit = hitTestItem(e.clientX, e.clientY);
     if (hit) {
       setSelectedItemId(hit.item.id);
 
       if (hit.edge === 'left' || hit.edge === 'right') {
-        // Trim handle drag
         setIsDragging(true);
         setDragInfo({
           type: 'trim',
@@ -355,7 +428,6 @@ export default function Timeline({ compact = false, onSeek }) {
           startX: e.clientX,
         });
       } else {
-        // Body drag (move)
         setIsDragging(true);
         setDragInfo({
           type: 'move',
@@ -368,17 +440,16 @@ export default function Timeline({ compact = false, onSeek }) {
         });
       }
     } else {
-      // Click on empty area: seek playhead
+      // Click on empty area: seek
       const time = getTimeFromX(e.clientX);
       setPlayhead(time);
       setSelectedItemId(null);
       onSeek?.(time);
 
-      // Drag to scrub
       setIsDragging(true);
       setDragInfo({ type: 'scrub', startX: e.clientX });
     }
-  }, [hitTestItem, getTimeFromX, setPlayhead, setSelectedItemId, onSeek]);
+  }, [hitTestItem, getTimeFromX, setPlayhead, setSelectedItemId, onSeek, activeTool, splitItem]);
 
   useEffect(() => {
     if (!isDragging || !dragInfo) return;
@@ -403,6 +474,7 @@ export default function Timeline({ compact = false, onSeek }) {
         const dx = (e.clientX - dragInfo.startX) / pps;
         let newStart = Math.max(0, dragInfo.origStart + dx);
         const dur = dragInfo.origEnd - dragInfo.origStart;
+
         // Snap
         if (snapEnabled) {
           const edges = items
@@ -411,16 +483,14 @@ export default function Timeline({ compact = false, onSeek }) {
           edges.push(playhead);
           for (const edge of edges) {
             if (Math.abs((newStart - edge) * pps) < SNAP_THRESHOLD_PX) {
-              newStart = edge;
-              break;
+              newStart = edge; break;
             }
             if (Math.abs((newStart + dur - edge) * pps) < SNAP_THRESHOLD_PX) {
-              newStart = edge - dur;
-              break;
+              newStart = edge - dur; break;
             }
           }
         }
-        // Track change via Y movement
+
         const track = getTrackFromY(e.clientY);
         const trackId = track ? track.id : dragInfo.origTrackId;
         updateItem(dragInfo.itemId, { start: newStart, end: newStart + dur, trackId });
@@ -428,13 +498,6 @@ export default function Timeline({ compact = false, onSeek }) {
     };
 
     const onUp = () => {
-      if (dragInfo.type === 'trim' || dragInfo.type === 'move') {
-        // Take snapshot for undo on completion
-        const item = items.find((i) => i.id === dragInfo.itemId);
-        if (item && (item.start !== dragInfo.origStart || item.end !== dragInfo.origEnd)) {
-          // Already modified inline, no additional action needed
-        }
-      }
       setIsDragging(false);
       setDragInfo(null);
     };
@@ -454,29 +517,24 @@ export default function Timeline({ compact = false, onSeek }) {
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    if (x < LABEL_WIDTH) {
-      setHoverTime(null);
-      canvas.style.cursor = 'default';
+    if (x < LABEL_WIDTH) { setHoverTime(null); canvas.style.cursor = 'default'; return; }
+
+    setHoverTime(getTimeFromX(e.clientX));
+
+    if (activeTool === 'razor') {
+      canvas.style.cursor = 'crosshair';
       return;
     }
-    const time = getTimeFromX(e.clientX);
-    setHoverTime(time);
 
     const hit = hitTestItem(e.clientX, e.clientY);
     if (hit) {
-      if (hit.edge === 'left' || hit.edge === 'right') {
-        canvas.style.cursor = 'col-resize';
-      } else {
-        canvas.style.cursor = 'grab';
-      }
+      canvas.style.cursor = hit.edge === 'left' || hit.edge === 'right' ? 'col-resize' : 'grab';
     } else {
       canvas.style.cursor = 'pointer';
     }
-  }, [isDragging, getTimeFromX, hitTestItem]);
+  }, [isDragging, getTimeFromX, hitTestItem, activeTool]);
 
-  const onPointerLeave = useCallback(() => {
-    setHoverTime(null);
-  }, []);
+  const onPointerLeave = useCallback(() => setHoverTime(null), []);
 
   // ── Zoom via Ctrl+Wheel ────────────────────────────────────────────────────
   const onWheel = useCallback((e) => {
@@ -485,10 +543,9 @@ export default function Timeline({ compact = false, onSeek }) {
       const delta = e.deltaY > 0 ? -0.1 : 0.1;
       setZoom(zoom + delta);
     } else {
-      // Horizontal scroll
-      setScrollX((prev) => Math.max(0, prev + e.deltaX + (e.shiftKey ? e.deltaY : 0)));
+      setScrollX(scrollX + e.deltaX + (e.shiftKey ? e.deltaY : 0));
     }
-  }, [zoom, setZoom]);
+  }, [zoom, scrollX, setZoom, setScrollX]);
 
   // ── Drop from media library ────────────────────────────────────────────────
   const onDrop = useCallback((e) => {
@@ -500,16 +557,12 @@ export default function Timeline({ compact = false, onSeek }) {
       const time = getTimeFromX(e.clientX);
       const track = getTrackFromY(e.clientY);
       if (!track) return;
-
       addItem({
         trackId: track.id,
         type: media.type,
         mediaRef: media.id,
         start: time,
         end: time + (media.duration || 5),
-        volume: 1.0,
-        speed: 1.0,
-        opacity: 1.0,
       });
     } catch { /* invalid data */ }
   }, [getTimeFromX, getTrackFromY, addItem]);
@@ -533,16 +586,12 @@ export default function Timeline({ compact = false, onSeek }) {
         if (item) removeItem(item.id);
         break;
       case 'duplicate':
-        if (item) {
-          const store = useTimelineStore.getState();
-          store.duplicateItem(item.id);
-        }
+        if (item) useTimelineStore.getState().duplicateItem(item.id);
         break;
     }
     setContextMenu(null);
   }, [contextMenu, splitItem, removeItem]);
 
-  // Close context menu on click elsewhere
   useEffect(() => {
     if (!contextMenu) return;
     const close = () => setContextMenu(null);
@@ -552,23 +601,19 @@ export default function Timeline({ compact = false, onSeek }) {
 
   // ── Compute canvas height ──────────────────────────────────────────────────
   const visibleTracks = tracks.filter((t) => t.visible !== false);
-  const canvasHeight = 22 + visibleTracks.length * (TRACK_HEIGHT + TRACK_GAP) + 8;
+  const canvasHeight = RULER_HEIGHT + visibleTracks.length * (TRACK_HEIGHT + TRACK_GAP) + 8;
 
   return (
-    <div
-      ref={containerRef}
-      className="ve-multi-timeline"
-      style={{ position: 'relative' }}
-    >
-      {/* Zoom toolbar */}
+    <div ref={containerRef} className="ve-multi-timeline" style={{ position: 'relative' }}>
+      {/* Toolbar row */}
       <div className="ve-multi-timeline__toolbar">
         <button
           className="ve-btn"
           onClick={() => setZoom(zoom - 0.2)}
-          title="Zoom out (−)"
+          title="Zoom out"
           style={{ fontSize: 12, padding: '2px 6px', minWidth: 24, minHeight: 24 }}
         >
-          −
+          -
         </button>
         <input
           type="range"
@@ -582,7 +627,7 @@ export default function Timeline({ compact = false, onSeek }) {
         <button
           className="ve-btn"
           onClick={() => setZoom(zoom + 0.2)}
-          title="Zoom in (+)"
+          title="Zoom in"
           style={{ fontSize: 12, padding: '2px 6px', minWidth: 24, minHeight: 24 }}
         >
           +
@@ -590,11 +635,34 @@ export default function Timeline({ compact = false, onSeek }) {
         <button
           className={`ve-btn${snapEnabled ? ' ve-btn--active-snap' : ''}`}
           onClick={toggleSnap}
-          title={`Snap: ${snapEnabled ? 'ON' : 'OFF'}`}
+          title={`Snap: ${snapEnabled ? 'ON' : 'OFF'} (N)`}
           style={{ fontSize: 10, padding: '2px 6px', minWidth: 'auto', minHeight: 24 }}
         >
-          ⚡ Snap
+          Snap {snapEnabled ? 'ON' : 'OFF'}
         </button>
+        <div style={{ flex: 1 }} />
+        <div style={{ position: 'relative' }}>
+          <button
+            className="ve-btn"
+            onClick={() => setShowAddTrack(!showAddTrack)}
+            style={{ fontSize: 10, padding: '2px 8px', minHeight: 24 }}
+          >
+            + Track
+          </button>
+          {showAddTrack && (
+            <div className="ve-multi-timeline__add-track-dropdown">
+              {['video', 'audio', 'overlay', 'subtitle'].map(type => (
+                <button
+                  key={type}
+                  onClick={() => { addTrack(type); setShowAddTrack(false); }}
+                  className="ve-multi-timeline__add-track-option"
+                >
+                  {TRACK_ICONS[type]} {type.charAt(0).toUpperCase() + type.slice(1)}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Canvas */}
@@ -617,14 +685,13 @@ export default function Timeline({ compact = false, onSeek }) {
           className="ve-multi-timeline__context-menu"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
-          {contextMenu.item && (
+          {contextMenu.item ? (
             <>
-              <button onClick={() => handleContextAction('split')}>Split at playhead</button>
+              <button onClick={() => handleContextAction('split')}>Split at cursor</button>
               <button onClick={() => handleContextAction('delete')}>Delete</button>
               <button onClick={() => handleContextAction('duplicate')}>Duplicate</button>
             </>
-          )}
-          {!contextMenu.item && (
+          ) : (
             <div style={{ padding: '4px 8px', fontSize: 10, color: 'var(--ve-text-muted)' }}>
               No item selected
             </div>
