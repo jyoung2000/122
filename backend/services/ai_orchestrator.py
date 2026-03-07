@@ -210,11 +210,12 @@ class AIOrchestrator:
         job_id: str,
     ) -> tuple[VideoSummary, str]:
         """Returns (summary, provider_name_used)."""
+        summary_prompt = self._custom_prompts.summary if self._custom_prompts else None
         for provider in self._get_active_chain():
             try:
                 await self._notify_attempt(job_id, provider.provider_name, "summary generation")
                 t0 = time.monotonic()
-                result = await provider.generate_summary(transcript, scenes, cancel_check=self._cancel_check)
+                result = await provider.generate_summary(transcript, scenes, cancel_check=self._cancel_check, custom_prompt=summary_prompt)
                 elapsed = time.monotonic() - t0
                 logger.info("Summary generation via %s completed in %.1fs", provider.provider_name, elapsed)
                 self._circuit_breaker.record_success(provider.provider_name)

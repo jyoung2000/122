@@ -497,7 +497,9 @@ class OpenRouterProvider(AIProvider):
         transcript: list[TranscriptSegment],
         scenes: list[SceneDescription],
         cancel_check=None,
+        custom_prompt=None,
     ) -> VideoSummary:
+        instruction = custom_prompt if custom_prompt else DEFAULT_SUMMARY_PROMPT
         # Dynamic context budget based on model
         context_budget = self._get_context_budget(self._summary_model)
         overhead = 500  # instructions + JSON format
@@ -513,7 +515,7 @@ class OpenRouterProvider(AIProvider):
             self._summary_model, context_budget, transcript_budget, scene_budget,
         )
         prompt = (
-            f"{DEFAULT_SUMMARY_PROMPT}\n\n"
+            f"{instruction}\n\n"
             f"TRANSCRIPT:\n{transcript_text}\n\n"
             f"SCENES:\n{scene_text}\n\n"
             "Return ONLY valid JSON:\n"

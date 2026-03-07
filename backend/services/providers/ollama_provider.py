@@ -170,7 +170,9 @@ class OllamaProvider(AIProvider):
         transcript: list[TranscriptSegment],
         scenes: list[SceneDescription],
         cancel_check=None,
+        custom_prompt=None,
     ) -> VideoSummary:
+        instruction = custom_prompt if custom_prompt else DEFAULT_SUMMARY_PROMPT
         transcript_text = "\n".join(
             f"[{s.start:.1f}-{s.end:.1f}] {s.speaker}: {s.text}" for s in transcript
         )
@@ -179,7 +181,7 @@ class OllamaProvider(AIProvider):
         ) if scenes else "No scene descriptions available."
 
         prompt = (
-            f"{DEFAULT_SUMMARY_PROMPT}\n\n"
+            f"{instruction}\n\n"
             f"TRANSCRIPT:\n{transcript_text[:3000]}\n\n"
             f"SCENES:\n{scene_text[:1000]}\n\n"
             "Return ONLY valid JSON:\n"

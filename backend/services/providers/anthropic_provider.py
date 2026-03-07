@@ -164,7 +164,9 @@ class AnthropicProvider(AIProvider):
         transcript: list[TranscriptSegment],
         scenes: list[SceneDescription],
         cancel_check=None,
+        custom_prompt=None,
     ) -> VideoSummary:
+        instruction = custom_prompt if custom_prompt else DEFAULT_SUMMARY_PROMPT
         transcript_text = "\n".join(
             f"[{s.start:.1f}-{s.end:.1f}] {s.speaker}: {s.text}" for s in transcript
         )
@@ -173,7 +175,7 @@ class AnthropicProvider(AIProvider):
             for s in scenes
         )
         prompt = (
-            f"{DEFAULT_SUMMARY_PROMPT}\n\n"
+            f"{instruction}\n\n"
             f"TRANSCRIPT:\n{transcript_text}\n\n"
             f"SCENES:\n{scene_text}\n\n"
             "Return ONLY valid JSON:\n"

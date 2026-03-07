@@ -244,6 +244,7 @@ class AIProvider(ABC):
         transcript: list[TranscriptSegment],
         scenes: list[SceneDescription],
         cancel_check: Optional[Callable] = None,
+        custom_prompt: Optional[str] = None,
     ) -> VideoSummary:
         pass
 

@@ -68,8 +68,8 @@ export default function Settings() {
   const [transSaving, setTransSaving] = useState(false);
 
   // Prompt customization state
-  const [prompts, setPrompts] = useState({ frame_analysis: '', viral_clip_detection: '', subject_tracking: '' });
-  const [promptDefaults, setPromptDefaults] = useState({ frame_analysis: '', viral_clip_detection: '', subject_tracking: '' });
+  const [prompts, setPrompts] = useState({ frame_analysis: '', viral_clip_detection: '', subject_tracking: '', summary: '' });
+  const [promptDefaults, setPromptDefaults] = useState({ frame_analysis: '', viral_clip_detection: '', subject_tracking: '', summary: '' });
   const [promptsSaving, setPromptsSaving] = useState(false);
   const [promptsLoaded, setPromptsLoaded] = useState(false);
 
@@ -1285,6 +1285,46 @@ export default function Settings() {
                 </div>
               </div>
 
+              {/* Video Summary Prompt */}
+              <div style={{ marginBottom: 28 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <h4 style={{ fontSize: 13, margin: 0, color: 'var(--text-primary)' }}>Video Summary</h4>
+                  <button
+                    onClick={() => setPrompts((prev) => ({ ...prev, summary: promptDefaults.summary }))}
+                    disabled={prompts.summary === promptDefaults.summary}
+                    style={{
+                      padding: '3px 10px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                      border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 11,
+                      opacity: prompts.summary === promptDefaults.summary ? 0.4 : 1,
+                    }}
+                  >
+                    Reset to Default
+                  </button>
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.5 }}>
+                  Controls how the AI summarizes your video — the overview, topics, tone, audience, and category.
+                  Write in a conversational style to get natural, human-readable summaries.
+                </p>
+                <textarea
+                  value={prompts.summary}
+                  onChange={(e) => setPrompts((prev) => ({ ...prev, summary: e.target.value }))}
+                  rows={8}
+                  style={{
+                    width: '100%', minHeight: 120, maxHeight: 400, padding: '10px 12px', resize: 'vertical',
+                    background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                    color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-mono)', lineHeight: 1.6, boxSizing: 'border-box',
+                  }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                    {prompts.summary.length.toLocaleString()} / 10,000
+                  </span>
+                  {prompts.summary !== promptDefaults.summary && (
+                    <span style={{ fontSize: 10, color: 'var(--accent-amber)' }}>Modified</span>
+                  )}
+                </div>
+              </div>
+
               {/* Viral Algorithm Section */}
               <div ref={viralAlgorithmRef} style={{
                 background: 'var(--bg-panel)', border: '1px solid var(--border)',
@@ -1384,11 +1424,11 @@ export default function Settings() {
                 </button>
                 <button
                   onClick={handleResetAllPrompts}
-                  disabled={promptsSaving || (prompts.frame_analysis === promptDefaults.frame_analysis && prompts.viral_clip_detection === promptDefaults.viral_clip_detection && prompts.subject_tracking === promptDefaults.subject_tracking)}
+                  disabled={promptsSaving || (prompts.frame_analysis === promptDefaults.frame_analysis && prompts.viral_clip_detection === promptDefaults.viral_clip_detection && prompts.subject_tracking === promptDefaults.subject_tracking && prompts.summary === promptDefaults.summary)}
                   style={{
                     padding: '8px 16px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
                     border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 12,
-                    opacity: (promptsSaving || (prompts.frame_analysis === promptDefaults.frame_analysis && prompts.viral_clip_detection === promptDefaults.viral_clip_detection && prompts.subject_tracking === promptDefaults.subject_tracking)) ? 0.4 : 1,
+                    opacity: (promptsSaving || (prompts.frame_analysis === promptDefaults.frame_analysis && prompts.viral_clip_detection === promptDefaults.viral_clip_detection && prompts.subject_tracking === promptDefaults.subject_tracking && prompts.summary === promptDefaults.summary)) ? 0.4 : 1,
                   }}
                 >
                   Reset All to Defaults

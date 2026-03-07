@@ -1524,6 +1524,7 @@ class SavePromptsRequest(BaseModel):
     frame_analysis: Optional[str] = None
     viral_clip_detection: Optional[str] = None
     subject_tracking: Optional[str] = None
+    summary: Optional[str] = None
 
 
 @router.get("/prompts")
@@ -1569,6 +1570,15 @@ async def update_prompts(req: SavePromptsRequest):
                 "message": f"Subject tracking prompt exceeds {MAX_PROMPT_LENGTH} characters",
             }
         current.subject_tracking = text if text else defaults.subject_tracking
+
+    if req.summary is not None:
+        text = req.summary.strip()
+        if len(text) > MAX_PROMPT_LENGTH:
+            return {
+                "status": "error",
+                "message": f"Summary prompt exceeds {MAX_PROMPT_LENGTH} characters",
+            }
+        current.summary = text if text else defaults.summary
 
     save_prompts(current)
     return {"status": "saved", "prompts": current.model_dump()}

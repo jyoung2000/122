@@ -160,6 +160,7 @@ class PromptSet(BaseModel):
     frame_analysis: str = Field(default=DEFAULT_FRAME_ANALYSIS_PROMPT)
     viral_clip_detection: str = Field(default=DEFAULT_VIRAL_CLIP_PROMPT)
     subject_tracking: str = Field(default=DEFAULT_SUBJECT_TRACKING_PROMPT)
+    summary: str = Field(default=DEFAULT_SUMMARY_PROMPT)
 
 
 def load_prompts() -> PromptSet:
@@ -187,4 +188,5 @@ def get_defaults() -> PromptSet:
         frame_analysis=DEFAULT_FRAME_ANALYSIS_PROMPT,
         viral_clip_detection=DEFAULT_VIRAL_CLIP_PROMPT,
         subject_tracking=DEFAULT_SUBJECT_TRACKING_PROMPT,
+        summary=DEFAULT_SUMMARY_PROMPT,
     )
