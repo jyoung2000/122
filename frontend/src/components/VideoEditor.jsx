@@ -27,6 +27,9 @@ const SEGMENT_COLORS = [
   '#AC8E68', // Tan/Brown
 ];
 
+// Speaker color palette (must match SubtitleOverlay / ClipSettingsPanel)
+const DEFAULT_SPEAKER_PALETTE = ['#00D9FF', '#F59E0B', '#10B981', '#A78BFA', '#EF4444', '#EC4899'];
+
 // ── Constants ────────────────────────────────────────────────────────────────
 const ASPECT_RATIO_VALUES = {
   '16:9': 16 / 9,
@@ -2469,8 +2472,8 @@ export default function VideoEditor({
           }}>
             Speaker Colors
           </span>
-          {speakers.map((spk) => {
-            const color = settings?.speakerColors?.[spk] || '#00D9FF';
+          {speakers.map((spk, spkIdx) => {
+            const color = settings?.speakerColors?.[spk] || DEFAULT_SPEAKER_PALETTE[spkIdx % DEFAULT_SPEAKER_PALETTE.length];
             const displayName = speakerNames?.[spk] || spk;
             return (
               <label key={spk} style={{

@@ -15,6 +15,9 @@ import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
 
+// Speaker color palette (must match SubtitleOverlay / ClipSettingsPanel / VideoEditor)
+const DEFAULT_SPEAKER_PALETTE = ['#00D9FF', '#F59E0B', '#10B981', '#A78BFA', '#EF4444', '#EC4899'];
+
 function formatDuration(seconds) {
   if (!seconds) return '-';
   const m = Math.floor(seconds / 60);
@@ -981,6 +984,24 @@ export default function Analysis() {
   (job.transcript || []).forEach((seg) => {
     if (!speakers.includes(seg.speaker)) speakers.push(seg.speaker);
   });
+
+  // Auto-initialize speaker colors from palette when speakers are detected
+  // This ensures each speaker gets a unique color even before ClipSettingsPanel mounts
+  const speakerColorsInitRef = useRef(false);
+  if (speakers.length > 0 && !speakerColorsInitRef.current) {
+    const currentColors = clipSettings.speakerColors || {};
+    const needsInit = speakers.some((sp) => !currentColors[sp]);
+    if (needsInit) {
+      const newColors = { ...currentColors };
+      speakers.forEach((sp, i) => {
+        if (!newColors[sp]) {
+          newColors[sp] = DEFAULT_SPEAKER_PALETTE[i % DEFAULT_SPEAKER_PALETTE.length];
+        }
+      });
+      setClipSettings((prev) => ({ ...prev, speakerColors: newColors }));
+      speakerColorsInitRef.current = true;
+    }
+  }
 
   // Always use ClipPreview when a clip is selected so it responds to
   // aspect ratio and subtitle settings changes in real time.

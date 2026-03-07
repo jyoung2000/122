@@ -19,10 +19,12 @@ export default function InteractiveOverlay({ currentTime = 0, clipStart = 0, con
 
   const absTime = clipStart + currentTime;
 
-  // Filter to visible overlay items (text, shape, image, overlay, subtitle) at current time
+  // Filter to visible overlay items (text, shape, image, overlay) at current time.
+  // Subtitle items are excluded — they are rendered by SubtitleOverlay (the "Subs On"
+  // system) and edited via the timeline track + PropertiesPanel instead.
   const visible = useMemo(() => {
     return items.filter((it) => {
-      if (it.type === 'video' || it.type === 'audio') return false;
+      if (it.type === 'video' || it.type === 'audio' || it.type === 'subtitle') return false;
       return absTime >= it.start && absTime < it.end;
     });
   }, [items, absTime]);
