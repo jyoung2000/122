@@ -277,9 +277,32 @@ export default function Upload() {
               Upload complete — starting analysis pipeline...
             </span>
           </div>
-          <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 12px', lineHeight: 1.5 }}>
             Redirecting to analysis page{postUploadSeconds > 0 ? ` (${postUploadSeconds}s)` : ''}...
-            The AI will extract frames, transcribe audio, and analyze scenes.
+            You'll see live progress for each step on the analysis page.
+          </p>
+          <div style={{ textAlign: 'left', margin: '0 auto', maxWidth: 340 }}>
+            {[
+              { label: 'Frame extraction', est: '~30s' },
+              { label: 'Audio transcription', est: '~1-2 min' },
+              { label: 'Scene analysis', est: '~1-2 min' },
+              { label: 'Viral clip detection', est: '~30s' },
+            ].map((step, i) => (
+              <div key={i} style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '4px 0', fontSize: 12, color: 'var(--text-secondary)',
+              }}>
+                <span style={{
+                  width: 6, height: 6, borderRadius: '50%',
+                  background: 'var(--text-muted)', flexShrink: 0,
+                }} />
+                <span style={{ flex: 1 }}>{step.label}</span>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>{step.est}</span>
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '10px 0 0', lineHeight: 1.4, fontStyle: 'italic' }}>
+            Total estimated time: 3-5 minutes depending on video length
           </p>
           <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
         </div>
@@ -305,12 +328,18 @@ export default function Upload() {
           border: '1px solid rgba(245, 158, 11, 0.3)',
           borderRadius: 'var(--radius-sm)',
           display: 'flex',
-          alignItems: 'center',
-          gap: 8,
+          flexDirection: 'column',
+          gap: 6,
         }}>
-          <span style={{ fontSize: 16, flexShrink: 0 }}>&#9888;</span>
-          <span style={{ fontSize: 12, color: 'var(--accent-amber)', lineHeight: 1.4 }}>
-            Upload in progress — do not close this tab or navigate away until the upload is complete.
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 16, flexShrink: 0 }}>&#9888;</span>
+            <span style={{ fontSize: 12, color: 'var(--accent-amber)', lineHeight: 1.4 }}>
+              Upload in progress — do not close this tab or navigate away until the upload is complete.
+            </span>
+          </div>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4, paddingLeft: 24 }}>
+            After upload, you'll be redirected to the analysis page where AI will extract frames,
+            transcribe audio, analyze scenes, and detect viral clips (3-5 min).
           </span>
         </div>
       )}

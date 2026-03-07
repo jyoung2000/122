@@ -48,7 +48,31 @@ app.add_middleware(CrossOriginIsolationMiddleware)
 
 @app.on_event("startup")
 async def _startup_preload():
-    """Preload the Whisper model in a background thread so the first job starts fast."""
+    """Auto-detect GPU and preload Whisper model at startup."""
+    # Auto-enable GPU acceleration if an NVIDIA GPU is detected and the user
+    # hasn't explicitly configured the setting yet.
+    from backend.config import settings as cfg
+    try:
+        smi = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if smi.returncode == 0 and smi.stdout.strip():
+            gpu_name = smi.stdout.strip().split("\n")[0].strip()
+            logger.info("NVIDIA GPU detected at startup: %s", gpu_name)
+            # Auto-enable GPU acceleration
+            cfg.GPU_ACCELERATION_ENABLED = True
+            cfg.GPU_VENDOR_OVERRIDE = "nvidia"
+            logger.info("GPU acceleration auto-enabled for encoding and Whisper")
+            # Also force re-detect by clearing the cache
+            try:
+                from backend.services.clip_exporter import _gpu_info_cache_clear
+                _gpu_info_cache_clear()
+            except Exception:
+                pass
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        logger.info("No NVIDIA GPU detected — using CPU for encoding and Whisper")
+
     from backend.services.transcription import preload_model
     threading.Thread(target=preload_model, daemon=True).start()
 

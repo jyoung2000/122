@@ -78,3 +78,46 @@ async def upload_media(
         "size": len(content),
         "url": url,
     })
+
+
+@router.get("/api/media/list")
+async def list_media(job_id: str = Query(...)):
+    """List all uploaded media files for a job."""
+    media_dir = os.path.join(UPLOAD_DIR, job_id, "media")
+    if not os.path.isdir(media_dir):
+        return JSONResponse({"items": []})
+
+    items = []
+    for fname in sorted(os.listdir(media_dir)):
+        fpath = os.path.join(media_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+        media_type = detect_media_type(fname)
+        if not media_type:
+            continue
+        media_id = Path(fname).stem
+        items.append({
+            "id": media_id,
+            "filename": fname,
+            "type": media_type,
+            "size": os.path.getsize(fpath),
+            "url": f"/api/files/{job_id}/media/{fname}",
+        })
+    return JSONResponse({"items": items})
+
+
+@router.delete("/api/media/{media_id}")
+async def delete_media(media_id: str, job_id: str = Query(...)):
+    """Delete an uploaded media file."""
+    media_dir = os.path.join(UPLOAD_DIR, job_id, "media")
+    if not os.path.isdir(media_dir):
+        raise HTTPException(status_code=404, detail="Media not found")
+
+    for fname in os.listdir(media_dir):
+        if Path(fname).stem == media_id:
+            fpath = os.path.join(media_dir, fname)
+            os.remove(fpath)
+            logger.info("Deleted media %s for job %s", fname, job_id)
+            return JSONResponse({"deleted": True, "id": media_id})
+
+    raise HTTPException(status_code=404, detail="Media not found")

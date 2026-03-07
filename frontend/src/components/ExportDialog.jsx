@@ -26,6 +26,8 @@ export default function ExportDialog({
   startTime = 0,
   endTime = 0,
   aspectRatio,
+  jobId,
+  clipId,
 }) {
   const [quality, setQuality] = useState('1080p');
   const [exportMode, setExportMode] = useState('server'); // 'server' | 'client'
@@ -41,7 +43,23 @@ export default function ExportDialog({
 
     if (exportMode === 'server') {
       const preset = QUALITY_PRESETS.find(p => p.id === quality) || QUALITY_PRESETS[1];
-      onServerExport?.({ quality: preset.id });
+      const exportPayload = {
+        quality: preset.id,
+        ...(settings || {}),
+        ...(jobId ? { jobId } : {}),
+        ...(clipId ? { clipId } : {}),
+        startTime,
+        endTime,
+      };
+      if (onServerExport) {
+        onServerExport(exportPayload);
+      } else if (jobId && clipId) {
+        fetch(`/api/export/${jobId}/${clipId}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(exportPayload),
+        }).catch(() => {});
+      }
       onClose?.();
       return;
     }

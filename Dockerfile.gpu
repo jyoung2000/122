@@ -5,6 +5,10 @@ FROM nvidia/cuda:12.3.2-cudnn9-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+# Ensure CUDA libraries are on the library path for ctranslate2/faster-whisper
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib/python3.11/dist-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/dist-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+# Auto-enable GPU acceleration at startup
+ENV GPU_ACCELERATION_ENABLED=true
 
 # Install system dependencies + VA-API support for Intel/AMD
 RUN apt-get update && apt-get install -y \

@@ -80,7 +80,7 @@ const useTimelineStore = create(
       setPlayhead: (t) => set({ playhead: t }),
       setIsPlaying: (v) => set({ isPlaying: v }),
       setDuration: (d) => set({ duration: d }),
-      setZoom: (z) => set({ zoom: Math.max(0.1, Math.min(10, z)) }),
+      setZoom: (z) => set({ zoom: Math.max(0.01, Math.min(10, z)) }),
       setScrollX: (x) => set({ scrollX: Math.max(0, x) }),
       toggleSnap: () => set((state) => { state.snapEnabled = !state.snapEnabled; }),
       setSelectedItemId: (id) => set({ selectedItemId: id, selectedItemIds: id ? [id] : [] }),

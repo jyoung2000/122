@@ -441,17 +441,108 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
         </div>
       )}
 
-      {/* ── Subtitle text ── */}
+      {/* ── Subtitle text + styling ── */}
       {item.type === 'subtitle' && (
-        <div className="ve-properties__section">
-          <label className="ve-properties__label">Subtitle Text</label>
-          <textarea
-            value={item.subtitleText || ''}
-            onChange={(e) => update('subtitleText', e.target.value)}
-            className="ve-properties__textarea"
-            rows={3}
-          />
-        </div>
+        <>
+          <div className="ve-properties__section">
+            <label className="ve-properties__label">Subtitle Text</label>
+            <textarea
+              value={item.subtitleText || ''}
+              onChange={(e) => update('subtitleText', e.target.value)}
+              className="ve-properties__textarea"
+              rows={3}
+            />
+          </div>
+
+          <div className="ve-properties__section">
+            <label className="ve-properties__label">Font</label>
+            <div className="ve-properties__row">
+              <div className="ve-properties__field" style={{ flex: 2 }}>
+                <span className="ve-properties__field-label">Family</span>
+                <select
+                  value={item.subtitleStyle?.fontFamily || 'DM Sans'}
+                  onChange={(e) => updateNested('subtitleStyle', 'fontFamily', e.target.value)}
+                  className="ve-properties__select"
+                >
+                  {FONT_OPTIONS.map(f => <option key={f} value={f}>{f}</option>)}
+                </select>
+              </div>
+              <div className="ve-properties__field">
+                <span className="ve-properties__field-label">Weight</span>
+                <select
+                  value={item.subtitleStyle?.fontWeight || 700}
+                  onChange={(e) => updateNested('subtitleStyle', 'fontWeight', parseInt(e.target.value))}
+                  className="ve-properties__select"
+                >
+                  <option value={300}>Light</option>
+                  <option value={400}>Regular</option>
+                  <option value={600}>Semi</option>
+                  <option value={700}>Bold</option>
+                  <option value={900}>Black</option>
+                </select>
+              </div>
+            </div>
+            <SliderRow label="Size" value={item.subtitleStyle?.fontSize || 48} min={8} max={200} step={1} unit="px" onChange={(v) => updateNested('subtitleStyle', 'fontSize', v)} />
+            <div className="ve-properties__row">
+              <ColorField label="Color" value={item.subtitleStyle?.color || '#FFFFFF'} onChange={(v) => updateNested('subtitleStyle', 'color', v)} />
+              <div className="ve-properties__field">
+                <span className="ve-properties__field-label">Align</span>
+                <div style={{ display: 'flex', gap: 2 }}>
+                  {['left', 'center', 'right'].map(a => (
+                    <button
+                      key={a}
+                      className={`ve-properties__speed-pill${(item.subtitleStyle?.textAlign || 'center') === a ? ' ve-properties__speed-pill--active' : ''}`}
+                      onClick={() => updateNested('subtitleStyle', 'textAlign', a)}
+                      style={{ padding: '3px 7px', fontSize: 9, textTransform: 'capitalize' }}
+                    >
+                      {a === 'left' ? '\u25C0' : a === 'right' ? '\u25B6' : '\u25C6'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="ve-properties__section">
+            <label className="ve-properties__label" onClick={() => toggleSection('subOutline')} style={{ cursor: 'pointer' }}>
+              Outline & Shadow {expandedSections.subOutline === false ? '\u25B8' : '\u25BE'}
+            </label>
+            {expandedSections.subOutline !== false && (
+              <>
+                <div className="ve-properties__row">
+                  <NumField label="Outline" value={item.subtitleStyle?.outlineWidth || 0} min={0} max={10} step={0.5} onChange={(v) => updateNested('subtitleStyle', 'outlineWidth', v)} />
+                  <ColorField label="Stroke" value={item.subtitleStyle?.outlineColor || '#000000'} onChange={(v) => updateNested('subtitleStyle', 'outlineColor', v)} />
+                </div>
+                <SliderRow label="Shadow" value={item.subtitleStyle?.shadowBlur || 0} min={0} max={20} step={0.5} unit="px" onChange={(v) => updateNested('subtitleStyle', 'shadowBlur', v)} />
+              </>
+            )}
+          </div>
+
+          <div className="ve-properties__section">
+            <label className="ve-properties__label" onClick={() => toggleSection('subBg')} style={{ cursor: 'pointer' }}>
+              Background {expandedSections.subBg === false ? '\u25B8' : '\u25BE'}
+            </label>
+            {expandedSections.subBg !== false && (
+              <>
+                <div className="ve-properties__row">
+                  <ColorField label="BG Color" value={item.subtitleStyle?.bgColor || '#000000'} onChange={(v) => updateNested('subtitleStyle', 'bgColor', v)} />
+                  <NumField label="Opacity" value={item.subtitleStyle?.bgOpacity || 0} min={0} max={100} onChange={(v) => updateNested('subtitleStyle', 'bgOpacity', v)} />
+                </div>
+                <div className="ve-properties__row">
+                  <NumField label="Padding" value={item.subtitleStyle?.bgPadding || 8} min={0} max={40} onChange={(v) => updateNested('subtitleStyle', 'bgPadding', v)} />
+                  <NumField label="Radius" value={item.subtitleStyle?.bgRadius || 4} min={0} max={40} onChange={(v) => updateNested('subtitleStyle', 'bgRadius', v)} />
+                </div>
+              </>
+            )}
+          </div>
+
+          <div className="ve-properties__section">
+            <label className="ve-properties__label">Position</label>
+            <SliderRow label="X" value={item.position?.x ?? 50} min={0} max={100} step={0.5} unit="%" onChange={(v) => update('position', { ...item.position, x: v })} />
+            <SliderRow label="Y" value={item.position?.y ?? 90} min={0} max={100} step={0.5} unit="%" onChange={(v) => update('position', { ...item.position, y: v })} />
+            <SliderRow label="Max Width" value={item.subtitleStyle?.maxWidth || 90} min={10} max={100} step={1} unit="%" onChange={(v) => updateNested('subtitleStyle', 'maxWidth', v)} />
+          </div>
+        </>
       )}
 
       {/* ── Transition ── */}

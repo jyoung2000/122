@@ -628,6 +628,16 @@ export default function VideoEditor({
     }
   }, [initialSegments]);
 
+  useEffect(() => {
+    useTimelineStore.getState().setSegments(
+      segments.map((s) => ({
+        ...s,
+        start: s.start != null ? s.start - clipStart : 0,
+        end: s.end != null ? s.end - clipStart : 0,
+      }))
+    );
+  }, [segments, clipStart]);
+
   // ── Sync volume/speed from settings panel ──────────
   // These ONLY apply to global state — never route to segments.
   // Segment settings should only change via direct user interaction.
@@ -863,7 +873,8 @@ export default function VideoEditor({
   const syncTime = useCallback((t) => {
     setCurrentTime(t);
     onTimeUpdate?.(t);
-  }, [onTimeUpdate]);
+    useTimelineStore.getState().setPlayhead(t - clipStart);
+  }, [onTimeUpdate, clipStart]);
 
   // Track which segment is active for volume override — store id + a hash
   // of the segment's settings so we re-apply when properties change.
@@ -1118,6 +1129,7 @@ export default function VideoEditor({
     const clamped = Math.max(clipStart, Math.min(effectiveClipEnd, time));
     video.currentTime = clamped;
     setCurrentTime(clamped);
+    useTimelineStore.getState().setPlayhead(clamped - clipStart);
   }, [clipStart, effectiveClipEnd]);
 
   const skipTime = useCallback((delta) => {
@@ -2833,6 +2845,10 @@ export default function VideoEditor({
           onClose={() => setShowExportDialog(false)}
           jobId={jobId}
           clipId={clipId}
+          settings={settings}
+          startTime={clipStart}
+          endTime={effectiveClipEnd}
+          aspectRatio={aspectRatio}
         />
       )}
 

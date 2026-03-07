@@ -67,6 +67,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   const removeItem = useTimelineStore((s) => s.removeItem);
   const toggleSnap = useTimelineStore((s) => s.toggleSnap);
   const addTrack = useTimelineStore((s) => s.addTrack);
+  const segments = useTimelineStore((s) => s.segments);
 
   const [isDragging, setIsDragging] = useState(false);
   const [dragInfo, setDragInfo] = useState(null);
@@ -261,6 +262,37 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       }
     });
 
+    // ── Segment boundaries ──
+    if (segments && segments.length > 0) {
+      segments.forEach((seg) => {
+        const segStart = seg.start != null ? seg.start : 0;
+        const segEnd = seg.end != null ? seg.end : 0;
+        for (const edge of [segStart, segEnd]) {
+          const ex = contentLeft + edge * pps - sx;
+          if (ex < contentLeft || ex > canvasW) continue;
+          ctx.strokeStyle = seg.color || '#FF9F0A';
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([4, 3]);
+          ctx.beginPath();
+          ctx.moveTo(ex, RULER_HEIGHT);
+          ctx.lineTo(ex, canvasH);
+          ctx.stroke();
+          ctx.setLineDash([]);
+          ctx.lineWidth = 1;
+        }
+        const sx1 = contentLeft + segStart * pps - sx;
+        const sx2 = contentLeft + segEnd * pps - sx;
+        if (sx2 > contentLeft && sx1 < canvasW && seg.label) {
+          ctx.fillStyle = (seg.color || '#FF9F0A') + '18';
+          ctx.fillRect(Math.max(sx1, contentLeft), RULER_HEIGHT, Math.min(sx2, canvasW) - Math.max(sx1, contentLeft), canvasH - RULER_HEIGHT);
+          ctx.fillStyle = seg.color || '#FF9F0A';
+          ctx.font = '9px -apple-system, BlinkMacSystemFont, sans-serif';
+          ctx.textAlign = 'left';
+          ctx.fillText(seg.label, Math.max(sx1 + 4, contentLeft + 4), RULER_HEIGHT + 10);
+        }
+      });
+    }
+
     // ── Playhead ──
     const phX = contentLeft + playhead * pps - sx;
     if (phX >= contentLeft && phX <= canvasW) {
@@ -323,7 +355,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         ctx.lineWidth = 1;
       }
     }
-  }, [tracks, items, playhead, duration, zoom, scrollX, selectedItemId, hoverTime, pps, compact, activeTool]);
+  }, [tracks, items, playhead, duration, zoom, scrollX, selectedItemId, hoverTime, pps, compact, activeTool, segments]);
 
   // Continuous redraw during playback
   useEffect(() => {
@@ -639,7 +671,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       <div className="ve-multi-timeline__toolbar">
         <button
           className="ve-btn"
-          onClick={() => setZoom(Math.max(0.1, zoom - 0.2))}
+          onClick={() => setZoom(Math.max(0.01, zoom - 0.2))}
           title="Zoom out"
           style={{ fontSize: 12, padding: '2px 6px', minWidth: 24, minHeight: 24 }}
         >
@@ -647,9 +679,9 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         </button>
         <input
           type="range"
-          min="0.1"
+          min="0.01"
           max="10"
-          step="0.1"
+          step="0.01"
           value={zoom}
           onChange={(e) => setZoom(parseFloat(e.target.value))}
           className="ve-multi-timeline__zoom-slider"
@@ -669,7 +701,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
             const canvas = canvasRef.current;
             if (canvas && duration > 0) {
               const availableWidth = canvas.getBoundingClientRect().width - LABEL_WIDTH;
-              const fitZoom = Math.max(0.1, availableWidth / (duration * basePPS));
+              const fitZoom = Math.max(0.01, availableWidth / (duration * basePPS));
               setZoom(fitZoom);
               setScrollX(0);
             }

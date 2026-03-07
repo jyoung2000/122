@@ -251,8 +251,8 @@ function ImageOverlayItem({ item }) {
   const size = item.size || { w: 30, h: 30 };
   const rotation = item.transform?.rotation || 0;
   const finalOpacity = item.opacity ?? 1;
+  const mediaLibrary = useTimelineStore((s) => s.mediaLibrary);
 
-  // Effects as CSS filters
   const effects = item.effects || {};
   const filters = [];
   if (effects.brightness) filters.push(`brightness(${1 + effects.brightness / 100})`);
@@ -262,8 +262,11 @@ function ImageOverlayItem({ item }) {
   if (effects.hueRotate) filters.push(`hue-rotate(${effects.hueRotate}deg)`);
   if (effects.sepia) filters.push(`sepia(${effects.sepia / 100})`);
 
-  // If we have a mediaRef, try to find the URL
-  const mediaSrc = item.mediaSrc || item.mediaRef || '';
+  let mediaSrc = item.mediaSrc || '';
+  if (!mediaSrc && item.mediaRef) {
+    const mediaEntry = mediaLibrary.find((m) => m.id === item.mediaRef);
+    mediaSrc = mediaEntry?.url || mediaEntry?.thumbnailUrl || item.mediaRef;
+  }
 
   if (!mediaSrc) {
     return (

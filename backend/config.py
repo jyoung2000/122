@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     FFMPEG_FASTSTART: bool = True    # -movflags +faststart for web streaming
 
     # GPU Hardware Acceleration — user toggle persisted to user_settings.json
+    # Auto-enabled at startup when NVIDIA GPU is detected (see main.py)
     GPU_ACCELERATION_ENABLED: bool = False   # Toggle in Settings > Advanced
     GPU_VENDOR_OVERRIDE: str = ""            # Empty = auto-detect; "nvidia", "intel", "amd", "apple" to force
     GPU_HWDECODE_ENABLED: bool = True        # Use GPU for video decoding (NVDEC/DXVA2/VAAPI/VideoToolbox)

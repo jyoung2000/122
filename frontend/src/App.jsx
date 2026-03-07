@@ -8,6 +8,7 @@ import ViralClips from './pages/ViralClips';
 import Logs from './pages/Logs';
 import Settings from './pages/Settings';
 import ClipSEO from './pages/ClipSEO';
+import MediaLibrary from './pages/MediaLibrary';
 import ToastContainer from './components/Toast';
 import { EncodingProvider } from './hooks/useEncodingManager';
 // Import installs localStorage monkey-patches for auto-sync
@@ -50,6 +51,7 @@ export default function App() {
           <Route path="/logs" element={<Logs />} />
           <Route path="/analysis/:jobId" element={<Analysis />} />
           <Route path="/seo/:jobId/:clipId" element={<ClipSEO />} />
+          <Route path="/media" element={<MediaLibrary />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </Layout>

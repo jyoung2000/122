@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { path: '/', label: 'Home', icon: 'D', mobileIcon: 'home' },
   { path: '/upload', label: 'Upload', icon: 'U', mobileIcon: 'upload' },
   { path: '/clips', label: 'Clips', icon: 'V', mobileIcon: 'clips' },
+  { path: '/media', label: 'Media Library', icon: 'M', mobileIcon: 'media' },
   { path: '/logs', label: 'Exports', icon: 'L', mobileIcon: 'logs' },
   { path: '/settings', label: 'Settings', icon: 'S', mobileIcon: 'settings' },
 ];
@@ -41,6 +42,11 @@ const MobileTabIcon = ({ type, active }) => {
     case 'logs': return (
       <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke={color} strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">
         <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
+      </svg>
+    );
+    case 'media': return (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke={color} strokeWidth={stroke} strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" /><circle cx="8.5" cy="8.5" r="1.5" fill={active ? color : 'none'} /><polyline points="21 15 16 10 5 21" />
       </svg>
     );
     case 'settings': return (
@@ -98,6 +104,7 @@ export default function Layout({ children }) {
     : location.pathname.startsWith('/clips') ? 'Viral Clips'
     : location.pathname.startsWith('/logs') ? 'Logs & Exports'
     : location.pathname.startsWith('/settings') ? 'Settings'
+    : location.pathname.startsWith('/media') ? 'Media Library'
     : location.pathname.startsWith('/analysis') ? 'Analysis'
     : location.pathname.startsWith('/seo') ? 'Clip Editor'
     : '';
