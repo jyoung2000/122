@@ -1751,14 +1751,14 @@ export default function Settings() {
                               fontSize: 12, padding: '4px 8px',
                               background: 'rgba(255, 255, 255, 0.03)', borderRadius: 4,
                             }}>
-                              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{gpu.name}</span>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{String(gpu.name || '')}</span>
                               <span style={{
                                 fontSize: 10, padding: '1px 6px', borderRadius: 3,
                                 fontFamily: 'var(--font-mono)',
                                 background: gpu.vendor === 'nvidia' ? 'rgba(118, 185, 0, 0.15)' : 'rgba(0, 114, 198, 0.15)',
                                 color: gpu.vendor === 'nvidia' ? '#76b900' : '#0072c6',
                               }}>
-                                {gpu.vendor.toUpperCase()} · {gpu.type === 'discrete' ? 'Discrete' : gpu.type === 'integrated' ? 'Integrated' : 'GPU'}
+                                {String(gpu.vendor || '').toUpperCase()} · {gpu.type === 'discrete' ? 'Discrete' : gpu.type === 'integrated' ? 'Integrated' : 'GPU'}
                                 {gpu.vram_mb > 0 ? ` · ${gpu.vram_mb} MB` : ''}
                               </span>
                             </div>
@@ -1802,18 +1802,18 @@ export default function Settings() {
                       ) : (
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
                           <span style={{ color: 'var(--text-muted)' }}>GPU</span>
-                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{gpuInfo.gpu_name}</span>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{String(gpuInfo.gpu_name || '')}</span>
                         </div>
                       )}
                       {/* Active encoder/decoder info */}
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginTop: 4 }}>
                         <span style={{ color: 'var(--text-muted)' }}>Video Encoder</span>
-                        <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--success)' }}>{gpuInfo.encoder}</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--success)' }}>{String(gpuInfo.encoder || '')}</span>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
                         <span style={{ color: 'var(--text-muted)' }}>Video Decoder</span>
                         <span style={{ fontFamily: 'var(--font-mono)', color: gpuInfo.decoder ? 'var(--success)' : 'var(--text-muted)' }}>
-                          {gpuInfo.decoder || 'N/A'}
+                          {String(gpuInfo.decoder || 'N/A')}
                         </span>
                       </div>
                       <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
@@ -1825,7 +1825,7 @@ export default function Settings() {
                       {gpuInfo.driver_version && (
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
                           <span style={{ color: 'var(--text-muted)' }}>Driver</span>
-                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{gpuInfo.driver_version}</span>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{String(gpuInfo.driver_version || '')}</span>
                         </div>
                       )}
                       {/* GPU Issues / Setup Guidance */}
@@ -1946,7 +1946,7 @@ export default function Settings() {
                   <div style={{ display: 'grid', gap: 6 }}>
                     {clientGpuInfo.gpus.map(gpu => (
                       <div key={gpu.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
-                        <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{gpu.name}</span>
+                        <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{String(gpu.name || '')}</span>
                         <span style={{
                           fontSize: 10, padding: '1px 6px', borderRadius: 3,
                           background: gpu.backend === 'webgpu' ? 'rgba(0, 217, 255, 0.15)' :
@@ -2166,7 +2166,7 @@ export default function Settings() {
                           <div style={{ display: 'grid', gap: 6 }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
                               <span style={{ color: 'var(--text-muted)' }}>GPU</span>
-                              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{gpu.name}</span>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{String(gpu.name || '')}</span>
                             </div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
                               <span style={{ color: 'var(--text-muted)' }}>Type</span>
@@ -2366,7 +2366,7 @@ export default function Settings() {
             <div style={{ display: 'grid', gap: 12 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
                 <span style={{ fontSize: 13 }}>Whisper Model</span>
-                <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{currentModels.transcript_model || 'base'}</span>
+                <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{String(currentModels.transcript_model || 'base')}</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
                 <span style={{ fontSize: 13 }}>Beam Size</span>

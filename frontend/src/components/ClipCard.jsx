@@ -240,7 +240,7 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
           onMouseEnter={(e) => { if (jobId && onTimesChanged) e.currentTarget.style.borderBottomColor = 'var(--accent-cyan)'; }}
           onMouseLeave={(e) => { e.currentTarget.style.borderBottomColor = 'transparent'; }}
         >
-          {clip.title}
+          {String(clip.title || '')}
         </h4>
       )}
 
@@ -321,16 +321,16 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
         {!editingTimes && (
           <>
             <span className={`badge ${clip.platform === 'tiktok' ? 'badge-cyan' : clip.platform === 'youtube_shorts' ? 'badge-red' : 'badge-gray'}`}>
-              {clip.platform.replace('_', ' ')}
+              {String(clip.platform || '').replace('_', ' ')}
             </span>
-            <span className="badge badge-gray">{clip.clip_type}</span>
+            <span className="badge badge-gray">{String(clip.clip_type || '')}</span>
             {clip.clip_focus && (
               <span className="badge" style={{
                 background: 'var(--success-dim, rgba(52,199,89,0.12))',
                 color: 'var(--success)',
                 border: '1px solid var(--success)',
               }}>
-                Focus: {clip.clip_focus}
+                Focus: {String(clip.clip_focus || '')}
               </span>
             )}
           </>

@@ -8,6 +8,7 @@ import VideoEditor from '../components/VideoEditor';
 import SubtitleOverlay from '../components/SubtitleOverlay';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
+import sanitizeJob from '../utils/sanitizeJob';
 
 function formatDuration(seconds) {
   if (!seconds && seconds !== 0) return '0:00';
@@ -318,6 +319,7 @@ export default function ClipSEO() {
   useEffect(() => {
     fetch(`/api/jobs/${jobId}`)
       .then((r) => r.ok ? r.json() : null)
+      .then((raw) => raw ? sanitizeJob(raw) : null)
       .then((data) => {
         if (data) {
           setJob(data);
@@ -350,7 +352,7 @@ export default function ClipSEO() {
     try {
       const res = await fetch(`/api/jobs/${jobId}`);
       if (res.ok) {
-        const data = await res.json();
+        const data = sanitizeJob(await res.json());
         setJob(data);
         const found = (data.clips || []).find((c) => c.id === parseInt(clipId));
         if (found) setClip(found);
@@ -846,7 +848,7 @@ export default function ClipSEO() {
         <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
           <Link to="/clips" style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>Viral Clips</Link>
           {' / '}
-          <Link to={`/analysis/${jobId}`} style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>{job.filename}</Link>
+          <Link to={`/analysis/${jobId}`} style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>{String(job.filename || '')}</Link>
           {' / '}
           <span style={{ color: 'var(--text-primary)' }}>SEO — Clip {clipId}</span>
         </div>
@@ -1231,28 +1233,28 @@ export default function ClipSEO() {
           {/* Clip info */}
           <div style={sectionStyle}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-              <h3 style={{ fontSize: 16, margin: 0 }}>{clip.title}</h3>
+              <h3 style={{ fontSize: 16, margin: 0 }}>{String(clip.title || '')}</h3>
               <div style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 700, color: scoreColor }}>
                 {clip.viral_score}<span style={{ fontSize: 10, color: 'var(--text-muted)' }}>/100</span>
               </div>
             </div>
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
               <span className={`badge ${clip.platform === 'tiktok' ? 'badge-cyan' : clip.platform === 'youtube_shorts' ? 'badge-red' : 'badge-gray'}`}>
-                {clip.platform.replace('_', ' ')}
+                {String(clip.platform || '').replace('_', ' ')}
               </span>
-              <span className="badge badge-gray">{clip.clip_type}</span>
+              <span className="badge badge-gray">{String(clip.clip_type || '')}</span>
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)' }}>
                 {formatDuration(clipDur)}
               </span>
             </div>
             {clip.hook_text && (
               <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>
-                <strong style={{ color: 'var(--text-primary)' }}>Hook:</strong> {clip.hook_text}
+                <strong style={{ color: 'var(--text-primary)' }}>Hook:</strong> {String(clip.hook_text || '')}
               </div>
             )}
             {clip.why_this_works && (
               <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                <strong style={{ color: 'var(--text-primary)' }}>Why it works:</strong> {clip.why_this_works}
+                <strong style={{ color: 'var(--text-primary)' }}>Why it works:</strong> {String(clip.why_this_works || '')}
               </div>
             )}
           </div>

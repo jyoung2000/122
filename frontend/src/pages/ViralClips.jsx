@@ -6,6 +6,7 @@ import ClipSettingsPanel from '../components/ClipSettingsPanel';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
+import sanitizeJob from '../utils/sanitizeJob';
 
 function formatDuration(seconds) {
   if (!seconds) return '-';
@@ -568,6 +569,7 @@ export default function ViralClips() {
         withClips.map((j) =>
           fetch(`/api/jobs/${j.job_id}`)
             .then((r) => r.ok ? r.json() : null)
+            .then((d) => d ? sanitizeJob(d) : null)
             .catch(() => null)
         )
       );
@@ -1083,7 +1085,7 @@ export default function ViralClips() {
                 <span style={{ fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)', background: 'var(--accent-cyan-dim)', padding: '2px 6px', borderRadius: 3 }}>SUBS</span>
               )}
               {!clipSettingsOpen && settings.aspectRatio && (
-                <span style={{ fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--accent-amber)', background: 'rgba(245,158,11,0.1)', padding: '2px 6px', borderRadius: 3 }}>{settings.aspectRatio}</span>
+                <span style={{ fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--accent-amber)', background: 'rgba(245,158,11,0.1)', padding: '2px 6px', borderRadius: 3 }}>{String(settings.aspectRatio || '')}</span>
               )}
             </span>
             <span style={{ fontSize: 14, color: 'var(--text-muted)', transition: 'transform 0.2s ease', transform: clipSettingsOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}>
@@ -1442,7 +1444,7 @@ export default function ViralClips() {
                     onMouseEnter={(e) => e.target.style.borderBottomColor = 'var(--accent-cyan)'}
                     onMouseLeave={(e) => e.target.style.borderBottomColor = 'transparent'}
                   >
-                    {clip.title}
+                    {String(clip.title || '')}
                     <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 6, opacity: 0.6 }}>&#x270E;</span>
                   </h4>
                 )}
@@ -1455,16 +1457,16 @@ export default function ViralClips() {
                     ({formatDuration(clip.duration)})
                   </span>
                   <span className={`badge ${clip.platform === 'tiktok' ? 'badge-cyan' : clip.platform === 'youtube_shorts' ? 'badge-red' : 'badge-gray'}`}>
-                    {clip.platform.replace('_', ' ')}
+                    {String(clip.platform || '').replace('_', ' ')}
                   </span>
-                  <span className="badge badge-gray">{clip.clip_type}</span>
+                  <span className="badge badge-gray">{String(clip.clip_type || '')}</span>
                   {clip.clip_focus && (
                     <span className="badge" style={{
                       background: 'var(--success-dim, rgba(52,199,89,0.12))',
                       color: 'var(--success)',
                       border: '1px solid var(--success)',
                     }}>
-                      Focus: {clip.clip_focus}
+                      Focus: {String(clip.clip_focus || '')}
                     </span>
                   )}
                   {clip.focus_relevance != null && (
@@ -1501,17 +1503,17 @@ export default function ViralClips() {
                 <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
                   {clip.suggested_caption && (
                     <div style={{ marginBottom: 4 }}>
-                      <strong style={{ color: 'var(--text-primary)' }}>Caption:</strong> {clip.suggested_caption}
+                      <strong style={{ color: 'var(--text-primary)' }}>Caption:</strong> {String(clip.suggested_caption || '')}
                     </div>
                   )}
                   {clip.hook_text && (
                     <div style={{ marginBottom: 4 }}>
-                      <strong style={{ color: 'var(--text-primary)' }}>Hook:</strong> {clip.hook_text}
+                      <strong style={{ color: 'var(--text-primary)' }}>Hook:</strong> {String(clip.hook_text || '')}
                     </div>
                   )}
                   {clip.why_this_works && (
                     <div>
-                      <strong style={{ color: 'var(--text-primary)' }}>Why it works:</strong> {clip.why_this_works}
+                      <strong style={{ color: 'var(--text-primary)' }}>Why it works:</strong> {String(clip.why_this_works || '')}
                     </div>
                   )}
                 </div>
@@ -1540,7 +1542,7 @@ export default function ViralClips() {
                       <span style={{ marginLeft: 6, fontSize: 9, color: 'var(--accent-cyan)' }}>SUBS</span>
                     )}
                     {isCustom && clipSettings.aspectRatio && (
-                      <span style={{ marginLeft: 6, fontSize: 9, color: 'var(--accent-amber)' }}>{clipSettings.aspectRatio}</span>
+                      <span style={{ marginLeft: 6, fontSize: 9, color: 'var(--accent-amber)' }}>{String(clipSettings.aspectRatio || '')}</span>
                     )}
                   </span>
                   <span style={{ fontSize: 12 }}>{isEditing ? '\u25B4' : '\u25BE'}</span>

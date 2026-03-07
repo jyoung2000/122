@@ -1847,7 +1847,7 @@ export default function VideoEditor({
         {segEntryIndicator && (
           <div className="ve-segment-enter-indicator" style={{ '--seg-color': segEntryIndicator.color }}>
             <span className="ve-segment-enter-indicator__dot" style={{ background: segEntryIndicator.color }} />
-            <span>{segEntryIndicator.label}</span>
+            <span>{String(segEntryIndicator.label || '')}</span>
             {segEntryIndicator.muted ? (
               <span style={{ color: '#FF3B30' }}>Muted</span>
             ) : (
@@ -1860,7 +1860,7 @@ export default function VideoEditor({
         )}
 
         {aspectRatio && (
-          <div className="ve-aspect-badge">{aspectRatio}</div>
+          <div className="ve-aspect-badge">{String(aspectRatio || '')}</div>
         )}
 
         {!playing && (
@@ -2282,7 +2282,7 @@ export default function VideoEditor({
                   }}
                 >
                   <span className="ve-segment-chip__dot" style={{ background: segHexColor }} />
-                  <span className="ve-segment-chip__label">{seg.label || 'Segment'}</span>
+                  <span className="ve-segment-chip__label">{String(seg.label || 'Segment')}</span>
                   <span className="ve-segment-chip__time">
                     {formatTimeShort(seg.start - clipStart)} – {formatTimeShort(seg.end - clipStart)}
                   </span>
