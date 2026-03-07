@@ -56,7 +56,8 @@ export function EncodingProvider({ children }) {
 
   const pushLog = useCallback((level, message, extra) => {
     const id = ++logIdRef.current;
-    const entry = { id, timestamp: Date.now(), level, message };
+    const safeMsg = typeof message === 'string' ? message : String(message ?? '');
+    const entry = { id, timestamp: Date.now(), level, message: safeMsg };
     if (extra) entry.extra = extra;
     setLogs((prev) => [entry, ...prev].slice(0, MAX_LOGS));
     return entry;
@@ -126,6 +127,8 @@ export function EncodingProvider({ children }) {
     ws.onmessage = (evt) => {
       try {
         const msg = JSON.parse(evt.data);
+        // Coerce message to string to prevent React error #310
+        if (msg.message != null && typeof msg.message !== 'string') msg.message = String(msg.message);
         if (msg.type === 'status' && msg.status === 'exporting') {
           setTasks((prev) => {
             const task = prev[exportId];
@@ -255,6 +258,7 @@ export function EncodingProvider({ children }) {
     ws.onmessage = (evt) => {
       try {
         const msg = JSON.parse(evt.data);
+        if (msg.message != null && typeof msg.message !== 'string') msg.message = String(msg.message);
         if (msg.type === 'status') {
           const level = msg.status === 'failed' ? 'error' : 'status';
           pushLog(level, `[${label}] ${msg.message || `Status: ${msg.status}`}`, {

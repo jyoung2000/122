@@ -435,7 +435,7 @@ export default function Logs() {
                         )}
                       </div>
                       <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                        {task.message}
+                        {typeof task.message === 'string' ? task.message : String(task.message ?? '')}
                       </div>
                       {task.progress != null && task.status === 'encoding' && (
                         <div style={{ marginTop: 4 }}>
@@ -540,7 +540,7 @@ export default function Logs() {
                             {task.exportQuality.toUpperCase()}
                           </span>
                         )}
-                        <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 8 }}>{task.message}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 8 }}>{typeof task.message === 'string' ? task.message : String(task.message ?? '')}</span>
                         {task.progress != null && task.status === 'encoding' && (
                           <div style={{ marginTop: 4 }}>
                             <ProgressBar progress={task.progress} variant="amber" />
@@ -1026,7 +1026,7 @@ export default function Logs() {
                     color: LOG_LEVEL_COLORS[entry.level] || 'var(--text-secondary)',
                     wordBreak: 'break-word',
                   }}>
-                    {entry.message}
+                    {typeof entry.message === 'string' ? entry.message : String(entry.message ?? '')}
                   </span>
                 </div>
               ))
