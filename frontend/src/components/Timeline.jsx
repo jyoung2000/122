@@ -2,9 +2,9 @@ import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import useTimelineStore from '../stores/timelineStore';
 
 // ── Constants ────────────────────────────────────────────────────────────────
-const TRACK_HEIGHT = 44;
+const TRACK_HEIGHT = 52;
 const TRACK_GAP = 1;
-const LABEL_WIDTH = 72;
+const LABEL_WIDTH = 80;
 const HANDLE_WIDTH = 6;
 const HANDLE_HIT_AREA = 12;
 const SNAP_THRESHOLD_PX = 5;
@@ -601,10 +601,10 @@ export default function Timeline({ compact = false, onSeek }) {
 
   // ── Compute canvas height ──────────────────────────────────────────────────
   const visibleTracks = tracks.filter((t) => t.visible !== false);
-  const canvasHeight = RULER_HEIGHT + visibleTracks.length * (TRACK_HEIGHT + TRACK_GAP) + 8;
+  const canvasHeight = RULER_HEIGHT + visibleTracks.length * (TRACK_HEIGHT + TRACK_GAP) + 12;
 
   return (
-    <div ref={containerRef} className="ve-multi-timeline" style={{ position: 'relative' }}>
+    <div ref={containerRef} className="ve-multi-timeline" style={{ position: 'relative', height: '100%' }}>
       {/* Toolbar row */}
       <div className="ve-multi-timeline__toolbar">
         <button
@@ -669,7 +669,7 @@ export default function Timeline({ compact = false, onSeek }) {
       <canvas
         ref={canvasRef}
         className="ve-multi-timeline__canvas"
-        style={{ width: '100%', height: canvasHeight }}
+        style={{ width: '100%', height: Math.max(canvasHeight, 280) }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerLeave={onPointerLeave}

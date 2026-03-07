@@ -217,6 +217,8 @@ export default function VideoEditor({
   jobId,
   clipId,
   transcript,
+  // Analysis state
+  isProcessing = false,
 }) {
   const { isMobile } = useResponsive();
 
@@ -235,19 +237,28 @@ export default function VideoEditor({
   // Initialize timeline store when clip data changes
   const addItem = useTimelineStore((s) => s.addItem);
   const multiTrackInitialized = useRef(false);
+  const lastInitClipEnd = useRef(0);
   useEffect(() => {
-    if (!src || multiTrackInitialized.current) return;
-    if (!recovered && timelineStoreItems.length === 0) {
+    if (!src) return;
+    const effectiveEnd = clipEnd > clipStart ? clipEnd : 0;
+    // Skip if clipEnd is not yet available (still processing)
+    if (effectiveEnd <= 0) return;
+
+    // Re-init if clipEnd becomes available for the first time, or changes significantly
+    const needsInit = !multiTrackInitialized.current || (lastInitClipEnd.current === 0 && effectiveEnd > 0);
+    if (!needsInit) return;
+
+    if (!recovered || timelineStoreItems.length === 0 || lastInitClipEnd.current === 0) {
       // Fresh init — populate with transcript subtitles
-      initFromClip({ src, clipStart, clipEnd, subtitleSegments: transcript || [] });
+      initFromClip({ src, clipStart, clipEnd: effectiveEnd, subtitleSegments: transcript || [] });
     } else if (recovered && transcript && transcript.length > 0) {
       // Recovered state but no subtitle items — backfill from transcript
       const hasSubtitles = timelineStoreItems.some((it) => it.type === 'subtitle');
       if (!hasSubtitles) {
         transcript.forEach((seg) => {
-          if (seg.end > clipStart && seg.start < clipEnd) {
+          if (seg.end > clipStart && seg.start < effectiveEnd) {
             const s = Math.max(seg.start, clipStart);
-            const e = Math.min(seg.end, clipEnd);
+            const e = Math.min(seg.end, effectiveEnd);
             addItem({
               trackId: 't1',
               type: 'subtitle',
@@ -272,7 +283,39 @@ export default function VideoEditor({
       }
     }
     multiTrackInitialized.current = true;
+    lastInitClipEnd.current = effectiveEnd;
   }, [src, clipStart, clipEnd, initFromClip, recovered, timelineStoreItems.length, transcript, addItem]);
+
+  // Re-populate subtitles when transcript becomes available after analysis
+  const lastTranscriptLength = useRef(0);
+  useEffect(() => {
+    if (!transcript || transcript.length === 0) return;
+    if (transcript.length === lastTranscriptLength.current) return;
+    lastTranscriptLength.current = transcript.length;
+
+    const effectiveEnd = clipEnd > clipStart ? clipEnd : 0;
+    if (effectiveEnd <= 0) return;
+
+    // Check if we already have subtitles — if not, add them
+    const currentItems = useTimelineStore.getState().items;
+    const hasSubtitles = currentItems.some((it) => it.type === 'subtitle');
+    if (hasSubtitles) return;
+
+    transcript.forEach((seg) => {
+      if (seg.end > clipStart && seg.start < effectiveEnd) {
+        const s = Math.max(seg.start, clipStart);
+        const e = Math.min(seg.end, effectiveEnd);
+        addItem({
+          trackId: 't1',
+          type: 'subtitle',
+          mediaRef: null,
+          start: s - clipStart,
+          end: e - clipStart,
+          subtitleText: seg.text,
+        });
+      }
+    });
+  }, [transcript, clipStart, clipEnd, addItem]);
 
   const videoRef = useRef(null);
   const containerRef = useRef(null);
@@ -2616,9 +2659,16 @@ export default function VideoEditor({
       {!compact && (
         <div className="ve-multitrack-toggle">
           <button
-            className={`ve-multitrack-toggle__btn${showMultiTrack ? ' ve-multitrack-toggle__btn--active' : ''}`}
-            onClick={(e) => { e.stopPropagation(); setShowMultiTrack(v => !v); }}
-            title="Toggle multi-track timeline editor"
+            className={`ve-multitrack-toggle__btn${showMultiTrack ? ' ve-multitrack-toggle__btn--active' : ''}${isProcessing ? ' ve-multitrack-toggle__btn--disabled' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (isProcessing) return;
+              setShowMultiTrack(v => {
+                if (!v) setShowProperties(true); // auto-show properties when opening
+                return !v;
+              });
+            }}
+            title={isProcessing ? 'Available after analysis completes' : 'Toggle multi-track timeline editor'}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <rect x="1" y="3" width="22" height="4" rx="1" />

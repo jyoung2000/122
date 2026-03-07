@@ -1418,32 +1418,74 @@ input.ve-timecode--input {
 
 .ve-multitrack {
   display: flex;
+  flex-direction: column;
   background: var(--ve-chrome-bg);
   border-top: 1px solid var(--ve-chrome-border);
-  min-height: 180px;
-  max-height: 350px;
   overflow: hidden;
 }
 
+.ve-multitrack__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  background: var(--ve-chrome-bg);
+  border-bottom: 1px solid var(--ve-chrome-border);
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.ve-multitrack__toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.ve-multitrack__content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.ve-multitrack__center {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.ve-multitrack__effects-panel {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--ve-chrome-border);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
 .ve-multitrack__sidebar {
-  width: 200px;
-  min-width: 160px;
-  max-width: 250px;
+  width: 240px;
+  min-width: 200px;
+  max-width: 280px;
   flex-shrink: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   border-right: 1px solid var(--ve-chrome-border);
   padding: 0;
 }
 .ve-multitrack__sidebar--right {
   border-right: none;
   border-left: 1px solid var(--ve-chrome-border);
+  width: 260px;
+  max-width: 300px;
 }
 
 .ve-multitrack__sidebar-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 8px;
+  padding: 8px 10px;
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
@@ -1459,13 +1501,56 @@ input.ve-timecode--input {
 .ve-multitrack__timeline {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   overflow: hidden;
+}
+
+/* Disabled state for multi-track toggle when analysis not done */
+.ve-multitrack-toggle__btn--disabled {
+  opacity: 0.4;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+/* Active small button styles */
+.ve-btn--active {
+  background: rgba(10, 132, 255, 0.1) !important;
+  color: var(--ve-accent) !important;
+  border-color: rgba(10, 132, 255, 0.3) !important;
+}
+
+.ve-btn--export {
+  background: var(--ve-accent) !important;
+  color: #fff !important;
+  border: none !important;
+  font-weight: 600;
+}
+.ve-btn--export:hover {
+  background: var(--ve-accent-hover) !important;
+}
+
+.ve-btn--small {
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 5px;
+  border: 1px solid var(--ve-chrome-border);
+  background: var(--ve-track-bg);
+  color: var(--ve-text-muted);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.ve-btn--small:hover {
+  background: var(--ve-btn-hover);
+  color: var(--ve-text);
 }
 
 /* ── Multi-track timeline canvas ────────────────────── */
 
 .ve-multi-timeline {
   height: 100%;
+  min-height: 280px;
   display: flex;
   flex-direction: column;
 }
@@ -1920,9 +2005,8 @@ input.ve-timecode--input {
 /* ── Responsive: multi-track ────────────────────────── */
 
 @media (max-width: 767px) {
-  .ve-multitrack {
+  .ve-multitrack__content {
     flex-direction: column;
-    max-height: 400px;
   }
   .ve-multitrack__sidebar {
     width: 100%;
@@ -1934,9 +2018,18 @@ input.ve-timecode--input {
   .ve-multitrack__sidebar--right {
     border-left: none;
     border-top: 1px solid var(--ve-chrome-border);
+    width: 100%;
+    max-width: none;
+    max-height: 200px;
   }
   .ve-multitrack-toggle {
     flex-wrap: wrap;
+  }
+  .ve-multitrack__toolbar {
+    overflow-x: auto;
+  }
+  .ve-multitrack__toolbar-actions {
+    margin-left: 0;
   }
 }
 
