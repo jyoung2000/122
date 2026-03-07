@@ -498,7 +498,9 @@ export default function Analysis() {
 
   const pushLog = useCallback((type, message, extra) => {
     const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    setActivityLog((prev) => [...prev, { ts, type, message, ...extra }]);
+    // Ensure message is always a string to prevent React error #310
+    const safeMsg = typeof message === 'string' ? message : String(message ?? '');
+    setActivityLog((prev) => [...prev, { ts, type, message: safeMsg, ...extra }]);
   }, []);
 
   // Auto-scroll log to bottom (within its own scroll container, not the page)
@@ -543,8 +545,8 @@ export default function Analysis() {
               setJob((prev) => prev ? {
                 ...prev,
                 status: msg.status || prev.status,
-                progress: msg.progress ?? prev.progress,
-                progress_message: msg.message || prev.progress_message,
+                progress: typeof msg.progress === 'number' ? msg.progress : (prev.progress ?? 0),
+                progress_message: typeof msg.message === 'string' ? msg.message : (prev.progress_message || ''),
               } : prev);
             }
             // Track clip generation state from status messages
@@ -1942,7 +1944,7 @@ export default function Analysis() {
                       </span>
                     )}
                     <span style={{ color: colors[entry.type] || colors.status }}>
-                      {entry.message}
+                      {typeof entry.message === 'string' ? entry.message : String(entry.message ?? '')}
                     </span>
                   </div>
                 );
@@ -1963,7 +1965,7 @@ export default function Analysis() {
       {/* Error */}
       {job.status === 'failed' && job.error && (
         <div style={{ padding: '12px 16px', background: 'var(--danger-dim)', border: '1px solid var(--danger)', color: 'var(--danger)', fontSize: 13, margin: '12px 0', borderRadius: 'var(--radius-sm)' }}>
-          {job.error}
+          {typeof job.error === 'string' ? job.error : JSON.stringify(job.error)}
         </div>
       )}
 
@@ -2065,7 +2067,7 @@ export default function Analysis() {
             <div className="slide-in">
               <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 20, marginBottom: 16, boxShadow: 'var(--shadow-sm)' }}>
                 <h3 style={{ fontSize: 14, marginBottom: 12, color: 'var(--accent-cyan)' }}>Overview</h3>
-                <p style={{ fontSize: 14, lineHeight: 1.6, color: 'var(--text-primary)' }}>{job.summary.overview}</p>
+                <p style={{ fontSize: 14, lineHeight: 1.6, color: 'var(--text-primary)' }}>{String(job.summary.overview || '')}</p>
               </div>
 
               <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 16, flexWrap: 'wrap', marginBottom: 16 }}>
@@ -2073,16 +2075,16 @@ export default function Analysis() {
                   <h4 style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Key Topics</h4>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     {(job.summary.key_topics || []).map((t, i) => (
-                      <span key={i} className="badge badge-cyan">{t}</span>
+                      <span key={i} className="badge badge-cyan">{typeof t === 'string' ? t : String(t)}</span>
                     ))}
                   </div>
                 </div>
                 <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 16, flex: 1, minWidth: 200, boxShadow: 'var(--shadow-sm)' }}>
                   <h4 style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Details</h4>
                   <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-                    <div style={{ marginBottom: 4 }}>Tone: <span className="badge badge-gray">{job.summary.tone}</span></div>
-                    <div style={{ marginBottom: 4 }}>Audience: {job.summary.estimated_audience}</div>
-                    <div>Category: <span className="badge badge-amber">{job.summary.content_category}</span></div>
+                    <div style={{ marginBottom: 4 }}>Tone: <span className="badge badge-gray">{String(job.summary.tone || '')}</span></div>
+                    <div style={{ marginBottom: 4 }}>Audience: {String(job.summary.estimated_audience || '')}</div>
+                    <div>Category: <span className="badge badge-amber">{String(job.summary.content_category || '')}</span></div>
                   </div>
                 </div>
               </div>

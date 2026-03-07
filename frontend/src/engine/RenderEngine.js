@@ -101,7 +101,7 @@ export default class RenderEngine {
     // Request GPU-accelerated canvas — willReadFrequently: false lets Chrome
     // keep the canvas on the GPU (hardware composited) instead of forcing
     // software readback on every frame.
-    this.ctx = canvas.getContext('2d', { willReadFrequently: false, desynchronized: true });
+    this.ctx = canvas.getContext('2d', { willReadFrequently: false }) || canvas.getContext('2d');
     this.width = options.width || 1920;
     this.height = options.height || 1080;
     this._fontCache = new Set();

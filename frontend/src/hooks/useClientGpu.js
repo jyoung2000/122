@@ -17,7 +17,17 @@ export function useClientGpuPreferences() {
     const load = () => {
       try {
         const saved = localStorage.getItem('clipai_client_gpu');
-        if (saved) setPrefs(JSON.parse(saved));
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          // Ensure all values are primitives (never objects) to prevent React error #310
+          setPrefs({
+            enabled: !!parsed.enabled,
+            selectedGpuId: String(parsed.selectedGpuId || ''),
+            selectedGpuName: String(parsed.selectedGpuName || ''),
+            whisperEnabled: parsed.whisperEnabled !== false,
+            encodingEnabled: parsed.encodingEnabled !== false,
+          });
+        }
       } catch { /* ignore */ }
     };
     load();
@@ -75,10 +85,10 @@ export function useAutoDetectGpu() {
 
         const state = {
           enabled: true,
-          selectedGpuId: gpu.id,
-          selectedGpuName: gpu.name || '',
-          whisperEnabled: gpu.whisperCapable || false,
-          encodingEnabled: info.webcodecSupported || false,
+          selectedGpuId: String(gpu.id || ''),
+          selectedGpuName: String(gpu.name || ''),
+          whisperEnabled: !!gpu.whisperCapable,
+          encodingEnabled: !!info.webcodecSupported,
         };
         localStorage.setItem('clipai_client_gpu', JSON.stringify(state));
         window.dispatchEvent(new Event('clientgpu-changed'));

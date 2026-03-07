@@ -28,7 +28,7 @@ export default function ProgressBar({ progress, message, variant = 'cyan' }) {
             marginBottom: 6,
           }}
         >
-          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{message}</span>
+          <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{typeof message === 'string' ? message : String(message ?? '')}</span>
           <span style={{ fontSize: 12, fontWeight: 600, fontFamily: 'var(--font-mono)', color }}>{displayProgress}%</span>
         </div>
       )}

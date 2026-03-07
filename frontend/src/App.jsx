@@ -32,7 +32,7 @@ class ErrorBoundary extends React.Component {
         <div style={{ padding: 48, textAlign: 'center', fontFamily: 'system-ui, sans-serif', color: '#ccc', background: '#0a0a0f', minHeight: '100vh' }}>
           <h2 style={{ color: '#ef4444', marginBottom: 16 }}>Something went wrong</h2>
           <p style={{ fontSize: 14, marginBottom: 12, color: '#888' }}>
-            {this.state.error?.message || 'An unexpected error occurred.'}
+            {String(this.state.error?.message || 'An unexpected error occurred.')}
           </p>
           <button
             onClick={() => { this.setState({ hasError: false, error: null }); window.location.reload(); }}
@@ -45,6 +45,51 @@ class ErrorBoundary extends React.Component {
     }
     return this.props.children;
   }
+}
+
+// ── Page-level Error Boundary — keeps Layout visible when a page crashes ──
+class PageErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error('[PageError] Uncaught error in page:', error, info?.componentStack);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 48, textAlign: 'center' }}>
+          <h2 style={{ color: 'var(--danger, #ef4444)', marginBottom: 16, fontSize: 18 }}>This page encountered an error</h2>
+          <p style={{ fontSize: 13, marginBottom: 16, color: 'var(--text-muted, #888)', maxWidth: 500, margin: '0 auto 16px' }}>
+            {String(this.state.error?.message || 'An unexpected error occurred.')}
+          </p>
+          <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+            <button
+              onClick={() => this.setState({ hasError: false, error: null })}
+              style={{ padding: '8px 20px', fontSize: 13, background: 'var(--bg-elevated, #1a1a2e)', color: 'var(--text-primary, #ccc)', border: '1px solid var(--border, #333)', borderRadius: 6, cursor: 'pointer' }}
+            >
+              Try Again
+            </button>
+            <button
+              onClick={() => window.location.reload()}
+              style={{ padding: '8px 20px', fontSize: 13, background: 'var(--accent-cyan, #00D9FF)', color: '#000', border: 'none', borderRadius: 6, cursor: 'pointer' }}
+            >
+              Reload Page
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function Wrapped({ children }) {
+  return <PageErrorBoundary>{children}</PageErrorBoundary>;
 }
 
 export default function App() {
@@ -84,14 +129,14 @@ export default function App() {
         <ToastContainer />
         <Layout>
           <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/upload" element={<Upload />} />
-            <Route path="/clips" element={<ViralClips />} />
-            <Route path="/logs" element={<Logs />} />
-            <Route path="/analysis/:jobId" element={<Analysis />} />
-            <Route path="/seo/:jobId/:clipId" element={<ClipSEO />} />
-            <Route path="/media" element={<MediaLibrary />} />
-            <Route path="/settings" element={<Settings />} />
+            <Route path="/" element={<Wrapped><Dashboard /></Wrapped>} />
+            <Route path="/upload" element={<Wrapped><Upload /></Wrapped>} />
+            <Route path="/clips" element={<Wrapped><ViralClips /></Wrapped>} />
+            <Route path="/logs" element={<Wrapped><Logs /></Wrapped>} />
+            <Route path="/analysis/:jobId" element={<Wrapped><Analysis /></Wrapped>} />
+            <Route path="/seo/:jobId/:clipId" element={<Wrapped><ClipSEO /></Wrapped>} />
+            <Route path="/media" element={<Wrapped><MediaLibrary /></Wrapped>} />
+            <Route path="/settings" element={<Wrapped><Settings /></Wrapped>} />
           </Routes>
         </Layout>
       </EncodingProvider>

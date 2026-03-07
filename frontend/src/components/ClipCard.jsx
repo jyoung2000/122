@@ -351,17 +351,17 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
 
       <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
         <div style={{ marginBottom: 4 }}>
-          <strong style={{ color: 'var(--text-primary)' }}>Caption:</strong> {clip.suggested_caption}
+          <strong style={{ color: 'var(--text-primary)' }}>Caption:</strong> {String(clip.suggested_caption || '')}
         </div>
         <div style={{ marginBottom: 4 }}>
-          <strong style={{ color: 'var(--text-primary)' }}>Hook:</strong> {clip.hook_text}
+          <strong style={{ color: 'var(--text-primary)' }}>Hook:</strong> {String(clip.hook_text || '')}
         </div>
         <div style={{ marginBottom: 4 }}>
-          <strong style={{ color: 'var(--text-primary)' }}>Why it works:</strong> {clip.why_this_works}
+          <strong style={{ color: 'var(--text-primary)' }}>Why it works:</strong> {String(clip.why_this_works || '')}
         </div>
         {clip.viral_score_reasoning && (
           <div>
-            <strong style={{ color: 'var(--text-primary)' }}>Score reasoning:</strong> {clip.viral_score_reasoning}
+            <strong style={{ color: 'var(--text-primary)' }}>Score reasoning:</strong> {String(clip.viral_score_reasoning || '')}
           </div>
         )}
       </div>
