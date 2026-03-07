@@ -12,6 +12,7 @@ import ToolBar from './ToolBar';
 import EffectsPanel from './EffectsPanel';
 import TransitionPicker from './TransitionPicker';
 import ExportDialog from './ExportDialog';
+import InteractiveOverlay from './InteractiveOverlay';
 import './VideoEditor.css';
 
 // ── Segment Color Palette ────────────────────────────────────────────────────
@@ -320,7 +321,9 @@ export default function VideoEditor({
 
   const videoRef = useRef(null);
   const containerRef = useRef(null);
+  const viewportRef = useRef(null);
   const timelineRef = useRef(null);
+  const [overlayInteracting, setOverlayInteracting] = useState(false);
   const waveformCanvasRef = useRef(null);
   const waveformDataRef = useRef(null);
   const audioCtxRef = useRef(null);
@@ -1733,6 +1736,7 @@ export default function VideoEditor({
 
       {/* ── Viewport ── */}
       <div
+        ref={viewportRef}
         className={`ve-viewport${isFullscreen ? ' ve-viewport--fullscreen' : ''}`}
         style={isFullscreen ? {} : {
           aspectRatio: `${targetRatio}`,
@@ -1741,7 +1745,7 @@ export default function VideoEditor({
           width: '100%',
           margin: '0 auto',
         }}
-        onClick={togglePlay}
+        onClick={() => { if (!overlayInteracting) togglePlay(); }}
       >
         <video
           ref={videoRef}
@@ -1760,6 +1764,16 @@ export default function VideoEditor({
           <TimelineOverlay
             currentTime={currentTime - clipStart}
             clipStart={clipStart}
+          />
+        )}
+
+        {/* Interactive overlay: click-to-select, drag, resize, rotate on preview */}
+        {showMultiTrack && (
+          <InteractiveOverlay
+            currentTime={currentTime - clipStart}
+            clipStart={clipStart}
+            containerRef={viewportRef}
+            onInteraction={setOverlayInteracting}
           />
         )}
 
@@ -1784,7 +1798,7 @@ export default function VideoEditor({
         )}
 
         {!playing && (
-          <div className="ve-viewport__play-overlay">
+          <div className="ve-viewport__play-overlay" style={{ pointerEvents: 'none' }}>
             <div className="ve-viewport__play-icon">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="white" stroke="none">
                 <path d="M6.5 4.1c-.9-.5-2 .1-2 1.2v13.4c0 1.1 1.1 1.7 2 1.2l11.6-6.7c.9-.5.9-1.8 0-2.4L6.5 4.1z" />
