@@ -249,6 +249,26 @@ async def _run_analysis_inner(job_id: str):
         f"Metadata extracted — {res} @ {fps_val}fps, {dur_fmt} duration, {mb:.1f}MB",
     )
 
+    # Broadcast GPU info early so user can see what hardware is available
+    try:
+        from backend.services.clip_exporter import detect_gpu_capabilities, get_encoder_label
+        _gpu = detect_gpu_capabilities()
+        _gpu_parts = []
+        if _gpu.get("cuda_available"):
+            _gpu_parts.append(f"Whisper: CUDA ({_gpu.get('gpu_name', 'GPU')})")
+        else:
+            _gpu_parts.append("Whisper: CPU")
+        _enc_label = get_encoder_label()
+        _gpu_parts.append(f"Encoding: {_enc_label}")
+        await broadcast_ws(job_id, {
+            "type": "status",
+            "status": "processing",
+            "progress": 5,
+            "message": f"Hardware — {' | '.join(_gpu_parts)}",
+        })
+    except Exception:
+        pass  # Non-critical — don't break pipeline if GPU detection fails
+
     # Step 2 — Frame + Audio Extraction in parallel (5-15%)
     cancel_check()
     file_mb = metadata.get("file_size_mb", 0)
@@ -329,8 +349,17 @@ async def _run_analysis_inner(job_id: str):
     async def _branch_transcription():
         cancel_check()
         lang_label = job.language if job.language else "auto-detect"
+        # Include GPU/device info in the initial transcription message
+        from backend.services.transcription import whisper_device_info
+        _wdev = whisper_device_info
+        if _wdev["device"] == "cuda" and _wdev["gpu_name"]:
+            device_label = f"GPU: {_wdev['gpu_name']} ({_wdev['compute_type']})"
+        elif _wdev["device"] == "cuda":
+            device_label = f"GPU: CUDA ({_wdev['compute_type']})"
+        else:
+            device_label = f"CPU ({_wdev['compute_type']})"
         await _update_branch_progress("transcription", 5, JobStatus.TRANSCRIBING,
-            f"Transcribing audio ({lang_label})...")
+            f"Transcribing audio ({lang_label}) — {device_label}")
 
         async def _transcribe_progress(info: dict):
             pct = info["pct"]
@@ -341,6 +370,7 @@ async def _run_analysis_inner(job_id: str):
             # branch-specific ETA here to avoid confusing double "remaining" messages.
             parts = [f"Transcribing{lang_info}: {pos} / {total}"]
             parts.append(f"{info['segments']} segments")
+            parts.append(f"via {device_label}")
             branch_pct = 5 + pct * 0.95  # 5-100% (audio already extracted in Step 2)
             await _update_branch_progress("transcription", branch_pct,
                 JobStatus.TRANSCRIBING, " \u2014 ".join(parts))

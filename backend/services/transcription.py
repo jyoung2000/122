@@ -12,6 +12,9 @@ logger = logging.getLogger(__name__)
 _whisper_model = None
 _model_lock = threading.Lock()
 
+# Exposed after model loads so the pipeline can report GPU info in status messages
+whisper_device_info = {"device": "cpu", "compute_type": "int8", "gpu_name": ""}
+
 # Dedicated thread pool for transcription so it never competes with
 # the default executor (used for base64 encoding, etc.).  A single
 # worker is sufficient because Whisper already parallelises internally.
@@ -28,7 +31,7 @@ _SEGMENT_STALL_TIMEOUT = 120  # 2 minutes
 
 
 def _get_whisper_model():
-    global _whisper_model
+    global _whisper_model, whisper_device_info
     with _model_lock:
         if _whisper_model is None:
             from faster_whisper import WhisperModel
@@ -37,13 +40,32 @@ def _get_whisper_model():
             # Pick best device and compute type automatically
             device = "cpu"
             compute_type = "int8"
+            gpu_name = ""
             try:
-                if ctranslate2.get_cuda_device_count() > 0:
+                cuda_count = ctranslate2.get_cuda_device_count()
+                if cuda_count > 0:
                     device = "cuda"
                     compute_type = "float16"
-                    logger.info("CUDA GPU detected — using float16 for Whisper")
+                    # Try to get GPU name via nvidia-smi for user-facing logs
+                    try:
+                        import subprocess
+                        smi = subprocess.run(
+                            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
+                            capture_output=True, text=True, timeout=5,
+                        )
+                        if smi.returncode == 0 and smi.stdout.strip():
+                            gpu_name = smi.stdout.strip().split("\n")[0].strip()
+                    except Exception:
+                        gpu_name = f"CUDA GPU ({cuda_count} device{'s' if cuda_count > 1 else ''})"
+                    logger.info("CUDA GPU detected: %s — using float16 for Whisper", gpu_name or "unknown")
             except Exception:
                 pass
+
+            whisper_device_info = {
+                "device": device,
+                "compute_type": compute_type,
+                "gpu_name": gpu_name,
+            }
 
             logger.info(
                 f"Loading Whisper model: {settings.WHISPER_MODEL} "
@@ -54,7 +76,8 @@ def _get_whisper_model():
                 device=device,
                 compute_type=compute_type,
             )
-            logger.info(f"Whisper model '{settings.WHISPER_MODEL}' loaded successfully")
+            logger.info(f"Whisper model '{settings.WHISPER_MODEL}' loaded successfully on {device}" +
+                         (f" ({gpu_name})" if gpu_name else ""))
     return _whisper_model
 
 

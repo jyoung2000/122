@@ -37,6 +37,38 @@ logger = logging.getLogger(__name__)
 _gpu_info: dict | None = None
 
 
+def get_encoder_label() -> str:
+    """Return a user-friendly label describing the current video encoder + GPU.
+
+    Examples:
+      "NVENC (NVIDIA GeForce RTX 4070)"
+      "VideoToolbox (Apple M2 Pro)"
+      "libx264 (CPU)"
+    """
+    if not app_settings.GPU_ACCELERATION_ENABLED:
+        return "libx264 (CPU)"
+    gpu = detect_gpu_capabilities()
+    encoder = gpu.get("encoder", "libx264")
+    gpu_name = gpu.get("gpu_name", "")
+    if encoder == "libx264":
+        return "libx264 (CPU)"
+    # Map encoder codecs to friendly names
+    _ENCODER_NAMES = {
+        "h264_nvenc": "NVENC H.264",
+        "hevc_nvenc": "NVENC HEVC",
+        "h264_qsv": "QuickSync H.264",
+        "hevc_qsv": "QuickSync HEVC",
+        "h264_vaapi": "VAAPI H.264",
+        "hevc_vaapi": "VAAPI HEVC",
+        "h264_videotoolbox": "VideoToolbox H.264",
+        "hevc_videotoolbox": "VideoToolbox HEVC",
+    }
+    friendly = _ENCODER_NAMES.get(encoder, encoder)
+    if gpu_name and gpu_name != "None (CPU only)":
+        return f"{friendly} ({gpu_name})"
+    return friendly
+
+
 def _gpu_info_cache_clear():
     """Clear the cached GPU info so next detect_gpu_capabilities() call re-scans."""
     global _gpu_info
@@ -3378,7 +3410,8 @@ async def export_clip(
 
             logger.info("FFmpeg export command for clip %s: %s", clip_id, " ".join(cmd))
             logger.info("FFmpeg filter chain for clip %s: %s", clip_id, vf or "(none)")
-            await _notify(f"Encoding clip {clip_id} with filters ({filter_desc})...")
+            _enc_label = get_encoder_label()
+            await _notify(f"Encoding clip {clip_id} via {_enc_label} — filters ({filter_desc})...")
 
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -3446,10 +3479,10 @@ async def export_clip(
                         else:
                             _eta_str = f"{_eta_s}s"
                         await _notify(
-                            f"Encoding clip {clip_id}... {_pct}% ({_elapsed}s elapsed, ~{_eta_str} remaining)"
+                            f"Encoding clip {clip_id} [{_enc_label}]... {_pct}% ({_elapsed}s elapsed, ~{_eta_str} remaining)"
                         )
                     else:
-                        await _notify(f"Encoding clip {clip_id}... ({_elapsed}s elapsed)")
+                        await _notify(f"Encoding clip {clip_id} [{_enc_label}]... ({_elapsed}s elapsed)")
 
             await proc.wait()
             await _stderr_task
