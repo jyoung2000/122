@@ -2780,6 +2780,7 @@ export default function VideoEditor({
                       onTimeUpdate?.(absTime);
                     }
                   }}
+                  onItemSelect={() => setShowProperties(true)}
                 />
               </div>
             </div>

@@ -2,13 +2,13 @@ import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react'
 import useTimelineStore from '../stores/timelineStore';
 
 // ── Constants ────────────────────────────────────────────────────────────────
-const TRACK_HEIGHT = 52;
+const TRACK_HEIGHT = 64;
 const TRACK_GAP = 1;
-const LABEL_WIDTH = 80;
+const LABEL_WIDTH = 90;
 const HANDLE_WIDTH = 6;
 const HANDLE_HIT_AREA = 12;
 const SNAP_THRESHOLD_PX = 5;
-const RULER_HEIGHT = 24;
+const RULER_HEIGHT = 28;
 
 const TRACK_COLORS = {
   video: '#3B82F6',
@@ -43,7 +43,7 @@ function formatTimeMs(s) {
   return `${m}:${sec.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
 }
 
-export default function Timeline({ compact = false, onSeek }) {
+export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
 
@@ -73,6 +73,16 @@ export default function Timeline({ compact = false, onSeek }) {
   const [hoverTime, setHoverTime] = useState(null);
   const [contextMenu, setContextMenu] = useState(null);
   const [showAddTrack, setShowAddTrack] = useState(false);
+  const [spaceHeld, setSpaceHeld] = useState(false);
+
+  // Spacebar hold for pan mode
+  useEffect(() => {
+    const onKeyDown = (e) => { if (e.code === 'Space' && !e.repeat) setSpaceHeld(true); };
+    const onKeyUp = (e) => { if (e.code === 'Space') setSpaceHeld(false); };
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp); };
+  }, []);
 
   const basePPS = compact ? 40 : 60;
   const pps = basePPS * zoom;
@@ -401,6 +411,14 @@ export default function Timeline({ compact = false, onSeek }) {
 
     setContextMenu(null);
 
+    // Middle-click or space+left-click: pan/scroll
+    if (e.button === 1 || (e.button === 0 && spaceHeld)) {
+      e.preventDefault();
+      setIsDragging(true);
+      setDragInfo({ type: 'pan', startX: e.clientX, origScrollX: scrollX });
+      return;
+    }
+
     // Razor tool: split on click
     if (activeTool === 'razor') {
       const time = getTimeFromX(e.clientX);
@@ -414,6 +432,7 @@ export default function Timeline({ compact = false, onSeek }) {
     const hit = hitTestItem(e.clientX, e.clientY);
     if (hit) {
       setSelectedItemId(hit.item.id);
+      onItemSelect?.(hit.item);
 
       if (hit.edge === 'left' || hit.edge === 'right') {
         setIsDragging(true);
@@ -449,12 +468,18 @@ export default function Timeline({ compact = false, onSeek }) {
       setIsDragging(true);
       setDragInfo({ type: 'scrub', startX: e.clientX });
     }
-  }, [hitTestItem, getTimeFromX, setPlayhead, setSelectedItemId, onSeek, activeTool, splitItem]);
+  }, [hitTestItem, getTimeFromX, setPlayhead, setSelectedItemId, onSeek, activeTool, splitItem, spaceHeld, scrollX, onItemSelect]);
 
   useEffect(() => {
     if (!isDragging || !dragInfo) return;
 
     const onMove = (e) => {
+      if (dragInfo.type === 'pan') {
+        const dx = e.clientX - dragInfo.startX;
+        setScrollX(Math.max(0, dragInfo.origScrollX - dx));
+        return;
+      }
+
       const time = getTimeFromX(e.clientX);
 
       if (dragInfo.type === 'scrub') {
@@ -508,7 +533,7 @@ export default function Timeline({ compact = false, onSeek }) {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
     };
-  }, [isDragging, dragInfo, items, pps, scrollX, snapEnabled, playhead, getTimeFromX, getTrackFromY, updateItem, setPlayhead, onSeek]);
+  }, [isDragging, dragInfo, items, pps, scrollX, snapEnabled, playhead, getTimeFromX, getTrackFromY, updateItem, setPlayhead, onSeek, setScrollX]);
 
   // ── Hover ──────────────────────────────────────────────────────────────────
   const onPointerMove = useCallback((e) => {
@@ -521,6 +546,11 @@ export default function Timeline({ compact = false, onSeek }) {
 
     setHoverTime(getTimeFromX(e.clientX));
 
+    if (spaceHeld) {
+      canvas.style.cursor = 'grab';
+      return;
+    }
+
     if (activeTool === 'razor') {
       canvas.style.cursor = 'crosshair';
       return;
@@ -532,7 +562,7 @@ export default function Timeline({ compact = false, onSeek }) {
     } else {
       canvas.style.cursor = 'pointer';
     }
-  }, [isDragging, getTimeFromX, hitTestItem, activeTool]);
+  }, [isDragging, getTimeFromX, hitTestItem, activeTool, spaceHeld]);
 
   const onPointerLeave = useCallback(() => setHoverTime(null), []);
 
@@ -609,7 +639,7 @@ export default function Timeline({ compact = false, onSeek }) {
       <div className="ve-multi-timeline__toolbar">
         <button
           className="ve-btn"
-          onClick={() => setZoom(zoom - 0.2)}
+          onClick={() => setZoom(Math.max(0.1, zoom - 0.2))}
           title="Zoom out"
           style={{ fontSize: 12, padding: '2px 6px', minWidth: 24, minHeight: 24 }}
         >
@@ -618,7 +648,7 @@ export default function Timeline({ compact = false, onSeek }) {
         <input
           type="range"
           min="0.1"
-          max="5"
+          max="10"
           step="0.1"
           value={zoom}
           onChange={(e) => setZoom(parseFloat(e.target.value))}
@@ -626,11 +656,28 @@ export default function Timeline({ compact = false, onSeek }) {
         />
         <button
           className="ve-btn"
-          onClick={() => setZoom(zoom + 0.2)}
+          onClick={() => setZoom(Math.min(10, zoom + 0.2))}
           title="Zoom in"
           style={{ fontSize: 12, padding: '2px 6px', minWidth: 24, minHeight: 24 }}
         >
           +
+        </button>
+        <button
+          className="ve-btn"
+          onClick={() => {
+            // Fit entire duration in view
+            const canvas = canvasRef.current;
+            if (canvas && duration > 0) {
+              const availableWidth = canvas.getBoundingClientRect().width - LABEL_WIDTH;
+              const fitZoom = Math.max(0.1, availableWidth / (duration * basePPS));
+              setZoom(fitZoom);
+              setScrollX(0);
+            }
+          }}
+          title="Fit entire video in view"
+          style={{ fontSize: 10, padding: '2px 8px', minWidth: 'auto', minHeight: 24, fontWeight: 600 }}
+        >
+          Fit
         </button>
         <button
           className={`ve-btn${snapEnabled ? ' ve-btn--active-snap' : ''}`}
