@@ -9,8 +9,8 @@ from backend.config import settings
 from backend.models import (
     FrameData, SceneDescription, TranscriptSegment, VideoSummary, ClipCandidate, ClipSEO,
 )
-from backend.services.providers.base import AIProvider, ProviderError, extract_json, extract_description_fallback, normalize_seo_data
-from backend.services.prompts import DEFAULT_FRAME_ANALYSIS_PROMPT, DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT
+from backend.services.providers.base import AIProvider, ProviderError, extract_json, extract_description_fallback, normalize_seo_data, build_fallback_summary
+from backend.services.prompts import DEFAULT_FRAME_ANALYSIS_PROMPT, DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT, DEFAULT_SUMMARY_PROMPT
 
 # JSON schema appended to vision prompts so Ollama returns structured data
 # including subject_x for dynamic subject tracking.
@@ -179,7 +179,7 @@ class OllamaProvider(AIProvider):
         ) if scenes else "No scene descriptions available."
 
         prompt = (
-            "Based on the transcript and scene descriptions below, generate a content summary.\n\n"
+            f"{DEFAULT_SUMMARY_PROMPT}\n\n"
             f"TRANSCRIPT:\n{transcript_text[:3000]}\n\n"
             f"SCENES:\n{scene_text[:1000]}\n\n"
             "Return ONLY valid JSON:\n"
@@ -191,13 +191,8 @@ class OllamaProvider(AIProvider):
             data = extract_json(raw)
             return VideoSummary(**data)
         except Exception:
-            return VideoSummary(
-                overview=raw[:500] if raw else "Summary generation failed with local AI.",
-                key_topics=["Unable to parse"],
-                tone="unknown",
-                estimated_audience="general",
-                content_category="uncategorized",
-            )
+            logger.warning("Failed to parse summary JSON, using fallback extraction. Raw (first 300): %s", raw[:300])
+            return VideoSummary(**build_fallback_summary(raw))
 
     async def detect_viral_clips(
         self,

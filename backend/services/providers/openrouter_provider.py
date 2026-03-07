@@ -11,8 +11,8 @@ from backend.config import settings
 from backend.models import (
     FrameData, SceneDescription, TranscriptSegment, VideoSummary, ClipCandidate, ClipSEO,
 )
-from backend.services.providers.base import AIProvider, ProviderError, ProviderRateLimitError, extract_json, extract_description_fallback, normalize_seo_data
-from backend.services.prompts import DEFAULT_FRAME_ANALYSIS_PROMPT, DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT
+from backend.services.providers.base import AIProvider, ProviderError, ProviderRateLimitError, extract_json, extract_description_fallback, normalize_seo_data, build_fallback_summary
+from backend.services.prompts import DEFAULT_FRAME_ANALYSIS_PROMPT, DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT, DEFAULT_SUMMARY_PROMPT
 from backend.services.transcript_utils import analyze_transcript_energy, correlate_scenes_with_transcript, derive_content_guidance
 
 logger = logging.getLogger(__name__)
@@ -470,10 +470,11 @@ class OpenRouterProvider(AIProvider):
                         ))
                 except (json.JSONDecodeError, KeyError, IndexError) as e:
                     logger.warning(f"Failed to parse frame analysis: {e}")
+                    fallback_desc = extract_description_fallback(raw) if raw else "Analysis failed"
                     for frame in batch:
                         batch_results[batch_idx].append(SceneDescription(
                             timestamp=frame.timestamp,
-                            description=raw[:200] if raw else "Analysis failed",
+                            description=fallback_desc[:200],
                             importance_score=5,
                             thumbnail_path=frame.path,
                             subject_x=50,
@@ -512,7 +513,7 @@ class OpenRouterProvider(AIProvider):
             self._summary_model, context_budget, transcript_budget, scene_budget,
         )
         prompt = (
-            "Based on the transcript and scene descriptions below, generate a content summary.\n\n"
+            f"{DEFAULT_SUMMARY_PROMPT}\n\n"
             f"TRANSCRIPT:\n{transcript_text}\n\n"
             f"SCENES:\n{scene_text}\n\n"
             "Return ONLY valid JSON:\n"
@@ -527,13 +528,8 @@ class OpenRouterProvider(AIProvider):
             data = extract_json(raw)
             return VideoSummary(**data)
         except Exception:
-            return VideoSummary(
-                overview=raw[:500],
-                key_topics=["Unable to parse"],
-                tone="unknown",
-                estimated_audience="general",
-                content_category="uncategorized",
-            )
+            logger.warning("Failed to parse summary JSON, using fallback extraction. Raw (first 300): %s", raw[:300])
+            return VideoSummary(**build_fallback_summary(raw))
 
     # ── Viral Clip Detection ───────────────────────────────────────────
 

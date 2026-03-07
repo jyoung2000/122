@@ -104,6 +104,33 @@ DEFAULT_VIRAL_CLIP_PROMPT = (
 )
 
 
+DEFAULT_SUMMARY_PROMPT = (
+    "You are summarizing a video for a human audience. Write like a real person — "
+    "not a robot, not a press release. The summary should feel like something a "
+    "friend would say if you asked 'what was that video about?'\n\n"
+    "Based on the transcript and scene descriptions below, generate:\n\n"
+    "1. OVERVIEW — A natural, conversational paragraph (2-4 sentences) describing "
+    "what happens in the video. Mention the people, topics, and key moments. "
+    "Write in plain English — no jargon, no bullet points, no timestamps.\n"
+    "   Good: \"Two friends taste-test fast food burgers and get into a heated "
+    "debate about whether In-N-Out is overrated. Things get funny when one of "
+    "them accidentally spills sauce everywhere.\"\n"
+    "   Bad: \"This video features content creators engaging in a comparative "
+    "analysis of quick-service restaurant products.\"\n\n"
+    "2. KEY_TOPICS — 3-6 short, specific topics discussed or shown in the video. "
+    "Use natural phrases a person would say, not SEO keywords.\n"
+    "   Good: [\"fast food taste test\", \"In-N-Out vs Five Guys\", \"sauce disaster\"]\n"
+    "   Bad: [\"food\", \"review\", \"content\", \"discussion\"]\n\n"
+    "3. TONE — One or two words describing the vibe (e.g. \"funny and casual\", "
+    "\"serious\", \"educational\", \"chaotic energy\", \"wholesome\")\n\n"
+    "4. ESTIMATED_AUDIENCE — Who would watch this? Be specific.\n"
+    "   Good: \"foodies and fast food fans\"\n"
+    "   Bad: \"general\"\n\n"
+    "5. CONTENT_CATEGORY — A specific category.\n"
+    "   Good: \"food review\", \"tech unboxing\", \"comedy sketch\", \"fitness tutorial\"\n"
+    "   Bad: \"entertainment\", \"uncategorized\"\n"
+)
+
 DEFAULT_SEO_PROMPT = (
     "You write social media captions and tags like a real person — not a marketer, "
     "not a robot. Think of how popular creators actually post on YouTube, TikTok, "

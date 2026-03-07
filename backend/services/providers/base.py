@@ -112,6 +112,91 @@ def extract_description_fallback(raw: str) -> str:
     return ''.join(chars) or text[:500]
 
 
+def build_fallback_summary(raw: str) -> dict:
+    """Extract a human-readable summary from raw AI text when JSON parsing fails.
+
+    Instead of dumping raw AI output into the overview, tries to pull out
+    meaningful content or generates a clean fallback.
+    """
+    if not raw or not raw.strip():
+        return {
+            "overview": "Could not generate a summary for this video.",
+            "key_topics": [],
+            "tone": "unknown",
+            "estimated_audience": "general",
+            "content_category": "uncategorized",
+        }
+
+    text = raw.strip()
+    # Strip thinking/reasoning blocks
+    text = re.sub(r'<(?:think|reasoning)>.*?</(?:think|reasoning)>', '', text, flags=re.DOTALL).strip()
+    # Strip markdown code fences
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+    # Try to extract individual fields from partial/broken JSON
+    result = {}
+    for field in ("overview", "tone", "estimated_audience", "content_category"):
+        m = re.search(rf'"{field}"\s*:\s*"', text)
+        if m:
+            start = m.end()
+            i = start
+            chars = []
+            while i < len(text):
+                if text[i] == '\\' and i + 1 < len(text):
+                    nxt = text[i + 1]
+                    chars.append('\n' if nxt == 'n' else nxt)
+                    i += 2
+                elif text[i] == '"':
+                    break
+                else:
+                    chars.append(text[i])
+                    i += 1
+            result[field] = ''.join(chars).strip()
+
+    # Try to extract key_topics array
+    m = re.search(r'"key_topics"\s*:\s*\[', text)
+    if m:
+        start = m.end()
+        end = text.find(']', start)
+        if end > start:
+            topics_str = text[start:end]
+            topics = re.findall(r'"([^"]+)"', topics_str)
+            result["key_topics"] = topics
+
+    # If we got an overview from partial JSON, use it
+    if result.get("overview"):
+        return {
+            "overview": result["overview"],
+            "key_topics": result.get("key_topics", []),
+            "tone": result.get("tone", "unknown"),
+            "estimated_audience": result.get("estimated_audience", "general"),
+            "content_category": result.get("content_category", "uncategorized"),
+        }
+
+    # Last resort: strip JSON artifacts and use cleaned text as overview
+    # Remove JSON syntax characters and clean up
+    cleaned = re.sub(r'[{}\[\]"]', '', text)
+    cleaned = re.sub(r'\b(?:overview|key_topics|tone|estimated_audience|content_category)\s*:', '', cleaned)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    if cleaned and len(cleaned) > 20:
+        return {
+            "overview": cleaned[:500],
+            "key_topics": [],
+            "tone": "unknown",
+            "estimated_audience": "general",
+            "content_category": "uncategorized",
+        }
+
+    return {
+        "overview": "Could not generate a summary for this video.",
+        "key_topics": [],
+        "tone": "unknown",
+        "estimated_audience": "general",
+        "content_category": "uncategorized",
+    }
+
+
 def normalize_seo_data(data: dict) -> dict:
     """Merge legacy 'hashtags' field into 'tags' and ensure all tags have # prefix."""
     tags = list(data.get("tags", []))

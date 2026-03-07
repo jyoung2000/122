@@ -565,10 +565,10 @@ async def _run_analysis_inner(job_id: str):
         except Exception as e:
             logger.exception("[%s] Summary generation failed", job_id)
             summary = VideoSummary(
-                overview="Summary generation failed.",
+                overview="We couldn't generate a summary for this video. Try re-analyzing or check your AI provider settings.",
                 key_topics=[],
                 tone="unknown",
-                estimated_audience="unknown",
+                estimated_audience="general",
                 content_category="uncategorized",
             )
             summary_provider = "none"
@@ -633,9 +633,9 @@ async def _run_analysis_inner(job_id: str):
             )
             # Use fallback values so the pipeline can still complete
             summary = VideoSummary(
-                overview="Summary generation timed out.",
+                overview="Summary generation timed out. The video may be too long or the AI provider was slow. Try re-analyzing with a faster provider.",
                 key_topics=[], tone="unknown",
-                estimated_audience="unknown",
+                estimated_audience="general",
                 content_category="uncategorized",
             )
             summary_provider = "none"
