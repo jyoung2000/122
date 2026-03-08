@@ -81,14 +81,22 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
   const editRef = useRef(null);
   const dragState = useRef(null);
 
+  // Use refs for callbacks/item to keep the useEffect stable during drag operations.
+  // Without this, the mousemove/mouseup listeners get torn down and re-added on every
+  // render (because inline onUpdate/onInteraction change identity each render), which
+  // can drop mouse events mid-drag.
+  const onUpdateRef = useRef(onUpdate);
+  const onInteractionRef = useRef(onInteraction);
+  const itemRef = useRef(item);
+  onUpdateRef.current = onUpdate;
+  onInteractionRef.current = onInteraction;
+  itemRef.current = item;
+
   const pos = item.position || { x: 50, y: 50 };
   const size = item.size || { w: 30, h: 30 };
   const rotation = item.transform?.rotation || 0;
 
-  // Text and subtitle don't use height in the same way
   const isText = item.type === 'text';
-  const isSubtitle = item.type === 'subtitle';
-  const isAutoHeight = isText || isSubtitle;
 
   // ── Get container dimensions ──
   const getContainerRect = useCallback(() => {
@@ -164,6 +172,8 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
   }, [pos, rotation, getContainerRect, onInteraction]);
 
   // ── Mouse move / up handlers ──────────────────────────
+  // Only depend on the boolean flags so listeners stay stable during drag/resize/rotate.
+  // Access latest item/onUpdate/onInteraction via refs to avoid listener churn.
   useEffect(() => {
     if (!isDragging && !isResizing && !isRotating) return;
 
@@ -176,7 +186,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
         const dy = e.clientY - ds.startMouseY;
         const newX = ds.startPosX + (dx / ds.containerW) * 100;
         const newY = ds.startPosY + (dy / ds.containerH) * 100;
-        onUpdate({
+        onUpdateRef.current({
           position: {
             x: Math.max(0, Math.min(100, Math.round(newX * 10) / 10)),
             y: Math.max(0, Math.min(100, Math.round(newY * 10) / 10)),
@@ -194,17 +204,11 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
         let newW = ds.startW;
         let newH = ds.startH;
 
-        // The position is center-based (translate -50%, -50%), so
-        // left edge = pos.x - w/2, right edge = pos.x + w/2
-        // When dragging a corner/edge, we adjust both pos and size.
-
         if (h.includes('e')) {
-          // Right edge moves: increase width, shift center right
           newW = Math.max(2, ds.startW + dx);
           newX = ds.startPosX + dx / 2;
         }
         if (h.includes('w')) {
-          // Left edge moves: decrease width, shift center left
           newW = Math.max(2, ds.startW - dx);
           newX = ds.startPosX + dx / 2;
         }
@@ -225,7 +229,6 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
           } else if (h === 'n' || h === 's') {
             newW = newH * aspect;
           } else {
-            // Corner: constrain by whichever dimension changed more
             const dw = Math.abs(newW - ds.startW);
             const dh = Math.abs(newH - ds.startH);
             if (dw > dh) {
@@ -248,29 +251,29 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
         };
 
         // Scale font size for text items on corner (diagonal) drags
+        const currentItem = itemRef.current;
         if (ds.isTextItem && h.length === 2 && ds.startW > 0) {
           const scale = newW / ds.startW;
           const newFontSize = Math.max(8, Math.min(400, Math.round(ds.startFontSize * scale)));
-          updates.textStyle = { ...(item.textStyle || {}), fontSize: newFontSize };
+          updates.textStyle = { ...(currentItem.textStyle || {}), fontSize: newFontSize };
         }
 
-        onUpdate(updates);
+        onUpdateRef.current(updates);
       }
 
       if (ds.type === 'rotate') {
         const angle = Math.atan2(e.clientY - ds.centerY, e.clientX - ds.centerX) * (180 / Math.PI);
         let newRotation = ds.startRotation + (angle - ds.startAngle);
 
-        // Snap to 0/90/180/270 when within 5 degrees
         if (e.shiftKey) {
           newRotation = Math.round(newRotation / 15) * 15;
         }
-        // Normalize to -360..360
         newRotation = ((newRotation % 360) + 360) % 360;
         if (newRotation > 180) newRotation -= 360;
 
-        onUpdate({
-          transform: { ...(item.transform || {}), rotation: Math.round(newRotation) },
+        const currentItem = itemRef.current;
+        onUpdateRef.current({
+          transform: { ...(currentItem.transform || {}), rotation: Math.round(newRotation) },
         });
       }
     };
@@ -280,9 +283,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
       setIsDragging(false);
       setIsResizing(false);
       setIsRotating(false);
-      // Delay clearing interaction flag so the viewport's onClick
-      // (which fires after mouseup) doesn't trigger togglePlay
-      setTimeout(() => onInteraction?.(false), 100);
+      setTimeout(() => onInteractionRef.current?.(false), 100);
     };
 
     window.addEventListener('mousemove', handleMouseMove);
@@ -291,7 +292,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
     };
-  }, [isDragging, isResizing, isRotating, item, onUpdate, onInteraction]);
+  }, [isDragging, isResizing, isRotating]);
 
   // ── Click to select ───────────────────────────────────
   const handleClick = useCallback((e) => {
@@ -341,7 +342,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
     left: `${pos.x}%`,
     top: `${pos.y}%`,
     width: `${size.w}%`,
-    height: isAutoHeight ? 'auto' : `${size.h}%`,
+    height: `${size.h}%`,
     padding: boxPad > 0 ? boxPad : undefined,
     transform: `translate(-50%, -50%) ${rotation ? `rotate(${rotation}deg)` : ''}`,
     cursor: isDragging ? 'grabbing' : 'grab',
@@ -424,11 +425,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
           }} />
 
           {/* Resize handles */}
-          {HANDLES.filter((h) => {
-            // For auto-height text items, hide vertical-only resize handles
-            if (isAutoHeight && (h.id === 'n' || h.id === 's')) return false;
-            return true;
-          }).map((h) => (
+          {HANDLES.map((h) => (
             <div
               key={h.id}
               style={{
@@ -453,7 +450,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
           <div style={{
             position: 'absolute',
             left: '50%',
-            top: -32,
+            top: -24,
             transform: 'translateX(-50%)',
             display: 'flex',
             flexDirection: 'column',
@@ -463,10 +460,10 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
             {/* Stem line connecting to element */}
             <div style={{
               width: 1,
-              height: 16,
+              height: 8,
               background: '#0A84FF',
               position: 'absolute',
-              bottom: -16,
+              bottom: -8,
             }} />
             {/* Rotation circle handle */}
             <div

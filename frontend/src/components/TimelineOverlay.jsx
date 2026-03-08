@@ -115,9 +115,11 @@ function TextOverlayItem({ item, elapsed, duration }) {
         left: `${pos.x}%`,
         top: `${pos.y}%`,
         width: `${size.w}%`,
+        height: `${size.h}%`,
         transform: `translate(-50%, -50%) ${rotation ? `rotate(${rotation}deg)` : ''} ${animTransform}`,
         opacity: finalOpacity,
         filter: filters.length ? filters.join(' ') : undefined,
+        overflow: 'hidden',
         display: 'flex',
         alignItems: 'center',
         justifyContent:
