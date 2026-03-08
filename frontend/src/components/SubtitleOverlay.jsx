@@ -203,6 +203,7 @@ export default function SubtitleOverlay({
 
   // Timeline store access for click-to-select subtitle items
   const timelineItems = useTimelineStore((s) => s.items);
+  const selectedItemId = useTimelineStore((s) => s.selectedItemId);
   const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
   const updateItem = useTimelineStore((s) => s.updateItem);
 
@@ -315,32 +316,28 @@ export default function SubtitleOverlay({
   const handleSubtitleClick = useCallback((e) => {
     e.stopPropagation(); // Prevent togglePlay on viewport
     if (!currentSubtitle) return;
-    // Match by overlapping time range (subtitle items use absolute times)
-    const absStart = currentSubtitle.start + clipStart;
-    const absEnd = currentSubtitle.end + clipStart;
+    // Timeline subtitle items use clip-relative times (0-based), same as currentSubtitle
     const match = timelineItems.find(
-      (it) => it.type === 'subtitle' && Math.abs(it.start - absStart) < 0.15 && Math.abs(it.end - absEnd) < 0.15
+      (it) => it.type === 'subtitle' && Math.abs(it.start - currentSubtitle.start) < 0.15 && Math.abs(it.end - currentSubtitle.end) < 0.15
     );
     if (match) {
       setSelectedItemId(match.id);
     }
-  }, [currentSubtitle, clipStart, timelineItems, setSelectedItemId]);
+  }, [currentSubtitle, timelineItems, setSelectedItemId]);
 
   const handleSubtitleDoubleClick = useCallback((e) => {
     e.stopPropagation();
     if (!currentSubtitle) return;
-    // Find matching item first
-    const absStart = currentSubtitle.start + clipStart;
-    const absEnd = currentSubtitle.end + clipStart;
+    // Timeline subtitle items use clip-relative times (0-based), same as currentSubtitle
     const match = timelineItems.find(
-      (it) => it.type === 'subtitle' && Math.abs(it.start - absStart) < 0.15 && Math.abs(it.end - absEnd) < 0.15
+      (it) => it.type === 'subtitle' && Math.abs(it.start - currentSubtitle.start) < 0.15 && Math.abs(it.end - currentSubtitle.end) < 0.15
     );
     if (match) {
       setSelectedItemId(match.id);
       setIsEditing(true);
       setTimeout(() => editRef.current?.focus(), 50);
     }
-  }, [currentSubtitle, clipStart, timelineItems, setSelectedItemId]);
+  }, [currentSubtitle, timelineItems, setSelectedItemId]);
 
   const handleEditBlur = useCallback(() => {
     setIsEditing(false);
@@ -348,15 +345,14 @@ export default function SubtitleOverlay({
 
   const handleEditChange = useCallback((e) => {
     if (!currentSubtitle) return;
-    const absStart = currentSubtitle.start + clipStart;
-    const absEnd = currentSubtitle.end + clipStart;
+    // Timeline subtitle items use clip-relative times (0-based), same as currentSubtitle
     const match = timelineItems.find(
-      (it) => it.type === 'subtitle' && Math.abs(it.start - absStart) < 0.15 && Math.abs(it.end - absEnd) < 0.15
+      (it) => it.type === 'subtitle' && Math.abs(it.start - currentSubtitle.start) < 0.15 && Math.abs(it.end - currentSubtitle.end) < 0.15
     );
     if (match) {
       updateItem(match.id, { subtitleText: e.target.value });
     }
-  }, [currentSubtitle, clipStart, timelineItems, updateItem]);
+  }, [currentSubtitle, timelineItems, updateItem]);
 
   const handleEditKeyDown = useCallback((e) => {
     e.stopPropagation();
@@ -429,15 +425,23 @@ export default function SubtitleOverlay({
   // Find the matching subtitle text from the timeline store (if the user edited
   // it via PropertiesPanel, use that text instead of the raw transcript).
   // MUST be before early returns to satisfy Rules of Hooks (error #310).
+  // Timeline subtitle items use clip-relative times (0-based), same as currentSubtitle.
   const resolvedSubtitleText = useMemo(() => {
     if (!currentSubtitle) return '';
-    const absStart = currentSubtitle.start + clipStart;
-    const absEnd = currentSubtitle.end + clipStart;
     const match = timelineItems.find(
-      (it) => it.type === 'subtitle' && Math.abs(it.start - absStart) < 0.15 && Math.abs(it.end - absEnd) < 0.15
+      (it) => it.type === 'subtitle' && Math.abs(it.start - currentSubtitle.start) < 0.15 && Math.abs(it.end - currentSubtitle.end) < 0.15
     );
     return match?.subtitleText || currentSubtitle.text;
-  }, [currentSubtitle, clipStart, timelineItems]);
+  }, [currentSubtitle, timelineItems]);
+
+  // Check if the current subtitle's matching timeline item is selected
+  const isSubtitleSelected = useMemo(() => {
+    if (!currentSubtitle || !selectedItemId) return false;
+    const match = timelineItems.find(
+      (it) => it.type === 'subtitle' && Math.abs(it.start - currentSubtitle.start) < 0.15 && Math.abs(it.end - currentSubtitle.end) < 0.15
+    );
+    return match?.id === selectedItemId;
+  }, [currentSubtitle, selectedItemId, timelineItems]);
 
   // Container wrapper — fills parent, used for ResizeObserver
   if (!subtitlesEnabled) {
@@ -605,9 +609,15 @@ export default function SubtitleOverlay({
                 background: hexToRgba(bgColor, bgOpacity / 100),
                 padding: `${Math.max(1, Math.max(Math.floor(4 * backendFontScale), 2) * subtitleScale)}px`,
               } : {}),
+              ...(isSubtitleSelected ? {
+                outline: '2px solid #0A84FF',
+                outlineOffset: 4,
+                borderRadius: 4,
+              } : {}),
             }}
             onClick={handleSubtitleClick}
             onDoubleClick={handleSubtitleDoubleClick}
+            title="Click to select, double-click to edit"
           >
             {textContent}
           </span>
