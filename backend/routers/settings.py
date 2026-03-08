@@ -52,6 +52,7 @@ _PERSISTABLE_KEYS = [
     "WHISPER_VAD_FILTER", "FRAME_SAMPLE_RATE", "SUBJECT_TRACKING_ENABLED",
     "FFMPEG_PRESET", "FFMPEG_CRF", "FFMPEG_THREADS", "FFMPEG_FASTSTART",
     "GPU_ACCELERATION_ENABLED", "GPU_VENDOR_OVERRIDE",
+    "GPU_HWDECODE_ENABLED", "GPU_HEVC_FOR_4K", "GPU_DEVICE_INDEX",
     "AI_FALLBACK_CHAIN",
 ]
 
@@ -1518,6 +1519,7 @@ async def report_client_gpu(req: ClientGpuReport):
     if req.gpu_index:
         settings.GPU_DEVICE_INDEX = req.gpu_index
         logger.info("GPU device index set to %s (%s)", req.gpu_index, req.gpu_name)
+        _persist_user_settings()
 
     # Auto-enable server GPU acceleration if client reports NVIDIA GPU
     # and server hasn't enabled it yet

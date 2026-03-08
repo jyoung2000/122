@@ -31,6 +31,7 @@ export default function ToolBar({ compact = false }) {
   const activeTool = useTimelineStore((s) => s.activeTool);
   const setActiveTool = useTimelineStore((s) => s.setActiveTool);
   const addItem = useTimelineStore((s) => s.addItem);
+  const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
   const duration = useTimelineStore((s) => s.duration);
   const playhead = useTimelineStore((s) => s.playhead);
 
@@ -39,7 +40,7 @@ export default function ToolBar({ compact = false }) {
 
     // For text/shape, auto-create an item at the playhead
     if (toolId === 'text') {
-      addItem({
+      const newId = addItem({
         trackId: 'v2',
         type: 'text',
         start: playhead,
@@ -66,9 +67,10 @@ export default function ToolBar({ compact = false }) {
         position: { x: 50, y: 50 },
         size: { w: 80, h: 20 },
       });
+      setSelectedItemId(newId);
       setActiveTool('select');
     } else if (toolId === 'shape') {
-      addItem({
+      const newId = addItem({
         trackId: 'v2',
         type: 'shape',
         start: playhead,
@@ -83,6 +85,7 @@ export default function ToolBar({ compact = false }) {
         position: { x: 30, y: 30 },
         size: { w: 40, h: 30 },
       });
+      setSelectedItemId(newId);
       setActiveTool('select');
     }
   };

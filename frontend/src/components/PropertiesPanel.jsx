@@ -326,8 +326,8 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
         </div>
       </div>
 
-      {/* ── Position & Size (all visual items) ── */}
-      {isVisual && (
+      {/* ── Position & Size (overlay items: text, shape, image, overlay) ── */}
+      {isOverlay && (
         <div className="ve-properties__section">
           <label className="ve-properties__label">Position & Size</label>
           <SliderRow label="X" value={item.position?.x ?? 50} min={0} max={100} step={0.5} unit="%" onChange={(v) => update('position', { ...item.position, x: v })} />

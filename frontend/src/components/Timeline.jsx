@@ -549,7 +549,19 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         }
 
         const track = getTrackFromY(e.clientY);
-        const trackId = track ? track.id : dragInfo.origTrackId;
+        let trackId = dragInfo.origTrackId;
+        if (track) {
+          // Enforce track type constraints: items can only move to compatible tracks
+          const draggedItem = items.find((i) => i.id === dragInfo.itemId);
+          const itemType = draggedItem?.type;
+          const trackType = track.type;
+          const compatible =
+            (itemType === 'video' && trackType === 'video') ||
+            (itemType === 'audio' && trackType === 'audio') ||
+            ((itemType === 'text' || itemType === 'shape' || itemType === 'image' || itemType === 'overlay') && trackType === 'overlay') ||
+            (itemType === 'subtitle' && trackType === 'subtitle');
+          if (compatible) trackId = track.id;
+        }
         updateItem(dragInfo.itemId, { start: newStart, end: newStart + dur, trackId });
       }
     };
