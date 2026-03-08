@@ -426,6 +426,19 @@ export default function SubtitleOverlay({
     }
   }, [containerSize, outputDims]);
 
+  // Find the matching subtitle text from the timeline store (if the user edited
+  // it via PropertiesPanel, use that text instead of the raw transcript).
+  // MUST be before early returns to satisfy Rules of Hooks (error #310).
+  const resolvedSubtitleText = useMemo(() => {
+    if (!currentSubtitle) return '';
+    const absStart = currentSubtitle.start + clipStart;
+    const absEnd = currentSubtitle.end + clipStart;
+    const match = timelineItems.find(
+      (it) => it.type === 'subtitle' && Math.abs(it.start - absStart) < 0.15 && Math.abs(it.end - absEnd) < 0.15
+    );
+    return match?.subtitleText || currentSubtitle.text;
+  }, [currentSubtitle, clipStart, timelineItems]);
+
   // Container wrapper — fills parent, used for ResizeObserver
   if (!subtitlesEnabled) {
     return <div ref={containerRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none' }} />;
@@ -501,8 +514,8 @@ export default function SubtitleOverlay({
   }
 
   const text = showLabels && currentSubtitle.speaker
-    ? `${currentSubtitle.speaker}: ${currentSubtitle.text}`
-    : currentSubtitle.text;
+    ? `${currentSubtitle.speaker}: ${resolvedSubtitleText}`
+    : resolvedSubtitleText;
 
   // Active word highlighting
   const awColor = settings.activeWordColor || '#FFD700';
@@ -512,7 +525,7 @@ export default function SubtitleOverlay({
 
   let textContent;
   if (activeWordEnabled && currentWordIdx >= 0) {
-    const words = currentSubtitle.text.split(/\s+/).filter(Boolean);
+    const words = resolvedSubtitleText.split(/\s+/).filter(Boolean);
     const prefix = showLabels && currentSubtitle.speaker ? `${currentSubtitle.speaker}: ` : '';
     const awOlHex = awOutlineColor.replace('#', '');
     const awOlR = parseInt(awOlHex.substring(0, 2), 16) || 0;
@@ -550,16 +563,8 @@ export default function SubtitleOverlay({
     textContent = text;
   }
 
-  // Find the matching subtitle text for editing (may differ from transcript if user edited)
-  const editingText = useMemo(() => {
-    if (!currentSubtitle) return '';
-    const absStart = currentSubtitle.start + clipStart;
-    const absEnd = currentSubtitle.end + clipStart;
-    const match = timelineItems.find(
-      (it) => it.type === 'subtitle' && Math.abs(it.start - absStart) < 0.15 && Math.abs(it.end - absEnd) < 0.15
-    );
-    return match?.subtitleText || currentSubtitle.text;
-  }, [currentSubtitle, clipStart, timelineItems]);
+  // Editing text uses the same resolved text (timeline item text preferred)
+  const editingText = resolvedSubtitleText;
 
   return (
     <div ref={containerRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5 }}>
