@@ -158,6 +158,7 @@ const useTimelineStore = create(
           transition: item.transition || null,
           subtitleText: item.subtitleText || null,
           subtitleStyle: item.subtitleStyle || null,
+          speaker: item.speaker || null,
           textContent: item.textContent || null,
           textStyle: item.textStyle || null,
           shapeType: item.shapeType || null,
@@ -340,6 +341,7 @@ const useTimelineStore = create(
                 fadeOut: 0,
                 subtitleText: seg.text,
                 subtitleStyle: null,
+                speaker: seg.speaker || null,
                 transition: null,
               });
             }

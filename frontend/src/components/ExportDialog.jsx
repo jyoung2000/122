@@ -1,5 +1,7 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useMemo } from 'react';
 import ExportEngine from '../engine/ExportEngine';
+import useTimelineStore from '../stores/timelineStore';
+import { runSubtitleQA } from '../utils/subtitleQA';
 
 const QUALITY_PRESETS = [
   { id: '720p', label: '720p', w: 1280, h: 720, bitrate: 4_000_000 },
@@ -34,12 +36,35 @@ export default function ExportDialog({
   const [isExporting, setIsExporting] = useState(false);
   const [progress, setProgress] = useState(0);
   const [error, setError] = useState(null);
+  const [qaReport, setQaReport] = useState(null);
   const exportEngineRef = useRef(null);
 
   const canClientExport = ExportEngine.isWebCodecsAvailable();
 
+  // Run subtitle QA validation
+  const timelineItems = useTimelineStore((s) => s.items);
+  const subtitleQA = useMemo(() => {
+    const preset = QUALITY_PRESETS.find(p => p.id === quality) || QUALITY_PRESETS[1];
+    let exportW = preset.w;
+    let exportH = preset.h;
+    if (aspectRatio && ASPECT_DIMS[aspectRatio]) {
+      const dims = ASPECT_DIMS[aspectRatio];
+      const scale = preset.h / dims.h;
+      exportW = Math.round(dims.w * scale);
+      exportH = Math.round(dims.h * scale);
+    }
+    return runSubtitleQA(timelineItems, settings, { w: exportW, h: exportH });
+  }, [timelineItems, settings, quality, aspectRatio]);
+
   const handleExport = useCallback(async () => {
     setError(null);
+    setQaReport(subtitleQA);
+
+    // Block export if subtitle QA has errors
+    if (!subtitleQA.valid) {
+      setError(`Export blocked: ${subtitleQA.errors.join('; ')}`);
+      return;
+    }
 
     if (exportMode === 'server') {
       const preset = QUALITY_PRESETS.find(p => p.id === quality) || QUALITY_PRESETS[1];
@@ -112,7 +137,7 @@ export default function ExportDialog({
     renderEngine.setResolution(exportW, exportH);
 
     await engine.export(startTime, endTime, tracks, clips, settings, mediaElements);
-  }, [exportMode, quality, renderEngine, tracks, clips, settings, mediaElements, startTime, endTime, aspectRatio, onServerExport, onClose]);
+  }, [exportMode, quality, renderEngine, tracks, clips, settings, mediaElements, startTime, endTime, aspectRatio, onServerExport, onClose, subtitleQA]);
 
   const handleCancel = useCallback(() => {
     if (exportEngineRef.current) {
@@ -200,6 +225,33 @@ export default function ExportDialog({
       {error && (
         <div className="ve-export-dialog__error">{error}</div>
       )}
+
+      {/* Subtitle QA Report */}
+      <div style={{
+        margin: '8px 16px',
+        padding: '8px 12px',
+        borderRadius: 6,
+        fontSize: 11,
+        lineHeight: 1.5,
+        background: subtitleQA.valid
+          ? (subtitleQA.warnings.length > 0 ? 'rgba(255, 159, 10, 0.12)' : 'rgba(48, 209, 88, 0.12)')
+          : 'rgba(255, 55, 95, 0.12)',
+        border: `1px solid ${subtitleQA.valid
+          ? (subtitleQA.warnings.length > 0 ? 'rgba(255, 159, 10, 0.3)' : 'rgba(48, 209, 88, 0.3)')
+          : 'rgba(255, 55, 95, 0.3)'}`,
+        color: 'var(--ve-text, #fff)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: subtitleQA.errors.length + subtitleQA.warnings.length > 0 ? 4 : 0 }}>
+          <span style={{ fontSize: 13 }}>{subtitleQA.valid ? (subtitleQA.warnings.length > 0 ? '⚠' : '✓') : '✕'}</span>
+          <span style={{ fontWeight: 600 }}>Subtitle QA: {subtitleQA.summary}</span>
+        </div>
+        {subtitleQA.errors.map((e, i) => (
+          <div key={`e-${i}`} style={{ color: '#FF375F', paddingLeft: 20 }}>• {e}</div>
+        ))}
+        {subtitleQA.warnings.map((w, i) => (
+          <div key={`w-${i}`} style={{ color: '#FF9F0A', paddingLeft: 20 }}>• {w}</div>
+        ))}
+      </div>
 
       {/* Actions */}
       <div className="ve-export-dialog__actions">

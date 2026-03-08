@@ -284,6 +284,7 @@ export default function VideoEditor({
               fadeOut: 0,
               subtitleText: seg.text,
               subtitleStyle: null,
+              speaker: seg.speaker || null,
             });
           }
         });

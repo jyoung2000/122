@@ -63,7 +63,7 @@ const _FAST_WORDS = new Set([
 function computeSpeakerRates(segments) {
   const stats = {};
   for (const seg of segments) {
-    const wc = (seg.text || '').split(/\s+/).filter(Boolean).length;
+    const wc = (seg.text || seg.subtitleText || '').split(/\s+/).filter(Boolean).length;
     const dur = seg.end - seg.start;
     if (dur <= 0 || wc === 0) continue;
     if (!stats[seg.speaker]) stats[seg.speaker] = { words: 0, time: 0 };
@@ -78,8 +78,9 @@ function computeSpeakerRates(segments) {
 }
 
 function getCurrentWordIndex(segment, relativeTime, speakerRates) {
-  if (!segment || !segment.text) return -1;
-  const words = segment.text.split(/\s+/).filter(Boolean);
+  const text = segment?.subtitleText || segment?.text || '';
+  if (!text) return -1;
+  const words = text.split(/\s+/).filter(Boolean);
   if (words.length <= 1) return words.length === 1 ? 0 : -1;
 
   if (segment.words && segment.words.length === words.length) {
@@ -129,7 +130,8 @@ function splitSegmentsByMaxWords(segments, maxWords) {
   if (!maxWords || maxWords <= 0) return segments;
   const result = [];
   for (const seg of segments) {
-    const words = (seg.text || '').split(/\s+/).filter(Boolean);
+    const text = seg.subtitleText || seg.text || '';
+    const words = text.split(/\s+/).filter(Boolean);
     if (words.length <= maxWords) { result.push(seg); continue; }
     const totalWords = words.length;
     const duration = seg.end - seg.start;
@@ -140,7 +142,7 @@ function splitSegmentsByMaxWords(segments, maxWords) {
       let chunkEnd = ct + chunkDuration;
       if (i + maxWords >= totalWords) chunkEnd = seg.end;
       if (chunkEnd - ct >= 0.1) {
-        result.push({ start: ct, end: chunkEnd, text: chunkWords.join(' '), speaker: seg.speaker, words: null });
+        result.push({ ...seg, start: ct, end: chunkEnd, subtitleText: chunkWords.join(' '), text: chunkWords.join(' '), speaker: seg.speaker, words: null });
       }
       ct = chunkEnd;
     }
@@ -175,11 +177,12 @@ function hexToRgba(hex, opacity) {
 // ── Component ───────────────────────────────────────────────────────────
 /**
  * Self-contained subtitle overlay for use inside VideoEditor's viewport.
- * Renders positioned subtitle text based on currentTime prop.
+ * Renders subtitle items from the timeline store as the SINGLE SOURCE OF TRUTH.
+ * Falls back to transcript prop only when no timeline subtitle items exist.
  *
  * Props:
  *  - currentTime: number (absolute video time)
- *  - transcript: array of { start, end, text, speaker, words? }
+ *  - transcript: array of { start, end, text, speaker, words? } (fallback only)
  *  - clipStart, clipEnd: clip time boundaries
  *  - settings: full clip settings object (subtitlesEnabled, subtitleFont, etc.)
  *  - aspectRatio, sourceWidth, sourceHeight: for font scaling
@@ -201,7 +204,7 @@ export default function SubtitleOverlay({
   const [isEditing, setIsEditing] = useState(false);
   const editRef = useRef(null);
 
-  // Timeline store access for click-to-select subtitle items
+  // Timeline store — SINGLE SOURCE OF TRUTH for subtitle items
   const timelineItems = useTimelineStore((s) => s.items);
   const selectedItemId = useTimelineStore((s) => s.selectedItemId);
   const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
@@ -210,19 +213,14 @@ export default function SubtitleOverlay({
   const subtitlesEnabledGlobal = settings.subtitlesEnabled || false;
 
   // Per-segment subtitle override: segment's subtitlesEnabled takes precedence
-  // over the global toggle when the playhead is inside a segment.
-  // This allows segments to ENABLE subtitles even when global is off, and
-  // vice versa — each segment controls its own subtitle visibility.
   const subtitlesEnabled = useMemo(() => {
     if (!segments || segments.length === 0) return subtitlesEnabledGlobal;
     const absTime = currentTime;
     for (const seg of segments) {
       if (absTime >= seg.start && absTime < seg.end) {
-        // Segment has explicit subtitlesEnabled — use it directly
         return seg.subtitlesEnabled !== false;
       }
     }
-    // Not inside any segment — use global setting
     return subtitlesEnabledGlobal;
   }, [segments, currentTime, subtitlesEnabledGlobal]);
 
@@ -240,16 +238,13 @@ export default function SubtitleOverlay({
   }, []);
 
   // Register @font-face and preload subtitle font
-  // This ensures fonts work even if ClipSettingsPanel hasn't loaded yet
   useEffect(() => {
     const font = settings.subtitleFont;
     if (!font || typeof document === 'undefined') return;
 
-    // Register builtin font @font-face if known
     if (BUILTIN_FONT_FILES[font]) {
       registerFontFace(font, BUILTIN_FONT_FILES[font]);
     } else {
-      // Custom font — look up URL from /api/fonts
       fetch('/api/fonts')
         .then((r) => r.ok ? r.json() : [])
         .then((fonts) => {
@@ -267,33 +262,26 @@ export default function SubtitleOverlay({
     document.fonts.load(`700 16px "${font}"`).catch(() => {});
   }, [settings.subtitleFont]);
 
-  // Pre-filter transcript segments to clip range, offset to clip-relative time
+  // ── SINGLE SOURCE: Use timeline store subtitle items ──
+  // Timeline items are the source of truth. They are populated from transcript
+  // during initFromClip() in VideoEditor, so they always exist when subtitles
+  // are available. This eliminates the dual-source problem.
+  const subtitleItems = useMemo(() => {
+    if (!subtitlesEnabled) return [];
+    return timelineItems.filter((it) => it.type === 'subtitle');
+  }, [subtitlesEnabled, timelineItems]);
+
+  // Apply maxWords splitting to subtitle items for display
   const clipSegments = useMemo(() => {
-    if (!subtitlesEnabled || !transcript?.length) return [];
-    const filtered = transcript
-      .filter((seg) => seg.end > clipStart && seg.start < clipEnd)
-      .map((seg) => {
-        const segStart = Math.max(seg.start, clipStart);
-        const segEnd = Math.min(seg.end, clipEnd);
-        let words = null;
-        if (seg.words && seg.words.length > 0) {
-          words = seg.words
-            .filter((w) => w.end > segStart && w.start < segEnd)
-            .map((w) => ({ start: w.start - clipStart, end: w.end - clipStart, word: w.word }));
-          if (words.length === 0) words = null;
-        }
-        return {
-          start: segStart - clipStart,
-          end: segEnd - clipStart,
-          text: (seg.text || '').trim(),
-          speaker: seg.speaker || '',
-          words,
-        };
-      })
-      .filter((seg) => seg.end - seg.start >= 0.1);
+    if (subtitleItems.length === 0) return [];
+    const mapped = subtitleItems.map((it) => ({
+      ...it,
+      text: it.subtitleText || '',
+      speaker: it.speaker || '',
+    }));
     const maxWords = settings.subtitleMaxWords || 0;
-    return maxWords > 0 ? splitSegmentsByMaxWords(filtered, maxWords) : filtered;
-  }, [subtitlesEnabled, transcript, clipStart, clipEnd, settings.subtitleMaxWords]);
+    return maxWords > 0 ? splitSegmentsByMaxWords(mapped, maxWords) : mapped;
+  }, [subtitleItems, settings.subtitleMaxWords]);
 
   const speakersOrdered = useMemo(() => {
     const seen = [];
@@ -305,54 +293,52 @@ export default function SubtitleOverlay({
 
   const speakerRates = useMemo(() => computeSpeakerRates(clipSegments), [clipSegments]);
 
-  // Find current subtitle based on currentTime
+  // Find current subtitle based on currentTime (clip-relative)
   const relTime = currentTime - clipStart;
   const currentSubtitle = useMemo(() => {
     if (!subtitlesEnabled || clipSegments.length === 0) return null;
     return clipSegments.find((seg) => seg.start <= relTime && relTime < seg.end) || null;
   }, [subtitlesEnabled, clipSegments, relTime]);
 
-  // Click-to-select: find the matching subtitle timeline item for the current subtitle
-  const handleSubtitleClick = useCallback((e) => {
-    e.stopPropagation(); // Prevent togglePlay on viewport
-    if (!currentSubtitle) return;
-    // Timeline subtitle items use clip-relative times (0-based), same as currentSubtitle
-    const match = timelineItems.find(
-      (it) => it.type === 'subtitle' && Math.abs(it.start - currentSubtitle.start) < 0.15 && Math.abs(it.end - currentSubtitle.end) < 0.15
-    );
-    if (match) {
-      setSelectedItemId(match.id);
+  // Find the original timeline item for the current subtitle (for selection)
+  const currentTimelineItem = useMemo(() => {
+    if (!currentSubtitle) return null;
+    // If the subtitle came directly from timeline (has id), use it
+    if (currentSubtitle.id) {
+      return subtitleItems.find((it) => it.id === currentSubtitle.id) || null;
     }
-  }, [currentSubtitle, timelineItems, setSelectedItemId]);
+    // Fallback: match by time proximity (for split segments)
+    return subtitleItems.find(
+      (it) => Math.abs(it.start - currentSubtitle.start) < 0.15 && Math.abs(it.end - currentSubtitle.end) < 0.15
+    ) || null;
+  }, [currentSubtitle, subtitleItems]);
+
+  // Click-to-select: select the subtitle timeline item
+  const handleSubtitleClick = useCallback((e) => {
+    e.stopPropagation();
+    if (currentTimelineItem) {
+      setSelectedItemId(currentTimelineItem.id);
+    }
+  }, [currentTimelineItem, setSelectedItemId]);
 
   const handleSubtitleDoubleClick = useCallback((e) => {
     e.stopPropagation();
-    if (!currentSubtitle) return;
-    // Timeline subtitle items use clip-relative times (0-based), same as currentSubtitle
-    const match = timelineItems.find(
-      (it) => it.type === 'subtitle' && Math.abs(it.start - currentSubtitle.start) < 0.15 && Math.abs(it.end - currentSubtitle.end) < 0.15
-    );
-    if (match) {
-      setSelectedItemId(match.id);
+    if (currentTimelineItem) {
+      setSelectedItemId(currentTimelineItem.id);
       setIsEditing(true);
       setTimeout(() => editRef.current?.focus(), 50);
     }
-  }, [currentSubtitle, timelineItems, setSelectedItemId]);
+  }, [currentTimelineItem, setSelectedItemId]);
 
   const handleEditBlur = useCallback(() => {
     setIsEditing(false);
   }, []);
 
   const handleEditChange = useCallback((e) => {
-    if (!currentSubtitle) return;
-    // Timeline subtitle items use clip-relative times (0-based), same as currentSubtitle
-    const match = timelineItems.find(
-      (it) => it.type === 'subtitle' && Math.abs(it.start - currentSubtitle.start) < 0.15 && Math.abs(it.end - currentSubtitle.end) < 0.15
-    );
-    if (match) {
-      updateItem(match.id, { subtitleText: e.target.value });
+    if (currentTimelineItem) {
+      updateItem(currentTimelineItem.id, { subtitleText: e.target.value });
     }
-  }, [currentSubtitle, timelineItems, updateItem]);
+  }, [currentTimelineItem, updateItem]);
 
   const handleEditKeyDown = useCallback((e) => {
     e.stopPropagation();
@@ -399,7 +385,6 @@ export default function SubtitleOverlay({
   }, [subtitlesEnabled, settings.subtitleSize, subtitleScale, backendFontScale]);
 
   // Compute the actual video content area within the viewport
-  // (accounts for letterboxing when viewport ratio doesn't match output ratio)
   const videoContentRect = useMemo(() => {
     if (containerSize.w === 0 || containerSize.h === 0) {
       return { left: 0, top: 0, width: containerSize.w, height: containerSize.h };
@@ -412,36 +397,22 @@ export default function SubtitleOverlay({
     }
 
     if (videoAR > containerAR) {
-      // Width-constrained (pillarbox top/bottom)
       const h = containerSize.w / videoAR;
       return { left: 0, top: (containerSize.h - h) / 2, width: containerSize.w, height: h };
     } else {
-      // Height-constrained (letterbox left/right)
       const w = containerSize.h * videoAR;
       return { left: (containerSize.w - w) / 2, top: 0, width: w, height: containerSize.h };
     }
   }, [containerSize, outputDims]);
 
-  // Find the matching subtitle text from the timeline store (if the user edited
-  // it via PropertiesPanel, use that text instead of the raw transcript).
-  // MUST be before early returns to satisfy Rules of Hooks (error #310).
-  // Timeline subtitle items use clip-relative times (0-based), same as currentSubtitle.
-  const resolvedSubtitleText = useMemo(() => {
-    if (!currentSubtitle) return '';
-    const match = timelineItems.find(
-      (it) => it.type === 'subtitle' && Math.abs(it.start - currentSubtitle.start) < 0.15 && Math.abs(it.end - currentSubtitle.end) < 0.15
-    );
-    return match?.subtitleText || currentSubtitle.text;
-  }, [currentSubtitle, timelineItems]);
-
-  // Check if the current subtitle's matching timeline item is selected
+  // Check if the current subtitle's timeline item is selected
   const isSubtitleSelected = useMemo(() => {
-    if (!currentSubtitle || !selectedItemId) return false;
-    const match = timelineItems.find(
-      (it) => it.type === 'subtitle' && Math.abs(it.start - currentSubtitle.start) < 0.15 && Math.abs(it.end - currentSubtitle.end) < 0.15
-    );
-    return match?.id === selectedItemId;
-  }, [currentSubtitle, selectedItemId, timelineItems]);
+    if (!currentTimelineItem || !selectedItemId) return false;
+    return currentTimelineItem.id === selectedItemId;
+  }, [currentTimelineItem, selectedItemId]);
+
+  // The resolved text comes directly from the timeline item (single source)
+  const resolvedSubtitleText = currentSubtitle?.subtitleText || currentSubtitle?.text || '';
 
   // Container wrapper — fills parent, used for ResizeObserver
   if (!subtitlesEnabled) {
@@ -453,6 +424,10 @@ export default function SubtitleOverlay({
   }
 
   // ── Render subtitle ─────────────────────────────────────────────────
+  // Use per-item position if set (from InteractiveOverlay drag), else use settings
+  const itemPos = currentTimelineItem?.position || { x: 50, y: 90 };
+  const itemRotation = currentTimelineItem?.transform?.rotation || 0;
+
   const position = settings.subtitlePosition || 'bottom';
   const maxWidthPct = settings.subtitleMaxWidth ?? 90;
   const offsetVPct = settings.subtitleOffsetV ?? 4;
@@ -477,7 +452,6 @@ export default function SubtitleOverlay({
 
   let outlineStyle;
   if (bgEnabled && scaledOlWidth > 0) {
-    // Background + outline: show both — CSS can layer text-stroke on top of background
     const olColorStr = `rgba(${olR},${olG},${olB},${olOpacity})`;
     outlineStyle = {
       WebkitTextStroke: `${scaledOlWidth * 2}px ${olColorStr}`,
@@ -505,16 +479,32 @@ export default function SubtitleOverlay({
   const marginH_px = Math.max(20, Math.floor(outputDims.w * (100 - clampedMaxWidth) / 100 / 2));
   const maxMarginH = Math.floor(outputDims.w * 0.40);
   const effectiveMarginH = Math.min(marginH_px, maxMarginH) / outputDims.w * 100;
-  // Map position setting to CSS positioning.
-  // "bottom" = offset from bottom edge, "top" = offset from top edge,
-  // "center" = vertically centered (offset ignored).
+
+  // Position: use per-item position if dragged, otherwise use settings-based position
+  const hasCustomPosition = itemPos.x !== 50 || itemPos.y !== 90;
   let positionStyle;
-  if (position === 'top') {
-    positionStyle = { top: `${clampedOffsetV}%` };
+  if (hasCustomPosition) {
+    // Per-item position from InteractiveOverlay drag (percentage-based)
+    positionStyle = {
+      left: `${itemPos.x}%`,
+      top: `${itemPos.y}%`,
+      transform: `translate(-50%, -50%)${itemRotation ? ` rotate(${itemRotation}deg)` : ''}`,
+    };
+  } else if (position === 'top') {
+    positionStyle = {
+      top: `${clampedOffsetV}%`,
+      ...(itemRotation ? { transform: `rotate(${itemRotation}deg)` } : {}),
+    };
   } else if (position === 'center') {
-    positionStyle = { top: '50%', transform: 'translateY(-50%)' };
+    positionStyle = {
+      top: '50%',
+      transform: `translateY(-50%)${itemRotation ? ` rotate(${itemRotation}deg)` : ''}`,
+    };
   } else {
-    positionStyle = { bottom: `${clampedOffsetV}%` };
+    positionStyle = {
+      bottom: `${clampedOffsetV}%`,
+      ...(itemRotation ? { transform: `rotate(${itemRotation}deg)` } : {}),
+    };
   }
 
   const text = showLabels && currentSubtitle.speaker
@@ -542,9 +532,6 @@ export default function SubtitleOverlay({
           const isActive = idx === currentWordIdx;
           const wordStyle = isActive ? {
             color: awColor,
-            // When background is enabled (BorderStyle=3 in ASS), outline
-            // strokes can't coexist with the box — only change text color.
-            // When background is off, apply outline per active word.
             ...(!bgEnabled && scaledOlWidth > 0 ? {
               WebkitTextStroke: `${scaledOlWidth * 2}px rgba(${awOlR},${awOlG},${awOlB},${olOpacity})`,
               paintOrder: 'stroke fill',
@@ -567,7 +554,7 @@ export default function SubtitleOverlay({
     textContent = text;
   }
 
-  // Editing text uses the same resolved text (timeline item text preferred)
+  // Editing text uses the resolved text from timeline store
   const editingText = resolvedSubtitleText;
 
   return (
@@ -584,8 +571,12 @@ export default function SubtitleOverlay({
       }}>
         <div style={{
           position: 'absolute',
-          left: `${effectiveMarginH}%`,
-          right: `${effectiveMarginH}%`,
+          ...(hasCustomPosition ? {
+            inset: 0,
+          } : {
+            left: `${effectiveMarginH}%`,
+            right: `${effectiveMarginH}%`,
+          }),
           textAlign: 'center',
           pointerEvents: 'none',
           ...positionStyle,

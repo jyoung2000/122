@@ -156,11 +156,10 @@ export default class RenderEngine {
     ctx.fillRect(0, 0, width, height);
 
     // Collect visible clips at currentTime, sorted by track order (bottom-to-top)
+    // Subtitle items are rendered last (on top) via the canvas engine, using the
+    // same timeline store items that SubtitleOverlay uses (single source of truth).
     const visibleClips = [];
     for (const clip of clips) {
-      // Subtitle items are rendered by SubtitleOverlay (the "Subs ON" system),
-      // not by the canvas engine — skip them to avoid duplicate subtitles.
-      if (clip.type === 'subtitle') continue;
       if (currentTime >= clip.start && currentTime < clip.end) {
         const track = tracks.find(t => t.id === clip.trackId);
         if (track && track.visible !== false && !track.muted) {
@@ -431,7 +430,7 @@ export default class RenderEngine {
     const fontScale = Math.min(outputW, outputH) / Math.min(REF_W, REF_H);
     const fontSize = Math.max(16, Math.round(basePx * fontScale));
     const fontWeight = subSettings.subtitleFontWeight === 'bold' ? 700 : subSettings.subtitleFontWeight === 'black' ? 900 : 400;
-    const position = subSettings.subtitlePosition || 'bottom';
+    const settingsPosition = subSettings.subtitlePosition || 'bottom';
     const maxWidthPct = subSettings.subtitleMaxWidth ?? 90;
     const offsetVPct = subSettings.subtitleOffsetV ?? 4;
     const bgEnabled = subSettings.subtitleBgEnabled || false;
@@ -444,24 +443,40 @@ export default class RenderEngine {
     const activeWordEnabled = subSettings.activeWordEnabled || false;
     const activeWordColor = subSettings.activeWordColor || '#FFD700';
 
+    // Per-item position and rotation from timeline store
+    const itemPos = clip.position || { x: 50, y: 90 };
+    const itemRotation = (clip.transform?.rotation) ?? 0;
+    const hasCustomPosition = itemPos.x !== 50 || itemPos.y !== 90;
+
     ctx.save();
 
-    // Position
+    // Position: use per-item position if set, otherwise use settings-based position
     const maxWidth = (maxWidthPct / 100) * width;
-    let y;
-    if (position === 'top') {
-      y = (offsetVPct / 100) * height + fontSize;
-    } else if (position === 'center') {
-      y = height / 2;
+    let x, y;
+    if (hasCustomPosition) {
+      x = (itemPos.x / 100) * width;
+      y = (itemPos.y / 100) * height;
     } else {
-      y = height - (offsetVPct / 100) * height - fontSize * 0.4;
+      x = width / 2;
+      if (settingsPosition === 'top') {
+        y = (offsetVPct / 100) * height + fontSize;
+      } else if (settingsPosition === 'center') {
+        y = height / 2;
+      } else {
+        y = height - (offsetVPct / 100) * height - fontSize * 0.4;
+      }
+    }
+
+    // Apply rotation around the subtitle's position
+    if (itemRotation !== 0) {
+      ctx.translate(x, y);
+      ctx.rotate((itemRotation * Math.PI) / 180);
+      ctx.translate(-x, -y);
     }
 
     ctx.font = `${fontWeight} ${fontSize}px "${fontName}", sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-
-    const x = width / 2;
 
     // Measure for background
     const lines = this._wrapText(ctx, text, maxWidth);
@@ -503,7 +518,6 @@ export default class RenderEngine {
       // Active word highlighting
       if (activeWordEnabled && clip._activeWordIndex >= 0) {
         const words = lines[i].split(/\s+/);
-        // Simple per-word rendering with highlight
         let wordX = x - ctx.measureText(lines[i]).width / 2;
         ctx.textAlign = 'left';
         for (let w = 0; w < words.length; w++) {

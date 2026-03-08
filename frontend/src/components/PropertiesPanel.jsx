@@ -295,7 +295,7 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
   const duration = item.end - item.start;
   const isVisual = item.type !== 'audio';
   const isMediaClip = item.type === 'video' || item.type === 'audio';
-  const isOverlay = item.type === 'text' || item.type === 'shape' || item.type === 'image' || item.type === 'overlay';
+  const isOverlay = item.type === 'text' || item.type === 'shape' || item.type === 'image' || item.type === 'overlay' || item.type === 'subtitle';
 
   return (
     <div className={`ve-properties${compact ? ' ve-properties--compact' : ''}`}>
