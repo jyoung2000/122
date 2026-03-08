@@ -198,8 +198,16 @@ export default class RenderEngine {
 
     ctx.save();
 
-    // Apply clip opacity
-    const opacity = clip.opacity ?? 1;
+    // Apply clip opacity with fadeIn/fadeOut
+    let opacity = clip.opacity ?? 1;
+    const clipDur = clip.end - clip.start;
+    const elapsed = currentTime - clip.start;
+    if (clip.fadeIn > 0 && elapsed < clip.fadeIn) {
+      opacity *= elapsed / clip.fadeIn;
+    }
+    if (clip.fadeOut > 0 && (clipDur - elapsed) < clip.fadeOut) {
+      opacity *= (clipDur - elapsed) / clip.fadeOut;
+    }
     if (opacity < 1) {
       ctx.globalAlpha = opacity;
     }
@@ -291,17 +299,18 @@ export default class RenderEngine {
 
     const { width, height } = this;
     const transform = clip.transform || {};
-    const pos = clip.position || { x: 0, y: 0 };
-    const size = clip.size || { w: 100, h: 100 };
+    // pos is center-based (DOM uses left/top + translate(-50%, -50%))
+    const pos = clip.position || { x: 50, y: 50 };
+    const size = clip.size || { w: 30, h: 30 };
 
-    const dx = (pos.x / 100) * width;
-    const dy = (pos.y / 100) * height;
+    const cx = (pos.x / 100) * width;
+    const cy = (pos.y / 100) * height;
     const dw = (size.w / 100) * width;
     const dh = (size.h / 100) * height;
     const rotation = transform.rotation ?? 0;
 
     ctx.save();
-    ctx.translate(dx + dw / 2, dy + dh / 2);
+    ctx.translate(cx, cy);
     if (rotation !== 0) ctx.rotate((rotation * Math.PI) / 180);
     ctx.drawImage(mediaEl, -dw / 2, -dh / 2, dw, dh);
     ctx.restore();
@@ -319,12 +328,15 @@ export default class RenderEngine {
     const color = style.color || '#FFFFFF';
     const align = style.textAlign || 'center';
     const pos = clip.position || { x: 50, y: 50 };
+    const size = clip.size || { w: 80, h: 20 };
+    const rotation = (clip.transform?.rotation) ?? 0;
 
     ctx.save();
 
     // Animation
     let animAlpha = 1;
     let animOffsetY = 0;
+    let animScale = 1;
     const anim = style.animation || 'none';
     const clipDur = clip.end - clip.start;
     const elapsed = currentTime - clip.start;
@@ -336,12 +348,7 @@ export default class RenderEngine {
       animAlpha = elapsed / 0.5;
     } else if (anim === 'pop' && elapsed < 0.3) {
       const t = elapsed / 0.3;
-      const scale = 0.5 + 0.5 * (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
-      ctx.translate((pos.x / 100) * width, (pos.y / 100) * height + animOffsetY);
-      ctx.scale(scale, scale);
-      ctx.translate(-(pos.x / 100) * width, -(pos.y / 100) * height);
-    } else if (anim === 'typewriter') {
-      const charsToShow = Math.floor((elapsed / clipDur) * text.length);
+      animScale = 0.5 + 0.5 * (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
     }
 
     ctx.globalAlpha *= animAlpha;
@@ -354,6 +361,17 @@ export default class RenderEngine {
     const x = (pos.x / 100) * width;
     const y = (pos.y / 100) * height + animOffsetY;
 
+    // Apply rotation and pop scale around center
+    ctx.translate(x, y);
+    if (rotation !== 0) ctx.rotate((rotation * Math.PI) / 180);
+    if (animScale !== 1) ctx.scale(animScale, animScale);
+    // Now draw relative to origin (which is the text center)
+    const drawX = 0;
+    const drawY = 0;
+
+    // Adjust textAlign anchor for centered drawing
+    const textAlignX = align === 'center' ? 0 : align === 'right' ? 0 : 0;
+
     // Background box
     if (style.bgColor && style.bgOpacity > 0) {
       const metrics = ctx.measureText(text);
@@ -361,9 +379,9 @@ export default class RenderEngine {
       const boxW = metrics.width + pad * 2;
       const boxH = fontSize * 1.4 + pad * 2;
       ctx.fillStyle = this._hexToRgba(style.bgColor, (style.bgOpacity || 75) / 100);
-      const bx = align === 'center' ? x - boxW / 2 : align === 'right' ? x - boxW : x;
+      const bx = align === 'center' ? -boxW / 2 : align === 'right' ? -boxW : 0;
       ctx.beginPath();
-      ctx.roundRect(bx, y - boxH / 2, boxW, boxH, style.bgRadius || 4);
+      ctx.roundRect(bx, -boxH / 2, boxW, boxH, style.bgRadius || 4);
       ctx.fill();
     }
 
@@ -372,7 +390,7 @@ export default class RenderEngine {
       ctx.strokeStyle = style.outlineColor || '#000000';
       ctx.lineWidth = style.outlineWidth * 2;
       ctx.lineJoin = 'round';
-      ctx.strokeText(text, x, y);
+      ctx.strokeText(text, drawX, drawY);
     }
 
     // Text shadow
@@ -386,13 +404,14 @@ export default class RenderEngine {
     // Fill text
     ctx.fillStyle = color;
 
+    // Use item's width for text wrapping (matches DOM rendering)
+    const maxWidth = (size.w / 100) * width;
+
     if (anim === 'typewriter') {
       const charsToShow = Math.floor((elapsed / clipDur) * text.length);
-      ctx.fillText(text.slice(0, charsToShow), x, y);
+      ctx.fillText(text.slice(0, charsToShow), drawX, drawY);
     } else {
-      // Word wrap
-      const maxWidth = style.maxWidth ? (style.maxWidth / 100) * width : width * 0.8;
-      this._drawWrappedText(ctx, text, x, y, maxWidth, fontSize * 1.4);
+      this._drawWrappedText(ctx, text, drawX, drawY, maxWidth, fontSize * 1.4);
     }
 
     ctx.restore();
@@ -506,16 +525,21 @@ export default class RenderEngine {
 
   _renderShape(ctx, clip) {
     const { width, height } = this;
+    // pos is center-based (DOM uses left/top + translate(-50%, -50%))
     const pos = clip.position || { x: 10, y: 10 };
     const size = clip.size || { w: 20, h: 20 };
     const style = clip.shapeStyle || {};
+    const rotation = (clip.transform?.rotation) ?? 0;
 
-    const dx = (pos.x / 100) * width;
-    const dy = (pos.y / 100) * height;
+    const cx = (pos.x / 100) * width;
+    const cy = (pos.y / 100) * height;
     const dw = (size.w / 100) * width;
     const dh = (size.h / 100) * height;
 
     ctx.save();
+    // Translate to center, apply rotation, then draw relative to center
+    ctx.translate(cx, cy);
+    if (rotation !== 0) ctx.rotate((rotation * Math.PI) / 180);
 
     ctx.fillStyle = style.fillColor || '#FF3B30';
     ctx.strokeStyle = style.strokeColor || '#FFFFFF';
@@ -526,33 +550,33 @@ export default class RenderEngine {
     switch (shapeType) {
       case 'rectangle':
         ctx.beginPath();
-        ctx.roundRect(dx, dy, dw, dh, style.cornerRadius || 0);
+        ctx.roundRect(-dw / 2, -dh / 2, dw, dh, style.cornerRadius || 0);
         if (style.fillColor) ctx.fill();
         if (style.strokeWidth > 0) ctx.stroke();
         break;
       case 'circle':
       case 'ellipse':
         ctx.beginPath();
-        ctx.ellipse(dx + dw / 2, dy + dh / 2, dw / 2, dh / 2, 0, 0, Math.PI * 2);
+        ctx.ellipse(0, 0, dw / 2, dh / 2, 0, 0, Math.PI * 2);
         if (style.fillColor) ctx.fill();
         if (style.strokeWidth > 0) ctx.stroke();
         break;
       case 'arrow':
         ctx.beginPath();
-        ctx.moveTo(dx, dy + dh / 2);
-        ctx.lineTo(dx + dw * 0.7, dy + dh / 2);
-        ctx.lineTo(dx + dw * 0.7, dy);
-        ctx.lineTo(dx + dw, dy + dh / 2);
-        ctx.lineTo(dx + dw * 0.7, dy + dh);
-        ctx.lineTo(dx + dw * 0.7, dy + dh / 2);
+        ctx.moveTo(-dw / 2, 0);
+        ctx.lineTo(dw * 0.2, 0);
+        ctx.lineTo(dw * 0.2, -dh / 2);
+        ctx.lineTo(dw / 2, 0);
+        ctx.lineTo(dw * 0.2, dh / 2);
+        ctx.lineTo(dw * 0.2, 0);
         ctx.closePath();
         if (style.fillColor) ctx.fill();
         if (style.strokeWidth > 0) ctx.stroke();
         break;
       case 'line':
         ctx.beginPath();
-        ctx.moveTo(dx, dy);
-        ctx.lineTo(dx + dw, dy + dh);
+        ctx.moveTo(-dw / 2, -dh / 2);
+        ctx.lineTo(dw / 2, dh / 2);
         ctx.stroke();
         break;
     }

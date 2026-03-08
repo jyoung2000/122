@@ -381,8 +381,8 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
         </div>
       )}
 
-      {/* ── Effects (video, image, overlay) ── */}
-      {(item.type === 'video' || item.type === 'image' || item.type === 'overlay') && (
+      {/* ── Effects (all visual items) ── */}
+      {(item.type === 'video' || item.type === 'text' || item.type === 'shape' || item.type === 'image' || item.type === 'overlay') && (
         <div className="ve-properties__section">
           <label className="ve-properties__label" onClick={() => toggleSection('effects')} style={{ cursor: 'pointer' }}>
             Effects {expandedSections.effects === false ? '▸' : '▾'}

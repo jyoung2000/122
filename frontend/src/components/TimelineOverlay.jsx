@@ -42,8 +42,8 @@ export default function TimelineOverlay({ currentTime = 0, clipStart = 0 }) {
         const duration = item.end - item.start;
 
         if (item.type === 'text') return <TextOverlayItem key={item.id} item={item} elapsed={elapsed} duration={duration} />;
-        if (item.type === 'shape') return <ShapeOverlayItem key={item.id} item={item} />;
-        if (item.type === 'image' || item.type === 'overlay') return <ImageOverlayItem key={item.id} item={item} />;
+        if (item.type === 'shape') return <ShapeOverlayItem key={item.id} item={item} elapsed={elapsed} duration={duration} />;
+        if (item.type === 'image' || item.type === 'overlay') return <ImageOverlayItem key={item.id} item={item} elapsed={elapsed} duration={duration} />;
         return null;
       })}
     </div>
@@ -164,15 +164,29 @@ function TextOverlayItem({ item, elapsed, duration }) {
 }
 
 
-function ShapeOverlayItem({ item }) {
+function ShapeOverlayItem({ item, elapsed = 0, duration = 1 }) {
   const pos = item.position || { x: 10, y: 10 };
   const size = item.size || { w: 20, h: 20 };
   const style = item.shapeStyle || {};
   const shapeType = item.shapeType || 'rectangle';
   const rotation = item.transform?.rotation || 0;
 
-  // Fade
-  const finalOpacity = item.opacity ?? 1;
+  // Fade in/out
+  let fadeAlpha = 1;
+  if (item.fadeIn > 0 && elapsed < item.fadeIn) fadeAlpha *= elapsed / item.fadeIn;
+  if (item.fadeOut > 0 && (duration - elapsed) < item.fadeOut) fadeAlpha *= (duration - elapsed) / item.fadeOut;
+
+  const finalOpacity = (item.opacity ?? 1) * fadeAlpha;
+
+  // Effects
+  const effects = item.effects || {};
+  const filters = [];
+  if (effects.brightness) filters.push(`brightness(${1 + effects.brightness / 100})`);
+  if (effects.contrast) filters.push(`contrast(${1 + effects.contrast / 100})`);
+  if (effects.saturation) filters.push(`saturate(${1 + effects.saturation / 100})`);
+  if (effects.blur) filters.push(`blur(${effects.blur}px)`);
+  if (effects.hueRotate) filters.push(`hue-rotate(${effects.hueRotate}deg)`);
+  if (effects.sepia) filters.push(`sepia(${effects.sepia / 100})`);
 
   const common = {
     position: 'absolute',
@@ -182,6 +196,7 @@ function ShapeOverlayItem({ item }) {
     height: `${size.h}%`,
     transform: `translate(-50%, -50%) ${rotation ? `rotate(${rotation}deg)` : ''}`,
     opacity: finalOpacity,
+    filter: filters.length ? filters.join(' ') : undefined,
     pointerEvents: 'none',
   };
 
@@ -249,12 +264,18 @@ function ShapeOverlayItem({ item }) {
 }
 
 
-function ImageOverlayItem({ item }) {
+function ImageOverlayItem({ item, elapsed = 0, duration = 1 }) {
   const pos = item.position || { x: 50, y: 50 };
   const size = item.size || { w: 30, h: 30 };
   const rotation = item.transform?.rotation || 0;
-  const finalOpacity = item.opacity ?? 1;
   const mediaLibrary = useTimelineStore((s) => s.mediaLibrary);
+
+  // Fade in/out
+  let fadeAlpha = 1;
+  if (item.fadeIn > 0 && elapsed < item.fadeIn) fadeAlpha *= elapsed / item.fadeIn;
+  if (item.fadeOut > 0 && (duration - elapsed) < item.fadeOut) fadeAlpha *= (duration - elapsed) / item.fadeOut;
+
+  const finalOpacity = (item.opacity ?? 1) * fadeAlpha;
 
   const effects = item.effects || {};
   const filters = [];
