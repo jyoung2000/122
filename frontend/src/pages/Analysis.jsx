@@ -1459,7 +1459,7 @@ export default function Analysis() {
               {builtinFonts.map(f => <option key={f} value={f}>{f}</option>)}
               {inlineCustomFonts.length > 0 && (
                 <optgroup label="Custom Fonts">
-                  {inlineCustomFonts.map(f => <option key={f.name} value={f.name}>{f.name}</option>)}
+                  {inlineCustomFonts.map(f => <option key={f.name} value={f.name}>{String(f.name ?? '')}</option>)}
                 </optgroup>
               )}
             </select>

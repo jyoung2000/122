@@ -445,7 +445,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
               >
                 <option value="">Load a preset...</option>
                 {presets.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
+                  <option key={p.id} value={p.id}>{String(p.name ?? '')}</option>
                 ))}
               </select>
               <button
@@ -692,7 +692,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                           {customFonts.length > 0 && (
                             <optgroup label="Custom Fonts">
                               {customFonts.map((f) => (
-                                <option key={f.name} value={f.name} style={{ fontFamily: f.name }}>{f.name}</option>
+                                <option key={f.name} value={f.name} style={{ fontFamily: f.name }}>{String(f.name ?? '')}</option>
                               ))}
                             </optgroup>
                           )}
