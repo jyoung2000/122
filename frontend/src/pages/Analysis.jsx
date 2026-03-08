@@ -959,6 +959,35 @@ export default function Analysis() {
     showToast('Clip settings applied to preview & export', 'info');
   };
 
+  // Derive unique speakers from transcript — MUST be before early returns
+  // because the useEffect below is a hook and hooks cannot be skipped.
+  const speakers = useMemo(() => {
+    const sp = [];
+    (job?.transcript || []).forEach((seg) => {
+      if (!sp.includes(seg.speaker)) sp.push(seg.speaker);
+    });
+    return sp;
+  }, [job?.transcript]);
+
+  // Auto-initialize speaker colors from palette when speakers are detected
+  // This ensures each speaker gets a unique color even before ClipSettingsPanel mounts
+  // MUST be before early returns to satisfy Rules of Hooks (error #310).
+  useEffect(() => {
+    if (speakers.length === 0) return;
+    setClipSettings((prev) => {
+      const currentColors = prev.speakerColors || {};
+      const needsInit = speakers.some((sp) => !currentColors[sp]);
+      if (!needsInit) return prev;
+      const newColors = { ...currentColors };
+      speakers.forEach((sp, i) => {
+        if (!newColors[sp]) {
+          newColors[sp] = DEFAULT_SPEAKER_PALETTE[i % DEFAULT_SPEAKER_PALETTE.length];
+        }
+      });
+      return { ...prev, speakerColors: newColors };
+    });
+  }, [speakers]);
+
   if (loading) {
     return (
       <div style={{ textAlign: 'center', padding: 48, color: 'var(--text-secondary)' }}>
@@ -996,30 +1025,6 @@ export default function Analysis() {
   const clipSubjectX = clipPreview && job.scenes?.length
     ? computeClipSubjectX(job.scenes, clipPreview.start_time, clipPreview.end_time)
     : 50;
-
-  // Derive unique speakers from transcript
-  const speakers = [];
-  (job.transcript || []).forEach((seg) => {
-    if (!speakers.includes(seg.speaker)) speakers.push(seg.speaker);
-  });
-
-  // Auto-initialize speaker colors from palette when speakers are detected
-  // This ensures each speaker gets a unique color even before ClipSettingsPanel mounts
-  useEffect(() => {
-    if (speakers.length === 0) return;
-    setClipSettings((prev) => {
-      const currentColors = prev.speakerColors || {};
-      const needsInit = speakers.some((sp) => !currentColors[sp]);
-      if (!needsInit) return prev;
-      const newColors = { ...currentColors };
-      speakers.forEach((sp, i) => {
-        if (!newColors[sp]) {
-          newColors[sp] = DEFAULT_SPEAKER_PALETTE[i % DEFAULT_SPEAKER_PALETTE.length];
-        }
-      });
-      return { ...prev, speakerColors: newColors };
-    });
-  }, [speakers.join(',')]);
 
   // Always use ClipPreview when a clip is selected so it responds to
   // aspect ratio and subtitle settings changes in real time.
