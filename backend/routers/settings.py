@@ -1447,6 +1447,7 @@ async def set_gpu_acceleration(req: GpuAccelerationRequest):
     When toggled OFF: clears cache, returns CPU fallback info.
     """
     from backend.services.clip_exporter import detect_gpu_capabilities, _gpu_info_cache_clear
+    from backend.services.transcription import reload_model as reload_whisper_model
 
     settings.GPU_ACCELERATION_ENABLED = req.enabled
     if req.vendor_override is not None:
@@ -1456,6 +1457,8 @@ async def set_gpu_acceleration(req: GpuAccelerationRequest):
 
     # Force re-detection so the response includes fresh GPU info
     _gpu_info_cache_clear()
+    # Reload Whisper model so it moves between CPU/CUDA to match the toggle
+    reload_whisper_model()
     # Run in thread to avoid blocking the event loop (subprocess calls inside).
     gpu_info = await asyncio.to_thread(detect_gpu_capabilities, force_redetect=True)
 
@@ -1526,10 +1529,12 @@ async def report_client_gpu(req: ClientGpuReport):
         settings.GPU_ACCELERATION_ENABLED = True
         settings.GPU_VENDOR_OVERRIDE = "nvidia"
         _persist_user_settings()
-        # Force GPU re-detection
+        # Force GPU re-detection and reload Whisper model for CUDA
         try:
             from backend.services.clip_exporter import _gpu_info_cache_clear
             _gpu_info_cache_clear()
+            from backend.services.transcription import reload_model as reload_whisper_model
+            reload_whisper_model()
         except Exception:
             pass
 

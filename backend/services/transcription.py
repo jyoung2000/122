@@ -120,6 +120,18 @@ def _get_gpu_name_from_sysfs() -> str:
     return ""
 
 
+def reload_model():
+    """Force-reload the Whisper model on the next transcription call.
+
+    Called when GPU acceleration is toggled so the model can move
+    between CPU and CUDA without restarting the server.
+    """
+    global _whisper_model
+    with _model_lock:
+        _whisper_model = None
+    logger.info("Whisper model cache cleared — will reload on next use")
+
+
 def _get_whisper_model():
     global _whisper_model, whisper_device_info
     with _model_lock:
@@ -132,7 +144,15 @@ def _get_whisper_model():
             gpu_name = ""
 
             cuda_available, cuda_count, detected_name = _detect_cuda_available()
-            if cuda_available and cuda_count > 0:
+            if not settings.GPU_ACCELERATION_ENABLED:
+                # User has GPU acceleration disabled — force CPU even if
+                # CUDA is available, but still record the GPU name for UI.
+                gpu_name = detected_name
+                logger.info(
+                    "GPU acceleration disabled in settings — using CPU for Whisper"
+                    + (f" (GPU detected: {gpu_name})" if gpu_name else "")
+                )
+            elif cuda_available and cuda_count > 0:
                 device = "cuda"
                 compute_type = "float16"
                 gpu_name = detected_name
