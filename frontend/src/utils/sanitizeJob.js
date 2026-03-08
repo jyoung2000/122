@@ -157,6 +157,11 @@ export function sanitizeClip(c) {
   if (Array.isArray(sc.seo_tags)) {
     sc.seo_tags = sc.seo_tags.map((t) => (typeof t === 'string' ? t : String(t)));
   }
+  // Numeric fields — coerce objects to number
+  const numFields = ['viral_score', 'start_time', 'end_time', 'id'];
+  for (const f of numFields) {
+    if (sc[f] != null && typeof sc[f] === 'object') sc[f] = Number(sc[f]) || 0;
+  }
   return sc;
 }
 
@@ -165,7 +170,7 @@ export function sanitizeClip(c) {
  * Fields like speakerColors are intentionally left as objects.
  */
 export function sanitizeSubtitleSettings(ss) {
-  if (!ss || typeof ss !== 'object') return ss;
+  if (!ss || typeof ss !== 'object' || Array.isArray(ss)) return {};
   const s = { ...ss };
   // All string fields that may be rendered in JSX
   const stringFields = [

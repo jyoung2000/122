@@ -333,10 +333,10 @@ export default function ClipSEO() {
             // Restore persisted SEO data
             if (found.seo_title) {
               setSeo({
-                title: found.seo_title,
-                description: found.seo_description || '',
-                tags: found.seo_tags || [],
-                platform_tips: found.seo_platform_tips || '',
+                title: typeof found.seo_title === 'string' ? found.seo_title : String(found.seo_title),
+                description: typeof found.seo_description === 'string' ? found.seo_description : String(found.seo_description ?? ''),
+                tags: Array.isArray(found.seo_tags) ? found.seo_tags.map((t) => typeof t === 'string' ? t : String(t)) : [],
+                platform_tips: typeof found.seo_platform_tips === 'string' ? found.seo_platform_tips : String(found.seo_platform_tips ?? ''),
               });
             }
             if (found.shorts_description) setShortsDesc(found.shorts_description);
@@ -468,7 +468,7 @@ export default function ClipSEO() {
       try {
         const msg = JSON.parse(evt.data);
         if (msg.type === 'status' && msg.status === 'generating_seo') {
-          setGenStatus(msg.message || 'Generating...');
+          setGenStatus(typeof msg.message === 'string' ? msg.message : String(msg.message ?? 'Generating...'));
         }
       } catch {}
     };
@@ -620,7 +620,13 @@ export default function ClipSEO() {
         throw new Error(err.detail || 'SEO generation failed');
       }
       const data = await res.json();
-      setSeo(data.seo);
+      const rawSeo = data.seo || {};
+      setSeo({
+        title: typeof rawSeo.title === 'string' ? rawSeo.title : String(rawSeo.title ?? ''),
+        description: typeof rawSeo.description === 'string' ? rawSeo.description : String(rawSeo.description ?? ''),
+        tags: Array.isArray(rawSeo.tags) ? rawSeo.tags.map((t) => typeof t === 'string' ? t : String(t)) : [],
+        platform_tips: typeof rawSeo.platform_tips === 'string' ? rawSeo.platform_tips : String(rawSeo.platform_tips ?? ''),
+      });
       showToast(`SEO generated via ${data.provider}`, 'success');
     } catch (err) {
       showToast(err.message, 'error');
@@ -657,7 +663,7 @@ export default function ClipSEO() {
         throw new Error(err.detail || 'Description generation failed');
       }
       const data = await res.json();
-      setter(data.description || '');
+      setter(typeof data.description === 'string' ? data.description : String(data.description ?? ''));
       showToast(`${isShorts ? 'Shorts' : 'YouTube'} description generated via ${data.provider}`, 'success');
     } catch (err) {
       showToast(err.message, 'error');
@@ -1498,7 +1504,7 @@ export default function ClipSEO() {
                     animation: 'seo-pulse 2s ease-in-out infinite',
                     fontFamily: 'var(--font-mono)',
                   }}>
-                    {genStatus}
+                    {String(genStatus ?? '')}
                   </p>
                   <p style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 12, fontFamily: 'var(--font-mono)' }}>
                     {genElapsed}s elapsed
@@ -1563,7 +1569,7 @@ export default function ClipSEO() {
                   </button>
                 </div>
                 <div style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary)', lineHeight: 1.4 }}>
-                  {seo.title}
+                  {String(seo.title ?? '')}
                 </div>
               </div>
 
@@ -1578,7 +1584,7 @@ export default function ClipSEO() {
                   </button>
                 </div>
                 <div style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
-                  {seo.description}
+                  {String(seo.description ?? '')}
                 </div>
               </div>
 
@@ -1605,7 +1611,7 @@ export default function ClipSEO() {
                         color: 'var(--accent-cyan)', cursor: 'pointer',
                       }}
                     >
-                      {tag}
+                      {String(tag ?? '')}
                     </span>
                   ))}
                 </div>
@@ -1615,7 +1621,7 @@ export default function ClipSEO() {
               {seo.platform_tips && (
                 <div style={{ ...sectionStyle, background: 'var(--bg-elevated)', borderStyle: 'dashed' }}>
                   <div style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.5, fontStyle: 'italic' }}>
-                    {seo.platform_tips}
+                    {String(seo.platform_tips ?? '')}
                   </div>
                 </div>
               )}

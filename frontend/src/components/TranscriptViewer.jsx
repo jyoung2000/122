@@ -441,7 +441,7 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
                   onMouseEnter={(e) => (e.target.style.borderBottomColor = color)}
                   onMouseLeave={(e) => (e.target.style.borderBottomColor = 'transparent')}
                 >
-                  {sp}
+                  {String(sp ?? '')}
                 </span>
               )}
             </div>
@@ -579,7 +579,7 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
                     <span
                       style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color, fontWeight: 600 }}
                     >
-                      {seg.speaker}
+                      {String(seg.speaker ?? '')}
                     </span>
                   )}
                   <br />

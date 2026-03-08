@@ -151,7 +151,7 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: clip.clip_focus ? 'var(--success)' : scoreColor }}>
-              {clip.viral_score}
+              {typeof clip.viral_score === 'number' ? clip.viral_score : String(clip.viral_score ?? '')}
             </div>
             <div style={{ fontSize: 10, color: clip.clip_focus ? 'var(--success)' : 'var(--text-secondary)', textTransform: 'uppercase' }}>
               {clip.clip_focus ? 'FOCUS' : '/100'}

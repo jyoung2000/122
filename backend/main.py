@@ -35,11 +35,20 @@ app = FastAPI(title="ClipAI", version="1.0.0")
 
 
 class CrossOriginIsolationMiddleware(BaseHTTPMiddleware):
-    """Add COOP/COEP headers for SharedArrayBuffer support (WebGPU/ONNX Runtime)."""
+    """Add COOP/COEP headers for SharedArrayBuffer support (WebGPU/ONNX Runtime).
+
+    Only sent when the origin is "potentially trustworthy" (localhost or HTTPS),
+    because browsers ignore these headers on plain-HTTP non-localhost origins
+    and log a noisy console warning.
+    """
     async def dispatch(self, request, call_next):
         response = await call_next(request)
-        response.headers["Cross-Origin-Embedder-Policy"] = "credentialless"
-        response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
+        host = (request.headers.get("host") or "").split(":")[0]
+        is_secure = request.url.scheme == "https"
+        is_localhost = host in ("localhost", "127.0.0.1", "::1")
+        if is_secure or is_localhost:
+            response.headers["Cross-Origin-Embedder-Policy"] = "credentialless"
+            response.headers["Cross-Origin-Opener-Policy"] = "same-origin"
         return response
 
 

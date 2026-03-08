@@ -1810,7 +1810,7 @@ export default function Analysis() {
               <span style={{ fontWeight: 600, color: 'var(--text-secondary)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.03em' }}>
                 Current subject (Clip {clipPreview.id}):
               </span>{' '}
-              {best.description.length > 150 ? best.description.slice(0, 150) + '...' : best.description}
+              {String(best.description || '').length > 150 ? String(best.description || '').slice(0, 150) + '...' : String(best.description || '')}
               <span style={{ marginLeft: 6, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--accent-cyan)' }}>
                 x={typeof best.subject_x === 'number' ? best.subject_x : 50}%
               </span>

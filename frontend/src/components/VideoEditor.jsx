@@ -2211,7 +2211,7 @@ export default function VideoEditor({
                   display: 'inline-block', width: 5, height: 5,
                   borderRadius: '50%', background: segHexColor,
                 }} />
-                {seg.label || 'Segment'}
+                {String(seg.label || 'Segment')}
                 {seg.muted ? ' (muted)' : ''}
                 {!seg.subtitlesEnabled ? ' (no subs)' : ''}
                 {seg.subjectTrackingEnabled === false ? ' (no tracking)' : ''}
@@ -2372,7 +2372,7 @@ export default function VideoEditor({
                     }}
                     title="Click to rename"
                   >
-                    {seg.label || 'Segment'}
+                    {String(seg.label || 'Segment')}
                   </span>
                 )}
                 {/* Time range */}
