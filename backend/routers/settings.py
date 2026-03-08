@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import logging
@@ -1405,7 +1406,8 @@ async def get_gpu_acceleration():
 
     # Always detect GPUs so the UI can show all available devices,
     # even when GPU acceleration is toggled off.
-    gpu_info = detect_gpu_capabilities(force_redetect=True)
+    # Run in thread to avoid blocking the event loop (subprocess calls inside).
+    gpu_info = await asyncio.to_thread(detect_gpu_capabilities, force_redetect=True)
 
     return {
         "enabled": settings.GPU_ACCELERATION_ENABLED,
@@ -1454,7 +1456,8 @@ async def set_gpu_acceleration(req: GpuAccelerationRequest):
 
     # Force re-detection so the response includes fresh GPU info
     _gpu_info_cache_clear()
-    gpu_info = detect_gpu_capabilities(force_redetect=True)
+    # Run in thread to avoid blocking the event loop (subprocess calls inside).
+    gpu_info = await asyncio.to_thread(detect_gpu_capabilities, force_redetect=True)
 
     return {
         "status": "saved",
