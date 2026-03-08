@@ -397,7 +397,7 @@ export default function Layout({ children }) {
                 fontSize: 11, color: 'var(--text-muted)',
                 whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
               }}>
-                {latestActivity.message}
+                {typeof latestActivity.message === 'string' ? latestActivity.message : String(latestActivity.message ?? '')}
               </span>
             </div>
           )}

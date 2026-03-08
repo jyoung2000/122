@@ -503,7 +503,16 @@ export default function Analysis() {
     const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
     // Ensure message is always a string to prevent React error #310
     const safeMsg = typeof message === 'string' ? message : String(message ?? '');
-    setActivityLog((prev) => [...prev, { ts, type, message: safeMsg, ...extra }]);
+    // Spread extra FIRST so ts/type/message always win (prevents overwrite).
+    // Also sanitize extra values — any objects would cause #310 if rendered.
+    const safeExtra = {};
+    if (extra && typeof extra === 'object') {
+      for (const [k, v] of Object.entries(extra)) {
+        if (k === 'ts' || k === 'type' || k === 'message') continue; // never overwrite core fields
+        safeExtra[k] = (v != null && typeof v === 'object') ? JSON.stringify(v) : v;
+      }
+    }
+    setActivityLog((prev) => [...prev, { ...safeExtra, ts, type, message: safeMsg }]);
   }, []);
 
   // Auto-scroll log to bottom (within its own scroll container, not the page)
@@ -1944,7 +1953,7 @@ export default function Analysis() {
                 };
                 return (
                   <div key={i} style={{ display: 'flex', gap: 8 }}>
-                    <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{entry.ts}</span>
+                    <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{String(entry.ts || '')}</span>
                     {entry.progress !== undefined && (
                       <span style={{ color: 'var(--accent-cyan)', flexShrink: 0, minWidth: 30, textAlign: 'right' }}>
                         {typeof entry.progress === 'number' ? entry.progress : String(entry.progress ?? '')}%

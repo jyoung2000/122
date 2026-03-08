@@ -1,12 +1,60 @@
 /**
+ * Deep-sanitize any value so it is safe to render as a React child.
+ * Walks objects/arrays recursively and converts any nested object that
+ * is NOT an array to a JSON string.  This is the catch-all defence
+ * against React error #310 ("Objects are not valid as a React child").
+ *
+ * Allowed leaf types: string, number, boolean, null, undefined.
+ * Arrays are recursed into.  Plain objects are recursed into but their
+ * VALUES are coerced if they are themselves objects (unless whitelisted).
+ *
+ * @param {*} val           The value to sanitize.
+ * @param {Set} [objectKeys] Keys whose object values should be preserved
+ *                           (e.g. speakerColors, words, subtitle_settings).
+ * @param {number} [depth]  Internal recursion guard.
+ */
+function deepSanitize(val, objectKeys, depth = 0) {
+  if (val == null || typeof val !== 'object' || depth > 10) return val;
+  if (Array.isArray(val)) {
+    return val.map((item) => deepSanitize(item, objectKeys, depth + 1));
+  }
+  // Plain object — recurse into values
+  const out = {};
+  for (const [k, v] of Object.entries(val)) {
+    if (v == null || typeof v !== 'object') {
+      out[k] = v;
+    } else if (Array.isArray(v)) {
+      out[k] = v.map((item) => deepSanitize(item, objectKeys, depth + 1));
+    } else if (objectKeys && objectKeys.has(k)) {
+      // Preserve whitelisted object values (e.g. speakerColors, words)
+      out[k] = v;
+    } else {
+      // Recurse into nested objects
+      out[k] = deepSanitize(v, objectKeys, depth + 1);
+    }
+  }
+  return out;
+}
+
+// Keys whose object values are intentionally objects (not display text)
+const PRESERVE_OBJECT_KEYS = new Set([
+  'speakerColors', 'speaker_colors', 'words',
+  'subtitle_settings', 'subtitle_style', 'position', 'size',
+]);
+
+/**
  * Sanitize job data from API to ensure no objects leak into React children.
  * React error #310 ("Objects are not valid as a React child") happens when
- * an object/array ends up inside JSX {} interpolation. This recursively
- * converts any non-primitive leaves in known display fields to strings.
+ * an object/array ends up inside JSX {} interpolation.
+ *
+ * Uses deep recursive sanitization as a catch-all, PLUS field-specific
+ * coercions for known display fields that must be primitives.
  */
 export default function sanitizeJob(job) {
   if (!job || typeof job !== 'object') return job;
-  const safe = { ...job };
+
+  // Deep-sanitize the entire object tree first (catch-all)
+  const safe = deepSanitize(job, PRESERVE_OBJECT_KEYS);
 
   // Scalar display fields — force to string/number/null
   const stringFields = ['filename', 'file_path', 'language', 'resolution', 'status',
@@ -68,6 +116,9 @@ export default function sanitizeJob(job) {
       if (!ec || typeof ec !== 'object') return ec;
       const s = { ...ec };
       if (s.filename != null && typeof s.filename !== 'string') s.filename = String(s.filename);
+      if (s.title != null && typeof s.title !== 'string') s.title = String(s.title);
+      if (s.export_quality != null && typeof s.export_quality !== 'string') s.export_quality = String(s.export_quality);
+      if (s.exported_at != null && typeof s.exported_at !== 'string') s.exported_at = String(s.exported_at);
       return s;
     });
   }
