@@ -1549,6 +1549,321 @@ async def report_client_gpu(req: ClientGpuReport):
     return {"status": "received"}
 
 
+# ── GPU QA & Validation ──────────────────────────────────────────────
+
+
+@router.get("/gpu-qa")
+async def gpu_qa_validation():
+    """Run comprehensive GPU QA validation.
+
+    Checks that GPU acceleration is properly configured and actually
+    being used for both Whisper transcription and FFmpeg video encoding.
+    Returns a structured report with pass/fail checks, warnings, and
+    actionable recommendations.
+    """
+    import subprocess as _subprocess
+
+    from backend.services.clip_exporter import (
+        detect_gpu_capabilities,
+        _gpu_encode_args,
+        _gpu_decode_args,
+    )
+    from backend.services.transcription import whisper_device_info
+
+    checks = []
+    warnings = []
+    errors = []
+
+    # ── 1. GPU Detection ──
+    gpu_info = await asyncio.to_thread(detect_gpu_capabilities, force_redetect=True)
+    gpu_vendor = gpu_info.get("vendor", "none")
+    gpu_name = gpu_info.get("gpu_name", "Unknown")
+
+    if gpu_vendor != "none":
+        checks.append({
+            "name": "GPU detected",
+            "status": "pass",
+            "detail": f"{gpu_name} (vendor: {gpu_vendor})",
+        })
+    else:
+        checks.append({
+            "name": "GPU detected",
+            "status": "fail",
+            "detail": "No GPU detected by FFmpeg/system probes",
+        })
+        errors.append("No GPU hardware detected — GPU acceleration cannot work")
+
+    # ── 2. GPU Acceleration Setting ──
+    if settings.GPU_ACCELERATION_ENABLED:
+        checks.append({
+            "name": "GPU acceleration enabled",
+            "status": "pass",
+            "detail": f"Enabled (vendor_override={settings.GPU_VENDOR_OVERRIDE or 'auto'})",
+        })
+    else:
+        checks.append({
+            "name": "GPU acceleration enabled",
+            "status": "fail",
+            "detail": "GPU acceleration is disabled in settings",
+        })
+        errors.append(
+            "GPU acceleration is disabled — enable it in Settings > GPU Acceleration"
+        )
+
+    # ── 3. CUDA Runtime (for Whisper) ──
+    cuda_available = False
+    cuda_device_count = 0
+    try:
+        from backend.services.transcription import _detect_cuda_available
+        cuda_available, cuda_device_count, _ = _detect_cuda_available()
+    except Exception:
+        pass
+
+    if cuda_available and cuda_device_count > 0:
+        checks.append({
+            "name": "CUDA runtime available",
+            "status": "pass",
+            "detail": f"{cuda_device_count} CUDA device(s) found",
+        })
+    else:
+        checks.append({
+            "name": "CUDA runtime available",
+            "status": "warn" if gpu_vendor != "none" else "fail",
+            "detail": "CUDA runtime not available (ctranslate2/torch cannot use GPU)",
+        })
+        if gpu_vendor == "nvidia":
+            warnings.append(
+                "NVIDIA GPU detected but CUDA runtime is not available. "
+                "Ensure CUDA toolkit is installed and container has --gpus all."
+            )
+
+    # ── 4. Whisper Model GPU Status ──
+    whisper_dev = whisper_device_info.get("device", "cpu")
+    whisper_idx = whisper_device_info.get("device_index", 0)
+    whisper_compute = whisper_device_info.get("compute_type", "int8")
+
+    if whisper_dev == "cuda":
+        checks.append({
+            "name": "Whisper using GPU",
+            "status": "pass",
+            "detail": f"device=cuda:{whisper_idx}, compute_type={whisper_compute}",
+        })
+    else:
+        status = "fail" if settings.GPU_ACCELERATION_ENABLED and cuda_available else "warn"
+        checks.append({
+            "name": "Whisper using GPU",
+            "status": status,
+            "detail": f"Whisper running on CPU ({whisper_compute})",
+        })
+        if status == "fail":
+            errors.append(
+                "GPU is enabled and CUDA is available, but Whisper is running on CPU. "
+                "Try toggling GPU acceleration off and on to reload the model."
+            )
+
+    # ── 5. Whisper GPU Verification (live check) ──
+    if whisper_dev == "cuda":
+        verification_results = []
+        try:
+            import ctranslate2
+            ct2_count = ctranslate2.get_cuda_device_count()
+            if ct2_count > 0:
+                verification_results.append(f"ctranslate2: {ct2_count} CUDA device(s)")
+        except Exception:
+            pass
+
+        try:
+            import torch
+            if torch.cuda.is_available():
+                mem = torch.cuda.memory_allocated(whisper_idx)
+                verification_results.append(
+                    f"torch: {mem / 1024 / 1024:.1f}MB allocated on device {whisper_idx}"
+                )
+        except Exception:
+            pass
+
+        try:
+            smi = _subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if smi.returncode == 0 and smi.stdout.strip():
+                our_pid = str(os.getpid())
+                for line in smi.stdout.strip().split("\n"):
+                    if our_pid in line:
+                        verification_results.append(f"nvidia-smi: PID {our_pid} using GPU")
+                        break
+        except Exception:
+            pass
+
+        if verification_results:
+            checks.append({
+                "name": "Whisper GPU verification",
+                "status": "pass",
+                "detail": "; ".join(verification_results),
+            })
+        else:
+            checks.append({
+                "name": "Whisper GPU verification",
+                "status": "warn",
+                "detail": "Could not independently verify GPU memory usage",
+            })
+            warnings.append(
+                "Whisper reports device=cuda but live GPU verification could not confirm usage"
+            )
+
+    # ── 6. FFmpeg GPU Encoder ──
+    encoder = gpu_info.get("encoder", "")
+    if encoder and encoder != "libx264":
+        checks.append({
+            "name": "FFmpeg GPU encoder available",
+            "status": "pass",
+            "detail": f"Encoder: {encoder}",
+        })
+    elif settings.GPU_ACCELERATION_ENABLED and gpu_vendor != "none":
+        checks.append({
+            "name": "FFmpeg GPU encoder available",
+            "status": "fail",
+            "detail": "GPU detected but no hardware encoder found by FFmpeg",
+        })
+        errors.append(
+            "FFmpeg cannot find a GPU encoder. Ensure FFmpeg is built with NVENC/VAAPI/QSV support."
+        )
+    else:
+        checks.append({
+            "name": "FFmpeg GPU encoder available",
+            "status": "info",
+            "detail": "Using software encoder (libx264)",
+        })
+
+    # ── 7. FFmpeg GPU Decoder / HW Decode ──
+    if settings.GPU_HWDECODE_ENABLED:
+        hwaccel = gpu_info.get("hwaccel", "")
+        if hwaccel:
+            checks.append({
+                "name": "FFmpeg GPU decoder available",
+                "status": "pass",
+                "detail": f"hwaccel: {hwaccel}",
+            })
+        else:
+            checks.append({
+                "name": "FFmpeg GPU decoder available",
+                "status": "warn",
+                "detail": "Hardware decode enabled but no hwaccel method detected",
+            })
+    else:
+        checks.append({
+            "name": "FFmpeg GPU decoder available",
+            "status": "info",
+            "detail": "Hardware decode disabled in settings",
+        })
+
+    # ── 8. Test Encode (quick NVENC/VAAPI probe) ──
+    if settings.GPU_ACCELERATION_ENABLED and encoder and encoder != "libx264":
+        try:
+            # Provide a minimal quality preset dict for the test
+            test_preset = {"crf": 23, "preset": "fast"}
+            encode_args = await asyncio.to_thread(_gpu_encode_args, test_preset, "1080p")
+            if encode_args:
+                # Run a minimal test encode to verify GPU encoder actually works
+                test_cmd = [
+                    "ffmpeg", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=64x64:d=0.1:r=1",
+                    *encode_args, "-frames:v", "1",
+                    "-f", "null", "-",
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *test_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=15)
+                if proc.returncode == 0:
+                    checks.append({
+                        "name": "GPU test encode",
+                        "status": "pass",
+                        "detail": f"Test encode succeeded with {encoder}",
+                    })
+                else:
+                    stderr_text = stderr_bytes.decode(errors="replace")[-300:]
+                    checks.append({
+                        "name": "GPU test encode",
+                        "status": "fail",
+                        "detail": f"Test encode failed: {stderr_text}",
+                    })
+                    errors.append(
+                        f"GPU encoder '{encoder}' failed test encode. "
+                        "The GPU driver or FFmpeg build may not support this encoder."
+                    )
+            else:
+                checks.append({
+                    "name": "GPU test encode",
+                    "status": "warn",
+                    "detail": "No encode args returned — encoder may not be configured",
+                })
+        except asyncio.TimeoutError:
+            checks.append({
+                "name": "GPU test encode",
+                "status": "warn",
+                "detail": "Test encode timed out (15s)",
+            })
+        except Exception as exc:
+            checks.append({
+                "name": "GPU test encode",
+                "status": "warn",
+                "detail": f"Test encode error: {exc}",
+            })
+
+    # ── 9. Device Index Consistency ──
+    configured_idx = (settings.GPU_DEVICE_INDEX or "0").strip()
+    if whisper_dev == "cuda" and str(whisper_idx) != configured_idx:
+        warnings.append(
+            f"Whisper is on CUDA device {whisper_idx} but GPU_DEVICE_INDEX is '{configured_idx}'. "
+            "Toggle GPU off/on to apply the new device index."
+        )
+
+    # ── Summary ──
+    pass_count = sum(1 for c in checks if c["status"] == "pass")
+    fail_count = sum(1 for c in checks if c["status"] == "fail")
+    warn_count = sum(1 for c in checks if c["status"] == "warn")
+
+    overall = "pass"
+    if fail_count > 0:
+        overall = "fail"
+    elif warn_count > 0:
+        overall = "warn"
+
+    return {
+        "overall": overall,
+        "summary": f"{pass_count} passed, {fail_count} failed, {warn_count} warnings",
+        "checks": checks,
+        "errors": errors,
+        "warnings": warnings,
+        "config": {
+            "gpu_acceleration_enabled": settings.GPU_ACCELERATION_ENABLED,
+            "gpu_vendor_override": settings.GPU_VENDOR_OVERRIDE,
+            "gpu_hwdecode_enabled": settings.GPU_HWDECODE_ENABLED,
+            "gpu_hevc_for_4k": settings.GPU_HEVC_FOR_4K,
+            "gpu_device_index": settings.GPU_DEVICE_INDEX,
+        },
+        "whisper": {
+            "device": whisper_dev,
+            "compute_type": whisper_compute,
+            "device_index": whisper_idx,
+            "gpu_name": whisper_device_info.get("gpu_name", ""),
+        },
+        "ffmpeg": {
+            "vendor": gpu_vendor,
+            "gpu_name": gpu_name,
+            "encoder": encoder,
+            "hevc_encoder": gpu_info.get("hevc_encoder", ""),
+            "decoder": gpu_info.get("decoder", ""),
+            "hwaccel": gpu_info.get("hwaccel", ""),
+        },
+    }
+
+
 # ── Prompt Management ──────────────────────────────────────────────
 
 

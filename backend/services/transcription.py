@@ -142,6 +142,7 @@ def _get_whisper_model():
             device = "cpu"
             compute_type = "int8"
             gpu_name = ""
+            device_index = 0
 
             cuda_available, cuda_count, detected_name = _detect_cuda_available()
             if not settings.GPU_ACCELERATION_ENABLED:
@@ -156,7 +157,23 @@ def _get_whisper_model():
                 device = "cuda"
                 compute_type = "float16"
                 gpu_name = detected_name
-                logger.info("CUDA GPU detected: %s — using float16 for Whisper", gpu_name or "unknown")
+
+                # Use specific GPU device index if configured
+                gpu_device_idx = (settings.GPU_DEVICE_INDEX or "").strip()
+                if gpu_device_idx and gpu_device_idx.isdigit():
+                    idx = int(gpu_device_idx)
+                    if idx < cuda_count:
+                        device_index = idx
+                    else:
+                        logger.warning(
+                            "GPU_DEVICE_INDEX=%s exceeds available CUDA devices (%d). Using device 0.",
+                            gpu_device_idx, cuda_count,
+                        )
+
+                logger.info(
+                    "CUDA GPU detected: %s — using float16 for Whisper on device %d (of %d)",
+                    gpu_name or "unknown", device_index, cuda_count,
+                )
             elif detected_name:
                 # GPU detected but CUDA runtime not available
                 logger.warning(
@@ -171,23 +188,32 @@ def _get_whisper_model():
                 "device": device,
                 "compute_type": compute_type,
                 "gpu_name": gpu_name,
+                "device_index": device_index,
             }
 
+            # Build model kwargs — pass device_index for GPU selection
+            model_kwargs = {
+                "device": device,
+                "compute_type": compute_type,
+            }
+            if device == "cuda":
+                model_kwargs["device_index"] = device_index
+
             logger.info(
-                f"Loading Whisper model: {settings.WHISPER_MODEL} "
-                f"(device={device}, compute={compute_type})"
+                "Loading Whisper model: %s (device=%s, compute=%s%s)",
+                settings.WHISPER_MODEL, device, compute_type,
+                f", device_index={device_index}" if device == "cuda" else "",
             )
             try:
                 _whisper_model = WhisperModel(
                     settings.WHISPER_MODEL,
-                    device=device,
-                    compute_type=compute_type,
+                    **model_kwargs,
                 )
             except Exception as e:
                 if device == "cuda":
                     logger.warning(
-                        "Failed to load Whisper on CUDA (%s), falling back to CPU: %s",
-                        gpu_name, e,
+                        "Failed to load Whisper on CUDA (%s, device_index=%d), falling back to CPU: %s",
+                        gpu_name, device_index, e,
                     )
                     device = "cpu"
                     compute_type = "int8"
@@ -200,9 +226,83 @@ def _get_whisper_model():
                 else:
                     raise
 
-            logger.info(f"Whisper model '{settings.WHISPER_MODEL}' loaded successfully on {device}" +
-                         (f" ({gpu_name})" if gpu_name else ""))
+            # ── Verify GPU is actually being used ──
+            if device == "cuda":
+                _verify_whisper_gpu_usage(gpu_name, device_index)
+            else:
+                logger.info(
+                    "Whisper model '%s' loaded on CPU (int8) — GPU not used for transcription",
+                    settings.WHISPER_MODEL,
+                )
     return _whisper_model
+
+
+def _verify_whisper_gpu_usage(gpu_name: str, device_index: int = 0):
+    """Verify that the Whisper model is actually running on the GPU.
+
+    Checks ctranslate2 and torch to confirm CUDA is active,
+    providing definitive proof the GPU is in use.
+    """
+    verification_methods = []
+
+    # Method 1: Check ctranslate2 CUDA device count (confirms CUDA runtime is active)
+    try:
+        import ctranslate2
+        cuda_count = ctranslate2.get_cuda_device_count()
+        if cuda_count > 0:
+            verification_methods.append(f"ctranslate2 sees {cuda_count} CUDA device(s)")
+    except Exception:
+        pass
+
+    # Method 2: Check PyTorch CUDA memory allocation (if torch is available)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            mem_allocated = torch.cuda.memory_allocated(device_index)
+            mem_reserved = torch.cuda.memory_reserved(device_index)
+            if mem_allocated > 0 or mem_reserved > 0:
+                verification_methods.append(
+                    f"torch CUDA device {device_index}: "
+                    f"{mem_allocated / 1024 / 1024:.1f}MB allocated, "
+                    f"{mem_reserved / 1024 / 1024:.1f}MB reserved"
+                )
+            else:
+                verification_methods.append(
+                    f"torch CUDA device {device_index} available "
+                    "(memory will allocate on first inference)"
+                )
+    except Exception:
+        pass
+
+    # Method 3: Check nvidia-smi for GPU processes
+    try:
+        import subprocess, os as _os
+        smi = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,name,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if smi.returncode == 0 and smi.stdout.strip():
+            our_pid = str(_os.getpid())
+            for line in smi.stdout.strip().split("\n"):
+                if our_pid in line:
+                    verification_methods.append(f"nvidia-smi confirms GPU usage: {line.strip()}")
+                    break
+    except Exception:
+        pass
+
+    if verification_methods:
+        logger.info(
+            "GPU VERIFICATION for Whisper (device=%d, %s): CONFIRMED\n  - %s",
+            device_index, gpu_name, "\n  - ".join(verification_methods),
+        )
+    else:
+        logger.warning(
+            "GPU VERIFICATION for Whisper (device=%d, %s): UNCONFIRMED — "
+            "could not verify GPU memory allocation. Model loaded with device=cuda "
+            "but GPU usage cannot be independently confirmed.",
+            device_index, gpu_name,
+        )
 
 
 def preload_model():

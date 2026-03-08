@@ -150,9 +150,44 @@ async def _startup_preload():
             pass
 
     if nvidia_found:
-        cfg.GPU_ACCELERATION_ENABLED = True
-        cfg.GPU_VENDOR_OVERRIDE = "nvidia"
-        logger.info("GPU acceleration auto-enabled: %s", gpu_name)
+        # Only auto-enable if the user hasn't explicitly saved a preference.
+        # _restore_user_settings() runs at module import time, so if the user
+        # previously disabled GPU acceleration, we respect that choice.
+        import os as _os
+        user_settings_path = _os.path.join(
+            "/data/logs" if _os.path.isdir("/data/logs") else ".",
+            "user_settings.json",
+        )
+        user_has_gpu_preference = False
+        try:
+            if _os.path.exists(user_settings_path):
+                import json as _json
+                with open(user_settings_path) as _f:
+                    _saved = _json.load(_f)
+                if "GPU_ACCELERATION_ENABLED" in _saved:
+                    user_has_gpu_preference = True
+                    logger.info(
+                        "User has saved GPU preference: GPU_ACCELERATION_ENABLED=%s",
+                        _saved["GPU_ACCELERATION_ENABLED"],
+                    )
+        except Exception:
+            pass
+
+        if not user_has_gpu_preference:
+            cfg.GPU_ACCELERATION_ENABLED = True
+            cfg.GPU_VENDOR_OVERRIDE = "nvidia"
+            logger.info("GPU acceleration auto-enabled (first run): %s", gpu_name)
+        elif cfg.GPU_ACCELERATION_ENABLED:
+            # User previously enabled it — ensure vendor is set
+            if not cfg.GPU_VENDOR_OVERRIDE:
+                cfg.GPU_VENDOR_OVERRIDE = "nvidia"
+            logger.info("GPU acceleration enabled (user preference): %s", gpu_name)
+        else:
+            logger.info(
+                "NVIDIA GPU detected (%s) but GPU acceleration disabled by user preference",
+                gpu_name,
+            )
+
         try:
             from backend.services.clip_exporter import _gpu_info_cache_clear
             _gpu_info_cache_clear()

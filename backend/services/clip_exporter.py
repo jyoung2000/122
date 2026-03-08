@@ -677,6 +677,9 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
     """
     # Respect user toggle — if OFF, always CPU
     if not app_settings.GPU_ACCELERATION_ENABLED:
+        logger.info(
+            "GPU ENCODE: using CPU (libx264) — GPU_ACCELERATION_ENABLED=False"
+        )
         return [
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
@@ -699,8 +702,14 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
     gpu_device = (app_settings.GPU_DEVICE_INDEX or "").strip()
 
     if gpu["encoder"] == "h264_nvenc":
-        # NVENC supports --gpu N to select a specific NVIDIA GPU
+        # NVENC supports -gpu N to select a specific NVIDIA GPU
         device_args = ["-gpu", gpu_device] if gpu_device else []
+        encoder = "hevc_nvenc" if use_hevc else "h264_nvenc"
+        logger.info(
+            "GPU ENCODE: using %s on %s (device=%s, crf=%d, quality=%s)",
+            encoder, gpu.get("gpu_name", "NVIDIA GPU"),
+            gpu_device or "auto", crf, export_quality,
+        )
         if use_hevc:
             return device_args + [
                 "-c:v", "hevc_nvenc",
@@ -720,6 +729,10 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
             "-pix_fmt", "yuv420p",
         ]
     elif gpu["encoder"] == "h264_vaapi":
+        logger.info(
+            "GPU ENCODE: using h264_vaapi on %s (device=%s, crf=%d)",
+            gpu.get("gpu_name", "GPU"), gpu.get("hwaccel_device", ""), crf,
+        )
         return [
             "-vaapi_device", gpu["hwaccel_device"],
             "-c:v", "h264_vaapi",
@@ -727,6 +740,11 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
             "-pix_fmt", "vaapi",
         ]
     elif gpu["encoder"] == "h264_qsv":
+        encoder = "hevc_qsv" if use_hevc else "h264_qsv"
+        logger.info(
+            "GPU ENCODE: using %s on %s (crf=%d, quality=%s)",
+            encoder, gpu.get("gpu_name", "Intel GPU"), crf, export_quality,
+        )
         if use_hevc:
             return [
                 "-c:v", "hevc_qsv",
@@ -741,17 +759,18 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
             "-pix_fmt", "yuv420p",
         ]
     elif gpu["encoder"] == "h264_videotoolbox":
-        # Apple VideoToolbox (M1/M2/M3/M4 and Intel Macs)
-        # VideoToolbox uses Apple's Media Engine for hardware H.264/HEVC
-        # encoding.  Quality is controlled via -q:v (1-100, higher=better)
-        # or -b:v for bitrate mode.  We map CRF roughly to VT quality.
-        vt_quality = max(1, min(100, int(100 - (crf * 3))))  # CRF 23 → ~31
+        vt_quality = max(1, min(100, int(100 - (crf * 3))))
+        encoder = "hevc_videotoolbox" if use_hevc else "h264_videotoolbox"
+        logger.info(
+            "GPU ENCODE: using %s on %s (vt_quality=%d, quality=%s)",
+            encoder, gpu.get("gpu_name", "Apple GPU"), vt_quality, export_quality,
+        )
         if use_hevc:
             return [
                 "-c:v", "hevc_videotoolbox",
                 "-q:v", str(vt_quality),
                 "-pix_fmt", "yuv420p",
-                "-tag:v", "hvc1",  # Browser/Apple compatibility
+                "-tag:v", "hvc1",
             ]
         return [
             "-c:v", "h264_videotoolbox",
@@ -759,6 +778,11 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
             "-pix_fmt", "yuv420p",
         ]
     else:
+        logger.warning(
+            "GPU ENCODE: falling back to CPU (libx264) — GPU acceleration enabled "
+            "but no working GPU encoder detected (gpu_name=%s, encoder=%s)",
+            gpu.get("gpu_name", "unknown"), gpu.get("encoder", "none"),
+        )
         return [
             "-c:v", "libx264",
             "-pix_fmt", "yuv420p",
@@ -789,8 +813,10 @@ def _gpu_decode_args() -> list[str]:
     filters) we keep frames on the GPU for maximum throughput.
     """
     if not app_settings.GPU_ACCELERATION_ENABLED:
+        logger.info("GPU DECODE: skipped — GPU acceleration is disabled")
         return []
     if not app_settings.GPU_HWDECODE_ENABLED:
+        logger.info("GPU DECODE: skipped — hardware decode is disabled (GPU_HWDECODE_ENABLED=False)")
         return []
 
     gpu = detect_gpu_capabilities()
@@ -801,38 +827,48 @@ def _gpu_decode_args() -> list[str]:
         # frames are auto-downloaded to system memory for filter
         # compatibility.  The encode side (_gpu_encode_args) uses NVENC
         # which can accept system memory input efficiently.
+        logger.info(
+            "GPU DECODE: using CUDA hwaccel on %s",
+            gpu.get("gpu_name", "NVIDIA GPU"),
+        )
         return ["-hwaccel", "cuda"]
     elif gpu["hwaccel"] == "qsv":
         args = ["-hwaccel", "qsv"]
         # On Linux, QSV needs an explicit device path
         if gpu["hwaccel_device"]:
             args += ["-hwaccel_device", gpu["hwaccel_device"]]
+        logger.info(
+            "GPU DECODE: using QSV hwaccel (device=%s)",
+            gpu.get("hwaccel_device", "default"),
+        )
         return args
     elif gpu["hwaccel"] == "d3d11va":
-        # Windows Direct3D 11 Video Acceleration — works with Intel
-        # iGPU and NVIDIA dGPU on Windows for hardware decoding even
-        # when no GPU encoder is available.
+        logger.info("GPU DECODE: using D3D11VA hwaccel")
         return ["-hwaccel", "d3d11va"]
     elif gpu["hwaccel"] == "videotoolbox":
-        # macOS VideoToolbox — uses Apple Media Engine on M-series chips
-        # or Intel Quick Sync on older Macs.  Decodes H.264, HEVC, VP9,
-        # and AV1 (M3+) in hardware.  Frames are automatically returned
-        # to system memory for filter compatibility.
+        logger.info("GPU DECODE: using VideoToolbox hwaccel")
         return ["-hwaccel", "videotoolbox"]
     elif gpu["hwaccel"] == "vaapi" and gpu["hwaccel_device"]:
+        logger.info(
+            "GPU DECODE: using VAAPI hwaccel (device=%s)",
+            gpu["hwaccel_device"],
+        )
         return ["-hwaccel", "vaapi", "-hwaccel_device", gpu["hwaccel_device"]]
 
     # On Windows, try D3D11VA as a universal fallback for decoding even
     # if no GPU encoder was detected — all modern Windows GPUs (Intel,
     # NVIDIA, AMD) support DXVA2/D3D11VA for video decoding.
     if _IS_WINDOWS and gpu["vendor"] == "none":
+        logger.info("GPU DECODE: using D3D11VA hwaccel (Windows fallback)")
         return ["-hwaccel", "d3d11va"]
 
     # On macOS, try VideoToolbox as a universal fallback — all Macs have
     # hardware decode support via VideoToolbox.
     if _IS_MACOS and gpu["vendor"] == "none":
+        logger.info("GPU DECODE: using VideoToolbox hwaccel (macOS fallback)")
         return ["-hwaccel", "videotoolbox"]
 
+    logger.info("GPU DECODE: no hardware decoder available, using CPU software decode")
     return []
 
 
