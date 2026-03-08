@@ -66,7 +66,7 @@ export default function ExportDialog({
 
     // Client-side export
     if (!renderEngine) {
-      setError('Render engine not available');
+      setError('Client-side export is not yet available. Please use Server Export.');
       return;
     }
 

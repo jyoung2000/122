@@ -1,5 +1,6 @@
 import React, { useMemo } from 'react';
 import useTimelineStore from '../stores/timelineStore';
+import { hexToRgba } from '../utils/colorUtils';
 
 /**
  * TimelineOverlay renders text, shape, and image items from the multi-track
@@ -13,8 +14,8 @@ import useTimelineStore from '../stores/timelineStore';
 export default function TimelineOverlay({ currentTime = 0, clipStart = 0 }) {
   const items = useTimelineStore((s) => s.items);
 
-  // Absolute playhead
-  const absTime = clipStart + currentTime;
+  // currentTime is already relative to clipStart (passed as currentTime - clipStart)
+  const absTime = currentTime;
 
   // Filter to visible text/shape/image/overlay items at current time
   const visible = useMemo(() => {
@@ -312,14 +313,4 @@ function ImageOverlayItem({ item }) {
       }}
     />
   );
-}
-
-
-function hexToRgba(hex, alpha = 1) {
-  if (!hex) return `rgba(0,0,0,${alpha})`;
-  const h = hex.replace('#', '');
-  const r = parseInt(h.substring(0, 2), 16) || 0;
-  const g = parseInt(h.substring(2, 4), 16) || 0;
-  const b = parseInt(h.substring(4, 6), 16) || 0;
-  return `rgba(${r},${g},${b},${alpha})`;
 }

@@ -17,7 +17,8 @@ export default function InteractiveOverlay({ currentTime = 0, clipStart = 0, con
   const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
   const updateItem = useTimelineStore((s) => s.updateItem);
 
-  const absTime = clipStart + currentTime;
+  // currentTime is already relative to clipStart (passed as currentTime - clipStart)
+  const absTime = currentTime;
 
   // Filter to visible overlay items (text, shape, image, overlay) at current time.
   // Subtitle items are excluded — they are rendered by SubtitleOverlay (the "Subs On"
@@ -423,7 +424,11 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
           }} />
 
           {/* Resize handles */}
-          {HANDLES.map((h) => (
+          {HANDLES.filter((h) => {
+            // For auto-height text items, hide vertical-only resize handles
+            if (isAutoHeight && (h.id === 'n' || h.id === 's')) return false;
+            return true;
+          }).map((h) => (
             <div
               key={h.id}
               style={{

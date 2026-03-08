@@ -13,6 +13,7 @@ import EffectsPanel from './EffectsPanel';
 import TransitionPicker from './TransitionPicker';
 import ExportDialog from './ExportDialog';
 import InteractiveOverlay from './InteractiveOverlay';
+import { hexToRgbString } from '../utils/colorUtils';
 import './VideoEditor.css';
 
 // ── Segment Color Palette ────────────────────────────────────────────────────
@@ -234,7 +235,6 @@ export default function VideoEditor({
   const [showExportDialog, setShowExportDialog] = useState(false);
   const [showEffectsPanel, setShowEffectsPanel] = useState(false);
   const [showTransitions, setShowTransitions] = useState(false);
-  const canvasPreviewRef = useRef(null);
   const initFromClip = useTimelineStore((s) => s.initFromClip);
   const timelineStoreItems = useTimelineStore((s) => s.items);
   const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
@@ -293,40 +293,10 @@ export default function VideoEditor({
     lastInitClipEnd.current = effectiveEnd;
   }, [src, clipStart, clipEnd, initFromClip, recovered, timelineStoreItems.length, transcript, addItem]);
 
-  // Re-populate subtitles when transcript becomes available after analysis
-  const lastTranscriptLength = useRef(0);
-  useEffect(() => {
-    if (!transcript || transcript.length === 0) return;
-    if (transcript.length === lastTranscriptLength.current) return;
-    lastTranscriptLength.current = transcript.length;
-
-    const effectiveEnd = clipEnd > clipStart ? clipEnd : 0;
-    if (effectiveEnd <= 0) return;
-
-    // Check if we already have subtitles — if not, add them
-    const currentItems = useTimelineStore.getState().items;
-    const hasSubtitles = currentItems.some((it) => it.type === 'subtitle');
-    if (hasSubtitles) return;
-
-    transcript.forEach((seg) => {
-      if (seg.end > clipStart && seg.start < effectiveEnd) {
-        const s = Math.max(seg.start, clipStart);
-        const e = Math.min(seg.end, effectiveEnd);
-        addItem({
-          trackId: 't1',
-          type: 'subtitle',
-          mediaRef: null,
-          start: s - clipStart,
-          end: e - clipStart,
-          subtitleText: seg.text,
-        });
-      }
-    });
-  }, [transcript, clipStart, clipEnd, addItem]);
-
   const videoRef = useRef(null);
   const containerRef = useRef(null);
   const viewportRef = useRef(null);
+  const viewportClickRef = useRef({ downTime: 0, moved: false });
   const timelineRef = useRef(null);
   const [overlayInteracting, setOverlayInteracting] = useState(false);
   const waveformCanvasRef = useRef(null);
@@ -576,10 +546,16 @@ export default function VideoEditor({
   }, [segments]);
 
   const addSegment = useCallback(() => {
-    if (trimStartOffset < 0.1 && trimEndOffset < 0.1) return; // no selection
-    const segStart = clipStart + trimStartOffset;
-    const segEnd = effectiveClipEnd - trimEndOffset;
+    const t = videoRef.current?.currentTime ?? currentTime;
+    const halfDur = 2; // +/- 2 seconds around playhead
+    const segStart = Math.max(trimmedStart, t - halfDur);
+    const segEnd = Math.min(trimmedEnd, t + halfDur);
     if (segEnd - segStart < 0.5) return; // too short
+
+    // Check for overlap with existing segments
+    const overlaps = segments.some(s => segStart < s.end && segEnd > s.start);
+    if (overlaps) return;
+
     const newSeg = {
       id: `seg_${segmentIdRef.current++}`,
       start: segStart,
@@ -596,7 +572,7 @@ export default function VideoEditor({
     setSegments(next);
     onSegmentsChange?.(next);
     setSelectedSegmentId(newSeg.id);
-  }, [trimStartOffset, trimEndOffset, clipStart, effectiveClipEnd, segments, onSegmentsChange]);
+  }, [currentTime, trimmedStart, trimmedEnd, segments, onSegmentsChange]);
 
   const removeSegment = useCallback((segId) => {
     const next = segments.filter(s => s.id !== segId);
@@ -1551,6 +1527,8 @@ export default function VideoEditor({
   // ── Keyboard shortcuts (J-K-L shuttle control) ─────
   useEffect(() => {
     const onKeyDown = (e) => {
+      // Skip when multi-track keyboard shortcuts are handling this
+      if (showMultiTrack) return;
       // Don't capture keys when typing in inputs
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
 
@@ -1695,7 +1673,7 @@ export default function VideoEditor({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [togglePlay, skipTime, seekTo, toggleMute, trimmedStart, trimmedEnd, segments, selectedSegmentId, selectedSegment, currentTime, onSegmentsChange]);
+  }, [showMultiTrack, togglePlay, skipTime, seekTo, toggleMute, trimmedStart, trimmedEnd, segments, selectedSegmentId, selectedSegment, currentTime, onSegmentsChange]);
 
   // ── J-K-L shuttle speed effect ──────────────────────
   useEffect(() => {
@@ -1808,7 +1786,15 @@ export default function VideoEditor({
           width: '100%',
           margin: '0 auto',
         }}
-        onClick={() => { if (!overlayInteracting) { setSelectedItemId(null); togglePlay(); } }}
+        onMouseDown={() => { viewportClickRef.current = { downTime: Date.now(), moved: false }; }}
+        onMouseMove={() => { viewportClickRef.current.moved = true; }}
+        onClick={() => {
+          if (overlayInteracting) return;
+          if (viewportClickRef.current.moved) return;
+          if (Date.now() - viewportClickRef.current.downTime > 300) return;
+          setSelectedItemId(null);
+          togglePlay();
+        }}
       >
         <video
           ref={videoRef}
@@ -2174,14 +2160,7 @@ export default function VideoEditor({
           const isSegSelected = selectedSegmentId === seg.id;
           const isSegActive = activeSegmentId === seg.id;
           const segHexColor = seg.color || SEGMENT_COLORS[0];
-          // Convert hex to rgba for overlays
-          const hexToRgb = (hex) => {
-            const r = parseInt(hex.slice(1, 3), 16);
-            const g = parseInt(hex.slice(3, 5), 16);
-            const b = parseInt(hex.slice(5, 7), 16);
-            return `${r}, ${g}, ${b}`;
-          };
-          const segRgb = hexToRgb(segHexColor);
+          const segRgb = hexToRgbString(segHexColor);
           return (
             <div
               key={seg.id}

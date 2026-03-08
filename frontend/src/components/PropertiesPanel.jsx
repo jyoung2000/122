@@ -317,14 +317,8 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
       <div className="ve-properties__section">
         <label className="ve-properties__label">Timing</label>
         <div className="ve-properties__row">
-          <div className="ve-properties__field">
-            <span className="ve-properties__field-label">Start</span>
-            <span className="ve-properties__field-value">{formatTime(item.start)}</span>
-          </div>
-          <div className="ve-properties__field">
-            <span className="ve-properties__field-label">End</span>
-            <span className="ve-properties__field-value">{formatTime(item.end)}</span>
-          </div>
+          <NumField label="Start" value={parseFloat(item.start.toFixed(2))} min={0} max={item.end - 0.1} step={0.01} onChange={(v) => update('start', v)} />
+          <NumField label="End" value={parseFloat(item.end.toFixed(2))} min={item.start + 0.1} max={9999} step={0.01} onChange={(v) => update('end', v)} />
           <div className="ve-properties__field">
             <span className="ve-properties__field-label">Duration</span>
             <span className="ve-properties__field-value">{formatTime(duration)}</span>
@@ -332,8 +326,8 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
         </div>
       </div>
 
-      {/* ── Position & Size (all visual overlay items) ── */}
-      {isOverlay && (
+      {/* ── Position & Size (all visual items) ── */}
+      {isVisual && (
         <div className="ve-properties__section">
           <label className="ve-properties__label">Position & Size</label>
           <SliderRow label="X" value={item.position?.x ?? 50} min={0} max={100} step={0.5} unit="%" onChange={(v) => update('position', { ...item.position, x: v })} />
@@ -384,24 +378,6 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
         <div className="ve-properties__section">
           <label className="ve-properties__label">Opacity</label>
           <SliderRow label="" value={item.opacity ?? 1} min={0} max={1} step={0.01} onChange={(v) => update('opacity', v)} />
-        </div>
-      )}
-
-      {/* ── Transform (video items with position override) ── */}
-      {(item.type === 'video' || item.type === 'image' || item.type === 'overlay') && !isOverlay && (
-        <div className="ve-properties__section">
-          <label className="ve-properties__label">Transform</label>
-          <div className="ve-properties__row">
-            <NumField label="X %" value={item.position?.x || 0} min={0} max={100} onChange={(v) => update('position', { ...item.position, x: v })} />
-            <NumField label="Y %" value={item.position?.y || 0} min={0} max={100} onChange={(v) => update('position', { ...item.position, y: v })} />
-          </div>
-          <div className="ve-properties__row">
-            <NumField label="W %" value={item.size?.w || 100} min={1} max={200} onChange={(v) => update('size', { ...item.size, w: v })} />
-            <NumField label="H %" value={item.size?.h || 100} min={1} max={200} onChange={(v) => update('size', { ...item.size, h: v })} />
-          </div>
-          <div className="ve-properties__row">
-            <NumField label="Rotation" value={item.transform?.rotation || 0} min={-360} max={360} onChange={(v) => updateNested('transform', 'rotation', v)} />
-          </div>
         </div>
       )}
 
