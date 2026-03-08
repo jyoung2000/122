@@ -123,7 +123,8 @@ export default function Upload() {
 
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) {
-          setProgress(Math.round((e.loaded / e.total) * 100));
+          // Cap at 95% during transfer — reserve 95-100% for server processing
+          setProgress(Math.min(95, Math.round((e.loaded / e.total) * 100)));
         }
       };
 
@@ -158,6 +159,8 @@ export default function Upload() {
     } catch (err) {
       setError(err.message);
       setUploading(false);
+      setUploadDone(false);
+      setProgress(0);
     }
   };
 
@@ -173,7 +176,7 @@ export default function Upload() {
   const uploadMessage = uploadDone
     ? 'Upload complete — preparing analysis pipeline...'
     : progress >= 95
-      ? 'Finishing upload...'
+      ? 'Processing on server...'
       : 'Uploading...';
 
   return (
