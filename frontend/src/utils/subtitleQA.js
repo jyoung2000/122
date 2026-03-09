@@ -211,40 +211,200 @@ export function validatePreviewExportConsistency(settings, outputDims) {
 }
 
 /**
+ * Validate transcript-timeline consistency.
+ * Ensures subtitle items in the timeline store match the backend transcript.
+ *
+ * @param {Array} items - Timeline store items
+ * @param {Array} transcript - Backend transcript segments
+ * @param {number} clipStart - Clip start time (absolute)
+ * @param {number} clipEnd - Clip end time (absolute)
+ * @returns {{ valid: boolean, errors: string[], warnings: string[], stats: Object }}
+ */
+export function validateTranscriptSync(items, transcript, clipStart = 0, clipEnd = Infinity) {
+  const errors = [];
+  const warnings = [];
+  const subtitles = items.filter((it) => it.type === 'subtitle');
+
+  if (!transcript || transcript.length === 0) {
+    if (subtitles.length > 0) {
+      warnings.push(`${subtitles.length} subtitle item(s) in timeline but no transcript data`);
+    }
+    return { valid: true, errors, warnings, stats: { matched: 0, unmatched: 0, missing: 0 } };
+  }
+
+  // Transcript segments within clip range
+  const clipTranscript = transcript.filter(
+    (seg) => seg.end > clipStart && seg.start < clipEnd
+  );
+
+  let matched = 0;
+  let textMismatches = 0;
+  let speakerMismatches = 0;
+  const unmatchedTimeline = [];
+  const unmatchedTranscript = [];
+  const matchedTranscriptIdxs = new Set();
+
+  // Match timeline items to transcript segments
+  for (const sub of subtitles) {
+    const subAbsStart = (sub.start || 0) + clipStart;
+    const subAbsEnd = (sub.end || 0) + clipStart;
+    const matchIdx = clipTranscript.findIndex((seg, idx) => {
+      if (matchedTranscriptIdxs.has(idx)) return false;
+      return Math.abs((seg.start ?? 0) - subAbsStart) < 0.3 &&
+             Math.abs((seg.end ?? 0) - subAbsEnd) < 0.3;
+    });
+
+    if (matchIdx >= 0) {
+      matchedTranscriptIdxs.add(matchIdx);
+      matched++;
+      const seg = clipTranscript[matchIdx];
+
+      if (seg.text !== sub.subtitleText) {
+        textMismatches++;
+        warnings.push(
+          `Text mismatch at ${sub.start.toFixed(1)}s: timeline="${(sub.subtitleText || '').slice(0, 30)}" vs transcript="${(seg.text || '').slice(0, 30)}"`
+        );
+      }
+      if (seg.speaker && sub.speaker && seg.speaker !== sub.speaker) {
+        speakerMismatches++;
+        warnings.push(
+          `Speaker mismatch at ${sub.start.toFixed(1)}s: timeline="${sub.speaker}" vs transcript="${seg.speaker}"`
+        );
+      }
+    } else {
+      unmatchedTimeline.push(sub);
+    }
+  }
+
+  // Find transcript segments without a matching timeline item
+  clipTranscript.forEach((seg, idx) => {
+    if (!matchedTranscriptIdxs.has(idx)) {
+      unmatchedTranscript.push(seg);
+    }
+  });
+
+  if (unmatchedTimeline.length > 0) {
+    warnings.push(
+      `${unmatchedTimeline.length} subtitle item(s) in timeline have no matching transcript segment`
+    );
+  }
+  if (unmatchedTranscript.length > 0) {
+    warnings.push(
+      `${unmatchedTranscript.length} transcript segment(s) have no matching timeline subtitle item`
+    );
+  }
+
+  const stats = {
+    matched,
+    textMismatches,
+    speakerMismatches,
+    unmatchedTimeline: unmatchedTimeline.length,
+    unmatchedTranscript: unmatchedTranscript.length,
+    totalTimeline: subtitles.length,
+    totalTranscript: clipTranscript.length,
+  };
+
+  return { valid: errors.length === 0, errors, warnings, stats };
+}
+
+/**
+ * Validate subtitle settings are applied correctly in the rendering pipeline.
+ * Checks that what the user sees in preview matches what gets exported.
+ *
+ * @param {Object} settings - Clip settings
+ * @param {Array} items - Timeline store items
+ * @returns {{ valid: boolean, errors: string[], warnings: string[] }}
+ */
+export function validateSettingsApplication(settings, items) {
+  const errors = [];
+  const warnings = [];
+  const s = settings || {};
+  const subtitles = items.filter((it) => it.type === 'subtitle');
+
+  if (subtitles.length === 0) return { valid: true, errors, warnings };
+
+  // Check that subtitlesEnabled matches the presence of subtitle items
+  if (!s.subtitlesEnabled && subtitles.length > 0) {
+    warnings.push(
+      'Subtitles are disabled but timeline has subtitle items — they won\'t render in preview'
+    );
+  }
+
+  // Check speaker color consistency
+  if (s.useSpeakerColors !== false) {
+    const speakersInItems = new Set(subtitles.map((it) => it.speaker).filter(Boolean));
+    if (speakersInItems.size === 0) {
+      warnings.push('Speaker colors enabled but no subtitle items have speaker assignments');
+    }
+  }
+
+  // Check for empty subtitle text
+  const emptyCount = subtitles.filter((it) => !it.subtitleText || !it.subtitleText.trim()).length;
+  if (emptyCount > 0) {
+    warnings.push(`${emptyCount} subtitle item(s) have empty text — they will render as blank`);
+  }
+
+  // Check subtitle position consistency
+  const customPositions = subtitles.filter(
+    (it) => it.position && (it.position.x !== 50 || it.position.y !== 90)
+  );
+  if (customPositions.length > 0 && customPositions.length < subtitles.length) {
+    warnings.push(
+      `${customPositions.length}/${subtitles.length} subtitle(s) have custom positions — may look inconsistent`
+    );
+  }
+
+  return { valid: errors.length === 0, errors, warnings };
+}
+
+/**
  * Full QA validation — runs all checks and returns a combined report.
  *
  * @param {Array} items - Timeline store items
  * @param {Object} settings - Clip settings
  * @param {Object} outputDims - { w, h } output resolution
- * @returns {{ valid: boolean, errors: string[], warnings: string[], summary: string }}
+ * @param {Object} [syncInfo] - Optional { transcript, clipStart, clipEnd } for sync validation
+ * @returns {{ valid: boolean, errors: string[], warnings: string[], summary: string, checks: Object[] }}
  */
-export function runSubtitleQA(items, settings, outputDims) {
+export function runSubtitleQA(items, settings, outputDims, syncInfo) {
   const itemResult = validateSubtitleItems(items);
   const settingsResult = validateSubtitleSettings(settings);
   const consistencyResult = validatePreviewExportConsistency(settings, outputDims);
+  const settingsAppResult = validateSettingsApplication(settings, items);
 
-  const errors = [
-    ...itemResult.errors,
-    ...settingsResult.errors,
-    ...consistencyResult.errors,
+  const checks = [
+    { name: 'Subtitle items', ...itemResult },
+    { name: 'Subtitle settings', ...settingsResult },
+    { name: 'Preview/export consistency', ...consistencyResult },
+    { name: 'Settings application', ...settingsAppResult },
   ];
-  const warnings = [
-    ...itemResult.warnings,
-    ...settingsResult.warnings,
-    ...consistencyResult.warnings,
-  ];
+
+  // Optional transcript sync validation
+  if (syncInfo && syncInfo.transcript) {
+    const syncResult = validateTranscriptSync(
+      items, syncInfo.transcript, syncInfo.clipStart || 0, syncInfo.clipEnd || Infinity
+    );
+    checks.push({ name: 'Transcript sync', ...syncResult });
+  }
+
+  const errors = checks.flatMap((c) => c.errors);
+  const warnings = checks.flatMap((c) => c.warnings);
 
   const subtitleCount = items.filter((it) => it.type === 'subtitle').length;
   const valid = errors.length === 0;
 
+  const passCount = checks.filter((c) => c.errors.length === 0 && c.warnings.length === 0).length;
+  const warnCount = checks.filter((c) => c.errors.length === 0 && c.warnings.length > 0).length;
+  const failCount = checks.filter((c) => c.errors.length > 0).length;
+
   let summary;
   if (valid && warnings.length === 0) {
-    summary = `QA passed: ${subtitleCount} subtitle(s), all settings valid, preview/export consistent.`;
+    summary = `QA passed: ${subtitleCount} subtitle(s), ${checks.length} checks passed.`;
   } else if (valid) {
-    summary = `QA passed with ${warnings.length} warning(s): ${subtitleCount} subtitle(s).`;
+    summary = `QA passed with ${warnings.length} warning(s): ${passCount} passed, ${warnCount} with warnings.`;
   } else {
-    summary = `QA FAILED: ${errors.length} error(s), ${warnings.length} warning(s).`;
+    summary = `QA FAILED: ${failCount} check(s) failed, ${errors.length} error(s), ${warnings.length} warning(s).`;
   }
 
-  return { valid, errors, warnings, summary };
+  return { valid, errors, warnings, summary, checks };
 }

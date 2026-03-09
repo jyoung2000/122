@@ -30,6 +30,7 @@ export default function ExportDialog({
   aspectRatio,
   jobId,
   clipId,
+  transcript,
 }) {
   const [quality, setQuality] = useState('1080p');
   const [exportMode, setExportMode] = useState('server'); // 'server' | 'client'
@@ -53,8 +54,9 @@ export default function ExportDialog({
       exportW = Math.round(dims.w * scale);
       exportH = Math.round(dims.h * scale);
     }
-    return runSubtitleQA(timelineItems, settings, { w: exportW, h: exportH });
-  }, [timelineItems, settings, quality, aspectRatio]);
+    const syncInfo = transcript ? { transcript, clipStart: startTime, clipEnd: endTime } : undefined;
+    return runSubtitleQA(timelineItems, settings, { w: exportW, h: exportH }, syncInfo);
+  }, [timelineItems, settings, quality, aspectRatio, transcript, startTime, endTime]);
 
   const handleExport = useCallback(async () => {
     setError(null);
@@ -245,12 +247,26 @@ export default function ExportDialog({
           <span style={{ fontSize: 13 }}>{subtitleQA.valid ? (subtitleQA.warnings.length > 0 ? '⚠' : '✓') : '✕'}</span>
           <span style={{ fontWeight: 600 }}>Subtitle QA: {subtitleQA.summary}</span>
         </div>
-        {subtitleQA.errors.map((e, i) => (
-          <div key={`e-${i}`} style={{ color: '#FF375F', paddingLeft: 20 }}>• {e}</div>
-        ))}
-        {subtitleQA.warnings.map((w, i) => (
-          <div key={`w-${i}`} style={{ color: '#FF9F0A', paddingLeft: 20 }}>• {w}</div>
-        ))}
+        {/* Per-check breakdown */}
+        {subtitleQA.checks && subtitleQA.checks.map((check, ci) => {
+          const hasIssues = check.errors.length > 0 || check.warnings.length > 0;
+          const icon = check.errors.length > 0 ? '✕' : check.warnings.length > 0 ? '⚠' : '✓';
+          const iconColor = check.errors.length > 0 ? '#FF375F' : check.warnings.length > 0 ? '#FF9F0A' : '#30D158';
+          return (
+            <div key={ci} style={{ marginTop: ci > 0 ? 4 : 2, paddingLeft: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ color: iconColor, fontSize: 10 }}>{icon}</span>
+                <span style={{ fontWeight: 500 }}>{check.name}</span>
+              </div>
+              {check.errors.map((e, i) => (
+                <div key={`ce-${ci}-${i}`} style={{ color: '#FF375F', paddingLeft: 18, fontSize: 10 }}>• {e}</div>
+              ))}
+              {check.warnings.map((w, i) => (
+                <div key={`cw-${ci}-${i}`} style={{ color: '#FF9F0A', paddingLeft: 18, fontSize: 10 }}>• {w}</div>
+              ))}
+            </div>
+          );
+        })}
       </div>
 
       {/* Actions */}
