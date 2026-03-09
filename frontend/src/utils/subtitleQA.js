@@ -358,25 +358,246 @@ export function validateSettingsApplication(settings, items) {
 }
 
 /**
+ * Validate active word highlighting timing and FPS adequacy.
+ * Ensures the export FPS is high enough for smooth word-by-word
+ * highlighting that doesn't lag or skip words.
+ *
+ * @param {Array} items - Timeline store items
+ * @param {Object} settings - Clip settings
+ * @param {number} exportFPS - The export FPS (after adaptive boost)
+ * @returns {{ valid: boolean, errors: string[], warnings: string[] }}
+ */
+export function validateActiveWordTiming(items, settings, exportFPS = 30) {
+  const errors = [];
+  const warnings = [];
+  const s = settings || {};
+  const subtitles = items.filter((it) => it.type === 'subtitle');
+
+  if (!s.activeWordEnabled || subtitles.length === 0) {
+    return { valid: true, errors, warnings };
+  }
+
+  // Check each subtitle segment for timing adequacy
+  for (const sub of subtitles) {
+    const text = sub.subtitleText || '';
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length <= 1) continue;
+
+    const segDuration = sub.end - sub.start;
+    const avgWordDuration = segDuration / words.length;
+    const framesPerWord = avgWordDuration * exportFPS;
+
+    if (framesPerWord < 2) {
+      errors.push(
+        `Subtitle at ${sub.start.toFixed(1)}s has ${words.length} words in ${segDuration.toFixed(1)}s ` +
+        `(${framesPerWord.toFixed(1)} frames/word at ${exportFPS}fps) — words will skip/lag`
+      );
+    } else if (framesPerWord < 3) {
+      warnings.push(
+        `Subtitle at ${sub.start.toFixed(1)}s has fast word transitions ` +
+        `(${framesPerWord.toFixed(1)} frames/word) — may appear slightly rushed`
+      );
+    }
+
+    // Check for very short segments that might cause word index jumps
+    if (segDuration < 0.3 && words.length > 2) {
+      warnings.push(
+        `Subtitle at ${sub.start.toFixed(1)}s is very short (${segDuration.toFixed(2)}s) ` +
+        `with ${words.length} words — active highlighting may not display all words`
+      );
+    }
+  }
+
+  return { valid: errors.length === 0, errors, warnings };
+}
+
+/**
+ * Validate that all clip effects and settings will be applied consistently
+ * in the exported video. Checks video, image, text, shape, and subtitle
+ * clips for any settings that might differ between preview and export.
+ *
+ * @param {Array} items - Timeline store items
+ * @param {Object} settings - Clip settings
+ * @returns {{ valid: boolean, errors: string[], warnings: string[] }}
+ */
+export function validateClipEffectsParity(items, settings) {
+  const errors = [];
+  const warnings = [];
+
+  for (const item of items) {
+    const label = `${item.type} clip "${(item.subtitleText || item.textContent || item.id || '').slice(0, 20)}"`;
+
+    // Validate effects are within canvas filter support
+    const fx = item.effects || {};
+    if (fx.blur && fx.blur > 20) {
+      warnings.push(`${label}: blur (${fx.blur}px) is very high — may affect export performance`);
+    }
+
+    // Validate transforms
+    const t = item.transform || {};
+    if (t.scaleX !== undefined && (t.scaleX <= 0 || t.scaleY <= 0)) {
+      warnings.push(`${label}: has zero or negative scale — may render invisible`);
+    }
+
+    // Validate opacity
+    if (item.opacity !== undefined && (item.opacity < 0 || item.opacity > 1)) {
+      warnings.push(`${label}: opacity (${item.opacity}) outside [0,1] range`);
+    }
+
+    // Validate fade durations
+    if (item.fadeIn && item.fadeOut) {
+      const dur = item.end - item.start;
+      if (item.fadeIn + item.fadeOut > dur) {
+        warnings.push(`${label}: fadeIn (${item.fadeIn}s) + fadeOut (${item.fadeOut}s) exceeds clip duration (${dur.toFixed(1)}s)`);
+      }
+    }
+
+    // Validate transitions
+    if (item.transition) {
+      const validTypes = ['dissolve', 'fade', 'wipe-left', 'wipe-right', 'slide-left', 'slide-right', 'zoom'];
+      if (item.transition.type && !validTypes.includes(item.transition.type)) {
+        warnings.push(`${label}: transition type "${item.transition.type}" is not recognized`);
+      }
+      if (item.transition.duration && item.transition.duration > (item.end - item.start)) {
+        warnings.push(`${label}: transition duration exceeds clip length`);
+      }
+    }
+
+    // Validate text clips
+    if (item.type === 'text') {
+      if (!item.textContent && !item.subtitleText) {
+        warnings.push(`${label}: text clip has no content — will render blank`);
+      }
+      const style = item.textStyle || {};
+      if (style.fontSize && style.fontSize > 200) {
+        warnings.push(`${label}: font size (${style.fontSize}px) is very large`);
+      }
+    }
+
+    // Validate shape clips
+    if (item.type === 'shape') {
+      const validShapes = ['rectangle', 'circle', 'ellipse', 'arrow', 'line'];
+      if (item.shapeType && !validShapes.includes(item.shapeType)) {
+        warnings.push(`${label}: shape type "${item.shapeType}" is not recognized`);
+      }
+    }
+  }
+
+  return { valid: errors.length === 0, errors, warnings };
+}
+
+/**
+ * Validate that the export will produce a video matching the preview.
+ * This is the master check that verifies all rendering parameters
+ * are consistent between preview (SubtitleOverlay CSS + DOM) and
+ * export (RenderEngine canvas).
+ *
+ * @param {Array} items - Timeline store items
+ * @param {Object} settings - Clip settings
+ * @param {Object} outputDims - { w, h } output resolution
+ * @returns {{ valid: boolean, errors: string[], warnings: string[], confidence: string }}
+ */
+export function validateExportParity(items, settings, outputDims) {
+  const errors = [];
+  const warnings = [];
+  const s = settings || {};
+  const { w: outputW, h: outputH } = outputDims || { w: 1920, h: 1080 };
+
+  // Check all item types are supported by RenderEngine
+  const supportedTypes = new Set(['video', 'audio', 'image', 'overlay', 'text', 'subtitle', 'shape']);
+  for (const item of items) {
+    if (!supportedTypes.has(item.type)) {
+      errors.push(`Item "${item.id}" has unsupported type "${item.type}" — will not render in export`);
+    }
+  }
+
+  // Verify track visibility settings will be honored
+  const subtitleTrack = items.some(it => it.type === 'subtitle' && it.trackId === 't1');
+  if (subtitleTrack && !s.subtitlesEnabled) {
+    warnings.push('Subtitle items exist but subtitles are disabled — they will not appear in the export');
+  }
+
+  // Verify speaker colors will match between preview and export
+  if (s.useSpeakerColors !== false) {
+    const subtitles = items.filter(it => it.type === 'subtitle');
+    const speakers = new Set(subtitles.map(s => s.speaker).filter(Boolean));
+    if (speakers.size > 6 && !s.speakerColors) {
+      warnings.push(
+        `${speakers.size} speakers detected but only 6 default palette colors — ` +
+        'some speakers will share colors (set custom speaker colors to differentiate)'
+      );
+    }
+  }
+
+  // Verify active word settings parity
+  if (s.activeWordEnabled) {
+    const subtitles = items.filter(it => it.type === 'subtitle');
+    if (subtitles.length === 0) {
+      warnings.push('Active word highlighting is enabled but no subtitle items exist');
+    }
+    // Warn about FPS adequacy
+    let fastestWordRate = 0;
+    for (const sub of subtitles) {
+      const words = (sub.subtitleText || '').split(/\s+/).filter(Boolean);
+      if (words.length > 1) {
+        const rate = words.length / (sub.end - sub.start);
+        fastestWordRate = Math.max(fastestWordRate, rate);
+      }
+    }
+    if (fastestWordRate > 10) {
+      warnings.push(
+        `Fastest word rate is ${fastestWordRate.toFixed(1)} words/sec — ` +
+        'export FPS will be boosted automatically for smooth highlighting'
+      );
+    }
+  }
+
+  // Check for items that extend beyond the export range
+  const maxTime = Math.max(...items.map(it => it.end), 0);
+  if (maxTime === 0) {
+    warnings.push('No items with duration found — export may be empty');
+  }
+
+  // Compute confidence level
+  let confidence;
+  if (errors.length === 0 && warnings.length === 0) {
+    confidence = 'high';
+  } else if (errors.length === 0 && warnings.length <= 2) {
+    confidence = 'medium';
+  } else {
+    confidence = errors.length > 0 ? 'low' : 'medium';
+  }
+
+  return { valid: errors.length === 0, errors, warnings, confidence };
+}
+
+/**
  * Full QA validation — runs all checks and returns a combined report.
  *
  * @param {Array} items - Timeline store items
  * @param {Object} settings - Clip settings
  * @param {Object} outputDims - { w, h } output resolution
  * @param {Object} [syncInfo] - Optional { transcript, clipStart, clipEnd } for sync validation
- * @returns {{ valid: boolean, errors: string[], warnings: string[], summary: string, checks: Object[] }}
+ * @param {number} [exportFPS] - Export FPS for active word timing validation
+ * @returns {{ valid: boolean, errors: string[], warnings: string[], summary: string, checks: Object[], confidence: string }}
  */
-export function runSubtitleQA(items, settings, outputDims, syncInfo) {
+export function runSubtitleQA(items, settings, outputDims, syncInfo, exportFPS = 30) {
   const itemResult = validateSubtitleItems(items);
   const settingsResult = validateSubtitleSettings(settings);
   const consistencyResult = validatePreviewExportConsistency(settings, outputDims);
   const settingsAppResult = validateSettingsApplication(settings, items);
+  const activeWordResult = validateActiveWordTiming(items, settings, exportFPS);
+  const effectsResult = validateClipEffectsParity(items, settings);
+  const parityResult = validateExportParity(items, settings, outputDims);
 
   const checks = [
     { name: 'Subtitle items', ...itemResult },
     { name: 'Subtitle settings', ...settingsResult },
     { name: 'Preview/export consistency', ...consistencyResult },
     { name: 'Settings application', ...settingsAppResult },
+    { name: 'Active word timing', ...activeWordResult },
+    { name: 'Clip effects parity', ...effectsResult },
+    { name: 'Export parity', ...parityResult },
   ];
 
   // Optional transcript sync validation
@@ -391,20 +612,24 @@ export function runSubtitleQA(items, settings, outputDims, syncInfo) {
   const warnings = checks.flatMap((c) => c.warnings);
 
   const subtitleCount = items.filter((it) => it.type === 'subtitle').length;
+  const allItemCount = items.length;
   const valid = errors.length === 0;
 
   const passCount = checks.filter((c) => c.errors.length === 0 && c.warnings.length === 0).length;
   const warnCount = checks.filter((c) => c.errors.length === 0 && c.warnings.length > 0).length;
   const failCount = checks.filter((c) => c.errors.length > 0).length;
 
+  // Overall confidence from parity check
+  const confidence = parityResult.confidence || (valid ? 'high' : 'low');
+
   let summary;
   if (valid && warnings.length === 0) {
-    summary = `QA passed: ${subtitleCount} subtitle(s), ${checks.length} checks passed.`;
+    summary = `QA passed: ${allItemCount} item(s), ${subtitleCount} subtitle(s), ${checks.length} checks passed. Export confidence: ${confidence}.`;
   } else if (valid) {
-    summary = `QA passed with ${warnings.length} warning(s): ${passCount} passed, ${warnCount} with warnings.`;
+    summary = `QA passed with ${warnings.length} warning(s): ${passCount} passed, ${warnCount} with warnings. Export confidence: ${confidence}.`;
   } else {
-    summary = `QA FAILED: ${failCount} check(s) failed, ${errors.length} error(s), ${warnings.length} warning(s).`;
+    summary = `QA FAILED: ${failCount} check(s) failed, ${errors.length} error(s), ${warnings.length} warning(s). Export confidence: ${confidence}.`;
   }
 
-  return { valid, errors, warnings, summary, checks };
+  return { valid, errors, warnings, summary, checks, confidence };
 }

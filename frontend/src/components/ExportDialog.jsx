@@ -44,6 +44,12 @@ export default function ExportDialog({
 
   // Run subtitle QA validation
   const timelineItems = useTimelineStore((s) => s.items);
+
+  // Compute optimal FPS (may be boosted for active word highlighting)
+  const exportFPS = useMemo(() => {
+    return ExportEngine.computeOptimalFPS(timelineItems, settings, 30);
+  }, [timelineItems, settings]);
+
   const subtitleQA = useMemo(() => {
     const preset = QUALITY_PRESETS.find(p => p.id === quality) || QUALITY_PRESETS[1];
     let exportW = preset.w;
@@ -55,8 +61,8 @@ export default function ExportDialog({
       exportH = Math.round(dims.h * scale);
     }
     const syncInfo = transcript ? { transcript, clipStart: startTime, clipEnd: endTime } : undefined;
-    return runSubtitleQA(timelineItems, settings, { w: exportW, h: exportH }, syncInfo);
-  }, [timelineItems, settings, quality, aspectRatio, transcript, startTime, endTime]);
+    return runSubtitleQA(timelineItems, settings, { w: exportW, h: exportH }, syncInfo, exportFPS);
+  }, [timelineItems, settings, quality, aspectRatio, transcript, startTime, endTime, exportFPS]);
 
   const handleExport = useCallback(async () => {
     setError(null);
@@ -112,7 +118,7 @@ export default function ExportDialog({
     }
 
     const engine = new ExportEngine(renderEngine, {
-      fps: 30,
+      fps: exportFPS,
       videoBitrate: preset.bitrate,
       width: exportW,
       height: exportH,
@@ -208,6 +214,11 @@ export default function ExportDialog({
         ) : (
           <p>Export directly in your browser using WebCodecs. Faster for short clips, no server needed.</p>
         )}
+        {exportFPS > 30 && (
+          <p style={{ fontSize: 11, color: 'var(--ve-accent, #0A84FF)', marginTop: 4 }}>
+            FPS boosted to {exportFPS}fps for smooth active word highlighting.
+          </p>
+        )}
       </div>
 
       {/* Progress */}
@@ -245,8 +256,14 @@ export default function ExportDialog({
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: subtitleQA.errors.length + subtitleQA.warnings.length > 0 ? 4 : 0 }}>
           <span style={{ fontSize: 13 }}>{subtitleQA.valid ? (subtitleQA.warnings.length > 0 ? '⚠' : '✓') : '✕'}</span>
-          <span style={{ fontWeight: 600 }}>Subtitle QA: {subtitleQA.summary}</span>
+          <span style={{ fontWeight: 600 }}>Export QA: {subtitleQA.summary}</span>
         </div>
+        {subtitleQA.confidence && (
+          <div style={{ fontSize: 10, paddingLeft: 20, marginBottom: 2, color: subtitleQA.confidence === 'high' ? '#30D158' : subtitleQA.confidence === 'medium' ? '#FF9F0A' : '#FF375F' }}>
+            Preview-to-export match confidence: {subtitleQA.confidence}
+            {subtitleQA.confidence === 'high' && ' — exported video will look exactly like preview'}
+          </div>
+        )}
         {/* Per-check breakdown */}
         {subtitleQA.checks && subtitleQA.checks.map((check, ci) => {
           const hasIssues = check.errors.length > 0 || check.warnings.length > 0;

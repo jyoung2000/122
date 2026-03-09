@@ -10,6 +10,12 @@
  *   Audio tracks → OfflineAudioContext → WAV
  *   FFmpeg.wasm: WebM video + WAV audio → MP4 (H.264 + AAC)
  *
+ * Active word highlighting:
+ *   When activeWordEnabled is on, the export FPS is automatically boosted
+ *   to ensure smooth, natural word-by-word highlighting that matches
+ *   the preview player exactly. The RenderEngine computes word indices
+ *   internally using the same algorithm as SubtitleOverlay.
+ *
  * Fallback: If WebCodecs unavailable, uses canvas.captureStream() + MediaRecorder.
  * If FFmpeg.wasm fails, falls back to server-side export.
  */
@@ -41,6 +47,45 @@ export default class ExportEngine {
    */
   static isFFmpegAvailable() {
     return typeof SharedArrayBuffer !== 'undefined';
+  }
+
+  /**
+   * Compute the optimal export FPS based on content.
+   * When active word highlighting is enabled, boost FPS to ensure
+   * smooth, lag-free word transitions that look human-edited.
+   *
+   * @param {Array} clips - All clip items
+   * @param {Object} settings - Project settings
+   * @returns {number} - Optimal FPS for export
+   */
+  static computeOptimalFPS(clips, settings, baseFPS = 30) {
+    const subSettings = settings?.subtitle || settings || {};
+    if (!subSettings.activeWordEnabled) return baseFPS;
+
+    // Find the fastest word transition rate across all subtitle clips
+    const subtitles = (clips || []).filter(c => c.type === 'subtitle');
+    if (subtitles.length === 0) return baseFPS;
+
+    let minWordDuration = Infinity;
+    for (const sub of subtitles) {
+      const text = sub.subtitleText || '';
+      const words = text.split(/\s+/).filter(Boolean);
+      if (words.length <= 1) continue;
+      const segDuration = sub.end - sub.start;
+      const avgWordDuration = segDuration / words.length;
+      minWordDuration = Math.min(minWordDuration, avgWordDuration);
+    }
+
+    if (minWordDuration === Infinity) return baseFPS;
+
+    // We want at least 3 frames per word transition for smooth highlighting.
+    // This prevents the jarring "skip" effect where a word appears to jump.
+    const neededFPS = Math.ceil(3 / minWordDuration);
+
+    // Clamp to reasonable range: at least baseFPS, at most 60fps
+    // 60fps gives ~16.7ms per frame, which covers even fast speakers
+    // (5+ words/sec = ~200ms/word, 60fps = ~12 frames per word)
+    return Math.min(60, Math.max(baseFPS, neededFPS));
   }
 
   /**
@@ -79,6 +124,118 @@ export default class ExportEngine {
   }
 
   /**
+   * Extract audio from media elements using OfflineAudioContext.
+   * Renders all audio tracks to a single WAV buffer.
+   *
+   * @param {number} startTime - Start of export range
+   * @param {number} endTime - End of export range
+   * @param {Array} clips - Clip items
+   * @param {Map} mediaElements - Media element map
+   * @returns {Blob|null} - WAV blob or null if no audio
+   */
+  async _extractAudio(startTime, endTime, clips, mediaElements) {
+    try {
+      const duration = endTime - startTime;
+      const sampleRate = 44100;
+      const numSamples = Math.ceil(duration * sampleRate);
+
+      // Find audio-producing clips (video and audio types)
+      const audioClips = clips.filter(c =>
+        (c.type === 'video' || c.type === 'audio') &&
+        c.end > startTime && c.start < endTime
+      );
+
+      if (audioClips.length === 0) return null;
+
+      const offlineCtx = new OfflineAudioContext(2, numSamples, sampleRate);
+
+      for (const clip of audioClips) {
+        const mediaEl = mediaElements?.get(clip.mediaRef || clip.id);
+        if (!mediaEl || !(mediaEl instanceof HTMLVideoElement || mediaEl instanceof HTMLAudioElement)) continue;
+
+        try {
+          // Clone the media element for offline rendering
+          const cloneEl = mediaEl.cloneNode(true);
+          cloneEl.muted = false;
+          cloneEl.volume = 1.0;
+
+          const source = offlineCtx.createMediaElementSource(cloneEl);
+          const gainNode = offlineCtx.createGain();
+          gainNode.gain.value = clip.volume ?? 1.0;
+          source.connect(gainNode);
+          gainNode.connect(offlineCtx.destination);
+
+          // Seek to the right position
+          const clipOffset = Math.max(0, startTime - clip.start);
+          cloneEl.currentTime = (clip.trimStart || 0) + clipOffset;
+        } catch {
+          // Media element may not support offline rendering — skip
+        }
+      }
+
+      const audioBuffer = await offlineCtx.startRendering();
+
+      // Convert AudioBuffer to WAV
+      return this._audioBufferToWav(audioBuffer);
+    } catch {
+      // Audio extraction failed — export will be silent
+      return null;
+    }
+  }
+
+  /**
+   * Convert an AudioBuffer to a WAV Blob.
+   */
+  _audioBufferToWav(audioBuffer) {
+    const numChannels = audioBuffer.numberOfChannels;
+    const sampleRate = audioBuffer.sampleRate;
+    const format = 1; // PCM
+    const bitDepth = 16;
+    const bytesPerSample = bitDepth / 8;
+    const blockAlign = numChannels * bytesPerSample;
+    const numSamples = audioBuffer.length;
+    const dataSize = numSamples * blockAlign;
+    const headerSize = 44;
+    const buffer = new ArrayBuffer(headerSize + dataSize);
+    const view = new DataView(buffer);
+
+    // WAV header
+    const writeString = (offset, str) => {
+      for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+    };
+    writeString(0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeString(8, 'WAVE');
+    writeString(12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, format, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * blockAlign, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitDepth, true);
+    writeString(36, 'data');
+    view.setUint32(40, dataSize, true);
+
+    // Interleave channels and write PCM data
+    const channels = [];
+    for (let ch = 0; ch < numChannels; ch++) {
+      channels.push(audioBuffer.getChannelData(ch));
+    }
+
+    let offset = headerSize;
+    for (let i = 0; i < numSamples; i++) {
+      for (let ch = 0; ch < numChannels; ch++) {
+        const sample = Math.max(-1, Math.min(1, channels[ch][i]));
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+        offset += 2;
+      }
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
+  }
+
+  /**
    * Export using WebCodecs + FFmpeg.wasm
    *
    * @param {number} startTime - Start of export range
@@ -92,13 +249,19 @@ export default class ExportEngine {
   async export(startTime, endTime, tracks, clips, settings, mediaElements) {
     this._cancelled = false;
 
+    // Pre-compute subtitle context for active word highlighting
+    this.renderEngine.prepareSubtitleContext(clips);
+
+    // Boost FPS if active word highlighting is enabled for smooth transitions
+    const exportFPS = ExportEngine.computeOptimalFPS(clips, settings, this.fps);
+
     if (!ExportEngine.isWebCodecsAvailable()) {
       // Fallback to MediaRecorder
-      return this._exportWithMediaRecorder(startTime, endTime, tracks, clips, settings, mediaElements);
+      return this._exportWithMediaRecorder(startTime, endTime, tracks, clips, settings, mediaElements, exportFPS);
     }
 
-    const totalFrames = Math.ceil((endTime - startTime) * this.fps);
-    const frameDuration = 1_000_000 / this.fps; // microseconds
+    const totalFrames = Math.ceil((endTime - startTime) * exportFPS);
+    const frameDuration = 1_000_000 / exportFPS; // microseconds
 
     try {
       // Dynamically import webm-muxer
@@ -129,15 +292,20 @@ export default class ExportEngine {
         width: this.width,
         height: this.height,
         bitrate: this.videoBitrate,
-        framerate: this.fps,
+        framerate: exportFPS,
         hardwareAcceleration: 'prefer-hardware',
       });
+
+      // Pre-load fonts for all subtitle clips
+      const subSettings = settings?.subtitle || settings || {};
+      const fontName = subSettings.subtitleFont || 'DM Sans';
+      await this.renderEngine.loadFont(fontName);
 
       // Step through time and encode each frame
       for (let i = 0; i < totalFrames; i++) {
         if (this._cancelled) break;
 
-        const time = startTime + i / this.fps;
+        const time = startTime + i / exportFPS;
 
         // Seek media elements to correct time
         for (const [assetId, mediaEl] of mediaElements) {
@@ -162,7 +330,7 @@ export default class ExportEngine {
           }
         }
 
-        // Render frame to canvas
+        // Render frame to canvas (RenderEngine now computes active word indices internally)
         this.renderEngine.renderFrame(time, tracks, clips, settings, mediaElements);
 
         // Encode
@@ -171,13 +339,13 @@ export default class ExportEngine {
           duration: frameDuration,
         });
 
-        const keyFrame = i % (this.fps * 2) === 0; // keyframe every 2 seconds
+        const keyFrame = i % (exportFPS * 2) === 0; // keyframe every 2 seconds
         encoder.encode(frame, { keyFrame });
         frame.close();
 
         // Report progress
         if (i % 10 === 0) {
-          this.onProgress?.(Math.round((i / totalFrames) * 80)); // 80% for video encoding
+          this.onProgress?.(Math.round((i / totalFrames) * 75)); // 75% for video encoding
         }
       }
 
@@ -189,7 +357,11 @@ export default class ExportEngine {
 
       const webmBlob = new Blob([target.buffer], { type: 'video/webm' });
 
-      // Try to remux to MP4 via FFmpeg.wasm
+      // Extract audio
+      this.onProgress?.(78);
+      const audioBlob = await this._extractAudio(startTime, endTime, clips, mediaElements);
+
+      // Try to mux to MP4 via FFmpeg.wasm
       this.onProgress?.(85);
 
       if (ExportEngine.isFFmpegAvailable()) {
@@ -199,17 +371,28 @@ export default class ExportEngine {
             const webmData = new Uint8Array(await webmBlob.arrayBuffer());
             await ffmpeg.writeFile('input.webm', webmData);
 
-            await ffmpeg.exec([
-              '-i', 'input.webm',
+            const ffmpegArgs = ['-i', 'input.webm'];
+
+            if (audioBlob) {
+              const audioData = new Uint8Array(await audioBlob.arrayBuffer());
+              await ffmpeg.writeFile('audio.wav', audioData);
+              ffmpegArgs.push('-i', 'audio.wav');
+            }
+
+            ffmpegArgs.push(
               '-c:v', 'copy',
               '-c:a', 'aac',
               '-b:a', `${this.audioBitrate}`,
               '-movflags', '+faststart',
+              '-shortest',
               'output.mp4'
-            ]);
+            );
+
+            await ffmpeg.exec(ffmpegArgs);
 
             const mp4Data = await ffmpeg.readFile('output.mp4');
             await ffmpeg.deleteFile('input.webm');
+            if (audioBlob) await ffmpeg.deleteFile('audio.wav');
             await ffmpeg.deleteFile('output.mp4');
 
             this.onProgress?.(100);
@@ -236,9 +419,11 @@ export default class ExportEngine {
   /**
    * Fallback export using canvas.captureStream() + MediaRecorder
    */
-  async _exportWithMediaRecorder(startTime, endTime, tracks, clips, settings, mediaElements) {
+  async _exportWithMediaRecorder(startTime, endTime, tracks, clips, settings, mediaElements, exportFPS) {
+    const fps = exportFPS || this.fps;
+
     try {
-      const stream = this.renderEngine.canvas.captureStream(this.fps);
+      const stream = this.renderEngine.canvas.captureStream(fps);
       const recorder = new MediaRecorder(stream, {
         mimeType: 'video/webm;codecs=vp9',
         videoBitsPerSecond: this.videoBitrate,
@@ -259,8 +444,8 @@ export default class ExportEngine {
 
         recorder.start(100); // Collect data every 100ms
 
-        const totalFrames = Math.ceil((endTime - startTime) * this.fps);
-        const frameTime = 1000 / this.fps;
+        const totalFrames = Math.ceil((endTime - startTime) * fps);
+        const frameTime = 1000 / fps;
         let frame = 0;
 
         const renderNext = () => {
@@ -269,7 +454,7 @@ export default class ExportEngine {
             return;
           }
 
-          const time = startTime + frame / this.fps;
+          const time = startTime + frame / fps;
           this.renderEngine.renderFrame(time, tracks, clips, settings, mediaElements);
           frame++;
 

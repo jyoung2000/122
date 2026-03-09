@@ -31,6 +31,110 @@ const FONT_SIZE_MAP = { small: 22, medium: 30, large: 40 };
 const REF_W = 1920;
 const REF_H = 1080;
 
+// ── Active word timing constants (MUST match SubtitleOverlay exactly) ────
+const _BASE_OVERHEAD_S = 0.04;
+const _ANTICIPATION_S  = 0.10;
+const _AUDIO_BUFFER_S  = 0.12;
+const _PUNCT_PAUSE = { ',': 0.15, ';': 0.16, ':': 0.12, '.': 0.22, '!': 0.22, '?': 0.24, '\u2014': 0.12, '\u2013': 0.10 };
+const _FAST_WORDS = new Set([
+  'the', 'a', 'an', 'to', 'in', 'on', 'at', 'of', 'for',
+  'and', 'but', 'or', 'is', 'was', 'are', 'were', 'it',
+  'its', 'this', 'that',
+]);
+
+/**
+ * Compute the active word index for a subtitle segment at a given time.
+ * This is the SAME algorithm used by SubtitleOverlay's getCurrentWordIndex
+ * to guarantee 1:1 parity between preview and export.
+ */
+function computeActiveWordIndex(segment, relativeTime, speakerRates) {
+  const text = segment?.subtitleText || segment?.text || '';
+  if (!text) return -1;
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length <= 1) return words.length === 1 ? 0 : -1;
+
+  // Use word-level timestamps if available
+  if (segment.words && segment.words.length === words.length) {
+    const adjusted = relativeTime + 0.10 - _AUDIO_BUFFER_S;
+    if (adjusted < segment.words[0].start) return -1;
+    for (let i = 0; i < segment.words.length; i++) {
+      if (adjusted < segment.words[i].end) return i;
+    }
+    return segment.words.length - 1;
+  }
+
+  // Proportional timing fallback (matches SubtitleOverlay exactly)
+  const totalChars = words.reduce((sum, w) => sum + w.length, 0);
+  if (totalChars === 0) return -1;
+  const segDuration = segment.end - segment.start;
+  const speakerWps = (speakerRates && speakerRates[segment.speaker]) || 3.0;
+  const rateScale = Math.max(0.6, Math.min(1.6, 3.0 / speakerWps));
+  const anticipation = _ANTICIPATION_S * rateScale;
+  const elapsed = (relativeTime - segment.start) + anticipation - _AUDIO_BUFFER_S;
+  if (elapsed < 0) return -1;
+
+  const punctPauses = words.map((w) => {
+    const last = w[w.length - 1];
+    return (_PUNCT_PAUSE[last] || 0) * rateScale;
+  });
+  const totalPunct = punctPauses.reduce((a, b) => a + b, 0);
+  const baseOverhead = _BASE_OVERHEAD_S * rateScale * words.length;
+  const totalPause = baseOverhead + totalPunct;
+  const charTime = Math.max(segDuration - totalPause, segDuration * 0.45);
+  const pauseScale = (segDuration - charTime) / Math.max(totalPause, 0.01);
+
+  let t = 0;
+  for (let i = 0; i < words.length; i++) {
+    const charDur = charTime * (words[i].length / totalChars);
+    const pause = (_BASE_OVERHEAD_S * rateScale + punctPauses[i]) * pauseScale;
+    let wordDur = charDur + pause;
+    const stripped = words[i].toLowerCase().replace(/[.,!?;:\u2014\u2013]+$/, '');
+    if (_FAST_WORDS.has(stripped)) wordDur *= 0.75;
+    if (i === 0) wordDur *= 1.15;
+    else if (i === words.length - 1) wordDur *= 1.10;
+    if (elapsed < t + wordDur) return i;
+    t += wordDur;
+  }
+  return words.length - 1;
+}
+
+/**
+ * Compute per-speaker word rates from subtitle segments.
+ * Matches SubtitleOverlay's computeSpeakerRates exactly.
+ */
+function computeSpeakerRates(segments) {
+  const stats = {};
+  for (const seg of segments) {
+    const wc = (seg.text || seg.subtitleText || '').split(/\s+/).filter(Boolean).length;
+    const dur = seg.end - seg.start;
+    if (dur <= 0 || wc === 0) continue;
+    if (!stats[seg.speaker]) stats[seg.speaker] = { words: 0, time: 0 };
+    stats[seg.speaker].words += wc;
+    stats[seg.speaker].time += dur;
+  }
+  const rates = {};
+  for (const [sp, s] of Object.entries(stats)) {
+    rates[sp] = s.time > 0 ? s.words / s.time : 3.0;
+  }
+  return rates;
+}
+
+/**
+ * Get speaker color matching SubtitleOverlay's getSpeakerColor logic.
+ */
+function getSpeakerColor(speaker, speakersOrdered, settings) {
+  const fontColor = settings?.subtitleFontColor;
+  if (fontColor && fontColor.toLowerCase() !== '#ffffff') {
+    return fontColor;
+  }
+  const useSpeaker = settings?.useSpeakerColors ?? true;
+  if (!useSpeaker) return fontColor || '#FFFFFF';
+  const speakerColors = settings?.speakerColors || {};
+  if (speakerColors[speaker]) return speakerColors[speaker];
+  const idx = speakersOrdered.indexOf(speaker);
+  return DEFAULT_SPEAKER_PALETTE[(idx >= 0 ? idx : 0) % DEFAULT_SPEAKER_PALETTE.length];
+}
+
 // ── Transition renderers ──────────────────────────────────────────────────
 const TRANSITIONS = {
   dissolve(ctx, outCanvas, inCanvas, progress, w, h) {
@@ -107,6 +211,26 @@ export default class RenderEngine {
     this._fontCache = new Set();
     this._transitionBuffer1 = null;
     this._transitionBuffer2 = null;
+
+    // Cached speaker data for active word highlighting (computed once per export)
+    this._speakerRates = null;
+    this._speakersOrdered = null;
+    this._subtitleSegments = null;
+  }
+
+  /**
+   * Pre-compute speaker data for a set of subtitle clips.
+   * Call this once before export to enable accurate active word rendering.
+   */
+  prepareSubtitleContext(allClips) {
+    const subtitles = (allClips || []).filter(c => c.type === 'subtitle');
+    this._subtitleSegments = subtitles;
+    this._speakerRates = computeSpeakerRates(subtitles);
+    const seen = [];
+    for (const seg of subtitles) {
+      if (seg.speaker && !seen.includes(seg.speaker)) seen.push(seg.speaker);
+    }
+    this._speakersOrdered = seen;
   }
 
   /**
@@ -447,9 +571,7 @@ export default class RenderEngine {
     const fontName = subSettings.subtitleFont || 'DM Sans';
     const sizeLabel = subSettings.subtitleSize || 'medium';
     const basePx = typeof sizeLabel === 'number' ? sizeLabel : (FONT_SIZE_MAP[sizeLabel] || 30);
-    const outputW = width;
-    const outputH = height;
-    const fontScale = Math.min(outputW, outputH) / Math.min(REF_W, REF_H);
+    const fontScale = Math.min(width, height) / Math.min(REF_W, REF_H);
     const fontSize = Math.max(16, Math.round(basePx * fontScale));
     const fontWeight = subSettings.subtitleFontWeight === 'bold' ? 700 : subSettings.subtitleFontWeight === 'black' ? 900 : 400;
     const settingsPosition = subSettings.subtitlePosition || 'bottom';
@@ -461,9 +583,15 @@ export default class RenderEngine {
     const outlineColor = subSettings.subtitleOutlineColor || '#000000';
     const outlineOpacity = (subSettings.subtitleOutlineOpacity ?? 100) / 100;
     const outlineWidth = Math.max(0, Math.round((subSettings.subtitleOutlineWidth ?? 2) * fontScale));
-    const fontColor = subSettings.subtitleFontColor || '#FFFFFF';
     const activeWordEnabled = subSettings.activeWordEnabled || false;
     const activeWordColor = subSettings.activeWordColor || '#FFD700';
+    const activeWordOutlineColor = subSettings.activeWordOutlineColor || '#000000';
+    const activeWordBgColor = subSettings.activeWordBgColor || '#000000';
+    const activeWordBgOpacity = subSettings.activeWordBgOpacity ?? 0;
+
+    // Resolve font color using speaker colors (matches SubtitleOverlay exactly)
+    const speakersOrdered = this._speakersOrdered || [];
+    const fontColor = getSpeakerColor(clip.speaker, speakersOrdered, subSettings);
 
     // Per-item position and rotation from timeline store
     const itemPos = clip.position || { x: 50, y: 90 };
@@ -524,12 +652,25 @@ export default class RenderEngine {
       ctx.fill();
     }
 
-    // Draw each line
+    // Compute active word index internally (same algorithm as SubtitleOverlay)
+    // This ensures 1:1 parity — no reliance on external _activeWordIndex property.
+    let globalActiveWordIdx = -1;
+    if (activeWordEnabled) {
+      const relTime = currentTime; // currentTime is already clip-relative
+      globalActiveWordIdx = computeActiveWordIndex(clip, relTime, this._speakerRates);
+    }
+
+    // Draw each line with proper per-line word index tracking
     const startY = y - (totalHeight - lineHeight) / 2;
+    // Build a flat word list to map global word index to per-line positions
+    const allWords = text.split(/\s+/).filter(Boolean);
+    let globalWordOffset = 0;
+
     for (let i = 0; i < lines.length; i++) {
       const lineY = startY + i * lineHeight;
+      const lineWords = lines[i].split(/\s+/).filter(Boolean);
 
-      // Outline
+      // Outline for the full line
       if (outlineWidth > 0 && !bgEnabled) {
         ctx.strokeStyle = this._hexToRgba(outlineColor, outlineOpacity);
         ctx.lineWidth = outlineWidth * 2;
@@ -537,15 +678,38 @@ export default class RenderEngine {
         ctx.strokeText(lines[i], x, lineY);
       }
 
-      // Active word highlighting
-      if (activeWordEnabled && clip._activeWordIndex >= 0) {
-        const words = lines[i].split(/\s+/);
-        let wordX = x - ctx.measureText(lines[i]).width / 2;
+      // Active word highlighting with correct per-line index tracking
+      if (activeWordEnabled && globalActiveWordIdx >= 0) {
+        const lineWidth = ctx.measureText(lines[i]).width;
+        let wordX = x - lineWidth / 2;
         ctx.textAlign = 'left';
-        for (let w = 0; w < words.length; w++) {
-          const word = words[w];
-          const ww = ctx.measureText(word + ' ').width;
-          ctx.fillStyle = w === clip._activeWordIndex ? activeWordColor : fontColor;
+
+        for (let w = 0; w < lineWords.length; w++) {
+          const word = lineWords[w];
+          const isLastWord = w === lineWords.length - 1;
+          const wordWithSpace = isLastWord ? word : word + ' ';
+          const ww = ctx.measureText(wordWithSpace).width;
+          const globalIdx = globalWordOffset + w;
+          const isActive = globalIdx === globalActiveWordIdx;
+
+          // Active word outline (matches SubtitleOverlay's per-word outline)
+          if (isActive && outlineWidth > 0 && !bgEnabled) {
+            const awOlColor = this._hexToRgba(activeWordOutlineColor, outlineOpacity);
+            ctx.strokeStyle = awOlColor;
+            ctx.lineWidth = outlineWidth * 2;
+            ctx.lineJoin = 'round';
+            ctx.strokeText(word, wordX, lineY);
+          }
+
+          // Active word background highlight
+          if (isActive && activeWordBgOpacity > 0) {
+            const wordWidth = ctx.measureText(word).width;
+            const padX = Math.max(1, 2 * fontScale);
+            ctx.fillStyle = this._hexToRgba(activeWordBgColor, activeWordBgOpacity / 100);
+            ctx.fillRect(wordX - padX, lineY - fontSize * 0.6, wordWidth + padX * 2, fontSize * 1.2);
+          }
+
+          ctx.fillStyle = isActive ? activeWordColor : fontColor;
           ctx.fillText(word, wordX, lineY);
           wordX += ww;
         }
@@ -554,6 +718,8 @@ export default class RenderEngine {
         ctx.fillStyle = fontColor;
         ctx.fillText(lines[i], x, lineY);
       }
+
+      globalWordOffset += lineWords.length;
     }
 
     ctx.restore();
@@ -745,5 +911,8 @@ export default class RenderEngine {
     this._transitionBuffer1 = null;
     this._transitionBuffer2 = null;
     this._fontCache.clear();
+    this._speakerRates = null;
+    this._speakersOrdered = null;
+    this._subtitleSegments = null;
   }
 }

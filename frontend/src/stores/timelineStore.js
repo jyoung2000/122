@@ -182,6 +182,7 @@ const useTimelineStore = create(
           subtitleText: item.subtitleText || null,
           subtitleStyle: item.subtitleStyle || null,
           speaker: item.speaker || null,
+          words: item.words || null,
           textContent: item.textContent || null,
           textStyle: item.textStyle || null,
           shapeType: item.shapeType || null,
@@ -350,6 +351,17 @@ const useTimelineStore = create(
             if (seg.end > clipStart && seg.start < clipEnd) {
               const clampedStart = Math.max(seg.start, clipStart);
               const clampedEnd = Math.min(seg.end, clipEnd);
+              // Preserve word-level timestamps for accurate active word highlighting
+              let segWords = null;
+              if (seg.words && Array.isArray(seg.words)) {
+                segWords = seg.words
+                  .filter(w => w.end > clipStart && w.start < clipEnd)
+                  .map(w => ({
+                    ...w,
+                    start: w.start - clipStart,
+                    end: w.end - clipStart,
+                  }));
+              }
               items.push({
                 id: nextItemId(),
                 trackId: 't1',
@@ -372,6 +384,7 @@ const useTimelineStore = create(
                 subtitleStyle: null,
                 speaker: seg.speaker || null,
                 transition: null,
+                words: segWords,
               });
             }
           });
