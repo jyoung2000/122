@@ -320,22 +320,32 @@ export default function SubtitleOverlay({
     ) || null;
   }, [currentSubtitle, subtitleItems]);
 
-  // Click-to-select: select the subtitle timeline item
+  // Click-to-select: select the subtitle timeline item.
+  // But only if no overlay item (text/image/shape) is already selected — otherwise
+  // the subtitle click-through steals focus from overlay items that visually overlap.
   const handleSubtitleClick = useCallback((e) => {
     e.stopPropagation();
-    if (currentTimelineItem) {
-      setSelectedItemId(currentTimelineItem.id);
+    if (!currentTimelineItem) return;
+    // Don't steal selection from overlay items (text, image, shape, video)
+    if (selectedItemId) {
+      const sel = timelineItems.find((it) => it.id === selectedItemId);
+      if (sel && sel.type !== 'subtitle') return;
     }
-  }, [currentTimelineItem, setSelectedItemId]);
+    setSelectedItemId(currentTimelineItem.id);
+  }, [currentTimelineItem, setSelectedItemId, selectedItemId, timelineItems]);
 
   const handleSubtitleDoubleClick = useCallback((e) => {
     e.stopPropagation();
-    if (currentTimelineItem) {
-      setSelectedItemId(currentTimelineItem.id);
-      setIsEditing(true);
-      setTimeout(() => editRef.current?.focus(), 50);
+    if (!currentTimelineItem) return;
+    // Don't steal selection from overlay items
+    if (selectedItemId) {
+      const sel = timelineItems.find((it) => it.id === selectedItemId);
+      if (sel && sel.type !== 'subtitle') return;
     }
-  }, [currentTimelineItem, setSelectedItemId]);
+    setSelectedItemId(currentTimelineItem.id);
+    setIsEditing(true);
+    setTimeout(() => editRef.current?.focus(), 50);
+  }, [currentTimelineItem, setSelectedItemId, selectedItemId, timelineItems]);
 
   const handleEditBlur = useCallback(() => {
     setIsEditing(false);

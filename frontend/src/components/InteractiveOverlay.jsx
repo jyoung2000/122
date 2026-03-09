@@ -119,8 +119,8 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
   const defaultPos = isVideo ? { x: 50, y: 50 } : { x: 50, y: 50 };
   const defaultSize = isVideo ? { w: 100, h: 100 } : { w: 30, h: 30 };
   const pos = item.position || defaultPos;
-  // For video items with legacy {x:0,y:0}, treat as centered
-  const effectivePos = (isVideo && pos.x === 0 && pos.y === 0) ? { x: 50, y: 50 } : pos;
+  // For items with legacy {x:0,y:0}, treat as centered (viewport uses % from center)
+  const effectivePos = (pos.x === 0 && pos.y === 0) ? { x: 50, y: 50 } : pos;
 
   // For text items, auto-measure the text to compute a tight bounding box
   const measuredSize = useMemo(() => {
@@ -135,15 +135,15 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
       ctx.font = `${fontWeight} ${fontSize}px "${fontFamily}", sans-serif`;
-      const metrics = ctx.measureText(text);
-      const textW = metrics.width;
-      const textH = fontSize * 1.4;
+      const lines = text.split('\n');
+      const textW = Math.max(...lines.map((l) => ctx.measureText(l).width));
+      const textH = fontSize * 1.4 * Math.max(1, lines.length);
       const rect = containerRef.current.getBoundingClientRect();
       if (rect.width > 0 && rect.height > 0) {
-        const pad = 16; // padding around text
+        const pad = 20; // generous padding for easier click targeting
         const wPct = ((textW + pad * 2) / rect.width) * 100;
         const hPct = ((textH + pad * 2) / rect.height) * 100;
-        return { w: Math.max(8, Math.min(95, wPct)), h: Math.max(5, Math.min(80, hPct)) };
+        return { w: Math.max(12, Math.min(95, wPct)), h: Math.max(8, Math.min(80, hPct)) };
       }
     } catch { /* fallback to stored size */ }
     return null;
