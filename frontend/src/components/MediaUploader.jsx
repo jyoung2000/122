@@ -62,6 +62,7 @@ function generateVideoThumbnail(file) {
 
 export default function MediaUploader({ jobId, compact = false }) {
   const addMedia = useTimelineStore((s) => s.addMedia);
+  const removeMedia = useTimelineStore((s) => s.removeMedia);
   const mediaLibrary = useTimelineStore((s) => s.mediaLibrary);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(null); // { filename, progress }
@@ -246,6 +247,16 @@ export default function MediaUploader({ jobId, compact = false }) {
                 </div>
               )}
               <span className="ve-media-uploader__item-name">{media.filename}</span>
+              <button
+                className="ve-media-uploader__item-delete"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  removeMedia(media.id);
+                }}
+                title="Delete"
+              >
+                x
+              </button>
             </div>
           ))}
         </div>

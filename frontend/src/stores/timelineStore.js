@@ -285,6 +285,12 @@ const useTimelineStore = create(
         state.items = state.items.filter(i => i.mediaRef !== mediaId);
       }),
 
+      removeMediaBatch: (mediaIds) => set((state) => {
+        const idSet = new Set(mediaIds);
+        state.mediaLibrary = state.mediaLibrary.filter(m => !idSet.has(m.id));
+        state.items = state.items.filter(i => !idSet.has(i.mediaRef));
+      }),
+
       // Initialize timeline with clip data (backward compat)
       initFromClip: (clipData) => {
         const { src, clipStart, clipEnd, subtitleSegments } = clipData;
