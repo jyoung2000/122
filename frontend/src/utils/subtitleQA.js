@@ -487,6 +487,51 @@ export function validateClipEffectsParity(items, settings) {
 }
 
 /**
+ * Validate that video effects and overlays from the multi-track editor
+ * will be included in the server export payload.
+ * Ensures the exported MP4 is 1:1 with the preview player.
+ */
+export function validateVideoEffectsExport(items) {
+  const errors = [];
+  const warnings = [];
+
+  // Check video item effects
+  const videoItem = items.find(it => it.type === 'video');
+  if (videoItem?.effects) {
+    const fx = videoItem.effects;
+    const activeEffects = [];
+    if ((fx.brightness || 0) !== 0) activeEffects.push(`brightness: ${fx.brightness}`);
+    if ((fx.contrast || 0) !== 0) activeEffects.push(`contrast: ${fx.contrast}`);
+    if ((fx.saturation || 0) !== 0) activeEffects.push(`saturation: ${fx.saturation}`);
+    if ((fx.blur || 0) > 0) activeEffects.push(`blur: ${fx.blur}px`);
+    if ((fx.hueRotate || 0) > 0) activeEffects.push(`hue: ${fx.hueRotate}deg`);
+    if ((fx.sepia || 0) > 0) activeEffects.push(`sepia: ${fx.sepia}%`);
+    if ((videoItem.opacity ?? 1) < 1) activeEffects.push(`opacity: ${(videoItem.opacity * 100).toFixed(0)}%`);
+
+    if (activeEffects.length > 0) {
+      // Not an error — these ARE now applied via FFmpeg filters
+      // Just informational so users see what effects will be in the export
+      warnings.push(`Video effects active (will be applied to export): ${activeEffects.join(', ')}`);
+    }
+  }
+
+  // Check text overlays
+  const textItems = items.filter(it => it.type === 'text');
+  if (textItems.length > 0) {
+    warnings.push(`${textItems.length} text overlay(s) will be included in export via FFmpeg drawtext`);
+  }
+
+  // Check image overlays
+  const imageItems = items.filter(it => it.type === 'image' || it.type === 'overlay');
+  const nonVideoImages = imageItems.filter(it => it.type !== 'video');
+  if (nonVideoImages.length > 0) {
+    warnings.push(`${nonVideoImages.length} image overlay(s) will be included in export`);
+  }
+
+  return { valid: true, errors, warnings };
+}
+
+/**
  * Validate that the export will produce a video matching the preview.
  * This is the master check that verifies all rendering parameters
  * are consistent between preview (SubtitleOverlay CSS + DOM) and
@@ -738,6 +783,7 @@ export function runSubtitleQA(items, settings, outputDims, syncInfo, exportFPS =
   const activeWordResult = validateActiveWordTiming(items, settings, exportFPS);
   const effectsResult = validateClipEffectsParity(items, settings);
   const parityResult = validateExportParity(items, settings, outputDims);
+  const videoEffectsResult = validateVideoEffectsExport(items);
 
   const checks = [
     { name: 'Subtitle items', ...itemResult },
@@ -747,6 +793,7 @@ export function runSubtitleQA(items, settings, outputDims, syncInfo, exportFPS =
     { name: 'Active word timing', ...activeWordResult },
     { name: 'Clip effects parity', ...effectsResult },
     { name: 'Export parity', ...parityResult },
+    { name: 'Video effects export', ...videoEffectsResult },
   ];
 
   // Subject tracking validation

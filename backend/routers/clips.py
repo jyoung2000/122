@@ -281,6 +281,9 @@ async def export_clip_endpoint(
                 volume=req.volume,
                 speed=req.speed,
                 segments=[s.model_dump() for s in req.segments] if req.segments else None,
+                video_effects=req.video_effects.model_dump() if req.video_effects else None,
+                text_overlays=[t.model_dump() for t in req.text_overlays] if req.text_overlays else None,
+                image_overlays=[i.model_dump() for i in req.image_overlays] if req.image_overlays else None,
             )
 
             elapsed = int(time.monotonic() - export_start)
@@ -452,6 +455,9 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                 volume=req.volume,
                 speed=req.speed,
                 segments=[s.model_dump() for s in req.segments] if req.segments else None,
+                video_effects=req.video_effects.model_dump() if req.video_effects else None,
+                text_overlays=[t.model_dump() for t in req.text_overlays] if req.text_overlays else None,
+                image_overlays=[i.model_dump() for i in req.image_overlays] if req.image_overlays else None,
             )
 
             elapsed = int(time.monotonic() - export_start)

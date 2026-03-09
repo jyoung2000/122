@@ -92,6 +92,61 @@ export default function ExportDialog({
         startTime,
         endTime,
       };
+
+      // Include multi-track editor video effects so export matches preview 1:1
+      const videoItem = timelineItems.find(it => it.type === 'video');
+      if (videoItem?.effects) {
+        const fx = videoItem.effects;
+        const hasEffects = (fx.brightness || 0) !== 0 || (fx.contrast || 0) !== 0 ||
+          (fx.saturation || 0) !== 0 || (fx.blur || 0) > 0 ||
+          (fx.hueRotate || 0) > 0 || (fx.sepia || 0) > 0 ||
+          (videoItem.opacity ?? 1) < 1;
+        if (hasEffects) {
+          exportPayload.video_effects = {
+            brightness: fx.brightness || 0,
+            contrast: fx.contrast || 0,
+            saturation: fx.saturation || 0,
+            blur: fx.blur || 0,
+            hue_rotate: fx.hueRotate || 0,
+            sepia: fx.sepia || 0,
+            opacity: videoItem.opacity ?? 1,
+          };
+        }
+      }
+
+      // Include text overlays from the timeline
+      const textItems = timelineItems.filter(it => it.type === 'text');
+      if (textItems.length > 0) {
+        exportPayload.text_overlays = textItems.map(it => ({
+          text: it.text || '',
+          x: it.position?.x ?? 50,
+          y: it.position?.y ?? 50,
+          font_size: it.fontSize || 48,
+          font_color: it.fontColor || '#FFFFFF',
+          font_family: it.fontFamily || 'sans-serif',
+          background_color: it.backgroundColor || null,
+          start_time: it.start || 0,
+          end_time: it.end || 0,
+          rotation: it.transform?.rotation || 0,
+          opacity: it.opacity ?? 1,
+        }));
+      }
+
+      // Include image overlays from the timeline
+      const imageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
+      if (imageItems.length > 0) {
+        exportPayload.image_overlays = imageItems.map(it => ({
+          src: it.src || it.mediaRef || '',
+          x: it.position?.x ?? 50,
+          y: it.position?.y ?? 50,
+          width: it.size?.w ?? 30,
+          height: it.size?.h ?? 30,
+          start_time: it.start || 0,
+          end_time: it.end || 0,
+          opacity: it.opacity ?? 1,
+        }));
+      }
+
       if (onServerExport) {
         onServerExport(exportPayload);
       } else if (jobId && clipId) {

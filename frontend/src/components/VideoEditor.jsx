@@ -3218,6 +3218,7 @@ export default function VideoEditor({
           sourceWidth={sourceWidth}
           sourceHeight={sourceHeight}
           subjectX={subjectX}
+          onServerExport={null}
         />
       )}
 

@@ -15,6 +15,7 @@ import { showToast } from '../components/Toast';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
+import useTimelineStore from '../stores/timelineStore';
 
 // Speaker color palette (must match SubtitleOverlay / ClipSettingsPanel / VideoEditor)
 const DEFAULT_SPEAKER_PALETTE = ['#00D9FF', '#F59E0B', '#10B981', '#A78BFA', '#EF4444', '#EC4899'];
@@ -279,6 +280,10 @@ export default function Analysis() {
   const [clipSettings, setClipSettings] = useState(CLIP_SETTINGS_DEFAULTS);
   const clipSettingsLoadedFromServer = useRef(false);
   const skipNextServerSave = useRef(false);
+
+  // ── Multi-track editor timeline items (for export) ──
+  const timelineItems = useTimelineStore((s) => s.items);
+  const timelineTracks = useTimelineStore((s) => s.tracks);
 
   // ── Server is source of truth for subtitle settings ──
   // When the job loads from the backend, apply server-stored settings (ignoring
@@ -786,6 +791,60 @@ export default function Analysis() {
         speed: s.speed || 1.0,
       }));
     }
+    // Include multi-track editor video effects so export matches preview
+    const videoItem = timelineItems.find(it => it.type === 'video');
+    if (videoItem?.effects) {
+      const fx = videoItem.effects;
+      const hasEffects = (fx.brightness || 0) !== 0 || (fx.contrast || 0) !== 0 ||
+        (fx.saturation || 0) !== 0 || (fx.blur || 0) > 0 ||
+        (fx.hueRotate || 0) > 0 || (fx.sepia || 0) > 0 ||
+        (videoItem.opacity ?? 1) < 1;
+      if (hasEffects) {
+        exportBody.video_effects = {
+          brightness: fx.brightness || 0,
+          contrast: fx.contrast || 0,
+          saturation: fx.saturation || 0,
+          blur: fx.blur || 0,
+          hue_rotate: fx.hueRotate || 0,
+          sepia: fx.sepia || 0,
+          opacity: videoItem.opacity ?? 1,
+        };
+      }
+    }
+
+    // Include text overlays from the timeline
+    const clipTextItems = timelineItems.filter(it => it.type === 'text');
+    if (clipTextItems.length > 0) {
+      exportBody.text_overlays = clipTextItems.map(it => ({
+        text: it.text || '',
+        x: it.position?.x ?? 50,
+        y: it.position?.y ?? 50,
+        font_size: it.fontSize || 48,
+        font_color: it.fontColor || '#FFFFFF',
+        font_family: it.fontFamily || 'sans-serif',
+        background_color: it.backgroundColor || null,
+        start_time: it.start || 0,
+        end_time: it.end || 0,
+        rotation: it.transform?.rotation || 0,
+        opacity: it.opacity ?? 1,
+      }));
+    }
+
+    // Include image overlays from the timeline
+    const clipImageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
+    if (clipImageItems.length > 0) {
+      exportBody.image_overlays = clipImageItems.map(it => ({
+        src: it.src || it.mediaRef || '',
+        x: it.position?.x ?? 50,
+        y: it.position?.y ?? 50,
+        width: it.size?.w ?? 30,
+        height: it.size?.h ?? 30,
+        start_time: it.start || 0,
+        end_time: it.end || 0,
+        opacity: it.opacity ?? 1,
+      }));
+    }
+
     encoding.startExport(jobId, clip.id, clip.title || `Clip ${clip.id}`, exportBody);
     showToast(`Exporting "${clip.title || `Clip ${clip.id}`}" at ${quality}...`, 'info');
   };
@@ -847,6 +906,60 @@ export default function Analysis() {
         speed: s.speed || 1.0,
       }));
     }
+    // Include multi-track editor video effects so export matches preview
+    const videoItem = timelineItems.find(it => it.type === 'video');
+    if (videoItem?.effects) {
+      const fx = videoItem.effects;
+      const hasEffects = (fx.brightness || 0) !== 0 || (fx.contrast || 0) !== 0 ||
+        (fx.saturation || 0) !== 0 || (fx.blur || 0) > 0 ||
+        (fx.hueRotate || 0) > 0 || (fx.sepia || 0) > 0 ||
+        (videoItem.opacity ?? 1) < 1;
+      if (hasEffects) {
+        body.video_effects = {
+          brightness: fx.brightness || 0,
+          contrast: fx.contrast || 0,
+          saturation: fx.saturation || 0,
+          blur: fx.blur || 0,
+          hue_rotate: fx.hueRotate || 0,
+          sepia: fx.sepia || 0,
+          opacity: videoItem.opacity ?? 1,
+        };
+      }
+    }
+
+    // Include text overlays from the timeline
+    const textItems = timelineItems.filter(it => it.type === 'text');
+    if (textItems.length > 0) {
+      body.text_overlays = textItems.map(it => ({
+        text: it.text || '',
+        x: it.position?.x ?? 50,
+        y: it.position?.y ?? 50,
+        font_size: it.fontSize || 48,
+        font_color: it.fontColor || '#FFFFFF',
+        font_family: it.fontFamily || 'sans-serif',
+        background_color: it.backgroundColor || null,
+        start_time: it.start || 0,
+        end_time: it.end || 0,
+        rotation: it.transform?.rotation || 0,
+        opacity: it.opacity ?? 1,
+      }));
+    }
+
+    // Include image overlays from the timeline
+    const imageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
+    if (imageItems.length > 0) {
+      body.image_overlays = imageItems.map(it => ({
+        src: it.src || it.mediaRef || '',
+        x: it.position?.x ?? 50,
+        y: it.position?.y ?? 50,
+        width: it.size?.w ?? 30,
+        height: it.size?.h ?? 30,
+        start_time: it.start || 0,
+        end_time: it.end || 0,
+        opacity: it.opacity ?? 1,
+      }));
+    }
+
     encoding.startExport(jobId, 0, job.filename || 'Full Video', body, {
       endpoint: `/api/jobs/${jobId}/export-full-video`,
     });

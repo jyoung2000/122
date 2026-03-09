@@ -147,6 +147,44 @@ class SegmentSettings(BaseModel):
     speed: float = 1.0    # 0.25 to 4.0 playback speed
 
 
+class VideoEffects(BaseModel):
+    """Video effects applied via FFmpeg eq/hue/boxblur filters to match preview."""
+    brightness: float = 0.0    # -100 to 100 (maps to FFmpeg eq brightness)
+    contrast: float = 0.0      # -100 to 100 (maps to FFmpeg eq contrast)
+    saturation: float = 0.0    # -100 to 100 (maps to FFmpeg eq saturation)
+    blur: float = 0.0          # 0 to 20 (maps to FFmpeg boxblur)
+    hue_rotate: float = 0.0    # 0 to 360 degrees (maps to FFmpeg hue)
+    sepia: float = 0.0         # 0 to 100 (maps to FFmpeg colorchannelmixer)
+    opacity: float = 1.0       # 0 to 1 (maps to FFmpeg colorchannelmixer alpha)
+
+
+class TextOverlay(BaseModel):
+    """Text overlay for FFmpeg drawtext filter."""
+    text: str = ""
+    x: float = 50              # position % (0-100)
+    y: float = 50              # position % (0-100)
+    font_size: int = 48
+    font_color: str = "#FFFFFF"
+    font_family: str = "sans-serif"
+    background_color: Optional[str] = None
+    start_time: float = 0.0    # relative to clip start
+    end_time: float = 0.0
+    rotation: float = 0.0
+    opacity: float = 1.0
+
+
+class ImageOverlay(BaseModel):
+    """Image overlay for FFmpeg overlay filter."""
+    src: str = ""              # path or URL to image
+    x: float = 50              # position % (0-100)
+    y: float = 50              # position % (0-100)
+    width: float = 30          # size % (0-100)
+    height: float = 30         # size % (0-100)
+    start_time: float = 0.0
+    end_time: float = 0.0
+    opacity: float = 1.0
+
+
 class ExportRequest(BaseModel):
     start: float
     end: float
@@ -163,6 +201,10 @@ class ExportRequest(BaseModel):
     trim_start_offset: float = 0.0   # Seconds trimmed from clip start
     trim_end_offset: float = 0.0     # Seconds trimmed from clip end
     segments: list[SegmentSettings] = []  # Per-segment volume/subtitle overrides
+    # Multi-track editor effects — applied via FFmpeg filters to match preview
+    video_effects: Optional[VideoEffects] = None
+    text_overlays: list[TextOverlay] = []
+    image_overlays: list[ImageOverlay] = []
 
 
 class FullVideoExportRequest(BaseModel):
@@ -177,6 +219,10 @@ class FullVideoExportRequest(BaseModel):
     trim_start_offset: float = 0.0
     trim_end_offset: float = 0.0
     segments: list[SegmentSettings] = []  # Per-segment volume/subtitle overrides
+    # Multi-track editor effects — applied via FFmpeg filters to match preview
+    video_effects: Optional[VideoEffects] = None
+    text_overlays: list[TextOverlay] = []
+    image_overlays: list[ImageOverlay] = []
 
 
 class UpdateClipTitleRequest(BaseModel):

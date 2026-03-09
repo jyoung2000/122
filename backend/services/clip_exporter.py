@@ -2808,6 +2808,7 @@ def _build_filter_chain(
     subtitle_force_style: str = "",
     video_path: str | None = None,
     start_time: float = 0,
+    video_effects: dict | None = None,
 ) -> tuple[str | None, bool]:
     """Build FFmpeg video filter chain.
 
@@ -2962,6 +2963,67 @@ def _build_filter_chain(
         out_w = -2
         filters.append(f"scale={out_w}:{out_h}")
 
+    # Apply video effects (brightness/contrast/saturation/blur/hue/sepia)
+    # These must match the CSS filter() values used in the frontend RenderEngine
+    if video_effects:
+        eq_parts = []
+        # brightness: frontend uses brightness(1 + val/100), FFmpeg eq uses brightness=val/100
+        if video_effects.get("brightness", 0) != 0:
+            eq_parts.append(f"brightness={video_effects['brightness'] / 100:.4f}")
+        # contrast: frontend uses contrast(1 + val/100), FFmpeg eq uses contrast=1+val/100
+        if video_effects.get("contrast", 0) != 0:
+            eq_parts.append(f"contrast={1 + video_effects['contrast'] / 100:.4f}")
+        # saturation: frontend uses saturate(1 + val/100), FFmpeg eq uses saturation=1+val/100
+        if video_effects.get("saturation", 0) != 0:
+            eq_parts.append(f"saturation={1 + video_effects['saturation'] / 100:.4f}")
+        if eq_parts:
+            filters.append(f"eq={':'.join(eq_parts)}")
+
+        # hue rotation: frontend uses hue-rotate(Xdeg), FFmpeg uses hue=h=X
+        if video_effects.get("hue_rotate", 0) > 0:
+            filters.append(f"hue=h={video_effects['hue_rotate']:.1f}")
+
+        # blur: frontend uses blur(Xpx), FFmpeg uses boxblur=X:X
+        blur_val = video_effects.get("blur", 0)
+        if blur_val > 0:
+            # Scale blur from CSS px to FFmpeg boxblur radius (approx mapping)
+            ffmpeg_blur = max(1, int(blur_val * 1.5))
+            filters.append(f"boxblur={ffmpeg_blur}:{ffmpeg_blur}")
+
+        # sepia: apply via colorchannelmixer to approximate CSS sepia()
+        sepia_val = video_effects.get("sepia", 0)
+        if sepia_val > 0:
+            s = sepia_val / 100.0
+            # Standard sepia matrix blended with identity by amount s
+            rr = 1 - s + s * 0.393
+            rg = s * 0.769
+            rb = s * 0.189
+            gr = s * 0.349
+            gg = 1 - s + s * 0.686
+            gb = s * 0.168
+            br = s * 0.272
+            bg = s * 0.534
+            bb = 1 - s + s * 0.131
+            filters.append(
+                f"colorchannelmixer={rr:.3f}:{rg:.3f}:{rb:.3f}:0:"
+                f"{gr:.3f}:{gg:.3f}:{gb:.3f}:0:"
+                f"{br:.3f}:{bg:.3f}:{bb:.3f}:0"
+            )
+
+        # opacity: applied as alpha blend with black if < 1
+        opacity_val = video_effects.get("opacity", 1.0)
+        if opacity_val < 1.0:
+            filters.append(f"colorchannelmixer=aa={opacity_val:.3f}")
+
+        logger.info(
+            "Video effects applied: brightness=%.1f contrast=%.1f saturation=%.1f "
+            "blur=%.1f hue=%.1f sepia=%.1f opacity=%.2f",
+            video_effects.get("brightness", 0), video_effects.get("contrast", 0),
+            video_effects.get("saturation", 0), video_effects.get("blur", 0),
+            video_effects.get("hue_rotate", 0), video_effects.get("sepia", 0),
+            video_effects.get("opacity", 1.0),
+        )
+
     if sub:
         filters.append(sub)
 
@@ -2973,6 +3035,45 @@ def _build_filter_chain(
             filters.append("hwupload")
 
     return (",".join(filters) if filters else None, False)
+
+
+def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> str:
+    """Build FFmpeg drawtext filter chain for text overlays.
+
+    Each text overlay becomes a drawtext filter with enable/disable based on timing.
+    Position is given as percentage (0-100) and converted to pixel expressions.
+    """
+    parts = []
+    for i, overlay in enumerate(text_overlays):
+        text = overlay.get("text", "").replace("'", "\\'").replace(":", "\\:")
+        if not text:
+            continue
+        x_pct = overlay.get("x", 50) / 100.0
+        y_pct = overlay.get("y", 50) / 100.0
+        font_size = overlay.get("font_size", 48)
+        font_color = overlay.get("font_color", "#FFFFFF")
+        font_family = overlay.get("font_family", "sans-serif")
+        opacity = overlay.get("opacity", 1.0)
+        start_t = overlay.get("start_time", 0) - clip_start
+        end_t = overlay.get("end_time", 0) - clip_start
+
+        # Build drawtext with enable expression for timing
+        dt = (
+            f"drawtext=text='{text}'"
+            f":x=w*{x_pct:.4f}-tw/2"
+            f":y=h*{y_pct:.4f}-th/2"
+            f":fontsize={font_size}"
+            f":fontcolor={font_color}@{opacity:.2f}"
+            f":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        )
+        bg_color = overlay.get("background_color")
+        if bg_color:
+            dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw=5"
+        if end_t > start_t:
+            dt += f":enable='between(t,{max(0, start_t):.3f},{end_t:.3f})'"
+        parts.append(dt)
+
+    return ",".join(parts)
 
 
 async def export_clip(
@@ -2997,6 +3098,9 @@ async def export_clip(
     speed: float = 1.0,
     segments: list | None = None,
     global_subtitles_enabled: bool | None = None,
+    video_effects: dict | None = None,
+    text_overlays: list | None = None,
+    image_overlays: list | None = None,
 ) -> str:
     """Export a clip from video using FFmpeg.
 
@@ -3071,7 +3175,13 @@ async def export_clip(
             if abs(seg.get("speed", 1.0) - 1.0) > 0.001:
                 has_seg_speed = True
                 break
-    needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments or has_seg_speed
+    has_video_effects = bool(video_effects) and any(
+        video_effects.get(k, 0) != (1.0 if k == "opacity" else 0)
+        for k in ("brightness", "contrast", "saturation", "blur", "hue_rotate", "sepia", "opacity")
+    )
+    has_text_overlays = bool(text_overlays) and len(text_overlays) > 0
+    has_image_overlays = bool(image_overlays) and len(image_overlays) > 0
+    needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments or has_seg_speed or has_video_effects or has_text_overlays or has_image_overlays
     filter_parts = []
     if aspect_ratio:
         filter_parts.append(f"crop to {aspect_ratio}")
@@ -3088,6 +3198,12 @@ async def export_clip(
         filter_parts.append(f"volume {volume:.0%}")
     if has_segments:
         filter_parts.append(f"{len(segments)} segment overrides")
+    if has_video_effects:
+        filter_parts.append("video effects (brightness/contrast/etc)")
+    if has_text_overlays:
+        filter_parts.append(f"{len(text_overlays)} text overlay(s)")
+    if has_image_overlays:
+        filter_parts.append(f"{len(image_overlays)} image overlay(s)")
     filter_desc = " + ".join(filter_parts) if filter_parts else "stream copy"
 
     await _notify(f"Preparing clip {clip_id} ({clip_dur:.1f}s) — {filter_desc}")
@@ -3438,7 +3554,15 @@ async def export_clip(
                 subtitle_force_style=subtitle_force_style,
                 video_path=video_path,
                 start_time=start,
+                video_effects=video_effects if has_video_effects else None,
             )
+
+            # Append text overlay drawtext filters
+            if has_text_overlays and text_overlays:
+                text_vf = _build_text_overlay_filters(text_overlays, clip_start=start)
+                if text_vf:
+                    vf = f"{vf},{text_vf}" if vf else text_vf
+                    logger.info("Text overlay filters for clip %s: %s", clip_id, text_vf)
 
             # QA: validate subject tracking is correctly applied in filter chain
             st_warnings = _validate_subject_tracking(
