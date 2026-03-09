@@ -246,9 +246,12 @@ export default function VideoEditor({
   const { recovered } = useTimelinePersistence(jobId, clipId);
 
   // ── Live QA: validate editor state and auto-fix track compatibility issues ──
+  // Runs when tracks/items/selection change (NOT on every playhead frame update)
   useEffect(() => {
     if (!timelineTracks.length || !timelineStoreItems.length) return;
-    const qa = runEditorQA(timelineTracks, timelineStoreItems);
+    const qa = runEditorQA(timelineTracks, timelineStoreItems, {
+      selectedItemId: storeSelectedItemId,
+    });
     if (qa.errors.length > 0) {
       // Auto-fix track compatibility violations
       const fixes = autoFixTrackCompatibility(timelineTracks, timelineStoreItems);
@@ -264,7 +267,7 @@ export default function VideoEditor({
     if (process.env.NODE_ENV === 'development' && qa.violations.length > 0) {
       console.warn('[EditorQA]', qa.summary, qa.violations);
     }
-  }, [timelineTracks, timelineStoreItems, updateTimelineItem]);
+  }, [timelineTracks, timelineStoreItems, updateTimelineItem, storeSelectedItemId]);
 
   // Initialize timeline store when clip data changes
   const addItem = useTimelineStore((s) => s.addItem);
@@ -907,6 +910,10 @@ export default function VideoEditor({
       if (video.duration && isFinite(video.duration)) {
         setVideoDuration(video.duration);
       }
+      // Seek to clipStart so the first frame is visible immediately
+      if (video.currentTime === 0 && clipStart > 0) {
+        video.currentTime = clipStart;
+      }
     };
     const onError = () => setVideoError(true);
     const onDuration = () => {
@@ -928,7 +935,7 @@ export default function VideoEditor({
       video.removeEventListener('durationchange', onDuration);
       video.removeEventListener('error', onError);
     };
-  }, [src]);
+  }, [src, clipStart]);
 
   // ── Auto-seek and auto-play on clip change ─────────
   useEffect(() => {
@@ -1731,6 +1738,16 @@ export default function VideoEditor({
       // Prevent native video element keyboard handling
       if (e.target.tagName === 'VIDEO') e.target.blur();
 
+      // When multi-track is active, useKeyboardShortcuts handles transport controls
+      // (Space, Arrows, J/K/L, Home/End, M). Skip them here to avoid double-firing.
+      if (showMultiTrack) {
+        const mtKeys = ['Space', 'ArrowLeft', 'ArrowRight', 'KeyJ', 'KeyK', 'KeyL', 'Home', 'End', 'KeyM'];
+        if (mtKeys.includes(e.code)) {
+          e.preventDefault();
+          return;
+        }
+      }
+
       switch (e.code) {
         case 'Space':
           e.preventDefault();
@@ -2018,6 +2035,7 @@ export default function VideoEditor({
           src={src}
           tabIndex={-1}
           playsInline
+          preload="auto"
           style={(() => {
             const hasCustomTransform = showMultiTrack && (
               videoItemPosition.x !== 50 || videoItemPosition.y !== 50 ||

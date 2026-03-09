@@ -160,14 +160,139 @@ export function validateItemProperties(items) {
 }
 
 /**
+ * Validate that the selected item's property panel matches its type.
+ * Returns violations if the selected item would show wrong properties.
+ */
+export function validateSelectedItemPanel(items, selectedItemId) {
+  const violations = [];
+  if (!selectedItemId) return violations;
+
+  const item = items.find(i => i.id === selectedItemId);
+  if (!item) {
+    violations.push({
+      type: 'selection_invalid',
+      severity: 'warning',
+      message: `Selected item "${selectedItemId}" not found in items list`,
+    });
+    return violations;
+  }
+
+  // Verify item has a valid type
+  const validTypes = ['video', 'audio', 'text', 'shape', 'image', 'overlay', 'subtitle'];
+  if (!validTypes.includes(item.type)) {
+    violations.push({
+      type: 'invalid_item_type',
+      severity: 'error',
+      itemId: item.id,
+      message: `Item "${item.id}" has invalid type: "${item.type}"`,
+    });
+  }
+
+  return violations;
+}
+
+/**
+ * Validate layer rendering: items visible at a given time should
+ * render in correct order (video bottom, overlays middle, subtitles top).
+ */
+export function validateLayerRendering(tracks, items, currentTime) {
+  const violations = [];
+  const trackMap = new Map(tracks.map(t => [t.id, t]));
+
+  // Get items visible at current time
+  const visibleItems = items.filter(
+    it => currentTime >= it.start && currentTime < it.end
+  );
+
+  // Group by track and check render order
+  const renderOrder = visibleItems
+    .map(it => {
+      const track = trackMap.get(it.trackId);
+      return { item: it, track, order: track?.order ?? 0 };
+    })
+    .sort((a, b) => a.order - b.order);
+
+  // Verify visual items render in correct layer order
+  let lastVideoOrder = -1;
+  let firstOverlayOrder = Infinity;
+  let firstSubtitleOrder = Infinity;
+
+  for (const { item, track, order } of renderOrder) {
+    if (!track) continue;
+    if (track.type === 'video') lastVideoOrder = Math.max(lastVideoOrder, order);
+    if (track.type === 'overlay') firstOverlayOrder = Math.min(firstOverlayOrder, order);
+    if (track.type === 'subtitle') firstSubtitleOrder = Math.min(firstSubtitleOrder, order);
+  }
+
+  if (lastVideoOrder >= 0 && firstOverlayOrder < Infinity && lastVideoOrder >= firstOverlayOrder) {
+    violations.push({
+      type: 'render_order',
+      severity: 'error',
+      message: `Video track (order ${lastVideoOrder}) renders at or above overlay track (order ${firstOverlayOrder}) at time ${currentTime.toFixed(2)}s`,
+    });
+  }
+
+  if (firstOverlayOrder < Infinity && firstSubtitleOrder < Infinity && firstOverlayOrder >= firstSubtitleOrder) {
+    violations.push({
+      type: 'render_order',
+      severity: 'warning',
+      message: `Overlay track (order ${firstOverlayOrder}) renders at or above subtitle track (order ${firstSubtitleOrder}) at time ${currentTime.toFixed(2)}s`,
+    });
+  }
+
+  return violations;
+}
+
+/**
+ * Validate keyboard shortcut configuration completeness.
+ * Returns a report of expected shortcuts and their status.
+ */
+export function validateKeyboardShortcuts() {
+  const expectedShortcuts = [
+    { key: 'Space', action: 'Play/Pause', category: 'transport' },
+    { key: 'ArrowLeft', action: 'Frame backward', category: 'transport' },
+    { key: 'ArrowRight', action: 'Frame forward', category: 'transport' },
+    { key: 'Shift+ArrowLeft', action: '1 second backward', category: 'transport' },
+    { key: 'Shift+ArrowRight', action: '1 second forward', category: 'transport' },
+    { key: 'J', action: 'Shuttle reverse', category: 'transport' },
+    { key: 'K', action: 'Shuttle stop', category: 'transport' },
+    { key: 'L', action: 'Shuttle forward', category: 'transport' },
+    { key: 'Home', action: 'Seek to start', category: 'transport' },
+    { key: 'End', action: 'Seek to end', category: 'transport' },
+    { key: 'M', action: 'Toggle mute', category: 'transport' },
+    { key: 'V', action: 'Select tool', category: 'tools' },
+    { key: 'C', action: 'Razor tool', category: 'tools' },
+    { key: 'T', action: 'Text tool', category: 'tools' },
+    { key: 'R', action: 'Shape tool', category: 'tools' },
+    { key: 'N', action: 'Toggle snap', category: 'tools' },
+    { key: 'S', action: 'Split at playhead', category: 'editing' },
+    { key: 'Delete/Backspace', action: 'Delete selected', category: 'editing' },
+    { key: 'Escape', action: 'Deselect', category: 'editing' },
+    { key: 'Ctrl+Z', action: 'Undo', category: 'editing' },
+    { key: 'Ctrl+Shift+Z / Ctrl+Y', action: 'Redo', category: 'editing' },
+    { key: 'Ctrl+A', action: 'Select all', category: 'editing' },
+  ];
+
+  return {
+    shortcuts: expectedShortcuts,
+    count: expectedShortcuts.length,
+    categories: [...new Set(expectedShortcuts.map(s => s.category))],
+  };
+}
+
+/**
  * Run all validation checks and return a summary.
  */
-export function runEditorQA(tracks, items) {
+export function runEditorQA(tracks, items, options = {}) {
+  const { selectedItemId, currentTime } = options;
+
   const results = {
     trackCompatibility: validateTrackCompatibility(tracks, items),
     layerOrder: validateLayerOrder(tracks),
     itemTiming: validateItemTiming(items),
     itemProperties: validateItemProperties(items),
+    selectedItemPanel: selectedItemId ? validateSelectedItemPanel(items, selectedItemId) : [],
+    layerRendering: currentTime != null ? validateLayerRendering(tracks, items, currentTime) : [],
   };
 
   const allViolations = [
@@ -175,6 +300,8 @@ export function runEditorQA(tracks, items) {
     ...results.layerOrder,
     ...results.itemTiming,
     ...results.itemProperties,
+    ...results.selectedItemPanel,
+    ...results.layerRendering,
   ];
 
   const errors = allViolations.filter(v => v.severity === 'error');

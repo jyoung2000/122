@@ -9,6 +9,7 @@ const HANDLE_WIDTH = 6;
 const HANDLE_HIT_AREA = 12;
 const SNAP_THRESHOLD_PX = 5;
 const RULER_HEIGHT = 28;
+const PLAYHEAD_GRAB_WIDTH = 16; // px on each side of playhead for grab detection
 
 const TRACK_COLORS = {
   video: '#3B82F6',
@@ -289,20 +290,34 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     // ── Playhead ──
     const phX = contentLeft + playhead * pps - sx;
     if (phX >= contentLeft && phX <= canvasW) {
+      // Playhead line with subtle glow
+      ctx.save();
+      ctx.shadowColor = 'rgba(255, 59, 48, 0.4)';
+      ctx.shadowBlur = 4;
       ctx.strokeStyle = '#FF3B30';
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(phX, 0);
       ctx.lineTo(phX, canvasH);
       ctx.stroke();
+      ctx.restore();
       ctx.lineWidth = 1;
 
-      // Playhead diamond
+      // Playhead handle — larger inverted triangle for easier grabbing
       ctx.fillStyle = '#FF3B30';
       ctx.beginPath();
-      ctx.moveTo(phX - 7, 0);
-      ctx.lineTo(phX + 7, 0);
-      ctx.lineTo(phX, 9);
+      ctx.moveTo(phX - 10, 0);
+      ctx.lineTo(phX + 10, 0);
+      ctx.lineTo(phX, 14);
+      ctx.closePath();
+      ctx.fill();
+
+      // White inner triangle for visibility
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.beginPath();
+      ctx.moveTo(phX - 5, 1);
+      ctx.lineTo(phX + 5, 1);
+      ctx.lineTo(phX, 8);
       ctx.closePath();
       ctx.fill();
     }
@@ -453,6 +468,21 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       return;
     }
 
+    // Playhead grab: check if click is near the playhead handle (ruler area or close to line)
+    const playheadPixelX = rect.left + LABEL_WIDTH + playhead * pps - scrollX;
+    const mouseY = e.clientY - rect.top;
+    const isNearPlayhead = Math.abs(e.clientX - playheadPixelX) <= PLAYHEAD_GRAB_WIDTH;
+    const isInRulerOrNear = mouseY <= RULER_HEIGHT + 8 || isNearPlayhead;
+    if (isNearPlayhead && isInRulerOrNear) {
+      // Grab the playhead directly
+      const time = getTimeFromX(e.clientX);
+      setPlayhead(time);
+      onSeek?.(time);
+      setIsDragging(true);
+      setDragInfo({ type: 'scrub', startX: e.clientX });
+      return;
+    }
+
     const hit = hitTestItem(e.clientX, e.clientY);
     if (hit) {
       setSelectedItemId(hit.item.id);
@@ -592,13 +622,22 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       return;
     }
 
+    // Check if hovering near the playhead handle for grab cursor
+    const phPixelX = rect.left + LABEL_WIDTH + playhead * pps - scrollX;
+    const mouseY = e.clientY - rect.top;
+    const nearPlayhead = Math.abs(e.clientX - phPixelX) <= PLAYHEAD_GRAB_WIDTH;
+    if (nearPlayhead && (mouseY <= RULER_HEIGHT + 8 || nearPlayhead)) {
+      canvas.style.cursor = 'col-resize';
+      return;
+    }
+
     const hit = hitTestItem(e.clientX, e.clientY);
     if (hit) {
       canvas.style.cursor = hit.edge === 'left' || hit.edge === 'right' ? 'col-resize' : 'grab';
     } else {
       canvas.style.cursor = 'pointer';
     }
-  }, [isDragging, getTimeFromX, hitTestItem, activeTool, spaceHeld]);
+  }, [isDragging, getTimeFromX, hitTestItem, activeTool, spaceHeld, playhead, pps, scrollX]);
 
   const onPointerLeave = useCallback(() => setHoverTime(null), []);
 
