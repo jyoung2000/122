@@ -223,6 +223,29 @@ async def _startup_preload():
             pass
     else:
         logger.info("No NVIDIA GPU detected — using CPU for encoding and Whisper")
+        # Log diagnostic details to help users troubleshoot GPU passthrough
+        diag_parts = []
+        try:
+            smi_check = subprocess.run(
+                ["nvidia-smi"], capture_output=True, text=True, timeout=5,
+            )
+            diag_parts.append(f"nvidia-smi exit={smi_check.returncode}")
+            if smi_check.stderr:
+                diag_parts.append(f"nvidia-smi stderr: {smi_check.stderr.strip()[:200]}")
+        except FileNotFoundError:
+            diag_parts.append("nvidia-smi not found (NVIDIA Container Toolkit may not be injecting GPU)")
+        except Exception as _e:
+            diag_parts.append(f"nvidia-smi error: {_e}")
+        import glob as _glob
+        diag_parts.append(f"/dev/nvidia*: {_glob.glob('/dev/nvidia*') or 'none'}")
+        diag_parts.append(f"NVIDIA_VISIBLE_DEVICES={os.environ.get('NVIDIA_VISIBLE_DEVICES', 'unset')}")
+        logger.info(
+            "GPU troubleshooting: %s | "
+            "Ensure: (1) Docker Desktop uses WSL2 backend, "
+            "(2) run 'docker compose up' (v2, not docker-compose), "
+            "(3) NVIDIA driver R525+ on Windows host",
+            " | ".join(diag_parts),
+        )
 
     from backend.services.transcription import preload_model
     threading.Thread(target=preload_model, daemon=True).start()
