@@ -467,10 +467,15 @@ export default function VideoEditor({
   const [videoItemRotation, setVideoItemRotation] = useState(0);
 
   // Sync video timeline item properties → actual video element
-  const videoTimelineItem = useMemo(
-    () => timelineStoreItems.find((it) => it.type === 'video') || null,
-    [timelineStoreItems],
-  );
+  // Find the video item at the current playhead (not just the first one)
+  // so split segments with different effects render correctly.
+  const relativePlayhead = currentTime - clipStart;
+  const videoTimelineItem = useMemo(() => {
+    const atPlayhead = timelineStoreItems.find(
+      (it) => it.type === 'video' && relativePlayhead >= it.start && relativePlayhead < it.end
+    );
+    return atPlayhead || timelineStoreItems.find((it) => it.type === 'video') || null;
+  }, [timelineStoreItems, relativePlayhead]);
   useEffect(() => {
     if (!videoTimelineItem) return;
     // Volume
