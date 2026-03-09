@@ -4,6 +4,7 @@ import ModelBrowser from '../components/ModelBrowser';
 import CostTracker from '../components/CostTracker';
 import { showToast } from '../components/Toast';
 import useResponsive from '../hooks/useResponsive';
+import { loadAllPresets, deletePreset as deleteTrackPreset, renamePreset as renameTrackPreset } from '../utils/trackPresets';
 
 const FONT_ACCEPT = '.ttf,.otf,.woff,.woff2,.eot,.TTF,.OTF,.WOFF,.WOFF2,.EOT';
 
@@ -86,6 +87,11 @@ export default function Settings() {
   const [presets, setPresets] = useState([]);
   const [editingPresetId, setEditingPresetId] = useState(null);
   const [editPresetName, setEditPresetName] = useState('');
+
+  // Track preset management state
+  const [trackPresets, setTrackPresets] = useState([]);
+  const [editingTrackPresetId, setEditingTrackPresetId] = useState(null);
+  const [editTrackPresetName, setEditTrackPresetName] = useState('');
 
   // API Access state
   const [apiKey, setApiKey] = useState('');
@@ -197,6 +203,11 @@ export default function Settings() {
       .then((r) => r.ok ? r.json() : [])
       .then(setPresets)
       .catch(() => {});
+  }, []);
+
+  // Load track presets from localStorage
+  useEffect(() => {
+    setTrackPresets(loadAllPresets());
   }, []);
 
   // Load transcription settings
@@ -1658,6 +1669,105 @@ export default function Settings() {
                     </button>
                     <button
                       onClick={() => handleDeletePresetSettings(p.id)}
+                      style={{
+                        padding: '4px 10px', fontSize: 11, background: 'var(--danger-dim)',
+                        color: 'var(--danger)', border: '1px solid var(--danger)',
+                        borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* ── Track Property Presets ── */}
+          <h3 style={{ fontSize: 14, marginBottom: 8, marginTop: 32, color: 'var(--text-secondary)' }}>Track Property Presets</h3>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 20, lineHeight: 1.6 }}>
+            Manage saved track property presets. These are saved locally and can be applied to matching track types in the video editor.
+          </p>
+          {trackPresets.length === 0 ? (
+            <div style={{
+              textAlign: 'center', padding: '32px 16px', color: 'var(--text-muted)',
+              fontSize: 12, border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+              background: 'var(--bg-panel)',
+            }}>
+              No track presets saved yet. Save presets from the Properties panel in the video editor.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {trackPresets.map((p) => (
+                <div key={p.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 12,
+                  padding: '10px 14px', background: 'var(--bg-panel)',
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                  flexWrap: 'wrap',
+                }}>
+                  {editingTrackPresetId === p.id ? (
+                    <div style={{ flex: 1, minWidth: 200, display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <input
+                        type="text" value={editTrackPresetName}
+                        onChange={(e) => setEditTrackPresetName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            renameTrackPreset(p.id, editTrackPresetName);
+                            setTrackPresets(loadAllPresets());
+                            setEditingTrackPresetId(null);
+                            showToast('Preset renamed');
+                          }
+                          if (e.key === 'Escape') setEditingTrackPresetId(null);
+                        }}
+                        autoFocus
+                        style={{
+                          flex: 1, padding: '4px 8px', fontSize: 13,
+                          background: 'var(--bg-elevated)', color: 'var(--accent-cyan)',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                          fontFamily: 'var(--font-mono)', outline: 'none',
+                        }}
+                      />
+                      <button
+                        onClick={() => {
+                          renameTrackPreset(p.id, editTrackPresetName);
+                          setTrackPresets(loadAllPresets());
+                          setEditingTrackPresetId(null);
+                          showToast('Preset renamed');
+                        }}
+                        style={{
+                          padding: '4px 10px', fontSize: 11,
+                          background: 'var(--accent-cyan)', color: 'var(--bg-base)',
+                          border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                        }}
+                      >
+                        Save
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+                      <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', marginTop: 2 }}>
+                        {p.type} | {p.createdAt ? new Date(p.createdAt).toLocaleDateString() : ''}
+                      </div>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      onClick={() => { setEditingTrackPresetId(p.id); setEditTrackPresetName(p.name); }}
+                      style={{
+                        padding: '4px 10px', fontSize: 11, background: 'var(--bg-elevated)',
+                        color: 'var(--text-secondary)', border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                      }}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      onClick={() => {
+                        deleteTrackPreset(p.id);
+                        setTrackPresets(loadAllPresets());
+                        showToast('Preset deleted');
+                      }}
                       style={{
                         padding: '4px 10px', fontSize: 11, background: 'var(--danger-dim)',
                         color: 'var(--danger)', border: '1px solid var(--danger)',

@@ -1,5 +1,11 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useState, useRef } from 'react';
 import useTimelineStore from '../stores/timelineStore';
+import {
+  loadPresetsForType,
+  savePreset,
+  applyPreset,
+  TYPE_LABELS,
+} from '../utils/trackPresets';
 
 const SPEED_PRESETS = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 4.0];
 const FONT_OPTIONS = [
@@ -251,6 +257,138 @@ function SubtitleProperties({ item, update, settings, onSettingsChange }) {
   );
 }
 
+/* ── PresetBar — dropdown + save + load for track-type presets ── */
+function PresetBar({ item, updateItem, settings, onSettingsChange }) {
+  const [presets, setPresets] = useState([]);
+  const [showSave, setShowSave] = useState(false);
+  const [saveName, setSaveName] = useState('');
+  const [message, setMessage] = useState(null);
+  const saveInputRef = useRef(null);
+  const type = item?.type;
+
+  // Refresh presets when type changes or after save
+  const refreshPresets = useCallback(() => {
+    if (!type) return;
+    setPresets(loadPresetsForType(type));
+  }, [type]);
+
+  // Load presets on mount and when type changes
+  useMemo(() => { refreshPresets(); }, [refreshPresets]);
+
+  const handleSave = useCallback(() => {
+    const name = saveName.trim();
+    if (!name || !item) return;
+    try {
+      savePreset(name, type, item, settings);
+      setShowSave(false);
+      setSaveName('');
+      refreshPresets();
+      setMessage('Preset saved');
+      setTimeout(() => setMessage(null), 2000);
+    } catch (err) {
+      setMessage(err.message);
+      setTimeout(() => setMessage(null), 3000);
+    }
+  }, [saveName, item, type, settings, refreshPresets]);
+
+  const handleLoad = useCallback((presetId) => {
+    const preset = presets.find(p => p.id === presetId);
+    if (!preset || !item) return;
+    try {
+      const { itemUpdates, subtitleSettings: subSettings } = applyPreset(preset, type);
+      updateItem(item.id, itemUpdates);
+      if (subSettings && onSettingsChange) {
+        onSettingsChange({ ...settings, ...subSettings });
+      }
+      setMessage('Preset applied');
+      setTimeout(() => setMessage(null), 2000);
+    } catch (err) {
+      setMessage(err.message);
+      setTimeout(() => setMessage(null), 3000);
+    }
+  }, [presets, item, type, updateItem, settings, onSettingsChange]);
+
+  if (!type) return null;
+
+  return (
+    <div className="ve-properties__section" style={{ paddingBottom: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <select
+          className="ve-properties__select"
+          style={{ flex: 1, fontSize: 11 }}
+          value=""
+          onChange={(e) => {
+            if (e.target.value) handleLoad(e.target.value);
+          }}
+        >
+          <option value="">
+            {presets.length === 0
+              ? `No ${TYPE_LABELS[type] || type} presets`
+              : `Load ${TYPE_LABELS[type] || type} preset...`}
+          </option>
+          {presets.map(p => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        <button
+          className="ve-properties__speed-pill"
+          style={{ fontSize: 10, padding: '4px 8px', whiteSpace: 'nowrap' }}
+          onClick={() => {
+            setShowSave(!showSave);
+            setSaveName(`${TYPE_LABELS[type] || type} Preset`);
+            setTimeout(() => saveInputRef.current?.focus(), 50);
+          }}
+          title="Save current properties as a preset"
+        >
+          Save
+        </button>
+      </div>
+      {showSave && (
+        <div style={{ display: 'flex', gap: 4, marginTop: 6 }}>
+          <input
+            ref={saveInputRef}
+            type="text"
+            value={saveName}
+            onChange={(e) => setSaveName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleSave();
+              if (e.key === 'Escape') setShowSave(false);
+            }}
+            placeholder="Preset name..."
+            className="ve-properties__input"
+            style={{ flex: 1, fontSize: 11 }}
+          />
+          <button
+            className="ve-properties__speed-pill ve-properties__speed-pill--active"
+            style={{ fontSize: 10, padding: '4px 8px' }}
+            onClick={handleSave}
+            disabled={!saveName.trim()}
+          >
+            Save
+          </button>
+          <button
+            className="ve-properties__speed-pill"
+            style={{ fontSize: 10, padding: '4px 6px' }}
+            onClick={() => setShowSave(false)}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+      {message && (
+        <div style={{
+          fontSize: 10, marginTop: 4, padding: '2px 6px', borderRadius: 3,
+          color: message.includes('error') || message.includes('Cannot') ? '#FF375F' : '#30D158',
+          background: message.includes('error') || message.includes('Cannot')
+            ? 'rgba(255,55,95,0.1)' : 'rgba(48,209,88,0.1)',
+        }}>
+          {message}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const DEFAULTS = {
   position: { x: 50, y: 50 },
   size: { video: { w: 100, h: 100 }, text: { w: 35, h: 12 }, shape: { w: 40, h: 30 }, other: { w: 30, h: 30 } },
@@ -350,6 +488,9 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
           ✕
         </button>
       </div>
+
+      {/* Preset Bar */}
+      <PresetBar item={item} updateItem={updateItem} settings={settings} onSettingsChange={onSettingsChange} />
 
       {/* ── Timing ── */}
       <div className="ve-properties__section">
