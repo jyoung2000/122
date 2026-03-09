@@ -24,30 +24,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-freefont-ttf \
     fonts-liberation2 \
     unzip \
-    gnupg2 \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
-
-# Install CUDA runtime libraries so GPU passthrough works without the full GPU image.
-# This adds ~600MB but enables Whisper GPU acceleration when an NVIDIA GPU is passed
-# through via docker --gpus or docker-compose deploy.resources.reservations.
-# The keyring package provides the repo GPG key; we only install the minimal runtime.
-RUN apt-get update && apt-get install -y --no-install-recommends wget && \
-    wget -qO /tmp/cuda-keyring.deb \
-      https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb && \
-    dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb && \
-    apt-get update && \
-    apt-get install -y --no-install-recommends \
-      cuda-cudart-12-3 \
-      libcublas-12-3 \
-      libcublaslt-12-3 \
-      libcudnn8 \
-      libcufft-12-3 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Ensure CUDA libraries are on LD_LIBRARY_PATH for ctranslate2/faster-whisper
-ENV LD_LIBRARY_PATH=/usr/local/cuda-12.3/lib64:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
-ENV PATH=/usr/local/cuda-12.3/bin:${PATH}
 
 # Install DM Sans font (default subtitle font) so FFmpeg/libass can find it
 # Downloaded directly from the canonical Google Fonts GitHub repo (stable raw URLs)
@@ -82,11 +60,31 @@ RUN mkdir -p /data/fonts && \
 
 WORKDIR /app
 
-# Install Python dependencies + CUDA support for faster-whisper
+# Install Python dependencies
 COPY backend/requirements.txt .
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir nvidia-cublas-cu12 nvidia-cudnn-cu12==9.* || true
+    pip install --no-cache-dir -r requirements.txt
+
+# Install CUDA runtime libraries via pip for GPU passthrough support.
+# These PyPI packages provide the CUDA shared libraries that ctranslate2
+# and faster-whisper need — no NVIDIA apt repo or system CUDA required.
+# The "|| true" ensures the build succeeds on non-x86 architectures
+# where these wheels may not be available.
+RUN pip install --no-cache-dir \
+    nvidia-cuda-runtime-cu12 \
+    nvidia-cublas-cu12 \
+    nvidia-cufft-cu12 \
+    nvidia-cudnn-cu12 \
+    nvidia-cuda-nvrtc-cu12 \
+    2>/dev/null || true
+
+# Point LD_LIBRARY_PATH at the pip-installed NVIDIA libs so ctranslate2 finds them
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/dist-packages/nvidia/cuda_runtime/lib:\
+/usr/local/lib/python3.11/dist-packages/nvidia/cublas/lib:\
+/usr/local/lib/python3.11/dist-packages/nvidia/cufft/lib:\
+/usr/local/lib/python3.11/dist-packages/nvidia/cudnn/lib:\
+/usr/local/lib/python3.11/dist-packages/nvidia/cuda_nvrtc/lib:\
+${LD_LIBRARY_PATH}
 
 # Copy backend source
 COPY backend/ ./backend/
