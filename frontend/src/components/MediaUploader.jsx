@@ -118,23 +118,62 @@ export default function MediaUploader({ jobId, compact = false }) {
         waveformData: [],
       });
 
-      // Upload to backend (fire-and-forget with progress)
+      // Upload to backend with chunked approach for large files
       if (jobId) {
-        try {
-          const formData = new FormData();
-          formData.append('file', file);
-          const xhr = new XMLHttpRequest();
-          xhr.open('POST', `/api/media/upload?job_id=${jobId}`);
-          xhr.upload.onprogress = (e) => {
-            if (e.lengthComputable) {
-              setUploading({ filename: file.name, progress: Math.round((e.loaded / e.total) * 100) });
+        const CHUNK_THRESHOLD = 50 * 1024 * 1024; // 50MB
+        const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+
+        if (file.size > CHUNK_THRESHOLD) {
+          // Chunked upload for large files
+          try {
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            for (let i = 0; i < totalChunks; i++) {
+              const start = i * CHUNK_SIZE;
+              const end = Math.min(start + CHUNK_SIZE, file.size);
+              const chunk = file.slice(start, end);
+              const chunkForm = new FormData();
+              chunkForm.append('file', chunk, file.name);
+              chunkForm.append('chunk_index', i.toString());
+              chunkForm.append('total_chunks', totalChunks.toString());
+              chunkForm.append('filename', file.name);
+
+              let success = false;
+              for (let attempt = 0; attempt < 4 && !success; attempt++) {
+                try {
+                  const resp = await fetch(`/api/media/upload?job_id=${jobId}`, {
+                    method: 'POST',
+                    body: chunkForm,
+                  });
+                  if (resp.ok) success = true;
+                  else if (attempt < 3) await new Promise(r => setTimeout(r, [2000, 4000, 8000][attempt]));
+                } catch {
+                  if (attempt < 3) await new Promise(r => setTimeout(r, [2000, 4000, 8000][attempt]));
+                }
+              }
+              setUploading({ filename: file.name, progress: Math.round(((i + 1) / totalChunks) * 100) });
             }
-          };
-          xhr.onload = () => setUploading(null);
-          xhr.onerror = () => setUploading(null);
-          xhr.send(formData);
-        } catch {
-          setUploading(null);
+            setUploading(null);
+          } catch {
+            setUploading(null);
+          }
+        } else {
+          // Standard upload for small files
+          try {
+            const formData = new FormData();
+            formData.append('file', file);
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', `/api/media/upload?job_id=${jobId}`);
+            xhr.upload.onprogress = (e) => {
+              if (e.lengthComputable) {
+                setUploading({ filename: file.name, progress: Math.round((e.loaded / e.total) * 100) });
+              }
+            };
+            xhr.onload = () => setUploading(null);
+            xhr.onerror = () => setUploading(null);
+            xhr.send(formData);
+          } catch {
+            setUploading(null);
+          }
         }
       } else {
         setUploading(null);

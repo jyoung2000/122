@@ -12,6 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from backend.routers import upload, jobs, clips, fonts, presets, settings as settings_router, ws
 from backend.routers import agent as agent_router
 from backend.routers import media as media_router
+from backend.routers import chunked_upload
 from backend.routers.api_v1 import router as api_v1_router
 
 LOG_FILE = "/data/logs/app.log"
@@ -229,6 +230,7 @@ async def _startup_preload():
 
 # Register API routers
 app.include_router(upload.router)
+app.include_router(chunked_upload.router)
 app.include_router(jobs.router)
 app.include_router(clips.router)
 app.include_router(fonts.router)

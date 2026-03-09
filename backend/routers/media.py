@@ -5,6 +5,7 @@ import uuid
 import logging
 from pathlib import Path
 
+import aiofiles
 from fastapi import APIRouter, File, UploadFile, Query, HTTPException
 from fastapi.responses import JSONResponse
 
@@ -24,6 +25,9 @@ MAX_SIZES = {
     "image": 50 * 1024 * 1024,          # 50 MB
 }
 
+# Stream buffer size for writing to disk
+_STREAM_BUF = 1024 * 1024  # 1 MB
+
 
 def detect_media_type(filename: str) -> str | None:
     ext = Path(filename).suffix.lower()
@@ -38,19 +42,15 @@ async def upload_media(
     file: UploadFile = File(...),
     job_id: str = Query(...),
 ):
-    """Accept media upload for the multi-track editor, store to data/uploads/{job_id}/media/."""
+    """Accept media upload for the multi-track editor, store to data/uploads/{job_id}/media/.
+
+    Streams file to disk in chunks to avoid loading large files into memory.
+    """
     media_type = detect_media_type(file.filename or "")
     if not media_type:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {file.filename}")
 
-    # Read file content
-    content = await file.read()
     max_size = MAX_SIZES.get(media_type, 50 * 1024 * 1024)
-    if len(content) > max_size:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File exceeds {max_size // (1024 * 1024)} MB limit for {media_type}",
-        )
 
     # Create upload directory
     media_dir = os.path.join(UPLOAD_DIR, job_id, "media")
@@ -62,11 +62,36 @@ async def upload_media(
     safe_filename = f"{media_id}{ext}"
     file_path = os.path.join(media_dir, safe_filename)
 
-    # Write to disk
-    with open(file_path, "wb") as f:
-        f.write(content)
+    # Stream to disk to avoid loading entire file into memory
+    total_written = 0
+    try:
+        async with aiofiles.open(file_path, "wb") as out:
+            while True:
+                chunk = await file.read(_STREAM_BUF)
+                if not chunk:
+                    break
+                total_written += len(chunk)
+                if total_written > max_size:
+                    # Clean up oversized file
+                    await out.close()
+                    os.remove(file_path)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File exceeds {max_size // (1024 * 1024)} MB limit for {media_type}",
+                    )
+                await out.write(chunk)
+    except HTTPException:
+        raise
+    except OSError as exc:
+        # Clean up on disk error
+        try:
+            os.remove(file_path)
+        except OSError:
+            pass
+        logger.error("Disk error writing media %s: %s", safe_filename, exc)
+        raise HTTPException(status_code=507, detail="Server storage error")
 
-    logger.info("Uploaded media %s (%s, %d bytes) for job %s", safe_filename, media_type, len(content), job_id)
+    logger.info("Uploaded media %s (%s, %d bytes) for job %s", safe_filename, media_type, total_written, job_id)
 
     # Build URL for frontend
     url = f"/api/files/{job_id}/media/{safe_filename}"
@@ -75,7 +100,7 @@ async def upload_media(
         "id": media_id,
         "filename": file.filename,
         "type": media_type,
-        "size": len(content),
+        "size": total_written,
         "url": url,
     })
 
