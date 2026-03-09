@@ -4,7 +4,7 @@ import useTimelineStore from '../stores/timelineStore';
 // ── Constants ────────────────────────────────────────────────────────────────
 const TRACK_HEIGHT = 64;
 const TRACK_GAP = 1;
-const LABEL_WIDTH = 90;
+const LABEL_WIDTH = 120;
 const HANDLE_WIDTH = 6;
 const HANDLE_HIT_AREA = 12;
 const SNAP_THRESHOLD_PX = 5;
@@ -145,31 +145,14 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       ctx.stroke();
     }
 
-    // ── Track lanes ──
-    const visibleTracks = tracks.filter((t) => t.visible !== false);
-    visibleTracks.forEach((track, idx) => {
+    // ── Track lanes (ALL tracks always visible in timeline) ──
+    tracks.forEach((track, idx) => {
       const y = RULER_HEIGHT + idx * (TRACK_HEIGHT + TRACK_GAP);
+      const isHidden = track.visible === false;
 
       // Track label background
       ctx.fillStyle = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)';
       ctx.fillRect(0, y, LABEL_WIDTH - 1, TRACK_HEIGHT);
-
-      // Track label
-      ctx.fillStyle = isDark ? 'rgba(255,255,255,0.6)' : 'rgba(0,0,0,0.6)';
-      ctx.font = '10px -apple-system, BlinkMacSystemFont, sans-serif';
-      ctx.textAlign = 'left';
-      const icon = TRACK_ICONS[track.type] || '';
-      ctx.fillText(`${icon} ${track.name}`, 6, y + TRACK_HEIGHT / 2 + 4);
-
-      // Lock/mute indicators
-      if (track.locked) {
-        ctx.fillStyle = isDark ? 'rgba(255,59,48,0.3)' : 'rgba(255,59,48,0.15)';
-        ctx.fillText('\uD83D\uDD12', LABEL_WIDTH - 18, y + 12);
-      }
-      if (track.muted) {
-        ctx.fillStyle = isDark ? 'rgba(255,59,48,0.3)' : 'rgba(255,59,48,0.15)';
-        ctx.fillText('M', LABEL_WIDTH - 18, y + TRACK_HEIGHT - 6);
-      }
 
       // Track lane background
       ctx.fillStyle = isDark ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.015)';
@@ -184,11 +167,18 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         ctx.fillStyle = isDark ? 'rgba(255,59,48,0.06)' : 'rgba(255,59,48,0.04)';
         ctx.fillRect(contentLeft, y, contentWidth, TRACK_HEIGHT);
       }
+
+      // Hidden track overlay — dimmed with diagonal stripes pattern
+      if (isHidden) {
+        ctx.fillStyle = isDark ? 'rgba(0,0,0,0.35)' : 'rgba(128,128,128,0.15)';
+        ctx.fillRect(contentLeft, y, contentWidth, TRACK_HEIGHT);
+        ctx.fillRect(0, y, LABEL_WIDTH - 1, TRACK_HEIGHT);
+      }
     });
 
     // ── Items (clips) ──
     items.forEach((item) => {
-      const trackIdx = visibleTracks.findIndex((t) => t.id === item.trackId);
+      const trackIdx = tracks.findIndex((t) => t.id === item.trackId);
       if (trackIdx < 0) return;
       const y = RULER_HEIGHT + trackIdx * (TRACK_HEIGHT + TRACK_GAP);
       const x1 = contentLeft + item.start * pps - sx;
@@ -395,9 +385,8 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
     const y = clientY - rect.top - RULER_HEIGHT;
-    const visibleTracks = tracks.filter((t) => t.visible !== false);
     const idx = Math.floor(y / (TRACK_HEIGHT + TRACK_GAP));
-    return visibleTracks[idx] || null;
+    return tracks[idx] || null;
   }, [tracks]);
 
   const hitTestItem = useCallback((clientX, clientY) => {
@@ -701,8 +690,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   }, [contextMenu]);
 
   // ── Compute canvas height ──────────────────────────────────────────────────
-  const visibleTracks = tracks.filter((t) => t.visible !== false);
-  const canvasHeight = RULER_HEIGHT + visibleTracks.length * (TRACK_HEIGHT + TRACK_GAP) + 12;
+  const canvasHeight = RULER_HEIGHT + tracks.length * (TRACK_HEIGHT + TRACK_GAP) + 12;
 
   return (
     <div ref={containerRef} className="ve-multi-timeline" style={{ position: 'relative', height: '100%' }}>
@@ -807,98 +795,90 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
                 key={track.id}
                 className="ve-multi-timeline__track-header"
                 style={{
-                  height: isHidden ? 0 : TRACK_HEIGHT,
-                  marginBottom: isHidden ? 0 : TRACK_GAP,
-                  display: isHidden ? 'none' : 'flex',
+                  height: TRACK_HEIGHT,
+                  marginBottom: TRACK_GAP,
+                  display: 'flex',
                   alignItems: 'center',
-                  justifyContent: 'flex-end',
-                  gap: 1,
-                  padding: '0 2px',
+                  justifyContent: 'space-between',
+                  gap: 2,
+                  padding: '0 4px',
                   pointerEvents: 'auto',
+                  opacity: isHidden ? 0.5 : 1,
                 }}
               >
-                {/* Visibility toggle (eye icon) — preview only, does not affect server export */}
-                <button
-                  onClick={(e) => { e.stopPropagation(); toggleTrackVisibility(track.id); }}
-                  title={`Hide ${track.name} from preview (still included in exported video)`}
-                  className="ve-multi-timeline__track-ctrl"
-                  style={{
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    padding: '2px', lineHeight: 1, fontSize: 12,
-                    opacity: 0.6,
-                    color: 'var(--ve-text, #666)',
-                  }}
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                    <circle cx="12" cy="12" r="3" />
-                  </svg>
-                </button>
-                {/* Mute toggle */}
-                <button
-                  onClick={(e) => { e.stopPropagation(); toggleTrackMute(track.id); }}
-                  title={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`}
-                  className="ve-multi-timeline__track-ctrl"
-                  style={{
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    padding: '2px', lineHeight: 1, fontSize: 9, fontWeight: 700,
-                    opacity: track.muted ? 1 : 0.35,
-                    color: track.muted ? 'var(--danger, #ef4444)' : 'var(--ve-text, #666)',
-                  }}
-                >
-                  M
-                </button>
-                {/* Lock toggle */}
-                <button
-                  onClick={(e) => { e.stopPropagation(); toggleTrackLock(track.id); }}
-                  title={track.locked ? `Unlock ${track.name}` : `Lock ${track.name}`}
-                  className="ve-multi-timeline__track-ctrl"
-                  style={{
-                    background: 'none', border: 'none', cursor: 'pointer',
-                    padding: '2px', lineHeight: 1, fontSize: 10,
-                    opacity: track.locked ? 1 : 0.35,
-                    color: track.locked ? 'var(--danger, #ef4444)' : 'var(--ve-text, #666)',
-                  }}
-                >
-                  {track.locked ? '\uD83D\uDD12' : '\uD83D\uDD13'}
-                </button>
+                {/* Track name */}
+                <span style={{
+                  fontSize: 10,
+                  fontWeight: 500,
+                  color: 'var(--ve-text, #ccc)',
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  flex: 1,
+                  minWidth: 0,
+                  opacity: isHidden ? 0.5 : 0.8,
+                }}>
+                  {TRACK_ICONS[track.type] || ''} {track.name}
+                </span>
+                {/* Controls row */}
+                <div style={{ display: 'flex', gap: 1, flexShrink: 0 }}>
+                  {/* Visibility toggle (eye icon) — preview only */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); toggleTrackVisibility(track.id); }}
+                    title={isHidden ? `Show ${track.name} in preview` : `Hide ${track.name} from preview (still in export)`}
+                    className="ve-multi-timeline__track-ctrl"
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      padding: '2px', lineHeight: 1, fontSize: 12,
+                      opacity: isHidden ? 0.4 : 0.7,
+                      color: isHidden ? 'var(--ve-text-muted, #999)' : 'var(--ve-text, #666)',
+                    }}
+                  >
+                    {isHidden ? (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" />
+                        <path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" />
+                        <line x1="1" y1="1" x2="23" y2="23" />
+                      </svg>
+                    ) : (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                        <circle cx="12" cy="12" r="3" />
+                      </svg>
+                    )}
+                  </button>
+                  {/* Mute toggle */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); toggleTrackMute(track.id); }}
+                    title={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`}
+                    className="ve-multi-timeline__track-ctrl"
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      padding: '2px', lineHeight: 1, fontSize: 9, fontWeight: 700,
+                      opacity: track.muted ? 1 : 0.35,
+                      color: track.muted ? 'var(--danger, #ef4444)' : 'var(--ve-text, #666)',
+                    }}
+                  >
+                    M
+                  </button>
+                  {/* Lock toggle */}
+                  <button
+                    onClick={(e) => { e.stopPropagation(); toggleTrackLock(track.id); }}
+                    title={track.locked ? `Unlock ${track.name}` : `Lock ${track.name}`}
+                    className="ve-multi-timeline__track-ctrl"
+                    style={{
+                      background: 'none', border: 'none', cursor: 'pointer',
+                      padding: '2px', lineHeight: 1, fontSize: 10,
+                      opacity: track.locked ? 1 : 0.35,
+                      color: track.locked ? 'var(--danger, #ef4444)' : 'var(--ve-text, #666)',
+                    }}
+                  >
+                    {track.locked ? '\uD83D\uDD12' : '\uD83D\uDD13'}
+                  </button>
+                </div>
               </div>
             );
           })}
-          {/* Show hidden tracks restore buttons */}
-          {tracks.some(t => t.visible === false) && (
-            <div style={{
-              padding: '4px 2px',
-              pointerEvents: 'auto',
-            }}>
-              {tracks.filter(t => t.visible === false).map(track => (
-                <button
-                  key={track.id}
-                  onClick={(e) => { e.stopPropagation(); toggleTrackVisibility(track.id); }}
-                  title={`Show ${track.name}`}
-                  style={{
-                    display: 'flex', alignItems: 'center', gap: 3,
-                    width: '100%',
-                    background: 'none', border: '1px dashed var(--ve-chrome-border, #ccc)',
-                    borderRadius: 4,
-                    cursor: 'pointer',
-                    padding: '3px 4px',
-                    marginBottom: 2,
-                    fontSize: 9,
-                    color: 'var(--ve-text-muted, #999)',
-                    opacity: 0.7,
-                  }}
-                >
-                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" />
-                    <path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" />
-                    <line x1="1" y1="1" x2="23" y2="23" />
-                  </svg>
-                  {TRACK_ICONS[track.type] || ''} {track.name}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
 
         {/* Canvas */}

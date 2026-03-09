@@ -281,6 +281,11 @@ const useTimelineStore = create(
         return id;
       },
 
+      updateMedia: (mediaId, updates) => set((state) => {
+        const item = state.mediaLibrary.find(m => m.id === mediaId);
+        if (item) Object.assign(item, updates);
+      }),
+
       removeMedia: (mediaId) => set((state) => {
         state.mediaLibrary = state.mediaLibrary.filter(m => m.id !== mediaId);
         state.items = state.items.filter(i => i.mediaRef !== mediaId);

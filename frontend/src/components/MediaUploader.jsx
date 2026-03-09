@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import useTimelineStore from '../stores/timelineStore';
 
 const ACCEPT_MAP = {
@@ -32,42 +32,124 @@ function formatSize(bytes) {
 
 function generateVideoThumbnail(file) {
   return new Promise((resolve) => {
+    let resolved = false;
+    const done = (result) => {
+      if (resolved) return;
+      resolved = true;
+      resolve(result);
+    };
+
     const url = URL.createObjectURL(file);
     const video = document.createElement('video');
     video.muted = true;
+    video.playsInline = true;
     video.preload = 'auto';
-    video.src = url;
-    video.onloadeddata = () => {
-      video.currentTime = 0.5;
-    };
-    video.onseeked = () => {
+    // Note: don't set crossOrigin for same-origin blob/server URLs
+
+    const captureFrame = () => {
       try {
         const canvas = document.createElement('canvas');
-        canvas.width = 120;
-        canvas.height = 68;
-        canvas.getContext('2d').drawImage(video, 0, 0, 120, 68);
-        resolve({ thumbnailUrl: canvas.toDataURL('image/jpeg', 0.7), duration: video.duration });
-      } catch {
-        resolve({ thumbnailUrl: '', duration: video.duration || 0 });
-      }
-      URL.revokeObjectURL(url);
+        const w = Math.min(video.videoWidth || 120, 240);
+        const h = Math.round(w * (video.videoHeight || 68) / (video.videoWidth || 120));
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext('2d').drawImage(video, 0, 0, w, h);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+        // Check if the frame is not blank (very short data URL = blank)
+        if (dataUrl.length > 500) {
+          done({ thumbnailUrl: dataUrl, duration: video.duration || 0 });
+          URL.revokeObjectURL(url);
+          return true;
+        }
+      } catch { /* fall through */ }
+      return false;
     };
+
+    video.onseeked = () => {
+      if (!captureFrame() && video.currentTime === 0) {
+        // If seeking to 0.5 failed, try frame at 0
+        // Already at 0, just resolve without thumbnail
+        done({ thumbnailUrl: '', duration: video.duration || 0 });
+        URL.revokeObjectURL(url);
+      } else if (!resolved && video.currentTime > 0) {
+        // Try time 0 as fallback
+        video.currentTime = 0;
+      }
+    };
+
+    video.onloadedmetadata = () => {
+      // Seek to 0.5s or 10% of duration, whichever is smaller
+      const seekTime = Math.min(0.5, (video.duration || 1) * 0.1);
+      video.currentTime = seekTime;
+    };
+
     video.onerror = () => {
       URL.revokeObjectURL(url);
-      resolve({ thumbnailUrl: '', duration: 0 });
+      done({ thumbnailUrl: '', duration: 0 });
     };
-    setTimeout(() => resolve({ thumbnailUrl: '', duration: 0 }), 10000);
+
+    video.src = url;
+    // Load explicitly to trigger metadata loading
+    video.load();
+
+    setTimeout(() => {
+      // Last resort: try to capture whatever frame is available
+      if (!resolved) {
+        captureFrame();
+        if (!resolved) {
+          done({ thumbnailUrl: '', duration: video.duration || 0 });
+        }
+        URL.revokeObjectURL(url);
+      }
+    }, 10000);
   });
 }
 
 export default function MediaUploader({ jobId, compact = false }) {
   const addMedia = useTimelineStore((s) => s.addMedia);
+  const updateMedia = useTimelineStore((s) => s.updateMedia);
   const removeMedia = useTimelineStore((s) => s.removeMedia);
   const mediaLibrary = useTimelineStore((s) => s.mediaLibrary);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(null); // { filename, progress }
   const [error, setError] = useState(null);
   const fileInputRef = useRef(null);
+
+  // Regenerate missing video thumbnails on mount
+  useEffect(() => {
+    mediaLibrary.forEach((media) => {
+      if (media.type === 'video' && !media.thumbnailUrl && media.url) {
+        const video = document.createElement('video');
+        video.muted = true;
+        video.playsInline = true;
+        video.preload = 'auto';
+        let done = false;
+        const capture = () => {
+          if (done) return true;
+          try {
+            const canvas = document.createElement('canvas');
+            const w = Math.min(video.videoWidth || 120, 240);
+            const h = Math.round(w * (video.videoHeight || 68) / (video.videoWidth || 120));
+            canvas.width = w;
+            canvas.height = h;
+            canvas.getContext('2d').drawImage(video, 0, 0, w, h);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+            if (dataUrl.length > 500) {
+              done = true;
+              updateMedia(media.id, { thumbnailUrl: dataUrl });
+              return true;
+            }
+          } catch { /* ignore */ }
+          return false;
+        };
+        video.onseeked = () => { if (!capture() && video.currentTime > 0) video.currentTime = 0; };
+        video.onloadedmetadata = () => { video.currentTime = Math.min(0.5, (video.duration || 1) * 0.1); };
+        video.src = media.url;
+        video.load();
+        setTimeout(() => { if (!done) capture(); }, 8000);
+      }
+    });
+  }, [mediaLibrary.length, updateMedia]);
 
   const handleFiles = useCallback(async (files) => {
     setError(null);

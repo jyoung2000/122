@@ -82,6 +82,7 @@ export default function MediaLibrary() {
   const { isMobile } = useResponsive();
   const mediaLibrary = useTimelineStore((s) => s.mediaLibrary);
   const addMedia = useTimelineStore((s) => s.addMedia);
+  const updateMedia = useTimelineStore((s) => s.updateMedia);
   const removeMedia = useTimelineStore((s) => s.removeMedia);
   const removeMediaBatch = useTimelineStore((s) => s.removeMediaBatch);
   const fileRef = useRef(null);
@@ -99,6 +100,53 @@ export default function MediaLibrary() {
       .then(setFonts)
       .catch(() => {});
   }, []);
+
+  // Regenerate thumbnails for video items that are missing them
+  useEffect(() => {
+    const videosWithoutThumbs = mediaLibrary.filter(
+      (m) => m.type === 'video' && !m.thumbnailUrl && m.url
+    );
+    videosWithoutThumbs.forEach((media) => {
+      const video = document.createElement('video');
+      video.muted = true;
+      video.playsInline = true;
+      video.preload = 'auto';
+      // Note: don't set crossOrigin for same-origin blob/server URLs
+      let done = false;
+      const captureFrame = () => {
+        if (done) return false;
+        try {
+          const canvas = document.createElement('canvas');
+          const w = Math.min(video.videoWidth || 180, 240);
+          const h = Math.round(w * (video.videoHeight || 100) / (video.videoWidth || 180));
+          canvas.width = w;
+          canvas.height = h;
+          canvas.getContext('2d').drawImage(video, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+          if (dataUrl.length > 500) {
+            done = true;
+            updateMedia(media.id, { thumbnailUrl: dataUrl, duration: video.duration || media.duration });
+            return true;
+          }
+        } catch { /* ignore */ }
+        return false;
+      };
+      video.onseeked = () => {
+        if (!captureFrame() && video.currentTime > 0) {
+          video.currentTime = 0;
+        }
+      };
+      video.onloadedmetadata = () => {
+        if (!media.duration && video.duration) {
+          updateMedia(media.id, { duration: video.duration });
+        }
+        video.currentTime = Math.min(0.5, (video.duration || 1) * 0.1);
+      };
+      video.src = media.url;
+      video.load();
+      setTimeout(() => { if (!done) captureFrame(); }, 8000);
+    });
+  }, [mediaLibrary.length, updateMedia]); // re-run when library size changes
 
   // Apply filters: type + search query
   const filtered = (() => {
@@ -136,29 +184,53 @@ export default function MediaLibrary() {
       if (type === 'video') {
         const video = document.createElement('video');
         video.muted = true;
+        video.playsInline = true;
         video.preload = 'auto';
-        video.src = url;
-        video.onloadeddata = () => { video.currentTime = 0.5; };
-        video.onseeked = () => {
+        // Note: don't set crossOrigin for same-origin blob/server URLs
+        let added = false;
+        const addOnce = (thumbUrl, dur) => {
+          if (added) return;
+          added = true;
+          addMedia({ type, filename: file.name, url, thumbnailUrl: thumbUrl, duration: dur });
+        };
+        const captureFrame = () => {
           try {
             const canvas = document.createElement('canvas');
-            canvas.width = 180;
-            canvas.height = 100;
-            canvas.getContext('2d').drawImage(video, 0, 0, 180, 100);
-            addMedia({
-              type,
-              filename: file.name,
-              url,
-              thumbnailUrl: canvas.toDataURL('image/jpeg', 0.7),
-              duration: video.duration || 0,
-            });
-          } catch {
-            addMedia({ type, filename: file.name, url, thumbnailUrl: '', duration: video.duration || 0 });
+            const w = Math.min(video.videoWidth || 180, 240);
+            const h = Math.round(w * (video.videoHeight || 100) / (video.videoWidth || 180));
+            canvas.width = w;
+            canvas.height = h;
+            canvas.getContext('2d').drawImage(video, 0, 0, w, h);
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+            if (dataUrl.length > 500) {
+              addOnce(dataUrl, video.duration || 0);
+              return true;
+            }
+          } catch { /* fall through */ }
+          return false;
+        };
+        video.onseeked = () => {
+          if (!captureFrame() && video.currentTime > 0) {
+            video.currentTime = 0;
+          } else if (!added) {
+            addOnce('', video.duration || 0);
           }
         };
-        video.onerror = () => {
-          addMedia({ type, filename: file.name, url, thumbnailUrl: '', duration: 0 });
+        video.onloadedmetadata = () => {
+          const seekTime = Math.min(0.5, (video.duration || 1) * 0.1);
+          video.currentTime = seekTime;
         };
+        video.onerror = () => {
+          addOnce('', 0);
+        };
+        video.src = url;
+        video.load();
+        setTimeout(() => {
+          if (!added) {
+            captureFrame();
+            if (!added) addOnce('', video.duration || 0);
+          }
+        }, 10000);
       } else {
         addMedia({
           type,

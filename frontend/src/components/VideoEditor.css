@@ -2637,12 +2637,22 @@ input.ve-timecode--input {
 }
 
 /* ── Track Header Controls (visibility/mute/lock toggles) ─── */
+.ve-multi-timeline__track-header {
+  box-sizing: border-box;
+}
 .ve-multi-timeline__track-ctrl {
   transition: opacity 0.15s ease;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
 }
 .ve-multi-timeline__track-ctrl:hover {
   opacity: 1 !important;
+  background: rgba(255,255,255,0.08);
 }
 
 /* ── Editor Layout (NLE-style) ───────────────────────── */
