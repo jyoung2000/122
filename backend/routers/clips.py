@@ -1335,3 +1335,268 @@ async def export_timeline(job_id: str, clip_id: int, timeline: dict):
         "message": "Timeline export is being processed. Full multi-track rendering will be available in a future update.",
         "clip_id": clip_id,
     }
+
+
+# ── QA / Validation Endpoint ─────────────────────────────────────────
+
+@router.get("/jobs/{job_id}/qa-validate")
+async def qa_validate_job(job_id: str):
+    """Run QA validation checks on a completed analysis job.
+
+    Validates that:
+    - Transcript was generated with segments
+    - Scenes were analyzed with importance scores
+    - Clips were detected with proper viral scores
+    - Clip boundaries are within video duration
+    - Clip durations are within valid ranges
+    - ClipFocus clips have focus metadata
+    - Subject tracking data is present (when enabled)
+    - All AI providers responded correctly
+    """
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    checks = []
+    warnings = []
+    errors = []
+
+    # 1. Job status
+    checks.append({
+        "name": "Job Status",
+        "status": "pass" if job.status == "complete" else "fail",
+        "detail": f"Status: {job.status}",
+    })
+
+    # 2. Transcript quality
+    if job.transcript:
+        seg_count = len(job.transcript)
+        speaker_count = len(set(s.speaker for s in job.transcript))
+        total_words = sum(len(s.text.split()) for s in job.transcript)
+        empty_segs = sum(1 for s in job.transcript if not s.text.strip())
+        checks.append({
+            "name": "Transcript",
+            "status": "pass" if seg_count > 0 and total_words > 10 else "warn",
+            "detail": f"{seg_count} segments, {speaker_count} speakers, {total_words} words",
+        })
+        if empty_segs > 0:
+            warnings.append(f"{empty_segs} empty transcript segments detected")
+        # Check for word-level timestamps
+        has_words = sum(1 for s in job.transcript if s.words and len(s.words) > 0)
+        checks.append({
+            "name": "Word Timestamps",
+            "status": "pass" if has_words > 0 else "warn",
+            "detail": f"{has_words}/{seg_count} segments have word-level timestamps (needed for active word highlighting)",
+        })
+    else:
+        checks.append({
+            "name": "Transcript",
+            "status": "fail",
+            "detail": "No transcript generated",
+        })
+        errors.append("No transcript — AI clip detection relies on transcript data")
+
+    # 3. Scene analysis quality
+    if job.scenes:
+        scene_count = len(job.scenes)
+        high_importance = sum(1 for s in job.scenes if s.importance_score >= 7)
+        avg_importance = round(sum(s.importance_score for s in job.scenes) / scene_count, 1)
+        checks.append({
+            "name": "Scene Analysis",
+            "status": "pass",
+            "detail": f"{scene_count} scenes analyzed, {high_importance} high-importance (7+), avg score {avg_importance}/10",
+        })
+        # Subject tracking check
+        if settings.SUBJECT_TRACKING_ENABLED:
+            tracked = [s for s in job.scenes if s.subject_x is not None]
+            all_center = all(s.subject_x == 50 for s in tracked) if tracked else True
+            checks.append({
+                "name": "Subject Tracking",
+                "status": "pass" if tracked and not all_center else "warn",
+                "detail": f"{len(tracked)}/{scene_count} scenes tracked"
+                    + (" — WARNING: all subject_x=50 (model may not have detected positions)" if all_center and tracked else ""),
+            })
+        else:
+            checks.append({
+                "name": "Subject Tracking",
+                "status": "info",
+                "detail": "Disabled in settings — exports use center crop",
+            })
+    else:
+        checks.append({
+            "name": "Scene Analysis",
+            "status": "fail",
+            "detail": "No scenes analyzed",
+        })
+        errors.append("No scene analysis — visual moment detection unavailable")
+
+    # 4. Clip detection quality
+    if job.clips:
+        clip_count = len(job.clips)
+        scores = [c.viral_score for c in job.clips]
+        avg_score = round(sum(scores) / len(scores), 1)
+        min_score = min(scores)
+        max_score = max(scores)
+        durations = [c.duration for c in job.clips]
+
+        checks.append({
+            "name": "Clip Detection",
+            "status": "pass",
+            "detail": f"{clip_count} clips found, viral scores: {min_score}-{max_score} (avg {avg_score})",
+        })
+
+        # Duration validation
+        invalid_dur = []
+        for c in job.clips:
+            if c.duration < 5:
+                invalid_dur.append(f"Clip {c.id}: too short ({c.duration:.1f}s)")
+            elif c.duration > 600:
+                invalid_dur.append(f"Clip {c.id}: too long ({c.duration:.1f}s)")
+        if invalid_dur:
+            checks.append({
+                "name": "Clip Durations",
+                "status": "warn",
+                "detail": f"{len(invalid_dur)} clips with unusual durations",
+            })
+            warnings.extend(invalid_dur)
+        else:
+            checks.append({
+                "name": "Clip Durations",
+                "status": "pass",
+                "detail": f"All clips within valid range ({min(durations):.0f}s - {max(durations):.0f}s)",
+            })
+
+        # Boundary validation
+        out_of_bounds = []
+        for c in job.clips:
+            if c.start_time < 0:
+                out_of_bounds.append(f"Clip {c.id}: negative start ({c.start_time:.1f}s)")
+            if job.duration and c.end_time > job.duration + 1:
+                out_of_bounds.append(f"Clip {c.id}: end ({c.end_time:.1f}s) exceeds video duration ({job.duration:.1f}s)")
+            if c.end_time <= c.start_time:
+                out_of_bounds.append(f"Clip {c.id}: end <= start ({c.start_time:.1f}-{c.end_time:.1f})")
+        if out_of_bounds:
+            checks.append({
+                "name": "Clip Boundaries",
+                "status": "fail",
+                "detail": f"{len(out_of_bounds)} clips with invalid boundaries",
+            })
+            errors.extend(out_of_bounds)
+        else:
+            checks.append({
+                "name": "Clip Boundaries",
+                "status": "pass",
+                "detail": "All clips within video boundaries",
+            })
+
+        # Overlap detection
+        sorted_clips = sorted(job.clips, key=lambda c: c.start_time)
+        overlaps = []
+        for i in range(len(sorted_clips) - 1):
+            a, b = sorted_clips[i], sorted_clips[i + 1]
+            overlap = a.end_time - b.start_time
+            if overlap > a.duration * 0.5:
+                overlaps.append(f"Clips {a.id} and {b.id}: {overlap:.1f}s overlap (>{a.duration * 0.5:.0f}s)")
+        if overlaps:
+            checks.append({
+                "name": "Clip Overlap",
+                "status": "warn",
+                "detail": f"{len(overlaps)} heavily overlapping clip pairs",
+            })
+            warnings.extend(overlaps)
+        else:
+            checks.append({
+                "name": "Clip Overlap",
+                "status": "pass",
+                "detail": "No excessive clip overlap detected",
+            })
+
+        # ClipFocus metadata
+        focus_clips = [c for c in job.clips if c.clip_focus]
+        if focus_clips:
+            with_relevance = sum(1 for c in focus_clips if c.focus_relevance is not None)
+            with_tier = sum(1 for c in focus_clips if c.focus_tier)
+            checks.append({
+                "name": "ClipFocus Metadata",
+                "status": "pass" if with_relevance == len(focus_clips) else "warn",
+                "detail": f"{len(focus_clips)} focus clips, {with_relevance} with relevance scores, {with_tier} with tier labels",
+            })
+    else:
+        checks.append({
+            "name": "Clip Detection",
+            "status": "fail" if job.status == "complete" else "info",
+            "detail": "No clips detected" + (" — analysis may still be running" if job.status != "complete" else ""),
+        })
+        if job.status == "complete":
+            errors.append("Analysis completed but no clips found — check AI provider configuration")
+
+    # 5. Summary quality
+    if job.summary:
+        has_overview = bool(job.summary.overview and len(job.summary.overview) > 20)
+        has_topics = bool(job.summary.key_topics and len(job.summary.key_topics) >= 2)
+        has_category = bool(job.summary.content_category and job.summary.content_category != "uncategorized")
+        checks.append({
+            "name": "Video Summary",
+            "status": "pass" if has_overview and has_topics else "warn",
+            "detail": f"Category: {job.summary.content_category}, Tone: {job.summary.tone}, "
+                f"{len(job.summary.key_topics)} topics, Audience: {job.summary.estimated_audience}",
+        })
+    else:
+        checks.append({
+            "name": "Video Summary",
+            "status": "warn",
+            "detail": "No summary generated — content-type guidance unavailable for clip detection",
+        })
+
+    # 6. Provider info
+    if job.provider_used:
+        provider_strs = [f"{task}: {provider}" for task, provider in job.provider_used.items()]
+        has_none = any(v == "none" for v in job.provider_used.values())
+        checks.append({
+            "name": "AI Providers",
+            "status": "warn" if has_none else "pass",
+            "detail": ", ".join(provider_strs),
+        })
+        if has_none:
+            warnings.append("Some pipeline stages used no AI provider (fallback/timeout)")
+    else:
+        checks.append({
+            "name": "AI Providers",
+            "status": "info",
+            "detail": "No provider info recorded",
+        })
+
+    # 7. Pipeline timing
+    if job.analysis_duration_seconds:
+        dur = job.analysis_duration_seconds
+        if dur < 60:
+            dur_str = f"{int(dur)}s"
+        else:
+            m, s = divmod(int(dur), 60)
+            dur_str = f"{m}m {s}s"
+        checks.append({
+            "name": "Pipeline Duration",
+            "status": "pass",
+            "detail": dur_str,
+        })
+
+    # Overall verdict
+    pass_count = sum(1 for c in checks if c["status"] == "pass")
+    warn_count = sum(1 for c in checks if c["status"] == "warn")
+    fail_count = sum(1 for c in checks if c["status"] == "fail")
+
+    if fail_count > 0:
+        overall = "fail"
+    elif warn_count > 0:
+        overall = "warn"
+    else:
+        overall = "pass"
+
+    return {
+        "job_id": job_id,
+        "overall": overall,
+        "summary": f"{pass_count} passed, {warn_count} warnings, {fail_count} failures",
+        "checks": checks,
+        "warnings": warnings,
+        "errors": errors,
+    }

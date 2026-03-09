@@ -437,6 +437,8 @@ export default function Analysis() {
   const prevClipSettingsRef = useRef(clipSettings);
   const [clipPresets, setClipPresets] = useState([]);
   const [selectedPresetId, setSelectedPresetId] = useState('');
+  const [qaResult, setQaResult] = useState(null);
+  const [qaLoading, setQaLoading] = useState(false);
   const [inlinePresetSaveOpen, setInlinePresetSaveOpen] = useState(false);
   const [inlinePresetName, setInlinePresetName] = useState('');
   const [inlineActivePreset, setInlineActivePreset] = useState('');
@@ -598,6 +600,9 @@ export default function Analysis() {
             showToast(msg.message || `Found ${msg.count} clip candidates`, 'success');
             setIsGeneratingClips(false);
             fetchJob();
+            // Re-run QA validation after new clips are generated
+            setQaResult(null);
+            setTimeout(() => runQaValidation(), 1500);
           } else if (msg.type === 'cancelled') {
             pushLog('warning', 'Job cancelled by user');
             showToast('Job cancelled', 'info');
@@ -877,6 +882,28 @@ export default function Analysis() {
       showToast('Failed to delete clip', 'error');
     }
   };
+
+  const runQaValidation = useCallback(async () => {
+    if (!jobId) return;
+    setQaLoading(true);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/qa-validate`);
+      if (res.ok) {
+        const data = await res.json();
+        setQaResult(data);
+      }
+    } catch {
+    } finally {
+      setQaLoading(false);
+    }
+  }, [jobId]);
+
+  // Auto-run QA when analysis completes
+  useEffect(() => {
+    if (job?.status === 'complete' && job?.clips?.length > 0 && !qaResult) {
+      runQaValidation();
+    }
+  }, [job?.status, job?.clips?.length, runQaValidation, qaResult]);
 
   const handleGenerateClips = async () => {
     setIsGeneratingClips(true);
@@ -2691,6 +2718,100 @@ export default function Analysis() {
                       )}
                     </div>
                   </div>
+                </div>
+
+                {/* QA Validation Panel */}
+                <div style={{
+                  marginTop: 16,
+                  padding: 16,
+                  background: 'var(--bg-panel)',
+                  border: `1px solid ${qaResult?.overall === 'pass' ? 'var(--success)' : qaResult?.overall === 'warn' ? 'var(--accent-amber)' : qaResult?.overall === 'fail' ? 'var(--danger)' : 'var(--border)'}`,
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: 'var(--shadow-sm)',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                    <h4 style={{
+                      fontSize: 12,
+                      color: 'var(--text-muted)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.06em',
+                      fontFamily: 'var(--font-mono)',
+                      margin: 0,
+                    }}>
+                      Pipeline QA
+                    </h4>
+                    <button
+                      onClick={() => { setQaResult(null); runQaValidation(); }}
+                      disabled={qaLoading}
+                      style={{
+                        padding: '4px 10px',
+                        fontSize: 10,
+                        fontWeight: 600,
+                        background: 'var(--bg-elevated)',
+                        color: 'var(--text-secondary)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)',
+                        cursor: qaLoading ? 'wait' : 'pointer',
+                      }}
+                    >
+                      {qaLoading ? 'Checking...' : 'Re-run'}
+                    </button>
+                  </div>
+
+                  {qaResult ? (
+                    <div>
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10,
+                        padding: '6px 10px',
+                        background: qaResult.overall === 'pass' ? 'rgba(16, 185, 129, 0.1)' : qaResult.overall === 'warn' ? 'rgba(245, 158, 11, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                        borderRadius: 'var(--radius-sm)',
+                      }}>
+                        <span style={{
+                          width: 8, height: 8, borderRadius: '50%',
+                          background: qaResult.overall === 'pass' ? 'var(--success)' : qaResult.overall === 'warn' ? 'var(--accent-amber)' : 'var(--danger)',
+                        }} />
+                        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                          {qaResult.overall === 'pass' ? 'All Checks Passed' : qaResult.overall === 'warn' ? 'Passed with Warnings' : 'Issues Detected'}
+                        </span>
+                        <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                          {qaResult.summary}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {qaResult.checks?.map((check, i) => (
+                          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
+                            <span style={{
+                              width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                              background: check.status === 'pass' ? 'var(--success)' : check.status === 'warn' ? 'var(--accent-amber)' : check.status === 'fail' ? 'var(--danger)' : 'var(--text-muted)',
+                            }} />
+                            <span style={{ color: 'var(--text-secondary)', fontWeight: 600, minWidth: 100 }}>{check.name}</span>
+                            <span style={{ color: 'var(--text-muted)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{check.detail}</span>
+                          </div>
+                        ))}
+                      </div>
+                      {qaResult.errors?.length > 0 && (
+                        <div style={{ marginTop: 8, padding: '6px 8px', background: 'rgba(239, 68, 68, 0.08)', borderRadius: 'var(--radius-sm)' }}>
+                          {qaResult.errors.map((e, i) => (
+                            <div key={i} style={{ fontSize: 10, color: 'var(--danger)', lineHeight: 1.4 }}>{e}</div>
+                          ))}
+                        </div>
+                      )}
+                      {qaResult.warnings?.length > 0 && (
+                        <div style={{ marginTop: 6, padding: '6px 8px', background: 'rgba(245, 158, 11, 0.08)', borderRadius: 'var(--radius-sm)' }}>
+                          {qaResult.warnings.slice(0, 5).map((w, i) => (
+                            <div key={i} style={{ fontSize: 10, color: 'var(--accent-amber)', lineHeight: 1.4 }}>{w}</div>
+                          ))}
+                          {qaResult.warnings.length > 5 && (
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>+{qaResult.warnings.length - 5} more warnings</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      {qaLoading ? 'Running validation checks...' : 'QA validation runs automatically when analysis completes'}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

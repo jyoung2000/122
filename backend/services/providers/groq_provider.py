@@ -175,6 +175,14 @@ class GroqProvider(AIProvider):
         for attempt in range(3):
             if cancel_check:
                 cancel_check()
+
+            # Build fresh messages each attempt — do NOT accumulate conversation
+            # history, as it bloats the prompt and causes timeouts
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
             raw = await self._call(messages, max_tokens=8192)
             try:
                 raw = raw.strip()
@@ -183,29 +191,34 @@ class GroqProvider(AIProvider):
                 data = json.loads(raw)
                 clips = []
                 for c in data.get("clips", []):
-                    duration = c.get("duration", c.get("end_time", 0) - c.get("start_time", 0))
+                    start = float(c.get("start_time", 0))
+                    end = float(c.get("end_time", 0))
+                    # Always compute from timestamps — model's duration field is unreliable
+                    duration = end - start
+                    if duration <= 0:
+                        duration = float(c.get("duration", 0))
                     if duration < (min_duration or 15) or duration > (max_duration or 600):
                         continue
                     clips.append(ClipCandidate(
-                        id=c["id"],
+                        id=int(c.get("id", len(clips) + 1)),
                         title=c.get("title", "Untitled"),
-                        start_time=c["start_time"],
-                        end_time=c["end_time"],
-                        duration=duration,
-                        viral_score=max(1, min(100, c.get("viral_score", 50))),
-                        viral_score_reasoning=c.get("viral_score_reasoning", ""),
-                        clip_type=c.get("clip_type", "highlight"),
-                        platform=c.get("platform", "both"),
-                        suggested_caption=c.get("suggested_caption", ""),
-                        hook_text=c.get("hook_text", ""),
-                        why_this_works=c.get("why_this_works", ""),
+                        start_time=start,
+                        end_time=end,
+                        duration=round(duration, 1),
+                        viral_score=max(1, min(100, int(float(c.get("viral_score", 50))))),
+                        viral_score_reasoning=str(c.get("viral_score_reasoning", "")),
+                        clip_type=str(c.get("clip_type", "highlight")),
+                        platform=str(c.get("platform", "both")),
+                        suggested_caption=str(c.get("suggested_caption", "")),
+                        hook_text=str(c.get("hook_text", "")),
+                        why_this_works=str(c.get("why_this_works", "")),
                     ))
-                return clips
+                if clips:
+                    return clips
+                logger.warning(f"Attempt {attempt + 1}: All Groq clips filtered out")
+                continue
             except (json.JSONDecodeError, KeyError) as e:
                 logger.warning(f"Attempt {attempt + 1}: Failed to parse Groq clips: {e}")
-                if attempt < 2:
-                    messages.append({"role": "assistant", "content": raw})
-                    messages.append({"role": "user", "content": "Return ONLY valid JSON."})
                 continue
         raise ProviderError("Failed to parse viral clips after 3 attempts")
 

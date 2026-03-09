@@ -293,49 +293,81 @@ class AnthropicProvider(AIProvider):
         for attempt in range(3):
             if cancel_check:
                 cancel_check()
+
+            # Build fresh messages each attempt — do NOT accumulate conversation
+            # history, as it bloats the prompt and causes timeouts
+            messages = [{"role": "user", "content": user_prompt}]
+
             raw = await self._call(messages, system=system_prompt, max_tokens=8192)
             try:
                 raw = raw.strip()
                 if raw.startswith("```"):
                     raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
                 data = json.loads(raw)
+                clips_data = data.get("clips", [])
+                if not clips_data:
+                    logger.warning(f"Attempt {attempt + 1}: Model returned empty clips array, raw={raw[:300]}")
+                    continue
                 clips = []
-                for c in data.get("clips", []):
-                    duration = c.get("duration", c.get("end_time", 0) - c.get("start_time", 0))
-                    if duration < (min_duration or 15) or duration > (max_duration or 600):
+                filtered_reasons = []
+                for c in clips_data:
+                    try:
+                        start = float(c.get("start_time", 0))
+                        end = float(c.get("end_time", 0))
+                        # Always compute from timestamps — model's duration field is unreliable
+                        duration = end - start
+                        if duration <= 0:
+                            # Fallback to model's duration field
+                            duration = float(c.get("duration", 0))
+                        clip_title = c.get("title", "Untitled")
+                        if duration < (min_duration or 15):
+                            filtered_reasons.append(
+                                f"  #{c.get('id', '?')} '{clip_title}': too short ({duration:.1f}s)")
+                            continue
+                        if duration > (max_duration or 600):
+                            filtered_reasons.append(
+                                f"  #{c.get('id', '?')} '{clip_title}': too long ({duration:.1f}s)")
+                            continue
+                        # Parse optional focus relevance fields
+                        focus_relevance = c.get("focus_relevance")
+                        if focus_relevance is not None:
+                            focus_relevance = max(1, min(100, int(float(focus_relevance))))
+                        focus_tier = c.get("focus_tier")
+                        if focus_tier and focus_tier not in ("strong", "moderate", "weak"):
+                            focus_tier = None
+                        clips.append(ClipCandidate(
+                            id=int(c.get("id", len(clips) + 1)),
+                            title=clip_title,
+                            start_time=start,
+                            end_time=end,
+                            duration=round(duration, 1),
+                            viral_score=max(1, min(100, int(float(c.get("viral_score", 50))))),
+                            viral_score_reasoning=str(c.get("viral_score_reasoning", "")),
+                            clip_type=str(c.get("clip_type", "highlight")),
+                            platform=str(c.get("platform", "both")),
+                            suggested_caption=str(c.get("suggested_caption", "")),
+                            hook_text=str(c.get("hook_text", "")),
+                            why_this_works=str(c.get("why_this_works", "")),
+                            focus_relevance=focus_relevance,
+                            focus_tier=focus_tier,
+                        ))
+                    except (TypeError, ValueError, KeyError) as clip_err:
+                        logger.warning(f"Skipping malformed clip: {clip_err} — data: {c}")
                         continue
-                    # Parse optional focus relevance fields
-                    focus_relevance = c.get("focus_relevance")
-                    if focus_relevance is not None:
-                        focus_relevance = max(1, min(100, int(float(focus_relevance))))
-                    focus_tier = c.get("focus_tier")
-                    if focus_tier and focus_tier not in ("strong", "moderate", "weak"):
-                        focus_tier = None
-                    clips.append(ClipCandidate(
-                        id=c["id"],
-                        title=c.get("title", "Untitled"),
-                        start_time=c["start_time"],
-                        end_time=c["end_time"],
-                        duration=duration,
-                        viral_score=max(1, min(100, c.get("viral_score", 50))),
-                        viral_score_reasoning=c.get("viral_score_reasoning", ""),
-                        clip_type=c.get("clip_type", "highlight"),
-                        platform=c.get("platform", "both"),
-                        suggested_caption=c.get("suggested_caption", ""),
-                        hook_text=c.get("hook_text", ""),
-                        why_this_works=c.get("why_this_works", ""),
-                        focus_relevance=focus_relevance,
-                        focus_tier=focus_tier,
-                    ))
-                return clips
+
+                if filtered_reasons:
+                    logger.info(
+                        f"Filtered {len(filtered_reasons)} clips by duration:\n"
+                        + "\n".join(filtered_reasons)
+                    )
+
+                if clips:
+                    logger.info(f"Parsed {len(clips)} valid clips from {len(clips_data)} candidates")
+                    return clips
+                logger.warning(f"Attempt {attempt + 1}: All {len(clips_data)} clips filtered out")
+                continue
             except (json.JSONDecodeError, KeyError) as e:
-                logger.warning(f"Attempt {attempt + 1}: Failed to parse clips: {e}")
-                if attempt < 2:
-                    messages.append({"role": "assistant", "content": raw})
-                    messages.append({
-                        "role": "user",
-                        "content": "That was not valid JSON. Return ONLY valid JSON.",
-                    })
+                logger.warning(f"Attempt {attempt + 1}: Failed to parse clips: {e}, raw={raw[:300]}")
                 continue
         raise ProviderError("Failed to parse viral clips after 3 attempts")
 

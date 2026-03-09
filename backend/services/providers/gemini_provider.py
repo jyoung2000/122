@@ -276,6 +276,9 @@ class GeminiProvider(AIProvider):
             '"hook_text": "...", "why_this_works": "..."}]}'
         )
 
+        # Store the original prompt for retries (don't mutate it)
+        original_prompt = prompt
+
         for attempt in range(3):
             if cancel_check:
                 cancel_check()
@@ -287,7 +290,12 @@ class GeminiProvider(AIProvider):
                 data = json.loads(raw)
                 clips = []
                 for c in data.get("clips", []):
-                    duration = c.get("duration", c.get("end_time", 0) - c.get("start_time", 0))
+                    start = float(c.get("start_time", 0))
+                    end = float(c.get("end_time", 0))
+                    # Always compute from timestamps — model's duration field is unreliable
+                    duration = end - start
+                    if duration <= 0:
+                        duration = float(c.get("duration", 0))
                     if duration < (min_duration or 15) or duration > (max_duration or 600):
                         continue
                     # Parse optional focus relevance fields
@@ -298,25 +306,29 @@ class GeminiProvider(AIProvider):
                     if focus_tier and focus_tier not in ("strong", "moderate", "weak"):
                         focus_tier = None
                     clips.append(ClipCandidate(
-                        id=c["id"],
+                        id=int(c.get("id", len(clips) + 1)),
                         title=c.get("title", "Untitled"),
-                        start_time=c["start_time"],
-                        end_time=c["end_time"],
-                        duration=duration,
-                        viral_score=max(1, min(100, c.get("viral_score", 50))),
-                        viral_score_reasoning=c.get("viral_score_reasoning", ""),
-                        clip_type=c.get("clip_type", "highlight"),
-                        platform=c.get("platform", "both"),
-                        suggested_caption=c.get("suggested_caption", ""),
-                        hook_text=c.get("hook_text", ""),
-                        why_this_works=c.get("why_this_works", ""),
+                        start_time=start,
+                        end_time=end,
+                        duration=round(duration, 1),
+                        viral_score=max(1, min(100, int(float(c.get("viral_score", 50))))),
+                        viral_score_reasoning=str(c.get("viral_score_reasoning", "")),
+                        clip_type=str(c.get("clip_type", "highlight")),
+                        platform=str(c.get("platform", "both")),
+                        suggested_caption=str(c.get("suggested_caption", "")),
+                        hook_text=str(c.get("hook_text", "")),
+                        why_this_works=str(c.get("why_this_works", "")),
                         focus_relevance=focus_relevance,
                         focus_tier=focus_tier,
                     ))
-                return clips
+                if clips:
+                    return clips
+                logger.warning(f"Attempt {attempt + 1}: All Gemini clips filtered out")
+                continue
             except (json.JSONDecodeError, KeyError) as e:
                 logger.warning(f"Attempt {attempt + 1}: Failed to parse Gemini clips: {e}")
-                prompt += "\n\nPrevious response was invalid JSON. Return ONLY valid JSON."
+                # Reset prompt to original — don't keep appending
+                prompt = original_prompt
                 continue
         raise ProviderError("Failed to parse viral clips after 3 attempts")
 
