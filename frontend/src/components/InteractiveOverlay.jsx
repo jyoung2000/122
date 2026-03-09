@@ -25,14 +25,21 @@ export default function InteractiveOverlay({ currentTime = 0, clipStart = 0, con
   // Audio and subtitle items are excluded — subtitle items are rendered by SubtitleOverlay.
   // Respects track visibility — items on hidden tracks are not interactive.
   const visible = useMemo(() => {
-    return items.filter((it) => {
-      if (it.type === 'audio' || it.type === 'subtitle') return false;
-      if (!(absTime >= it.start && absTime < it.end)) return false;
-      // Check track visibility
-      const track = tracks.find((t) => t.id === it.trackId);
-      if (track && track.visible === false) return false;
-      return true;
-    });
+    return items
+      .filter((it) => {
+        if (it.type === 'audio' || it.type === 'subtitle') return false;
+        if (!(absTime >= it.start && absTime < it.end)) return false;
+        // Check track visibility
+        const track = tracks.find((t) => t.id === it.trackId);
+        if (track && track.visible === false) return false;
+        return true;
+      })
+      // Sort by track order so interactive handles match visual z-layering
+      .sort((a, b) => {
+        const trackA = tracks.find((t) => t.id === a.trackId);
+        const trackB = tracks.find((t) => t.id === b.trackId);
+        return (trackA?.order ?? 0) - (trackB?.order ?? 0);
+      });
   }, [items, absTime, tracks]);
 
   // Build a set of locked item IDs for quick lookup
@@ -172,7 +179,7 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
       containerH: rect.height,
     };
     setIsDragging(true);
-  }, [effectivePos, getContainerRect, onSelect, onInteraction]);
+  }, [effectivePos, getContainerRect, onSelect, onInteraction, isLocked]);
 
   // ── RESIZE ────────────────────────────────────────────
   const handleResizeStart = useCallback((e, handleId) => {
@@ -197,7 +204,7 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
       isTextItem: item.type === 'text',
     };
     setIsResizing(true);
-  }, [effectivePos, size, item, getContainerRect, onInteraction]);
+  }, [effectivePos, size, item, getContainerRect, onInteraction, isLocked]);
 
   // ── ROTATE ────────────────────────────────────────────
   const handleRotateStart = useCallback((e) => {
@@ -219,7 +226,7 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
       startRotation: rotation,
     };
     setIsRotating(true);
-  }, [effectivePos, rotation, getContainerRect, onInteraction]);
+  }, [effectivePos, rotation, getContainerRect, onInteraction, isLocked]);
 
   // ── Mouse move / up handlers ──────────────────────────
   // Only depend on the boolean flags so listeners stay stable during drag/resize/rotate.
@@ -360,7 +367,7 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
       // Focus the input after render
       setTimeout(() => editRef.current?.focus(), 50);
     }
-  }, [item.type, onInteraction]);
+  }, [item.type, onInteraction, isLocked]);
 
   const handleEditBlur = useCallback(() => {
     setIsEditing(false);
