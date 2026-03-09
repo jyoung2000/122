@@ -71,6 +71,8 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   const toggleTrackVisibility = useTimelineStore((s) => s.toggleTrackVisibility);
   const toggleTrackMute = useTimelineStore((s) => s.toggleTrackMute);
   const toggleTrackLock = useTimelineStore((s) => s.toggleTrackLock);
+  const resetSubtitleTimings = useTimelineStore((s) => s.resetSubtitleTimings);
+  const hasOriginalSubtitles = useTimelineStore((s) => (s._originalSubtitles || []).length > 0);
   const segments = useTimelineStore((s) => s.segments);
 
   const [isDragging, setIsDragging] = useState(false);
@@ -907,6 +909,28 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
                   >
                     {track.locked ? '\uD83D\uDD12' : '\uD83D\uDD13'}
                   </button>
+                  {/* Reset subtitle timings button — only on subtitle tracks */}
+                  {track.type === 'subtitle' && hasOriginalSubtitles && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        resetSubtitleTimings();
+                      }}
+                      title="Reset all subtitles to original timing from transcript"
+                      className="ve-multi-timeline__track-ctrl"
+                      style={{
+                        background: 'none', border: 'none', cursor: 'pointer',
+                        padding: '2px', lineHeight: 1, fontSize: 10,
+                        opacity: 0.7,
+                        color: 'var(--ve-text, #666)',
+                      }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="1 4 1 10 7 10" />
+                        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+                      </svg>
+                    </button>
+                  )}
                 </div>
               </div>
             );

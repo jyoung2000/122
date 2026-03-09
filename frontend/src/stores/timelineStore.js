@@ -53,6 +53,9 @@ const useTimelineStore = create(
       items: [],
       mediaLibrary: [],
 
+      // ── Original subtitle timings (snapshot from initFromClip for reset) ──
+      _originalSubtitles: [],
+
       // ── Playback state (not tracked by undo) ──
       playhead: 0,
       duration: 0,
@@ -242,6 +245,52 @@ const useTimelineStore = create(
         if (item) Object.assign(item, updates);
       }),
 
+      // Reset all subtitle items to their original timing/position from initFromClip
+      resetSubtitleTimings: () => set((state) => {
+        const originals = state._originalSubtitles;
+        if (!originals || originals.length === 0) return;
+
+        // Remove all current subtitle items
+        state.items = state.items.filter((it) => it.type !== 'subtitle');
+
+        // Re-create subtitles from the original snapshot
+        originals.forEach((orig) => {
+          state.items.push({
+            id: nextItemId(),
+            trackId: 't1',
+            type: 'subtitle',
+            mediaRef: null,
+            start: orig.start,
+            end: orig.end,
+            trimStart: 0,
+            trimEnd: null,
+            volume: 1.0,
+            speed: 1.0,
+            opacity: 1.0,
+            position: orig.position ? { ...orig.position } : { x: 50, y: 90 },
+            size: { w: 100, h: 100 },
+            transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 },
+            effects: {},
+            fadeIn: 0,
+            fadeOut: 0,
+            subtitleText: orig.subtitleText,
+            subtitleStyle: null,
+            speaker: orig.speaker || null,
+            transition: null,
+            words: orig.words || null,
+          });
+        });
+
+        // Deselect if the selected item was a subtitle (it no longer exists)
+        if (state.selectedItemId) {
+          const stillExists = state.items.find((it) => it.id === state.selectedItemId);
+          if (!stillExists) {
+            state.selectedItemId = null;
+            state.selectedItemIds = [];
+          }
+        }
+      }),
+
       splitItem: (itemId, time) => set((state) => {
         const idx = state.items.findIndex(i => i.id === itemId);
         if (idx < 0) return;
@@ -426,10 +475,16 @@ const useTimelineStore = create(
           });
         }
 
+        // Snapshot original subtitle timings so user can reset after accidental moves
+        const originalSubtitles = items
+          .filter((it) => it.type === 'subtitle')
+          .map((it) => ({ id: it.id, start: it.start, end: it.end, subtitleText: it.subtitleText, speaker: it.speaker, words: it.words, position: { ...it.position } }));
+
         set({
           tracks: createDefaultTracks(),
           items,
           mediaLibrary,
+          _originalSubtitles: originalSubtitles,
           playhead: 0,
           duration,
           zoom: 1.0,
@@ -471,6 +526,7 @@ const useTimelineStore = create(
           trimStartOffset: 0,
           trimEndOffset: 0,
           subtitleSettings: {},
+          _originalSubtitles: [],
         });
       },
 
