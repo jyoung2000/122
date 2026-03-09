@@ -1637,6 +1637,7 @@ export default function Analysis() {
               jobId={jobId}
               clipId={clipPreview.id}
               transcript={job.transcript || []}
+              onTranscriptUpdated={fetchJob}
               isProcessing={isProcessing}
               onClose={() => {
                 if (clipPreview) {
@@ -1721,6 +1722,7 @@ export default function Analysis() {
               onSettingsChange={setClipSettings}
               jobId={jobId}
               transcript={job.transcript || []}
+              onTranscriptUpdated={fetchJob}
               isProcessing={isProcessing}
               subtitleOverlay={
                 <SubtitleOverlay

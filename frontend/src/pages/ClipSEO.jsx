@@ -933,6 +933,7 @@ export default function ClipSEO() {
               jobId={jobId}
               clipId={clipId}
               transcript={job.transcript || []}
+              onTranscriptUpdated={fetchJob}
               onAspectRatioChange={(ar) => setClipSettings((prev) => ({ ...prev, aspectRatio: ar }))}
               subtitleOverlay={
                 <SubtitleOverlay
@@ -1155,6 +1156,7 @@ export default function ClipSEO() {
               jobId={jobId}
               clipId={clipId}
               transcript={job.transcript || []}
+              onTranscriptUpdated={fetchJob}
               onAspectRatioChange={(ar) => setClipSettings((prev) => ({ ...prev, aspectRatio: ar }))}
               subtitleOverlay={
                 <SubtitleOverlay

@@ -629,17 +629,41 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     try {
       const media = JSON.parse(data);
       const time = getTimeFromX(e.clientX);
-      const track = getTrackFromY(e.clientY);
-      if (!track) return;
+      const dropTrack = getTrackFromY(e.clientY);
+      if (!dropTrack) return;
+
+      // Auto-route items to the correct track type if dropped on an incompatible track
+      const itemType = media.type;
+      const dropTrackType = dropTrack.type;
+      let targetTrackId = dropTrack.id;
+
+      const compatible =
+        (itemType === 'video' && dropTrackType === 'video') ||
+        (itemType === 'audio' && dropTrackType === 'audio') ||
+        ((itemType === 'text' || itemType === 'shape' || itemType === 'image' || itemType === 'overlay') && dropTrackType === 'overlay') ||
+        (itemType === 'subtitle' && dropTrackType === 'subtitle');
+
+      if (!compatible) {
+        // Find the first compatible track
+        const compatTrack = tracks.find((t) => {
+          if (itemType === 'video') return t.type === 'video';
+          if (itemType === 'audio') return t.type === 'audio';
+          if (itemType === 'text' || itemType === 'shape' || itemType === 'image' || itemType === 'overlay') return t.type === 'overlay';
+          if (itemType === 'subtitle') return t.type === 'subtitle';
+          return false;
+        });
+        if (compatTrack) targetTrackId = compatTrack.id;
+      }
+
       addItem({
-        trackId: track.id,
+        trackId: targetTrackId,
         type: media.type,
         mediaRef: media.id,
         start: time,
         end: time + (media.duration || 5),
       });
     } catch { /* invalid data */ }
-  }, [getTimeFromX, getTrackFromY, addItem]);
+  }, [getTimeFromX, getTrackFromY, addItem, tracks]);
 
   const onDragOver = useCallback((e) => {
     e.preventDefault();

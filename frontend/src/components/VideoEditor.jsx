@@ -223,6 +223,7 @@ export default function VideoEditor({
   jobId,
   clipId,
   transcript,
+  onTranscriptUpdated,
   // Analysis state
   isProcessing = false,
 }) {
@@ -238,6 +239,7 @@ export default function VideoEditor({
   const initFromClip = useTimelineStore((s) => s.initFromClip);
   const timelineStoreItems = useTimelineStore((s) => s.items);
   const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
+  const storeSelectedItemId = useTimelineStore((s) => s.selectedItemId);
   const updateTimelineItem = useTimelineStore((s) => s.updateItem);
   const { recovered } = useTimelinePersistence(jobId, clipId);
 
@@ -293,6 +295,38 @@ export default function VideoEditor({
     multiTrackInitialized.current = true;
     lastInitClipEnd.current = effectiveEnd;
   }, [src, clipStart, clipEnd, initFromClip, recovered, timelineStoreItems.length, transcript, addItem]);
+
+  // ── Subtitle sync refs (shared by forward and reverse sync effects) ──
+  const subtitleSyncTimerRef = useRef(null);
+  const lastSyncedSubtitlesRef = useRef(new Map());
+
+  // ── Reverse sync: when transcript prop changes (e.g. from TranscriptViewer edits),
+  //    update matching subtitle items in the timeline store ──
+  const prevTranscriptRef = useRef(transcript);
+  useEffect(() => {
+    if (!transcript || !multiTrackInitialized.current) return;
+    // Only run if transcript prop actually changed (not on first render)
+    if (prevTranscriptRef.current === transcript) return;
+    prevTranscriptRef.current = transcript;
+
+    const subtitleItems = timelineStoreItems.filter((it) => it.type === 'subtitle');
+    if (subtitleItems.length === 0) return;
+
+    subtitleItems.forEach((subItem) => {
+      const subAbsStart = (subItem.start || 0) + clipStart;
+      const subAbsEnd = (subItem.end || 0) + clipStart;
+      const match = transcript.find((seg) => {
+        const tStart = seg.start ?? 0;
+        const tEnd = seg.end ?? 0;
+        return Math.abs(tStart - subAbsStart) < 0.15 && Math.abs(tEnd - subAbsEnd) < 0.15;
+      });
+      if (match && match.text !== subItem.subtitleText) {
+        updateTimelineItem(subItem.id, { subtitleText: match.text });
+        // Track so we don't re-sync back to the API
+        lastSyncedSubtitlesRef.current.set(subItem.id, match.text);
+      }
+    });
+  }, [transcript, timelineStoreItems, clipStart, updateTimelineItem]);
 
   const videoRef = useRef(null);
   const containerRef = useRef(null);
@@ -430,6 +464,74 @@ export default function VideoEditor({
       updateTimelineItem(videoTimelineItem.id, { speed });
     }
   }, [speed, videoTimelineItem?.id]);
+
+  // Auto-open properties panel when an item is selected (via viewport or timeline)
+  useEffect(() => {
+    if (storeSelectedItemId && showMultiTrack) {
+      setShowProperties(true);
+    }
+  }, [storeSelectedItemId, showMultiTrack]);
+
+  // ── Sync subtitle edits from timeline store back to backend transcript ──
+  // When a subtitle item's text is edited via the multi-track editor (PropertiesPanel
+  // or InteractiveOverlay double-click), propagate the change to the backend transcript
+  // so the Transcription tab stays in sync.
+  useEffect(() => {
+    if (!jobId || !transcript || !showMultiTrack) return;
+
+    const subtitleItems = timelineStoreItems.filter((it) => it.type === 'subtitle');
+    if (subtitleItems.length === 0) return;
+
+    // Find subtitle items whose text differs from the transcript
+    const pendingUpdates = [];
+    subtitleItems.forEach((subItem) => {
+      // Match to transcript segment by time range (subtitle start + clipStart ≈ segment start)
+      const subAbsStart = (subItem.start || 0) + clipStart;
+      const subAbsEnd = (subItem.end || 0) + clipStart;
+      const matchIdx = transcript.findIndex((seg) => {
+        const tStart = seg.start ?? 0;
+        const tEnd = seg.end ?? 0;
+        return Math.abs(tStart - subAbsStart) < 0.15 && Math.abs(tEnd - subAbsEnd) < 0.15;
+      });
+      if (matchIdx < 0) return;
+
+      const transcriptText = transcript[matchIdx]?.text || '';
+      const timelineText = subItem.subtitleText || '';
+      const lastSynced = lastSyncedSubtitlesRef.current.get(subItem.id);
+
+      // Only sync if text actually changed from transcript AND hasn't been synced already
+      if (timelineText !== transcriptText && timelineText !== lastSynced) {
+        pendingUpdates.push({ itemId: subItem.id, segmentIndex: matchIdx, text: timelineText });
+      }
+    });
+
+    if (pendingUpdates.length === 0) return;
+
+    // Debounce: wait 800ms after last change before syncing
+    if (subtitleSyncTimerRef.current) clearTimeout(subtitleSyncTimerRef.current);
+    subtitleSyncTimerRef.current = setTimeout(async () => {
+      for (const upd of pendingUpdates) {
+        try {
+          const res = await fetch(`/api/jobs/${jobId}/transcript/${upd.segmentIndex}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: upd.text }),
+          });
+          if (res.ok) {
+            lastSyncedSubtitlesRef.current.set(upd.itemId, upd.text);
+          }
+        } catch (err) {
+          console.error('Subtitle sync to transcript failed:', err);
+        }
+      }
+      // Notify parent to refresh transcript data
+      if (onTranscriptUpdated) onTranscriptUpdated();
+    }, 800);
+
+    return () => {
+      if (subtitleSyncTimerRef.current) clearTimeout(subtitleSyncTimerRef.current);
+    };
+  }, [timelineStoreItems, jobId, transcript, clipStart, showMultiTrack, onTranscriptUpdated]);
 
   // Derived: the currently selected segment object (or null)
   const selectedSegment = useMemo(

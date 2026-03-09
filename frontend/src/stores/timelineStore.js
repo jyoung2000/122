@@ -137,10 +137,33 @@ const useTimelineStore = create(
       // Item operations
       addItem: (item) => {
         const id = item.id || nextItemId();
+        // Auto-route to the correct track based on item type
+        let trackId = item.trackId || 'v1';
+        const itemType = item.type || 'video';
+        const state = get();
+        const track = state.tracks.find((t) => t.id === trackId);
+        if (track) {
+          const trackType = track.type;
+          const compatible =
+            (itemType === 'video' && trackType === 'video') ||
+            (itemType === 'audio' && trackType === 'audio') ||
+            ((itemType === 'text' || itemType === 'shape' || itemType === 'image' || itemType === 'overlay') && trackType === 'overlay') ||
+            (itemType === 'subtitle' && trackType === 'subtitle');
+          if (!compatible) {
+            const correctTrack = state.tracks.find((t) => {
+              if (itemType === 'video') return t.type === 'video';
+              if (itemType === 'audio') return t.type === 'audio';
+              if (itemType === 'text' || itemType === 'shape' || itemType === 'image' || itemType === 'overlay') return t.type === 'overlay';
+              if (itemType === 'subtitle') return t.type === 'subtitle';
+              return false;
+            });
+            if (correctTrack) trackId = correctTrack.id;
+          }
+        }
         const newItem = {
           id,
-          trackId: item.trackId || 'v1',
-          type: item.type || 'video',
+          trackId,
+          type: itemType,
           mediaRef: item.mediaRef || null,
           start: item.start || 0,
           end: item.end || 0,
