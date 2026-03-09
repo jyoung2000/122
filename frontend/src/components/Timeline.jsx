@@ -71,9 +71,14 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   const toggleTrackVisibility = useTimelineStore((s) => s.toggleTrackVisibility);
   const toggleTrackMute = useTimelineStore((s) => s.toggleTrackMute);
   const toggleTrackLock = useTimelineStore((s) => s.toggleTrackLock);
+  const reorderTracks = useTimelineStore((s) => s.reorderTracks);
   const resetSubtitleTimings = useTimelineStore((s) => s.resetSubtitleTimings);
   const hasOriginalSubtitles = useTimelineStore((s) => (s._originalSubtitles || []).length > 0);
   const segments = useTimelineStore((s) => s.segments);
+
+  // Track drag-to-reorder state
+  const [dragTrackIdx, setDragTrackIdx] = useState(null);
+  const [dragOverTrackIdx, setDragOverTrackIdx] = useState(null);
 
   const [isDragging, setIsDragging] = useState(false);
   const [dragInfo, setDragInfo] = useState(null);
@@ -822,12 +827,34 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         >
           {/* Spacer for ruler */}
           <div style={{ height: RULER_HEIGHT }} />
-          {tracks.map((track) => {
+          {tracks.map((track, trackIdx) => {
             const isHidden = track.visible === false;
+            const isDragOver = dragOverTrackIdx === trackIdx && dragTrackIdx !== trackIdx;
             return (
               <div
                 key={track.id}
                 className="ve-multi-timeline__track-header"
+                draggable
+                onDragStart={(e) => {
+                  setDragTrackIdx(trackIdx);
+                  e.dataTransfer.effectAllowed = 'move';
+                  e.dataTransfer.setData('text/plain', String(trackIdx));
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'move';
+                  setDragOverTrackIdx(trackIdx);
+                }}
+                onDragLeave={() => { if (dragOverTrackIdx === trackIdx) setDragOverTrackIdx(null); }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (dragTrackIdx != null && dragTrackIdx !== trackIdx) {
+                    reorderTracks(dragTrackIdx, trackIdx);
+                  }
+                  setDragTrackIdx(null);
+                  setDragOverTrackIdx(null);
+                }}
+                onDragEnd={() => { setDragTrackIdx(null); setDragOverTrackIdx(null); }}
                 style={{
                   height: TRACK_HEIGHT,
                   marginBottom: TRACK_GAP,
@@ -837,10 +864,13 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
                   gap: 2,
                   padding: '0 4px',
                   pointerEvents: 'auto',
-                  opacity: isHidden ? 0.5 : 1,
+                  opacity: isHidden ? 0.5 : (dragTrackIdx === trackIdx ? 0.4 : 1),
+                  cursor: 'grab',
+                  borderTop: isDragOver ? '2px solid var(--accent, #0A84FF)' : '2px solid transparent',
+                  transition: 'opacity 0.15s, border-color 0.15s',
                 }}
               >
-                {/* Track name */}
+                {/* Drag handle + track name */}
                 <span style={{
                   fontSize: 10,
                   fontWeight: 500,
@@ -849,9 +879,17 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
                   flex: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 3,
                   minWidth: 0,
                   opacity: isHidden ? 0.5 : 0.8,
                 }}>
+                  <svg width="8" height="10" viewBox="0 0 8 10" fill="currentColor" style={{ opacity: 0.35, flexShrink: 0 }}>
+                    <circle cx="2" cy="2" r="1" /><circle cx="6" cy="2" r="1" />
+                    <circle cx="2" cy="5" r="1" /><circle cx="6" cy="5" r="1" />
+                    <circle cx="2" cy="8" r="1" /><circle cx="6" cy="8" r="1" />
+                  </svg>
                   {TRACK_ICONS[track.type] || ''} {track.name}
                 </span>
                 {/* Controls row */}

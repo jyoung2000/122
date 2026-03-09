@@ -1856,8 +1856,10 @@ input.ve-timecode--input {
 }
 .ve-properties__type-badge[data-type="video"] { background: #3B82F6; }
 .ve-properties__type-badge[data-type="audio"] { background: #10B981; }
+.ve-properties__type-badge[data-type="text"] { background: #EC4899; }
 .ve-properties__type-badge[data-type="image"],
 .ve-properties__type-badge[data-type="overlay"] { background: #F59E0B; }
+.ve-properties__type-badge[data-type="shape"] { background: #F97316; }
 .ve-properties__type-badge[data-type="subtitle"] { background: #8B5CF6; }
 
 .ve-properties__delete {

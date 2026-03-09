@@ -6,9 +6,9 @@ import { temporal } from 'zundo';
 const createDefaultTracks = () => [
   { id: 'v1', type: 'video', name: 'Video', order: 0, muted: false, locked: false, visible: true },
   { id: 'v2', type: 'overlay', name: 'Overlay', order: 1, muted: false, locked: false, visible: true },
-  { id: 'a1', type: 'audio', name: 'Audio', order: 2, muted: false, locked: false, visible: true },
+  { id: 't1', type: 'subtitle', name: 'Subtitles', order: 2, muted: false, locked: false, visible: true },
   { id: 'a2', type: 'audio', name: 'Music', order: 3, muted: false, locked: false, visible: true },
-  { id: 't1', type: 'subtitle', name: 'Subtitles', order: 4, muted: false, locked: false, visible: true },
+  { id: 'a1', type: 'audio', name: 'Audio', order: 4, muted: false, locked: false, visible: true },
 ];
 
 // Track-item type compatibility map
@@ -155,6 +155,18 @@ const useTimelineStore = create(
       toggleTrackVisibility: (trackId) => set((state) => {
         const track = state.tracks.find(t => t.id === trackId);
         if (track) track.visible = !track.visible;
+      }),
+
+      // Reorder tracks: move track at fromIndex to toIndex, recalculate order values.
+      // Order values drive z-index in both preview (TimelineOverlay) and export (RenderEngine).
+      reorderTracks: (fromIndex, toIndex) => set((state) => {
+        if (fromIndex === toIndex) return;
+        if (fromIndex < 0 || fromIndex >= state.tracks.length) return;
+        if (toIndex < 0 || toIndex >= state.tracks.length) return;
+        const [moved] = state.tracks.splice(fromIndex, 1);
+        state.tracks.splice(toIndex, 0, moved);
+        // Recalculate order values to match array position
+        state.tracks.forEach((t, i) => { t.order = i; });
       }),
 
       // Item operations

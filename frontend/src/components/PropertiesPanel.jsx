@@ -476,17 +476,47 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
     );
   }
 
+  // ── Live QA: validate item type matches track and properties are correct ──
+  const itemTrack = tracks.find((t) => t.id === item.trackId);
+  const trackTypeMismatch = useMemo(() => {
+    if (!itemTrack) return null;
+    const allowed = {
+      video: ['video'], overlay: ['text', 'shape', 'image', 'overlay'],
+      audio: ['audio'], subtitle: ['subtitle'],
+    };
+    const ok = allowed[itemTrack.type];
+    if (ok && !ok.includes(item.type)) {
+      return `Item type "${item.type}" is on incompatible track "${itemTrack.name}" (${itemTrack.type})`;
+    }
+    return null;
+  }, [item.type, item.trackId, itemTrack]);
+
   const duration = item.end - item.start;
   const isVisual = item.type !== 'audio';
   const isMediaClip = item.type === 'video' || item.type === 'audio';
   const isOverlay = item.type === 'video' || item.type === 'text' || item.type === 'shape' || item.type === 'image' || item.type === 'overlay' || item.type === 'subtitle';
 
+  // Determine the human-readable type label for the badge
+  const TYPE_LABELS_MAP = {
+    video: 'Video', audio: 'Audio', text: 'Text', image: 'Image',
+    overlay: 'Overlay', shape: 'Shape', subtitle: 'Subtitle',
+  };
+
   return (
     <div className={`ve-properties${compact ? ' ve-properties--compact' : ''}`}>
+      {/* QA warning if track/type mismatch detected */}
+      {trackTypeMismatch && (
+        <div style={{
+          padding: '4px 8px', fontSize: 10, background: 'rgba(255,59,48,0.1)',
+          color: '#FF375F', borderRadius: 4, marginBottom: 4,
+        }}>
+          QA: {trackTypeMismatch}
+        </div>
+      )}
       {/* Header */}
       <div className="ve-properties__header">
         <span className="ve-properties__type-badge" data-type={item.type}>
-          {item.type}
+          {TYPE_LABELS_MAP[item.type] || item.type}
         </span>
         {isLocked && (
           <span style={{ fontSize: 11, color: 'var(--danger, #ef4444)', marginLeft: 4, display: 'flex', alignItems: 'center', gap: 3 }}>

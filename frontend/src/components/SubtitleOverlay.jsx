@@ -321,12 +321,23 @@ export default function SubtitleOverlay({
   }, [currentSubtitle, subtitleItems]);
 
   // Click-to-select: select the subtitle timeline item.
-  // But only if no overlay item (text/image/shape) is already selected — otherwise
-  // the subtitle click-through steals focus from overlay items that visually overlap.
+  // Guard: don't steal selection from overlay items (text/image/shape) that are
+  // visible at the same time — those sit at a higher z-index and the user likely
+  // intended to click them. Also guard if a non-subtitle is already selected.
+  const hasVisibleOverlayItems = useMemo(() => {
+    const absTime = currentTime;
+    return timelineItems.some((it) => {
+      if (it.type === 'subtitle' || it.type === 'video' || it.type === 'audio') return false;
+      if (!(absTime >= it.start && absTime < it.end)) return false;
+      const track = tracks.find((t) => t.id === it.trackId);
+      return track && track.visible !== false;
+    });
+  }, [timelineItems, tracks, currentTime]);
+
   const handleSubtitleClick = useCallback((e) => {
     e.stopPropagation();
     if (!currentTimelineItem) return;
-    // Don't steal selection from overlay items (text, image, shape, video)
+    // Don't steal selection from overlay items
     if (selectedItemId) {
       const sel = timelineItems.find((it) => it.id === selectedItemId);
       if (sel && sel.type !== 'subtitle') return;
