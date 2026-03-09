@@ -14,6 +14,7 @@ import TransitionPicker from './TransitionPicker';
 import ExportDialog from './ExportDialog';
 import InteractiveOverlay from './InteractiveOverlay';
 import { hexToRgbString } from '../utils/colorUtils';
+import { runEditorQA, autoFixTrackCompatibility } from '../utils/editorQA';
 import './VideoEditor.css';
 
 // ── Segment Color Palette ────────────────────────────────────────────────────
@@ -241,7 +242,29 @@ export default function VideoEditor({
   const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
   const storeSelectedItemId = useTimelineStore((s) => s.selectedItemId);
   const updateTimelineItem = useTimelineStore((s) => s.updateItem);
+  const timelineTracks = useTimelineStore((s) => s.tracks);
   const { recovered } = useTimelinePersistence(jobId, clipId);
+
+  // ── Live QA: validate editor state and auto-fix track compatibility issues ──
+  useEffect(() => {
+    if (!timelineTracks.length || !timelineStoreItems.length) return;
+    const qa = runEditorQA(timelineTracks, timelineStoreItems);
+    if (qa.errors.length > 0) {
+      // Auto-fix track compatibility violations
+      const fixes = autoFixTrackCompatibility(timelineTracks, timelineStoreItems);
+      if (fixes.length > 0) {
+        for (const fix of fixes) {
+          updateTimelineItem(fix.itemId, { trackId: fix.toTrackId });
+        }
+        if (process.env.NODE_ENV === 'development') {
+          console.warn('[EditorQA] Auto-fixed track violations:', fixes);
+        }
+      }
+    }
+    if (process.env.NODE_ENV === 'development' && qa.violations.length > 0) {
+      console.warn('[EditorQA]', qa.summary, qa.violations);
+    }
+  }, [timelineTracks, timelineStoreItems, updateTimelineItem]);
 
   // Initialize timeline store when clip data changes
   const addItem = useTimelineStore((s) => s.addItem);

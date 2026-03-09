@@ -21,11 +21,11 @@ export default function InteractiveOverlay({ currentTime = 0, clipStart = 0, con
   const absTime = currentTime;
 
   // Filter to visible interactive items at current time.
-  // Audio items are excluded — all other types (video, text, shape, image, overlay, subtitle)
-  // can be selected, dragged, resized, and rotated in the viewport.
+  // Audio and subtitle items are excluded — subtitle items are rendered by SubtitleOverlay.
+  // Only video, text, shape, image, and overlay types are interactive in the viewport.
   const visible = useMemo(() => {
     return items.filter((it) => {
-      if (it.type === 'audio') return false;
+      if (it.type === 'audio' || it.type === 'subtitle') return false;
       return absTime >= it.start && absTime < it.end;
     });
   }, [items, absTime]);
@@ -94,6 +94,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
 
   const isVideo = item.type === 'video';
   const isText = item.type === 'text';
+  const isShape = item.type === 'shape';
 
   // Video items default to centered full-size; overlays default to smaller centered
   const defaultPos = isVideo ? { x: 50, y: 50 } : { x: 50, y: 50 };
@@ -101,7 +102,35 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
   const pos = item.position || defaultPos;
   // For video items with legacy {x:0,y:0}, treat as centered
   const effectivePos = (isVideo && pos.x === 0 && pos.y === 0) ? { x: 50, y: 50 } : pos;
-  const size = item.size || defaultSize;
+
+  // For text items, auto-measure the text to compute a tight bounding box
+  const measuredSize = useMemo(() => {
+    if (!isText || !containerRef?.current) return null;
+    const text = item.textContent || '';
+    if (!text) return null;
+    const style = item.textStyle || {};
+    const fontSize = style.fontSize || 48;
+    const fontFamily = style.fontFamily || 'DM Sans';
+    const fontWeight = style.fontWeight || 400;
+    try {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      ctx.font = `${fontWeight} ${fontSize}px "${fontFamily}", sans-serif`;
+      const metrics = ctx.measureText(text);
+      const textW = metrics.width;
+      const textH = fontSize * 1.4;
+      const rect = containerRef.current.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        const pad = 16; // padding around text
+        const wPct = ((textW + pad * 2) / rect.width) * 100;
+        const hPct = ((textH + pad * 2) / rect.height) * 100;
+        return { w: Math.max(8, Math.min(95, wPct)), h: Math.max(5, Math.min(80, hPct)) };
+      }
+    } catch { /* fallback to stored size */ }
+    return null;
+  }, [isText, item.textContent, item.textStyle?.fontSize, item.textStyle?.fontFamily, item.textStyle?.fontWeight, containerRef]);
+
+  const size = measuredSize || item.size || defaultSize;
   const rotation = item.transform?.rotation || 0;
 
   // ── Get container dimensions ──
@@ -351,16 +380,16 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
     height: `${size.h}%`,
     padding: boxPad > 0 ? boxPad : undefined,
     transform: `translate(-50%, -50%) ${rotation ? `rotate(${rotation}deg)` : ''}`,
-    cursor: isDragging ? 'grabbing' : 'grab',
-    // Video items: only capture pointer events when selected (viewport click handles
-    // initial selection). This prevents the full-viewport video handle from blocking
-    // clicks on text/shape/image overlays and the play/pause viewport click.
-    pointerEvents: isVideo && !isSelected ? 'none' : 'auto',
-    // Make hitbox slightly bigger for small elements
+    cursor: isDragging ? 'grabbing' : (isVideo ? 'default' : 'grab'),
+    // Video items: always use pointer-events none EXCEPT when actively being
+    // dragged/resized/rotated. This prevents the full-viewport video handle from
+    // blocking clicks on text/shape/image overlays.
+    pointerEvents: isVideo ? 'none' : 'auto',
     minWidth: 20,
     minHeight: 20,
-    // Video items sit behind other overlays unless selected; other items at z:10
-    zIndex: isSelected ? 20 : (isVideo ? 1 : 10),
+    // Video items always sit behind overlays (z:1). Other items at z:10, selected at z:15.
+    // This ensures text/shape/image overlays are always clickable above the video.
+    zIndex: isVideo ? 1 : (isSelected ? 15 : 10),
   };
 
   const isActive = isDragging || isResizing || isRotating;

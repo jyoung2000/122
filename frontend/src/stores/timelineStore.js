@@ -11,6 +11,26 @@ const createDefaultTracks = () => [
   { id: 't1', type: 'subtitle', name: 'Subtitles', order: 4, muted: false, locked: false, visible: true },
 ];
 
+// Track-item type compatibility map
+// Defines which item types are allowed on each track type
+export const TRACK_ALLOWED_TYPES = {
+  video: ['video'],
+  overlay: ['text', 'shape', 'image', 'overlay'],
+  audio: ['audio'],
+  subtitle: ['subtitle'],
+};
+
+// Check if an item type is compatible with a track type
+function isTrackCompatible(itemType, trackType) {
+  const allowed = TRACK_ALLOWED_TYPES[trackType];
+  return allowed ? allowed.includes(itemType) : false;
+}
+
+// Find the first compatible track for an item type
+function findCompatibleTrack(tracks, itemType) {
+  return tracks.find((t) => isTrackCompatible(itemType, t.type)) || null;
+}
+
 let _itemIdCounter = 1;
 const nextItemId = () => `item-${_itemIdCounter++}`;
 const nextMediaId = () => `media-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -143,20 +163,8 @@ const useTimelineStore = create(
         const state = get();
         const track = state.tracks.find((t) => t.id === trackId);
         if (track) {
-          const trackType = track.type;
-          const compatible =
-            (itemType === 'video' && trackType === 'video') ||
-            (itemType === 'audio' && trackType === 'audio') ||
-            ((itemType === 'text' || itemType === 'shape' || itemType === 'image' || itemType === 'overlay') && trackType === 'overlay') ||
-            (itemType === 'subtitle' && trackType === 'subtitle');
-          if (!compatible) {
-            const correctTrack = state.tracks.find((t) => {
-              if (itemType === 'video') return t.type === 'video';
-              if (itemType === 'audio') return t.type === 'audio';
-              if (itemType === 'text' || itemType === 'shape' || itemType === 'image' || itemType === 'overlay') return t.type === 'overlay';
-              if (itemType === 'subtitle') return t.type === 'subtitle';
-              return false;
-            });
+          if (!isTrackCompatible(itemType, track.type)) {
+            const correctTrack = findCompatibleTrack(state.tracks, itemType);
             if (correctTrack) trackId = correctTrack.id;
           }
         }
@@ -206,7 +214,18 @@ const useTimelineStore = create(
 
       updateItem: (itemId, updates) => set((state) => {
         const item = state.items.find(i => i.id === itemId);
-        if (item) Object.assign(item, updates);
+        if (!item) return;
+        // Validate track change: prevent moving items to incompatible tracks
+        if (updates.trackId && updates.trackId !== item.trackId) {
+          const targetTrack = state.tracks.find(t => t.id === updates.trackId);
+          if (targetTrack && !isTrackCompatible(item.type, targetTrack.type)) {
+            // Silently reject the track change — keep item on current track
+            const { trackId, ...rest } = updates;
+            Object.assign(item, rest);
+            return;
+          }
+        }
+        Object.assign(item, updates);
       }),
 
       updateItemWithSnapshot: (itemId, updates) => set((state) => {
