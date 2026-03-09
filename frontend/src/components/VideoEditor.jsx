@@ -1698,10 +1698,10 @@ export default function VideoEditor({
   // ── Keyboard shortcuts (J-K-L shuttle control) ─────
   useEffect(() => {
     const onKeyDown = (e) => {
-      // Skip when multi-track keyboard shortcuts are handling this
-      if (showMultiTrack) return;
       // Don't capture keys when typing in inputs
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      // Prevent native video element keyboard handling
+      if (e.target.tagName === 'VIDEO') e.target.blur();
 
       switch (e.code) {
         case 'Space':
@@ -1755,8 +1755,9 @@ export default function VideoEditor({
           e.preventDefault();
           toggleMute();
           break;
-        // ── Segment shortcuts ──
+        // ── Segment shortcuts (only in simple mode, not multi-track) ──
         case 'KeyS': {
+          if (showMultiTrack) break;
           e.preventDefault();
           const splitTime = videoRef.current?.currentTime ?? currentTime;
           // Split existing segment at playhead, or create a new one
@@ -1799,6 +1800,7 @@ export default function VideoEditor({
         }
         case 'Delete':
         case 'Backspace': {
+          if (showMultiTrack) break;
           if (selectedSegmentId) {
             e.preventDefault();
             const next = segments.filter(s => s.id !== selectedSegmentId);
@@ -1809,12 +1811,14 @@ export default function VideoEditor({
           break;
         }
         case 'Escape':
+          if (showMultiTrack) break;
           if (selectedSegmentId) {
             e.preventDefault();
             setSelectedSegmentId(null);
           }
           break;
         case 'Tab': {
+          if (showMultiTrack) break;
           if (segments.length > 0) {
             e.preventDefault();
             const curIdx = segments.findIndex(s => s.id === selectedSegmentId);
@@ -1829,12 +1833,14 @@ export default function VideoEditor({
           break;
         }
         case 'BracketLeft':
+          if (showMultiTrack) break;
           if (selectedSegment) {
             e.preventDefault();
             seekTo(selectedSegment.start);
           }
           break;
         case 'BracketRight':
+          if (showMultiTrack) break;
           if (selectedSegment) {
             e.preventDefault();
             seekTo(selectedSegment.end);
@@ -1982,6 +1988,7 @@ export default function VideoEditor({
         <video
           ref={videoRef}
           src={src}
+          tabIndex={-1}
           playsInline
           style={(() => {
             const hasCustomTransform = showMultiTrack && (
