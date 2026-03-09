@@ -30,18 +30,21 @@ _MODEL_LOAD_TIMEOUT = 600  # 10 minutes
 _SEGMENT_STALL_TIMEOUT = 120  # 2 minutes
 
 
-def _detect_cuda_available() -> tuple[bool, int, str]:
+def _detect_cuda_available() -> tuple[bool, int, str, int]:
     """Try multiple methods to detect CUDA GPU availability.
 
-    Returns (cuda_available, device_count, gpu_name).
+    Returns (cuda_available, device_count, gpu_name, best_device_index).
+    The best_device_index is the index of the most capable GPU (highest VRAM).
     """
+    best_name, best_idx = _get_best_gpu()
+
     # Method 1: ctranslate2 (used by faster-whisper)
     try:
         import ctranslate2
         cuda_count = ctranslate2.get_cuda_device_count()
         if cuda_count > 0:
-            gpu_name = _get_gpu_name_from_nvidia_smi() or f"CUDA GPU ({cuda_count} device{'s' if cuda_count > 1 else ''})"
-            return True, cuda_count, gpu_name
+            gpu_name = best_name or f"CUDA GPU ({cuda_count} device{'s' if cuda_count > 1 else ''})"
+            return True, cuda_count, gpu_name, best_idx
     except Exception:
         pass
 
@@ -50,8 +53,8 @@ def _detect_cuda_available() -> tuple[bool, int, str]:
         import torch
         if torch.cuda.is_available():
             count = torch.cuda.device_count()
-            name = torch.cuda.get_device_name(0) if count > 0 else "CUDA GPU"
-            return True, count, name
+            name = best_name or (torch.cuda.get_device_name(0) if count > 0 else "CUDA GPU")
+            return True, count, name, best_idx
     except Exception:
         pass
 
@@ -60,15 +63,13 @@ def _detect_cuda_available() -> tuple[bool, int, str]:
         import glob
         nvidia_devs = glob.glob("/dev/nvidia[0-9]*")
         if nvidia_devs:
-            gpu_name = _get_gpu_name_from_nvidia_smi() or _get_gpu_name_from_sysfs() or f"NVIDIA GPU ({len(nvidia_devs)} devices)"
+            gpu_name = best_name or _get_gpu_name_from_sysfs() or f"NVIDIA GPU ({len(nvidia_devs)} devices)"
             logger.info(
                 "NVIDIA device nodes found (%s) but CUDA runtime not available. "
-                "Install CUDA toolkit (apt install nvidia-cuda-toolkit) or use a CUDA-enabled "
-                "container image for GPU-accelerated Whisper.",
+                "Install CUDA toolkit or use Dockerfile.gpu for GPU-accelerated Whisper.",
                 nvidia_devs,
             )
-            # Devices exist but CUDA runtime isn't loadable - can't use GPU for Whisper
-            return False, 0, gpu_name
+            return False, 0, gpu_name, 0
     except Exception:
         pass
 
@@ -78,30 +79,73 @@ def _detect_cuda_available() -> tuple[bool, int, str]:
         for lib in ["libcuda.so.1", "libcuda.so", "nvcuda.dll"]:
             try:
                 ctypes.cdll.LoadLibrary(lib)
-                gpu_name = _get_gpu_name_from_nvidia_smi() or _get_gpu_name_from_sysfs() or "NVIDIA GPU"
+                gpu_name = best_name or _get_gpu_name_from_sysfs() or "NVIDIA GPU"
                 logger.info("CUDA library %s is loadable — GPU may be available for Whisper", lib)
-                return True, 1, gpu_name
+                return True, 1, gpu_name, best_idx
             except OSError:
                 continue
     except Exception:
         pass
 
-    return False, 0, ""
+    return False, 0, "", 0
 
 
-def _get_gpu_name_from_nvidia_smi() -> str:
-    """Try to get GPU name from nvidia-smi."""
+def _enumerate_gpus_nvidia_smi() -> list[dict]:
+    """Enumerate all NVIDIA GPUs via nvidia-smi.
+
+    Returns list of {index, name, vram_mb} sorted by VRAM (most capable first).
+    """
     try:
         import subprocess
         smi = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=index,name,memory.total",
+             "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=5,
         )
-        if smi.returncode == 0 and smi.stdout.strip():
-            return smi.stdout.strip().split("\n")[0].strip()
+        if smi.returncode != 0 or not smi.stdout.strip():
+            return []
+        gpus = []
+        for line in smi.stdout.strip().split("\n"):
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 3:
+                try:
+                    gpus.append({
+                        "index": int(parts[0]),
+                        "name": parts[1],
+                        "vram_mb": int(float(parts[2])),
+                    })
+                except (ValueError, IndexError):
+                    continue
+        # Sort by VRAM descending — prefer most capable GPU
+        gpus.sort(key=lambda g: g["vram_mb"], reverse=True)
+        return gpus
     except Exception:
-        pass
-    return ""
+        return []
+
+
+def _get_best_gpu() -> tuple[str, int]:
+    """Get the most capable GPU name and its device index.
+
+    Returns (gpu_name, device_index). Prefers GPU with the most VRAM
+    so a passed-through RTX 4070 is chosen over a server's GTX 1650.
+    """
+    gpus = _enumerate_gpus_nvidia_smi()
+    if gpus:
+        best = gpus[0]
+        if len(gpus) > 1:
+            logger.info(
+                "Multiple GPUs detected: %s — selecting %s (index %d, %d MB VRAM)",
+                ", ".join(f"{g['name']} [{g['index']}]" for g in gpus),
+                best["name"], best["index"], best["vram_mb"],
+            )
+        return best["name"], best["index"]
+    return "", 0
+
+
+def _get_gpu_name_from_nvidia_smi() -> str:
+    """Try to get GPU name from nvidia-smi (best/most capable GPU)."""
+    name, _ = _get_best_gpu()
+    return name
 
 
 def _get_gpu_name_from_sysfs() -> str:
@@ -144,7 +188,7 @@ def _get_whisper_model():
             gpu_name = ""
             device_index = 0
 
-            cuda_available, cuda_count, detected_name = _detect_cuda_available()
+            cuda_available, cuda_count, detected_name, best_device_idx = _detect_cuda_available()
             if not settings.GPU_ACCELERATION_ENABLED:
                 # User has GPU acceleration disabled — force CPU even if
                 # CUDA is available, but still record the GPU name for UI.
@@ -158,7 +202,8 @@ def _get_whisper_model():
                 compute_type = "float16"
                 gpu_name = detected_name
 
-                # Use specific GPU device index if configured
+                # Use specific GPU device index if configured, otherwise use
+                # the auto-detected best GPU (highest VRAM).
                 gpu_device_idx = (settings.GPU_DEVICE_INDEX or "").strip()
                 if gpu_device_idx and gpu_device_idx.isdigit():
                     idx = int(gpu_device_idx)
@@ -166,9 +211,13 @@ def _get_whisper_model():
                         device_index = idx
                     else:
                         logger.warning(
-                            "GPU_DEVICE_INDEX=%s exceeds available CUDA devices (%d). Using device 0.",
-                            gpu_device_idx, cuda_count,
+                            "GPU_DEVICE_INDEX=%s exceeds available CUDA devices (%d). Using best GPU at index %d.",
+                            gpu_device_idx, cuda_count, best_device_idx,
                         )
+                        device_index = best_device_idx
+                else:
+                    # Auto-select the most capable GPU (highest VRAM)
+                    device_index = best_device_idx if best_device_idx < cuda_count else 0
 
                 logger.info(
                     "CUDA GPU detected: %s — using float16 for Whisper on device %d (of %d)",

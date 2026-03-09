@@ -236,10 +236,20 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
                 pass
 
         if nvidia_detected and nvidia_gpus:
+            # Select the most capable GPU (highest VRAM) — ensures a locally
+            # passed-through high-end GPU is preferred over a server's weaker GPU.
+            best_gpu = max(nvidia_gpus, key=lambda g: g.get("vram_mb", 0))
+            if len(nvidia_gpus) > 1:
+                logger.info(
+                    "Multiple NVIDIA GPUs detected — selecting %s (index %s, %d MB) over %s",
+                    best_gpu["name"], best_gpu["index"], best_gpu.get("vram_mb", 0),
+                    ", ".join(g["name"] for g in nvidia_gpus if g["index"] != best_gpu["index"]),
+                )
             info.update({
-                "gpu_name": nvidia_gpus[0]["name"],
-                "vram_mb": nvidia_gpus[0].get("vram_mb", 0),
-                "driver_version": nvidia_gpus[0].get("driver_version", ""),
+                "gpu_name": best_gpu["name"],
+                "vram_mb": best_gpu.get("vram_mb", 0),
+                "driver_version": best_gpu.get("driver_version", ""),
+                "gpu_device_index": best_gpu["index"],
             })
 
     # ── Step 2: Check CUDA for Whisper ──
@@ -276,14 +286,19 @@ def detect_gpu_capabilities(force_redetect: bool = False) -> dict:
     encoder_configs = []
 
     if "h264_nvenc" in available_encoders and (forced_vendor in ("auto", "nvidia") or nvidia_detected):
+        # Use the best GPU's device index for the test encode
+        nvenc_gpu_idx = info.get("gpu_device_index", "")
+        nvenc_test_cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1",
+        ]
+        if nvenc_gpu_idx:
+            nvenc_test_cmd += ["-gpu", str(nvenc_gpu_idx)]
+        nvenc_test_cmd += ["-c:v", "h264_nvenc", "-f", "null", "-"]
         encoder_configs.append({
             "vendor": "nvidia", "encoder": "h264_nvenc", "decoder": "h264_cuvid",
             "hwaccel": "cuda", "hwaccel_device": None,
-            "test_cmd": [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-f", "lavfi", "-i", "nullsrc=s=256x256:d=0.1",
-                "-c:v", "h264_nvenc", "-f", "null", "-",
-            ],
+            "test_cmd": nvenc_test_cmd,
         })
 
     if "h264_qsv" in available_encoders and forced_vendor in ("auto", "intel"):
@@ -698,8 +713,10 @@ def _gpu_encode_args(quality_preset: dict, export_quality: str = "1080p") -> lis
         and app_settings.GPU_HEVC_FOR_4K
     )
 
-    # GPU device index — lets the user pick which GPU to encode on
+    # GPU device index — user preference, or auto-detected best GPU (highest VRAM)
     gpu_device = (app_settings.GPU_DEVICE_INDEX or "").strip()
+    if not gpu_device and gpu.get("gpu_device_index"):
+        gpu_device = str(gpu["gpu_device_index"])
 
     if gpu["encoder"] == "h264_nvenc":
         # NVENC supports -gpu N to select a specific NVIDIA GPU

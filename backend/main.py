@@ -65,15 +65,42 @@ async def _startup_preload():
     gpu_name = ""
 
     # Method 1: nvidia-smi (most reliable when installed)
+    # Enumerate ALL GPUs and pick the most capable (highest VRAM) —
+    # this ensures a locally passed-through high-end GPU is preferred
+    # over a server's weaker GPU.
     try:
         smi = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=index,name,memory.total",
+             "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=10,
         )
         if smi.returncode == 0 and smi.stdout.strip():
-            gpu_name = smi.stdout.strip().split("\n")[0].strip()
-            nvidia_found = True
-            logger.info("NVIDIA GPU detected via nvidia-smi: %s", gpu_name)
+            gpu_list = []
+            for line in smi.stdout.strip().split("\n"):
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 3:
+                    try:
+                        gpu_list.append({
+                            "index": int(parts[0]),
+                            "name": parts[1],
+                            "vram_mb": int(float(parts[2])),
+                        })
+                    except (ValueError, IndexError):
+                        continue
+            if gpu_list:
+                # Sort by VRAM descending — prefer most capable GPU
+                gpu_list.sort(key=lambda g: g["vram_mb"], reverse=True)
+                best = gpu_list[0]
+                gpu_name = best["name"]
+                nvidia_found = True
+                if len(gpu_list) > 1:
+                    logger.info(
+                        "Multiple NVIDIA GPUs detected: %s — selecting %s (index %d, %d MB VRAM)",
+                        ", ".join(f"{g['name']} [{g['index']}]" for g in gpu_list),
+                        best["name"], best["index"], best["vram_mb"],
+                    )
+                else:
+                    logger.info("NVIDIA GPU detected via nvidia-smi: %s (%d MB)", gpu_name, best["vram_mb"])
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 

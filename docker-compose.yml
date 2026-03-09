@@ -13,6 +13,17 @@ services:
       - whisper_models:/root/.cache/huggingface
     environment:
       - PYTHONUNBUFFERED=1
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+    # Enable GPU passthrough when NVIDIA Container Toolkit is installed.
+    # If no GPU is available, the container still starts normally on CPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, video, compute]
     env_file:
       - path: .env
         required: false

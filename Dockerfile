@@ -9,6 +9,10 @@ RUN npm run build
 ## Stage 2: Runtime
 FROM python:3.11-slim
 
+# Make NVIDIA GPUs visible when passed through with --gpus
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+
 # Install system dependencies (ca-certificates ensures HTTPS model downloads work)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
@@ -20,8 +24,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-freefont-ttf \
     fonts-liberation2 \
     unzip \
+    gnupg2 \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Install CUDA runtime libraries so GPU passthrough works without the full GPU image.
+# This adds ~600MB but enables Whisper GPU acceleration when an NVIDIA GPU is passed
+# through via docker --gpus or docker-compose deploy.resources.reservations.
+# The keyring package provides the repo GPG key; we only install the minimal runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends wget && \
+    wget -qO /tmp/cuda-keyring.deb \
+      https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-keyring_1.1-1_all.deb && \
+    dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      cuda-cudart-12-3 \
+      libcublas-12-3 \
+      libcublaslt-12-3 \
+      libcudnn8 \
+      libcufft-12-3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Ensure CUDA libraries are on LD_LIBRARY_PATH for ctranslate2/faster-whisper
+ENV LD_LIBRARY_PATH=/usr/local/cuda-12.3/lib64:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+ENV PATH=/usr/local/cuda-12.3/bin:${PATH}
 
 # Install DM Sans font (default subtitle font) so FFmpeg/libass can find it
 # Downloaded directly from the canonical Google Fonts GitHub repo (stable raw URLs)
@@ -56,10 +82,11 @@ RUN mkdir -p /data/fonts && \
 
 WORKDIR /app
 
-# Install Python dependencies
+# Install Python dependencies + CUDA support for faster-whisper
 COPY backend/requirements.txt .
 RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir nvidia-cublas-cu12 nvidia-cudnn-cu12==9.* || true
 
 # Copy backend source
 COPY backend/ ./backend/
