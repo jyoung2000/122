@@ -1,4 +1,4 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import useTimelineStore from '../stores/timelineStore';
 
 /**
@@ -19,6 +19,11 @@ export default function useKeyboardShortcuts({
   const splitItem = useTimelineStore((s) => s.splitItem);
   const playhead = useTimelineStore((s) => s.playhead);
   const items = useTimelineStore((s) => s.items);
+
+  // Arrow key hold-to-repeat state
+  const arrowHoldRef = useRef({ key: null, interval: null });
+  const onSkipTimeRef = useRef(onSkipTime);
+  onSkipTimeRef.current = onSkipTime;
 
   const handleKeyDown = useCallback((e) => {
     if (!enabled) return;
@@ -59,13 +64,21 @@ export default function useKeyboardShortcuts({
         onTogglePlay?.();
         break;
       case 'ArrowLeft':
+      case 'ArrowRight': {
         e.preventDefault();
-        onSkipTime?.(e.shiftKey ? -1 : -1 / 30);
+        if (e.repeat) return; // handled by our own interval
+        const dir = e.code === 'ArrowLeft' ? -1 : 1;
+        const delta = e.shiftKey ? dir : dir / 30;
+        onSkipTime?.(delta);
+        // Start hold-to-repeat interval
+        const hold = arrowHoldRef.current;
+        if (hold.interval) clearInterval(hold.interval);
+        hold.key = e.code;
+        hold.interval = setInterval(() => {
+          onSkipTimeRef.current?.(delta);
+        }, 1000 / 15); // 15 steps per second while held
         break;
-      case 'ArrowRight':
-        e.preventDefault();
-        onSkipTime?.(e.shiftKey ? 1 : 1 / 30);
-        break;
+      }
 
       // J/K/L shuttle
       case 'KeyJ':
@@ -156,9 +169,30 @@ export default function useKeyboardShortcuts({
   }, [enabled, onTogglePlay, onSeek, onSkipTime, onToggleMute, onShuttleSpeed,
       setActiveTool, selectedItemId, removeItem, splitItem, playhead, items]);
 
+  const handleKeyUp = useCallback((e) => {
+    if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+      const hold = arrowHoldRef.current;
+      if (hold.key === e.code && hold.interval) {
+        clearInterval(hold.interval);
+        hold.interval = null;
+        hold.key = null;
+      }
+    }
+  }, []);
+
   useEffect(() => {
     if (!enabled) return;
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [enabled, handleKeyDown]);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      const hold = arrowHoldRef.current;
+      if (hold.interval) {
+        clearInterval(hold.interval);
+        hold.interval = null;
+        hold.key = null;
+      }
+    };
+  }, [enabled, handleKeyDown, handleKeyUp]);
 }

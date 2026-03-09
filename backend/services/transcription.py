@@ -359,6 +359,24 @@ def preload_model():
     try:
         logger.info("Preloading Whisper model in background...")
         _get_whisper_model()
+
+        # Log a summary of what GPU is used for each subsystem
+        _wdev = whisper_device_info
+        if _wdev["device"] == "cuda" and _wdev.get("gpu_name"):
+            whisper_label = f"CUDA — {_wdev['gpu_name']} ({_wdev['compute_type']}, device {_wdev.get('device_index', 0)})"
+        elif _wdev["device"] == "cuda":
+            whisper_label = f"CUDA ({_wdev['compute_type']})"
+        else:
+            whisper_label = f"CPU ({_wdev['compute_type']})"
+
+        try:
+            from backend.services.clip_exporter import get_encoder_label
+            encoder_label = get_encoder_label()
+        except Exception:
+            encoder_label = "unknown"
+
+        logger.info("Whisper transcription: %s", whisper_label)
+        logger.info("Video encoding: %s", encoder_label)
     except Exception as e:
         logger.warning(f"Whisper model preload failed (will retry on first use): {e}")
 
