@@ -65,7 +65,7 @@ export default function ToolBar({ compact = false }) {
           animation: 'none',
         },
         position: { x: 50, y: 50 },
-        size: { w: 80, h: 20 },
+        size: { w: 35, h: 12 },
       });
       setSelectedItemId(newId);
       setActiveTool('select');

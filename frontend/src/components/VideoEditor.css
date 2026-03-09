@@ -36,6 +36,8 @@
 [data-theme="dark"] .ve-container {
   --ve-chrome-bg: rgba(28, 28, 30, 0.88);
   --ve-chrome-border: rgba(255, 255, 255, 0.06);
+  --ve-text: #F5F5F7;
+  --ve-text-muted: rgba(235, 235, 245, 0.6);
   --ve-trim-dimmed: rgba(0, 0, 0, 0.55);
   --ve-btn-hover: rgba(255, 255, 255, 0.08);
   --ve-btn-active: rgba(255, 255, 255, 0.12);
@@ -46,6 +48,7 @@
   --ve-slider-track: rgba(255, 255, 255, 0.15);
   --ve-dropdown-bg: rgba(30, 30, 32, 0.95);
   --ve-dropdown-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
   background: #0d0d0f;
 }
 
@@ -2586,6 +2589,10 @@ input.ve-timecode--input {
 
 .ve-properties__select:focus {
   border-color: var(--ve-accent);
+}
+.ve-properties__select option {
+  background: var(--ve-dropdown-bg, #fff);
+  color: var(--ve-text);
 }
 
 .ve-properties__color {

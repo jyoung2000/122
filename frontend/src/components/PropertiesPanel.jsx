@@ -251,6 +251,44 @@ function SubtitleProperties({ item, update, settings, onSettingsChange }) {
   );
 }
 
+const DEFAULTS = {
+  position: { x: 50, y: 50 },
+  size: { video: { w: 100, h: 100 }, text: { w: 35, h: 12 }, shape: { w: 40, h: 30 }, other: { w: 30, h: 30 } },
+  rotation: 0,
+  fadeIn: 0,
+  fadeOut: 0,
+  volume: 1,
+  speed: 1.0,
+  opacity: 1,
+  effects: { brightness: 0, contrast: 0, saturation: 0, blur: 0, hueRotate: 0, sepia: 0 },
+  textStyle: { fontSize: 48, fontFamily: 'DM Sans', fontWeight: 700, color: '#FFFFFF', textAlign: 'center', outlineWidth: 2, outlineColor: '#000000', bgOpacity: 0, bgPadding: 8, bgRadius: 4, shadowBlur: 0, shadowOffsetX: 0, shadowOffsetY: 0, animation: 'none' },
+};
+
+function hasChanged(current, def) {
+  if (current == null && def == null) return false;
+  if (typeof def === 'object' && def !== null) {
+    return Object.keys(def).some(k => {
+      const cv = current?.[k];
+      const dv = def[k];
+      return cv !== undefined && cv !== null && cv !== dv;
+    });
+  }
+  return current !== def;
+}
+
+function ResetButton({ onClick, label = 'Reset' }) {
+  return (
+    <button
+      className="ve-properties__speed-pill"
+      style={{ fontSize: 9, padding: '2px 6px', marginLeft: 'auto', opacity: 0.7 }}
+      onClick={onClick}
+      title={`Reset ${label} to default`}
+    >
+      {label}
+    </button>
+  );
+}
+
 export default function PropertiesPanel({ compact = false, settings = null, onSettingsChange = null }) {
   const selectedItemId = useTimelineStore((s) => s.selectedItemId);
   const items = useTimelineStore((s) => s.items);
@@ -329,7 +367,19 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
       {/* ── Position & Size (all visual items including video) ── */}
       {isOverlay && (
         <div className="ve-properties__section">
-          <label className="ve-properties__label">Position & Size</label>
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+            <label className="ve-properties__label" style={{ marginBottom: 0 }}>Position & Size</label>
+            {(hasChanged(item.position, DEFAULTS.position) ||
+              hasChanged(item.size, DEFAULTS.size[item.type] || DEFAULTS.size.other) ||
+              (item.transform?.rotation || 0) !== DEFAULTS.rotation) && (
+              <ResetButton label="Reset" onClick={() => {
+                const defSize = DEFAULTS.size[item.type] || DEFAULTS.size.other;
+                update('position', { ...DEFAULTS.position });
+                update('size', { ...defSize });
+                updateNested('transform', 'rotation', 0);
+              }} />
+            )}
+          </div>
           <SliderRow label="X" value={item.position?.x ?? 50} min={0} max={100} step={0.5} unit="%" onChange={(v) => update('position', { ...item.position, x: v })} />
           <SliderRow label="Y" value={item.position?.y ?? 50} min={0} max={100} step={0.5} unit="%" onChange={(v) => update('position', { ...item.position, y: v })} />
           <SliderRow label="Width" value={item.size?.w ?? 50} min={1} max={200} step={0.5} unit="%" onChange={(v) => update('size', { ...item.size, w: v })} />
@@ -354,7 +404,12 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
 
       {/* ── Fades ── */}
       <div className="ve-properties__section">
-        <label className="ve-properties__label">Fades</label>
+        <div style={{ display: 'flex', alignItems: 'center' }}>
+          <label className="ve-properties__label" style={{ marginBottom: 0 }}>Fades</label>
+          {((item.fadeIn || 0) !== 0 || (item.fadeOut || 0) !== 0) && (
+            <ResetButton label="Reset" onClick={() => { update('fadeIn', 0); update('fadeOut', 0); }} />
+          )}
+        </div>
         <div className="ve-properties__row">
           <NumField label="Fade In" value={item.fadeIn || 0} min={0} max={duration} step={0.1} onChange={(v) => update('fadeIn', v)} />
           <NumField label="Fade Out" value={item.fadeOut || 0} min={0} max={duration} step={0.1} onChange={(v) => update('fadeOut', v)} />
@@ -364,7 +419,12 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
       {/* ── Volume (video & audio) ── */}
       {isMediaClip && (
         <div className="ve-properties__section">
-          <label className="ve-properties__label">Audio</label>
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+            <label className="ve-properties__label" style={{ marginBottom: 0 }}>Audio</label>
+            {(item.volume ?? 1) !== 1 && (
+              <ResetButton label="Reset" onClick={() => update('volume', 1)} />
+            )}
+          </div>
           <SliderRow label="Volume" value={item.volume ?? 1} min={0} max={2} step={0.01} onChange={(v) => update('volume', v)} />
         </div>
       )}
@@ -372,7 +432,12 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
       {/* ── Speed (video & audio) ── */}
       {isMediaClip && (
         <div className="ve-properties__section">
-          <label className="ve-properties__label">Speed</label>
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+            <label className="ve-properties__label" style={{ marginBottom: 0 }}>Speed</label>
+            {item.speed !== 1.0 && (
+              <ResetButton label="Reset" onClick={() => update('speed', 1.0)} />
+            )}
+          </div>
           <div className="ve-properties__speed-pills">
             {SPEED_PRESETS.map((s) => (
               <button
@@ -390,7 +455,12 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
       {/* ── Opacity (all visual items) ── */}
       {isVisual && (
         <div className="ve-properties__section">
-          <label className="ve-properties__label">Opacity</label>
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+            <label className="ve-properties__label" style={{ marginBottom: 0 }}>Opacity</label>
+            {(item.opacity ?? 1) !== 1 && (
+              <ResetButton label="Reset" onClick={() => update('opacity', 1)} />
+            )}
+          </div>
           <SliderRow label="" value={item.opacity ?? 1} min={0} max={1} step={0.01} onChange={(v) => update('opacity', v)} />
         </div>
       )}
@@ -398,9 +468,14 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
       {/* ── Effects (all visual items) ── */}
       {(item.type === 'video' || item.type === 'text' || item.type === 'shape' || item.type === 'image' || item.type === 'overlay') && (
         <div className="ve-properties__section">
-          <label className="ve-properties__label" onClick={() => toggleSection('effects')} style={{ cursor: 'pointer' }}>
-            Effects {expandedSections.effects === false ? '▸' : '▾'}
-          </label>
+          <div style={{ display: 'flex', alignItems: 'center' }}>
+            <label className="ve-properties__label" onClick={() => toggleSection('effects')} style={{ cursor: 'pointer', marginBottom: 0 }}>
+              Effects {expandedSections.effects === false ? '▸' : '▾'}
+            </label>
+            {hasChanged(item.effects, DEFAULTS.effects) && (
+              <ResetButton label="Reset" onClick={() => update('effects', { ...DEFAULTS.effects })} />
+            )}
+          </div>
           {expandedSections.effects !== false && (
             <>
               {[
@@ -699,8 +774,12 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
             <button
               className={`ve-properties__speed-pill${(item.clipSettings?.subtitlesEnabled ?? settings?.subtitlesEnabled) ? ' ve-properties__speed-pill--active' : ''}`}
               onClick={() => {
-                const cs = { ...(item.clipSettings || settings || {}), subtitlesEnabled: !(item.clipSettings?.subtitlesEnabled ?? settings?.subtitlesEnabled) };
+                const newVal = !(item.clipSettings?.subtitlesEnabled ?? settings?.subtitlesEnabled);
+                const cs = { ...(item.clipSettings || settings || {}), subtitlesEnabled: newVal };
                 updateItem(item.id, { clipSettings: cs });
+                if (onSettingsChange) {
+                  onSettingsChange({ ...settings, subtitlesEnabled: newVal });
+                }
               }}
             >
               {(item.clipSettings?.subtitlesEnabled ?? settings?.subtitlesEnabled) ? 'On' : 'Off'}

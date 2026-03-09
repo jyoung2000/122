@@ -44,6 +44,10 @@ export default function useKeyboardShortcuts({
             useTimelineStore.temporal.getState().undo();
           }
           return;
+        case 'KeyY':
+          e.preventDefault();
+          useTimelineStore.temporal.getState().redo();
+          return;
         case 'KeyS':
           e.preventDefault();
           // TODO: Project save

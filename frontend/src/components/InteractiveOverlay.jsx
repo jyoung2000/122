@@ -342,7 +342,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
   // Determine the bounding box style.
   // Elements use percentage-based position (center) and size.
   // Text items get extra padding so the bounding box isn't cramped
-  const boxPad = isText ? 12 : 0;
+  const boxPad = 0;
   const boxStyle = {
     position: 'absolute',
     left: `${effectivePos.x}%`,

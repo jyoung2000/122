@@ -2998,37 +2998,6 @@ export default function VideoEditor({
           <div className="ve-multitrack__toolbar">
             <ToolBar />
             <div className="ve-multitrack__toolbar-actions">
-              <button
-                className={`ve-btn ve-btn--small${showEffectsPanel ? ' ve-btn--active' : ''}`}
-                onClick={() => {
-                  setShowEffectsPanel(v => {
-                    if (!v) setShowProperties(true); // auto-open sidebar
-                    return !v;
-                  });
-                }}
-                title="Effects"
-              >
-                Effects
-              </button>
-              <button
-                className={`ve-btn ve-btn--small${showTransitions ? ' ve-btn--active' : ''}`}
-                onClick={() => {
-                  setShowTransitions(v => {
-                    if (!v) setShowProperties(true); // auto-open sidebar
-                    return !v;
-                  });
-                }}
-                title="Transitions"
-              >
-                Transitions
-              </button>
-              <button
-                className="ve-btn ve-btn--small ve-btn--export"
-                onClick={() => setShowExportDialog(true)}
-                title="Export"
-              >
-                Export
-              </button>
             </div>
           </div>
 
