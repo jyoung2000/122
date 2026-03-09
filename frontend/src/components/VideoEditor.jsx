@@ -344,21 +344,32 @@ export default function VideoEditor({
       .map((seg, idx) => ({ ...seg, _origIdx: idx }))
       .filter((seg) => seg.end > clipStart && seg.start < effectiveEnd);
 
-    // Match existing subtitle items to transcript segments by time proximity
-    const matched = new Set(); // transcript indices that matched
+    // Match existing subtitle items to transcript segments.
+    // Prefer stable transcriptIndex; fall back to time proximity.
+    const matched = new Set(); // transcript _origIdx values that matched
     subtitleItems.forEach((subItem) => {
       const subAbsStart = (subItem.start || 0) + clipStart;
       const subAbsEnd = (subItem.end || 0) + clipStart;
-      const match = clipTranscript.find((seg) => {
-        if (matched.has(seg._origIdx)) return false;
-        return Math.abs((seg.start ?? 0) - subAbsStart) < 0.15 &&
-               Math.abs((seg.end ?? 0) - subAbsEnd) < 0.15;
-      });
+      let match = null;
+      // Try transcriptIndex first
+      if (subItem.transcriptIndex != null) {
+        match = clipTranscript.find((seg) => seg._origIdx === subItem.transcriptIndex && !matched.has(seg._origIdx));
+      }
+      // Fall back to time proximity
+      if (!match) {
+        match = clipTranscript.find((seg) => {
+          if (matched.has(seg._origIdx)) return false;
+          return Math.abs((seg.start ?? 0) - subAbsStart) < 0.15 &&
+                 Math.abs((seg.end ?? 0) - subAbsEnd) < 0.15;
+        });
+      }
       if (match) {
         matched.add(match._origIdx);
         const updates = {};
         if (match.text !== subItem.subtitleText) updates.subtitleText = match.text;
         if (match.speaker !== subItem.speaker) updates.speaker = match.speaker;
+        // Update transcriptIndex if not set
+        if (subItem.transcriptIndex == null) updates.transcriptIndex = match._origIdx;
         if (Object.keys(updates).length > 0) {
           updateTimelineItem(subItem.id, updates);
           lastSyncedSubtitlesRef.current.set(subItem.id, match.text);
@@ -370,10 +381,17 @@ export default function VideoEditor({
     subtitleItems.forEach((subItem) => {
       const subAbsStart = (subItem.start || 0) + clipStart;
       const subAbsEnd = (subItem.end || 0) + clipStart;
-      const hasMatch = clipTranscript.some((seg) =>
-        Math.abs((seg.start ?? 0) - subAbsStart) < 0.3 &&
-        Math.abs((seg.end ?? 0) - subAbsEnd) < 0.3
-      );
+      // Check by transcriptIndex first, then time proximity
+      let hasMatch = false;
+      if (subItem.transcriptIndex != null) {
+        hasMatch = clipTranscript.some((seg) => seg._origIdx === subItem.transcriptIndex);
+      }
+      if (!hasMatch) {
+        hasMatch = clipTranscript.some((seg) =>
+          Math.abs((seg.start ?? 0) - subAbsStart) < 0.3 &&
+          Math.abs((seg.end ?? 0) - subAbsEnd) < 0.3
+        );
+      }
       if (!hasMatch) {
         removeItem(subItem.id);
       }
@@ -384,6 +402,7 @@ export default function VideoEditor({
       if (matched.has(seg._origIdx)) return;
       // Check if any existing subtitle item matches this segment
       const alreadyExists = subtitleItems.some((subItem) => {
+        if (subItem.transcriptIndex === seg._origIdx) return true;
         const subAbsStart = (subItem.start || 0) + clipStart;
         const subAbsEnd = (subItem.end || 0) + clipStart;
         return Math.abs((seg.start ?? 0) - subAbsStart) < 0.3 &&
@@ -401,6 +420,7 @@ export default function VideoEditor({
           size: { w: 100, h: 100 },
           subtitleText: seg.text,
           speaker: seg.speaker || null,
+          transcriptIndex: seg._origIdx,
         });
       }
     });
@@ -574,6 +594,7 @@ export default function VideoEditor({
 
   // ── Forward sync: subtitle edits in timeline store → backend transcript API ──
   // Handles text, speaker, and timing changes. Debounced to 800ms.
+  // Uses transcriptIndex for stable matching (survives timing changes).
   // Runs regardless of showMultiTrack (SubtitleOverlay edits also sync).
   useEffect(() => {
     if (!jobId || !transcript) return;
@@ -586,11 +607,18 @@ export default function VideoEditor({
     subtitleItems.forEach((subItem) => {
       const subAbsStart = (subItem.start || 0) + clipStart;
       const subAbsEnd = (subItem.end || 0) + clipStart;
-      const matchIdx = transcript.findIndex((seg) => {
-        const tStart = seg.start ?? 0;
-        const tEnd = seg.end ?? 0;
-        return Math.abs(tStart - subAbsStart) < 0.15 && Math.abs(tEnd - subAbsEnd) < 0.15;
-      });
+
+      // Prefer stable transcriptIndex for matching; fall back to time proximity
+      let matchIdx = -1;
+      if (subItem.transcriptIndex != null && subItem.transcriptIndex < transcript.length) {
+        matchIdx = subItem.transcriptIndex;
+      } else {
+        matchIdx = transcript.findIndex((seg) => {
+          const tStart = seg.start ?? 0;
+          const tEnd = seg.end ?? 0;
+          return Math.abs(tStart - subAbsStart) < 0.15 && Math.abs(tEnd - subAbsEnd) < 0.15;
+        });
+      }
       if (matchIdx < 0) return;
 
       const seg = transcript[matchIdx];
@@ -605,6 +633,13 @@ export default function VideoEditor({
       // Speaker change
       if (subItem.speaker && subItem.speaker !== seg.speaker) {
         body.speaker = subItem.speaker;
+      }
+      // Timing change — convert clip-relative back to absolute
+      if (Math.abs(subAbsStart - (seg.start ?? 0)) > 0.05) {
+        body.start = subAbsStart;
+      }
+      if (Math.abs(subAbsEnd - (seg.end ?? 0)) > 0.05) {
+        body.end = subAbsEnd;
       }
 
       if (Object.keys(body).length > 0) {

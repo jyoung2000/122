@@ -903,11 +903,21 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
                     style={{
                       background: 'none', border: 'none', cursor: 'pointer',
                       padding: '2px', lineHeight: 1, fontSize: 10,
-                      opacity: track.locked ? 1 : 0.35,
-                      color: track.locked ? 'var(--danger, #ef4444)' : 'var(--ve-text, #666)',
+                      opacity: track.locked ? 0.8 : 0.35,
+                      color: 'var(--ve-text, #999)',
                     }}
                   >
-                    {track.locked ? '\uD83D\uDD12' : '\uD83D\uDD13'}
+                    {track.locked ? (
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                        <path d="M7 11V7a5 5 0 0110 0v4" />
+                      </svg>
+                    ) : (
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                        <path d="M7 11V7a5 5 0 019.9-1" />
+                      </svg>
+                    )}
                   </button>
                   {/* Reset subtitle timings button — only on subtitle tracks */}
                   {track.type === 'subtitle' && hasOriginalSubtitles && (

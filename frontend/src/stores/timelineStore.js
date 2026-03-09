@@ -195,6 +195,7 @@ const useTimelineStore = create(
           subtitleStyle: item.subtitleStyle || null,
           speaker: item.speaker || null,
           words: item.words || null,
+          transcriptIndex: item.transcriptIndex ?? null,
           textContent: item.textContent || null,
           textStyle: item.textStyle || null,
           shapeType: item.shapeType || null,
@@ -278,6 +279,7 @@ const useTimelineStore = create(
             speaker: orig.speaker || null,
             transition: null,
             words: orig.words || null,
+            transcriptIndex: orig.transcriptIndex ?? null,
           });
         });
 
@@ -432,7 +434,7 @@ const useTimelineStore = create(
 
         // Add subtitle items if provided
         if (Array.isArray(subtitleSegments)) {
-          subtitleSegments.forEach((seg) => {
+          subtitleSegments.forEach((seg, segIdx) => {
             if (seg.end > clipStart && seg.start < clipEnd) {
               const clampedStart = Math.max(seg.start, clipStart);
               const clampedEnd = Math.min(seg.end, clipEnd);
@@ -470,6 +472,7 @@ const useTimelineStore = create(
                 speaker: seg.speaker || null,
                 transition: null,
                 words: segWords,
+                transcriptIndex: segIdx,
               });
             }
           });
@@ -478,7 +481,7 @@ const useTimelineStore = create(
         // Snapshot original subtitle timings so user can reset after accidental moves
         const originalSubtitles = items
           .filter((it) => it.type === 'subtitle')
-          .map((it) => ({ id: it.id, start: it.start, end: it.end, subtitleText: it.subtitleText, speaker: it.speaker, words: it.words, position: { ...it.position } }));
+          .map((it) => ({ id: it.id, start: it.start, end: it.end, subtitleText: it.subtitleText, speaker: it.speaker, words: it.words, position: { ...it.position }, transcriptIndex: it.transcriptIndex }));
 
         set({
           tracks: createDefaultTracks(),

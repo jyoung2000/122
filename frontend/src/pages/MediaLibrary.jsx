@@ -111,14 +111,16 @@ export default function MediaLibrary() {
       video.muted = true;
       video.playsInline = true;
       video.preload = 'auto';
-      // Note: don't set crossOrigin for same-origin blob/server URLs
       let done = false;
       const captureFrame = () => {
         if (done) return false;
         try {
+          const vw = video.videoWidth || 0;
+          const vh = video.videoHeight || 0;
+          if (vw === 0 || vh === 0) return false;
           const canvas = document.createElement('canvas');
-          const w = Math.min(video.videoWidth || 180, 240);
-          const h = Math.round(w * (video.videoHeight || 100) / (video.videoWidth || 180));
+          const w = Math.min(vw, 240);
+          const h = Math.round(w * vh / vw);
           canvas.width = w;
           canvas.height = h;
           canvas.getContext('2d').drawImage(video, 0, 0, w, h);
@@ -126,25 +128,39 @@ export default function MediaLibrary() {
           if (dataUrl.length > 500) {
             done = true;
             updateMedia(media.id, { thumbnailUrl: dataUrl, duration: video.duration || media.duration });
+            video.removeAttribute('src');
+            video.load(); // free memory
             return true;
           }
         } catch { /* ignore */ }
         return false;
       };
-      video.onseeked = () => {
-        if (!captureFrame() && video.currentTime > 0) {
-          video.currentTime = 0;
+      // Try multiple strategies for reliable frame capture
+      video.onseeked = () => captureFrame();
+      video.onloadeddata = () => {
+        // Some browsers paint the first frame on loadeddata without needing a seek
+        if (!done && video.readyState >= 2) {
+          if (!captureFrame()) {
+            // Seek to a later frame
+            video.currentTime = Math.min(0.5, (video.duration || 1) * 0.1);
+          }
         }
       };
       video.onloadedmetadata = () => {
         if (!media.duration && video.duration) {
           updateMedia(media.id, { duration: video.duration });
         }
+        // Trigger seek for onseeked fallback
         video.currentTime = Math.min(0.5, (video.duration || 1) * 0.1);
       };
+      video.onerror = () => { done = true; }; // give up on broken sources
       video.src = media.url;
       video.load();
-      setTimeout(() => { if (!done) captureFrame(); }, 8000);
+      // Fallback: retry capture at intervals (1s, 3s, 6s)
+      const retries = [1000, 3000, 6000];
+      retries.forEach((delay) => {
+        setTimeout(() => { if (!done) captureFrame(); }, delay);
+      });
     });
   }, [mediaLibrary.length, updateMedia]); // re-run when library size changes
 
@@ -493,8 +509,8 @@ export default function MediaLibrary() {
         ))}
       </div>
 
-      {/* Media grid */}
-      {filter !== 'font' && (
+      {/* Unified media + fonts grid */}
+      {(
         <div
           onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; }}
           onDrop={handleDrop}
@@ -505,7 +521,7 @@ export default function MediaLibrary() {
             minHeight: 200,
           }}
         >
-          {filtered.length === 0 && (
+          {filtered.length === 0 && !(showFonts && filteredFonts.length > 0) && (
             <div style={{
               gridColumn: '1 / -1',
               textAlign: 'center',
@@ -629,129 +645,105 @@ export default function MediaLibrary() {
               </div>
             );
           })}
-        </div>
-      )}
 
-      {/* Fonts section */}
-      {showFonts && (
-        <div style={{ marginTop: filter === 'font' ? 0 : 24 }}>
-          {filter !== 'font' && (
-            <h3 style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 12 }}>
-              Fonts
-            </h3>
-          )}
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(auto-fill, minmax(180px, 1fr))',
-            gap: 12,
-            minHeight: filter === 'font' ? 200 : undefined,
-          }}>
-            {/* Upload font card */}
-            <div
-              onClick={() => fontRef.current?.click()}
-              style={{
-                background: 'var(--bg-panel)',
-                border: '2px dashed var(--border)',
-                borderRadius: 'var(--radius-sm)',
-                overflow: 'hidden',
-                cursor: 'pointer',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: '24px 12px',
-                gap: 8,
-                minHeight: 120,
-                transition: 'border-color 0.15s',
-              }}
-            >
-              <span style={{ fontSize: 24, color: 'var(--text-muted)' }}>+</span>
-              <span style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' }}>
-                Upload Font
-              </span>
-              <span style={{ fontSize: 9, color: 'var(--text-muted)', opacity: 0.6 }}>
-                TTF, OTF, WOFF, WOFF2
-              </span>
-            </div>
-
-            {filteredFonts.length === 0 && filter === 'font' && !searchQuery && (
-              <div style={{
-                gridColumn: '2 / -1',
-                textAlign: 'center',
-                padding: '24px',
-                color: 'var(--text-muted)',
-                fontSize: 13,
-              }}>
-                No uploaded fonts yet.
-              </div>
-            )}
-
-            {filteredFonts.map((font) => (
+          {/* Font cards — inline alongside media items */}
+          {showFonts && (
+            <>
+              {/* Upload font card */}
               <div
-                key={font.name}
+                onClick={() => fontRef.current?.click()}
                 style={{
                   background: 'var(--bg-panel)',
-                  border: '2px solid var(--border)',
+                  border: '2px dashed var(--border)',
                   borderRadius: 'var(--radius-sm)',
                   overflow: 'hidden',
-                  position: 'relative',
-                }}
-              >
-                <div style={{
-                  height: 80,
-                  background: 'var(--bg-elevated)',
+                  cursor: 'pointer',
                   display: 'flex',
+                  flexDirection: 'column',
                   alignItems: 'center',
                   justifyContent: 'center',
-                  overflow: 'hidden',
-                }}>
-                  <FontIcon size={32} />
-                </div>
-                <div style={{ padding: '8px 10px' }}>
-                  <div style={{
-                    fontSize: 11,
-                    fontWeight: 600,
-                    color: 'var(--text-primary)',
-                    whiteSpace: 'nowrap',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    marginBottom: 4,
-                  }} title={font.name}>
-                    {font.name}
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                    <span style={{
-                      fontSize: 10,
-                      color: 'var(--text-muted)',
-                      textTransform: 'uppercase',
-                      fontFamily: 'var(--font-mono)',
-                    }}>
-                      Font
-                    </span>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteFont(font.name);
-                      }}
-                      style={{
-                        background: 'none',
-                        border: 'none',
-                        color: 'var(--text-muted)',
-                        cursor: 'pointer',
-                        padding: '2px 4px',
-                        borderRadius: 'var(--radius-xs)',
-                        display: 'flex',
-                        alignItems: 'center',
-                      }}
-                      title="Delete font"
-                    >
-                      <TrashIcon size={13} />
-                    </button>
-                  </div>
-                </div>
+                  padding: '24px 12px',
+                  gap: 8,
+                  minHeight: 120,
+                  transition: 'border-color 0.15s',
+                }}
+              >
+                <span style={{ fontSize: 24, color: 'var(--text-muted)' }}>+</span>
+                <span style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' }}>
+                  Upload Font
+                </span>
+                <span style={{ fontSize: 9, color: 'var(--text-muted)', opacity: 0.6 }}>
+                  TTF, OTF, WOFF, WOFF2
+                </span>
               </div>
-            ))}
-          </div>
+
+              {filteredFonts.map((font) => (
+                <div
+                  key={`font-${font.name}`}
+                  style={{
+                    background: 'var(--bg-panel)',
+                    border: '2px solid var(--border)',
+                    borderRadius: 'var(--radius-sm)',
+                    overflow: 'hidden',
+                    position: 'relative',
+                  }}
+                >
+                  <div style={{
+                    height: 110,
+                    background: 'var(--bg-elevated)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    overflow: 'hidden',
+                  }}>
+                    <FontIcon size={32} />
+                  </div>
+                  <div style={{ padding: '8px 10px' }}>
+                    <div style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: 'var(--text-primary)',
+                      whiteSpace: 'nowrap',
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      marginBottom: 4,
+                    }} title={font.name}>
+                      {font.name}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                      <span style={{
+                        fontSize: 10,
+                        color: 'var(--text-muted)',
+                        textTransform: 'uppercase',
+                        fontFamily: 'var(--font-mono)',
+                      }}>
+                        Font
+                      </span>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteFont(font.name);
+                        }}
+                        style={{
+                          background: 'none',
+                          border: 'none',
+                          color: 'var(--text-muted)',
+                          cursor: 'pointer',
+                          padding: '2px 4px',
+                          borderRadius: 'var(--radius-xs)',
+                          display: 'flex',
+                          alignItems: 'center',
+                        }}
+                        title="Delete font"
+                      >
+                        <TrashIcon size={13} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       )}
 

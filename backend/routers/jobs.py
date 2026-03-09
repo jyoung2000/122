@@ -203,6 +203,8 @@ async def rename_speakers(job_id: str, req: SpeakerRenameRequest):
 class UpdateTranscriptSegmentRequest(BaseModel):
     text: str | None = None
     speaker: str | None = None
+    start: float | None = None
+    end: float | None = None
 
 
 @router.put("/jobs/{job_id}/transcript/{segment_index}")
@@ -222,11 +224,15 @@ async def update_transcript_segment(job_id: str, segment_index: int, req: Update
         updates["text"] = req.text
     if req.speaker is not None:
         updates["speaker"] = req.speaker
+    if req.start is not None:
+        updates["start"] = req.start
+    if req.end is not None:
+        updates["end"] = req.end
     if updates:
         seg = seg.model_copy(update=updates)
         job.transcript[segment_index] = seg
         await database.save_job(job)
-    return {"job_id": job_id, "segment_index": segment_index, "text": seg.text, "speaker": seg.speaker}
+    return {"job_id": job_id, "segment_index": segment_index, "text": seg.text, "speaker": seg.speaker, "start": seg.start, "end": seg.end}
 
 
 @router.delete("/jobs/{job_id}/transcript/{segment_index}")
