@@ -430,6 +430,7 @@ function ResetButton({ onClick, label = 'Reset' }) {
 export default function PropertiesPanel({ compact = false, settings = null, onSettingsChange = null }) {
   const selectedItemId = useTimelineStore((s) => s.selectedItemId);
   const items = useTimelineStore((s) => s.items);
+  const tracks = useTimelineStore((s) => s.tracks);
   const updateItem = useTimelineStore((s) => s.updateItem);
   const removeItem = useTimelineStore((s) => s.removeItem);
   const [expandedSections, setExpandedSections] = useState({});
@@ -439,21 +440,28 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
     [items, selectedItemId],
   );
 
+  // Check if the selected item is on a locked track
+  const isLocked = useMemo(() => {
+    if (!item) return false;
+    const track = tracks.find((t) => t.id === item.trackId);
+    return track?.locked === true;
+  }, [item, tracks]);
+
   const update = useCallback(
     (field, value) => {
-      if (!item) return;
+      if (!item || isLocked) return;
       updateItem(item.id, { [field]: value });
     },
-    [item, updateItem],
+    [item, updateItem, isLocked],
   );
 
   const updateNested = useCallback(
     (field, subField, value) => {
-      if (!item) return;
+      if (!item || isLocked) return;
       const current = item[field] || {};
       updateItem(item.id, { [field]: { ...current, [subField]: value } });
     },
-    [item, updateItem],
+    [item, updateItem, isLocked],
   );
 
   const toggleSection = (name) => setExpandedSections(prev => ({ ...prev, [name]: !prev[name] }));
@@ -480,10 +488,17 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
         <span className="ve-properties__type-badge" data-type={item.type}>
           {item.type}
         </span>
+        {isLocked && (
+          <span style={{ fontSize: 11, color: 'var(--danger, #ef4444)', marginLeft: 4, display: 'flex', alignItems: 'center', gap: 3 }}>
+            🔒 Locked
+          </span>
+        )}
         <button
           className="ve-properties__delete"
-          onClick={() => removeItem(item.id)}
-          title="Delete item"
+          onClick={() => { if (!isLocked) removeItem(item.id); }}
+          title={isLocked ? 'Cannot delete — track is locked' : 'Delete item'}
+          disabled={isLocked}
+          style={isLocked ? { opacity: 0.3, cursor: 'not-allowed' } : undefined}
         >
           ✕
         </button>

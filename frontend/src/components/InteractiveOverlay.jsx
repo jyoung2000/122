@@ -13,6 +13,7 @@ import useTimelineStore from '../stores/timelineStore';
  */
 export default function InteractiveOverlay({ currentTime = 0, clipStart = 0, containerRef, onInteraction }) {
   const items = useTimelineStore((s) => s.items);
+  const tracks = useTimelineStore((s) => s.tracks);
   const selectedItemId = useTimelineStore((s) => s.selectedItemId);
   const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
   const updateItem = useTimelineStore((s) => s.updateItem);
@@ -22,13 +23,23 @@ export default function InteractiveOverlay({ currentTime = 0, clipStart = 0, con
 
   // Filter to visible interactive items at current time.
   // Audio and subtitle items are excluded — subtitle items are rendered by SubtitleOverlay.
-  // Only video, text, shape, image, and overlay types are interactive in the viewport.
+  // Respects track visibility — items on hidden tracks are not interactive.
   const visible = useMemo(() => {
     return items.filter((it) => {
       if (it.type === 'audio' || it.type === 'subtitle') return false;
-      return absTime >= it.start && absTime < it.end;
+      if (!(absTime >= it.start && absTime < it.end)) return false;
+      // Check track visibility
+      const track = tracks.find((t) => t.id === it.trackId);
+      if (track && track.visible === false) return false;
+      return true;
     });
-  }, [items, absTime]);
+  }, [items, absTime, tracks]);
+
+  // Build a set of locked item IDs for quick lookup
+  const lockedItemIds = useMemo(() => {
+    const lockedTrackIds = new Set(tracks.filter((t) => t.locked).map((t) => t.id));
+    return new Set(items.filter((it) => lockedTrackIds.has(it.trackId)).map((it) => it.id));
+  }, [items, tracks]);
 
   if (visible.length === 0) return null;
 
@@ -48,6 +59,7 @@ export default function InteractiveOverlay({ currentTime = 0, clipStart = 0, con
           key={item.id}
           item={item}
           isSelected={item.id === selectedItemId}
+          isLocked={lockedItemIds.has(item.id)}
           containerRef={containerRef}
           onSelect={() => setSelectedItemId(item.id)}
           onUpdate={(updates) => updateItem(item.id, updates)}
@@ -72,7 +84,7 @@ const HANDLES = [
 ];
 
 
-function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate, onInteraction }) {
+function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect, onUpdate, onInteraction }) {
   const [isHovered, setIsHovered] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
@@ -146,6 +158,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
     e.stopPropagation();
     e.preventDefault();
     onSelect();
+    if (isLocked) return; // Locked items can be selected but not moved
     onInteraction?.(true);
 
     const rect = getContainerRect();
@@ -165,6 +178,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
   const handleResizeStart = useCallback((e, handleId) => {
     e.stopPropagation();
     e.preventDefault();
+    if (isLocked) return; // Locked items cannot be resized
     onInteraction?.(true);
 
     const rect = getContainerRect();
@@ -189,6 +203,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
   const handleRotateStart = useCallback((e) => {
     e.stopPropagation();
     e.preventDefault();
+    if (isLocked) return; // Locked items cannot be rotated
     onInteraction?.(true);
 
     const rect = getContainerRect();
@@ -338,6 +353,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
   // ── Double-click to edit text/subtitle ────────────────
   const handleDoubleClick = useCallback((e) => {
     e.stopPropagation();
+    if (isLocked) return; // Locked items cannot be edited
     if (item.type === 'text' || item.type === 'subtitle') {
       setIsEditing(true);
       onInteraction?.(true);
@@ -380,7 +396,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
     height: `${size.h}%`,
     padding: boxPad > 0 ? boxPad : undefined,
     transform: `translate(-50%, -50%) ${rotation ? `rotate(${rotation}deg)` : ''}`,
-    cursor: isDragging ? 'grabbing' : (isVideo ? 'default' : 'grab'),
+    cursor: isLocked ? 'not-allowed' : isDragging ? 'grabbing' : (isVideo ? 'default' : 'grab'),
     // Video items: always use pointer-events none EXCEPT when actively being
     // dragged/resized/rotated. This prevents the full-viewport video handle from
     // blocking clicks on text/shape/image overlays.

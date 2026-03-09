@@ -163,9 +163,10 @@ const useTimelineStore = create(
         const state = get();
         const track = state.tracks.find((t) => t.id === trackId);
         if (track) {
-          if (!isTrackCompatible(itemType, track.type)) {
+          if (track.locked || !isTrackCompatible(itemType, track.type)) {
             const correctTrack = findCompatibleTrack(state.tracks, itemType);
-            if (correctTrack) trackId = correctTrack.id;
+            if (correctTrack && !correctTrack.locked) trackId = correctTrack.id;
+            else if (correctTrack?.locked) return null; // All compatible tracks are locked
           }
         }
         const newItem = {
@@ -205,6 +206,11 @@ const useTimelineStore = create(
       },
 
       removeItem: (itemId) => set((state) => {
+        const item = state.items.find(i => i.id === itemId);
+        if (item) {
+          const track = state.tracks.find(t => t.id === item.trackId);
+          if (track?.locked) return; // Cannot remove items from locked tracks
+        }
         state.items = state.items.filter(i => i.id !== itemId);
         if (state.selectedItemId === itemId) {
           state.selectedItemId = null;
@@ -215,6 +221,9 @@ const useTimelineStore = create(
       updateItem: (itemId, updates) => set((state) => {
         const item = state.items.find(i => i.id === itemId);
         if (!item) return;
+        // Prevent modifications to items on locked tracks
+        const currentTrack = state.tracks.find(t => t.id === item.trackId);
+        if (currentTrack?.locked) return;
         // Validate track change: prevent moving items to incompatible tracks
         if (updates.trackId && updates.trackId !== item.trackId) {
           const targetTrack = state.tracks.find(t => t.id === updates.trackId);
@@ -237,6 +246,9 @@ const useTimelineStore = create(
         const idx = state.items.findIndex(i => i.id === itemId);
         if (idx < 0) return;
         const item = state.items[idx];
+        // Prevent splitting items on locked tracks
+        const track = state.tracks.find(t => t.id === item.trackId);
+        if (track?.locked) return;
         if (time <= item.start || time >= item.end) return;
 
         const newId = nextItemId();

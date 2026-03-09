@@ -492,6 +492,13 @@ export default function VideoEditor({
   const [videoItemSize, setVideoItemSize] = useState({ w: 100, h: 100 });
   const [videoItemRotation, setVideoItemRotation] = useState(0);
 
+  // Check if the video track is hidden (for preview visibility)
+  const videoTrackHidden = useMemo(() => {
+    if (!showMultiTrack) return false;
+    const videoTrack = timelineTracks.find((t) => t.type === 'video');
+    return videoTrack?.visible === false;
+  }, [showMultiTrack, timelineTracks]);
+
   // Sync video timeline item properties → actual video element
   // Find the video item at the current playhead (not just the first one)
   // so split segments with different effects render correctly.
@@ -2057,6 +2064,8 @@ export default function VideoEditor({
                 opacity: videoItemOpacity,
                 filter: videoItemFilter || undefined,
                 transition: 'opacity 0.1s, filter 0.1s',
+                // Hide video visually when track is hidden (use visibility so audio still plays)
+                visibility: videoTrackHidden ? 'hidden' : undefined,
               };
             }
             // Default: fill viewport
@@ -2066,6 +2075,7 @@ export default function VideoEditor({
               opacity: videoItemOpacity,
               filter: videoItemFilter || undefined,
               transition: 'opacity 0.1s, filter 0.1s',
+              visibility: videoTrackHidden ? 'hidden' : undefined,
             };
           })()}
         />

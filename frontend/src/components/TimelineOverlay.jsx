@@ -13,17 +13,30 @@ import { hexToRgba } from '../utils/colorUtils';
  */
 export default function TimelineOverlay({ currentTime = 0, clipStart = 0 }) {
   const items = useTimelineStore((s) => s.items);
+  const tracks = useTimelineStore((s) => s.tracks);
 
   // currentTime is already relative to clipStart (passed as currentTime - clipStart)
   const absTime = currentTime;
 
-  // Filter to visible text/shape/image/overlay items at current time
+  // Filter to visible text/shape/image/overlay items at current time.
+  // Respects track visibility — items on hidden tracks are not rendered in preview.
   const visible = useMemo(() => {
-    return items.filter((it) => {
-      if (it.type === 'video' || it.type === 'audio' || it.type === 'subtitle') return false;
-      return absTime >= it.start && absTime < it.end;
-    });
-  }, [items, absTime]);
+    return items
+      .filter((it) => {
+        if (it.type === 'video' || it.type === 'audio' || it.type === 'subtitle') return false;
+        if (!(absTime >= it.start && absTime < it.end)) return false;
+        // Check track visibility
+        const track = tracks.find((t) => t.id === it.trackId);
+        if (track && track.visible === false) return false;
+        return true;
+      })
+      // Sort by track order so higher tracks render on top (correct z-layering)
+      .sort((a, b) => {
+        const trackA = tracks.find((t) => t.id === a.trackId);
+        const trackB = tracks.find((t) => t.id === b.trackId);
+        return (trackA?.order ?? 0) - (trackB?.order ?? 0);
+      });
+  }, [items, absTime, tracks]);
 
   if (visible.length === 0) return null;
 

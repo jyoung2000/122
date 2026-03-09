@@ -458,11 +458,13 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       return;
     }
 
-    // Razor tool: split on click
+    // Razor tool: split on click (blocked on locked tracks)
     if (activeTool === 'razor') {
       const time = getTimeFromX(e.clientX);
       const hit = hitTestItem(e.clientX, e.clientY);
       if (hit?.item) {
+        const itemTrack = tracks.find((t) => t.id === hit.item.trackId);
+        if (itemTrack?.locked) return; // Cannot split items on locked tracks
         splitItem(hit.item.id, time);
       }
       return;
@@ -488,7 +490,11 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       setSelectedItemId(hit.item.id);
       onItemSelect?.(hit.item);
 
-      if (hit.edge === 'left' || hit.edge === 'right') {
+      // Check if item is on a locked track — allow selection but block drag/trim
+      const itemTrack = tracks.find((t) => t.id === hit.item.trackId);
+      if (itemTrack?.locked) {
+        // Selection allowed, but no drag/trim
+      } else if (hit.edge === 'left' || hit.edge === 'right') {
         setIsDragging(true);
         setDragInfo({
           type: 'trim',
@@ -573,7 +579,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         const track = getTrackFromY(e.clientY);
         let trackId = dragInfo.origTrackId;
         if (track) {
-          // Enforce track type constraints: items can only move to compatible tracks
+          // Enforce track type constraints and lock: items can only move to compatible, unlocked tracks
           const draggedItem = items.find((i) => i.id === dragInfo.itemId);
           const itemType = draggedItem?.type;
           const trackType = track.type;
@@ -582,7 +588,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
             (itemType === 'audio' && trackType === 'audio') ||
             ((itemType === 'text' || itemType === 'shape' || itemType === 'image' || itemType === 'overlay') && trackType === 'overlay') ||
             (itemType === 'subtitle' && trackType === 'subtitle');
-          if (compatible) trackId = track.id;
+          if (compatible && !track.locked) trackId = track.id;
         }
         updateItem(dragInfo.itemId, { start: newStart, end: newStart + dur, trackId });
       }
@@ -662,6 +668,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       const time = getTimeFromX(e.clientX);
       const dropTrack = getTrackFromY(e.clientY);
       if (!dropTrack) return;
+      if (dropTrack.locked) return; // Cannot drop items onto locked tracks
 
       // addItem auto-routes to the correct compatible track if the target is incompatible
       addItem({
@@ -685,6 +692,14 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   const handleContextAction = useCallback((action) => {
     if (!contextMenu) return;
     const { time, item } = contextMenu;
+    // Block destructive actions on locked tracks
+    if (item) {
+      const itemTrack = tracks.find((t) => t.id === item.trackId);
+      if (itemTrack?.locked && (action === 'split' || action === 'delete' || action === 'duplicate')) {
+        setContextMenu(null);
+        return;
+      }
+    }
     switch (action) {
       case 'split':
         if (item) splitItem(item.id, time);
@@ -697,7 +712,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         break;
     }
     setContextMenu(null);
-  }, [contextMenu, splitItem, removeItem]);
+  }, [contextMenu, splitItem, removeItem, tracks]);
 
   useEffect(() => {
     if (!contextMenu) return;
