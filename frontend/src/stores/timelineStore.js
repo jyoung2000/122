@@ -308,7 +308,7 @@ const useTimelineStore = create(
             volume: 1.0,
             speed: 1.0,
             opacity: 1.0,
-            position: { x: 0, y: 0 },
+            position: { x: 50, y: 50 },
             size: { w: 100, h: 100 },
             transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 },
             effects: { brightness: 0, contrast: 0, saturation: 0, blur: 0, hueRotate: 0, sepia: 0 },

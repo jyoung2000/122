@@ -272,23 +272,45 @@ export default class RenderEngine {
       }
     }
 
-    // Apply transform (position, scale)
+    // Apply transform (position, size, rotation)
     const transform = clip.transform || {};
-    const dx = (transform.x || 0) * width / 100;
-    const dy = (transform.y || 0) * height / 100;
+    const pos = clip.position || { x: 50, y: 50 };
+    const size = clip.size || { w: 100, h: 100 };
+    const rotation = transform.rotation ?? 0;
     const scaleX = transform.scaleX ?? 1;
     const scaleY = transform.scaleY ?? 1;
-    const rotation = transform.rotation ?? 0;
 
-    if (rotation !== 0 || scaleX !== 1 || scaleY !== 1 || dx !== 0 || dy !== 0) {
+    // Check if user has custom position/size (non-default)
+    const effectivePos = (pos.x === 0 && pos.y === 0) ? { x: 50, y: 50 } : pos;
+    const hasCustomLayout = effectivePos.x !== 50 || effectivePos.y !== 50 ||
+      size.w !== 100 || size.h !== 100 || rotation !== 0 ||
+      scaleX !== 1 || scaleY !== 1;
+
+    if (hasCustomLayout) {
+      // Custom position/size/rotation: draw video at specified position and size
+      const drawW = (size.w / 100) * width;
+      const drawH = (size.h / 100) * height;
+      const cx = (effectivePos.x / 100) * width;
+      const cy = (effectivePos.y / 100) * height;
+
       ctx.save();
-      ctx.translate(width / 2 + dx, height / 2 + dy);
+      ctx.translate(cx, cy);
       if (rotation !== 0) ctx.rotate((rotation * Math.PI) / 180);
       ctx.scale(scaleX, scaleY);
-      ctx.drawImage(mediaEl, sx, sy, sw, sh, -width / 2, -height / 2, width, height);
+      ctx.drawImage(mediaEl, sx, sy, sw, sh, -drawW / 2, -drawH / 2, drawW, drawH);
       ctx.restore();
     } else {
-      ctx.drawImage(mediaEl, sx, sy, sw, sh, 0, 0, width, height);
+      // Default: fill entire canvas
+      const dx = (transform.x || 0) * width / 100;
+      const dy = (transform.y || 0) * height / 100;
+      if (dx !== 0 || dy !== 0) {
+        ctx.save();
+        ctx.translate(width / 2 + dx, height / 2 + dy);
+        ctx.drawImage(mediaEl, sx, sy, sw, sh, -width / 2, -height / 2, width, height);
+        ctx.restore();
+      } else {
+        ctx.drawImage(mediaEl, sx, sy, sw, sh, 0, 0, width, height);
+      }
     }
   }
 

@@ -295,7 +295,7 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
   const duration = item.end - item.start;
   const isVisual = item.type !== 'audio';
   const isMediaClip = item.type === 'video' || item.type === 'audio';
-  const isOverlay = item.type === 'text' || item.type === 'shape' || item.type === 'image' || item.type === 'overlay' || item.type === 'subtitle';
+  const isOverlay = item.type === 'video' || item.type === 'text' || item.type === 'shape' || item.type === 'image' || item.type === 'overlay' || item.type === 'subtitle';
 
   return (
     <div className={`ve-properties${compact ? ' ve-properties--compact' : ''}`}>
@@ -326,7 +326,7 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
         </div>
       </div>
 
-      {/* ── Position & Size (overlay items: text, shape, image, overlay) ── */}
+      {/* ── Position & Size (all visual items including video) ── */}
       {isOverlay && (
         <div className="ve-properties__section">
           <label className="ve-properties__label">Position & Size</label>
@@ -335,6 +335,20 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
           <SliderRow label="Width" value={item.size?.w ?? 50} min={1} max={200} step={0.5} unit="%" onChange={(v) => update('size', { ...item.size, w: v })} />
           <SliderRow label="Height" value={item.size?.h ?? 50} min={1} max={200} step={0.5} unit="%" onChange={(v) => update('size', { ...item.size, h: v })} />
           <SliderRow label="Rotation" value={item.transform?.rotation ?? 0} min={-360} max={360} step={1} unit="°" onChange={(v) => updateNested('transform', 'rotation', v)} />
+          {item.type === 'video' && (
+            <button
+              className="ve-properties__speed-pill"
+              style={{ marginTop: 4, fontSize: 10, padding: '3px 8px' }}
+              onClick={() => {
+                update('position', { x: 50, y: 50 });
+                update('size', { w: 100, h: 100 });
+                updateNested('transform', 'rotation', 0);
+              }}
+              title="Reset video to fill viewport"
+            >
+              Reset to Fill
+            </button>
+          )}
         </div>
       )}
 

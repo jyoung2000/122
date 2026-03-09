@@ -20,11 +20,12 @@ export default function InteractiveOverlay({ currentTime = 0, clipStart = 0, con
   // currentTime is already relative to clipStart (passed as currentTime - clipStart)
   const absTime = currentTime;
 
-  // Filter to visible overlay items (text, shape, image, overlay, subtitle) at current time.
-  // Subtitle items are included so users can drag/resize/rotate them in the viewport.
+  // Filter to visible interactive items at current time.
+  // Audio items are excluded — all other types (video, text, shape, image, overlay, subtitle)
+  // can be selected, dragged, resized, and rotated in the viewport.
   const visible = useMemo(() => {
     return items.filter((it) => {
-      if (it.type === 'video' || it.type === 'audio') return false;
+      if (it.type === 'audio') return false;
       return absTime >= it.start && absTime < it.end;
     });
   }, [items, absTime]);
@@ -91,11 +92,17 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
   onInteractionRef.current = onInteraction;
   itemRef.current = item;
 
-  const pos = item.position || { x: 50, y: 50 };
-  const size = item.size || { w: 30, h: 30 };
-  const rotation = item.transform?.rotation || 0;
-
+  const isVideo = item.type === 'video';
   const isText = item.type === 'text';
+
+  // Video items default to centered full-size; overlays default to smaller centered
+  const defaultPos = isVideo ? { x: 50, y: 50 } : { x: 50, y: 50 };
+  const defaultSize = isVideo ? { w: 100, h: 100 } : { w: 30, h: 30 };
+  const pos = item.position || defaultPos;
+  // For video items with legacy {x:0,y:0}, treat as centered
+  const effectivePos = (isVideo && pos.x === 0 && pos.y === 0) ? { x: 50, y: 50 } : pos;
+  const size = item.size || defaultSize;
+  const rotation = item.transform?.rotation || 0;
 
   // ── Get container dimensions ──
   const getContainerRect = useCallback(() => {
@@ -117,13 +124,13 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
       type: 'drag',
       startMouseX: e.clientX,
       startMouseY: e.clientY,
-      startPosX: pos.x,
-      startPosY: pos.y,
+      startPosX: effectivePos.x,
+      startPosY: effectivePos.y,
       containerW: rect.width,
       containerH: rect.height,
     };
     setIsDragging(true);
-  }, [pos, getContainerRect, onSelect, onInteraction]);
+  }, [effectivePos, getContainerRect, onSelect, onInteraction]);
 
   // ── RESIZE ────────────────────────────────────────────
   const handleResizeStart = useCallback((e, handleId) => {
@@ -137,8 +144,8 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
       handle: handleId,
       startMouseX: e.clientX,
       startMouseY: e.clientY,
-      startPosX: pos.x,
-      startPosY: pos.y,
+      startPosX: effectivePos.x,
+      startPosY: effectivePos.y,
       startW: size.w,
       startH: size.h,
       containerW: rect.width,
@@ -147,7 +154,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
       isTextItem: item.type === 'text',
     };
     setIsResizing(true);
-  }, [pos, size, item, getContainerRect, onInteraction]);
+  }, [effectivePos, size, item, getContainerRect, onInteraction]);
 
   // ── ROTATE ────────────────────────────────────────────
   const handleRotateStart = useCallback((e) => {
@@ -157,8 +164,8 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
 
     const rect = getContainerRect();
     // Center of the element in viewport coordinates
-    const centerX = rect.left + (pos.x / 100) * rect.width;
-    const centerY = rect.top + (pos.y / 100) * rect.height;
+    const centerX = rect.left + (effectivePos.x / 100) * rect.width;
+    const centerY = rect.top + (effectivePos.y / 100) * rect.height;
 
     dragState.current = {
       type: 'rotate',
@@ -168,7 +175,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
       startRotation: rotation,
     };
     setIsRotating(true);
-  }, [pos, rotation, getContainerRect, onInteraction]);
+  }, [effectivePos, rotation, getContainerRect, onInteraction]);
 
   // ── Mouse move / up handlers ──────────────────────────
   // Only depend on the boolean flags so listeners stay stable during drag/resize/rotate.
@@ -338,18 +345,22 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
   const boxPad = isText ? 12 : 0;
   const boxStyle = {
     position: 'absolute',
-    left: `${pos.x}%`,
-    top: `${pos.y}%`,
+    left: `${effectivePos.x}%`,
+    top: `${effectivePos.y}%`,
     width: `${size.w}%`,
     height: `${size.h}%`,
     padding: boxPad > 0 ? boxPad : undefined,
     transform: `translate(-50%, -50%) ${rotation ? `rotate(${rotation}deg)` : ''}`,
     cursor: isDragging ? 'grabbing' : 'grab',
-    pointerEvents: 'auto',
+    // Video items: only capture pointer events when selected (viewport click handles
+    // initial selection). This prevents the full-viewport video handle from blocking
+    // clicks on text/shape/image overlays and the play/pause viewport click.
+    pointerEvents: isVideo && !isSelected ? 'none' : 'auto',
     // Make hitbox slightly bigger for small elements
     minWidth: 20,
     minHeight: 20,
-    zIndex: isSelected ? 20 : 10,
+    // Video items sit behind other overlays unless selected; other items at z:10
+    zIndex: isSelected ? 20 : (isVideo ? 1 : 10),
   };
 
   const isActive = isDragging || isResizing || isRotating;
@@ -507,7 +518,7 @@ function InteractiveElement({ item, isSelected, containerRef, onSelect, onUpdate
               zIndex: 40,
               backdropFilter: 'blur(4px)',
             }}>
-              {isDragging && `${pos.x.toFixed(1)}%, ${pos.y.toFixed(1)}%`}
+              {isDragging && `${effectivePos.x.toFixed(1)}%, ${effectivePos.y.toFixed(1)}%`}
               {isResizing && `${size.w.toFixed(1)}% x ${size.h.toFixed(1)}%`}
               {isRotating && `${rotation}°`}
             </div>

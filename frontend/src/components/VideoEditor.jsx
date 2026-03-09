@@ -407,9 +407,12 @@ export default function VideoEditor({
   // Segment delete confirmation
   const [deleteConfirmId, setDeleteConfirmId] = useState(null);
 
-  // Video item properties from multi-track timeline (opacity, effects)
+  // Video item properties from multi-track timeline (opacity, effects, position, size, rotation)
   const [videoItemOpacity, setVideoItemOpacity] = useState(1);
   const [videoItemFilter, setVideoItemFilter] = useState('');
+  const [videoItemPosition, setVideoItemPosition] = useState({ x: 50, y: 50 });
+  const [videoItemSize, setVideoItemSize] = useState({ w: 100, h: 100 });
+  const [videoItemRotation, setVideoItemRotation] = useState(0);
 
   // Sync video timeline item properties → actual video element
   const videoTimelineItem = useMemo(
@@ -434,6 +437,12 @@ export default function VideoEditor({
     }
     // Opacity
     setVideoItemOpacity(videoTimelineItem.opacity ?? 1);
+    // Position, Size, Rotation
+    const vPos = videoTimelineItem.position || { x: 50, y: 50 };
+    // Treat legacy {x:0,y:0} as centered
+    setVideoItemPosition(vPos.x === 0 && vPos.y === 0 ? { x: 50, y: 50 } : vPos);
+    setVideoItemSize(videoTimelineItem.size || { w: 100, h: 100 });
+    setVideoItemRotation(videoTimelineItem.transform?.rotation || 0);
     // Effects → CSS filter
     const eff = videoTimelineItem.effects || {};
     const filters = [];
@@ -1895,21 +1904,58 @@ export default function VideoEditor({
           if (overlayInteracting) return;
           if (viewportClickRef.current.moved) return;
           if (Date.now() - viewportClickRef.current.downTime > 300) return;
-          setSelectedItemId(null);
-          togglePlay();
+          // In multi-track mode: clicking the viewport selects the video item
+          // (so the user can drag/resize/rotate it). If the video is already
+          // selected, deselect and toggle play instead.
+          if (showMultiTrack && videoTimelineItem) {
+            if (storeSelectedItemId === videoTimelineItem.id) {
+              setSelectedItemId(null);
+              togglePlay();
+            } else {
+              setSelectedItemId(videoTimelineItem.id);
+            }
+          } else {
+            setSelectedItemId(null);
+            togglePlay();
+          }
         }}
       >
         <video
           ref={videoRef}
           src={src}
           playsInline
-          style={{
-            objectFit: isCrop ? 'cover' : 'contain',
-            objectPosition: initialObjectPosition,
-            opacity: videoItemOpacity,
-            filter: videoItemFilter || undefined,
-            transition: 'opacity 0.1s, filter 0.1s',
-          }}
+          style={(() => {
+            const hasCustomTransform = showMultiTrack && (
+              videoItemPosition.x !== 50 || videoItemPosition.y !== 50 ||
+              videoItemSize.w !== 100 || videoItemSize.h !== 100 ||
+              videoItemRotation !== 0
+            );
+            if (hasCustomTransform) {
+              // When user has adjusted position/size/rotation, render video as
+              // a positioned element within the viewport (like other overlay items)
+              return {
+                position: 'absolute',
+                left: `${videoItemPosition.x}%`,
+                top: `${videoItemPosition.y}%`,
+                width: `${videoItemSize.w}%`,
+                height: `${videoItemSize.h}%`,
+                objectFit: isCrop ? 'cover' : 'contain',
+                objectPosition: initialObjectPosition,
+                transform: `translate(-50%, -50%)${videoItemRotation ? ` rotate(${videoItemRotation}deg)` : ''}`,
+                opacity: videoItemOpacity,
+                filter: videoItemFilter || undefined,
+                transition: 'opacity 0.1s, filter 0.1s',
+              };
+            }
+            // Default: fill viewport
+            return {
+              objectFit: isCrop ? 'cover' : 'contain',
+              objectPosition: initialObjectPosition,
+              opacity: videoItemOpacity,
+              filter: videoItemFilter || undefined,
+              transition: 'opacity 0.1s, filter 0.1s',
+            };
+          })()}
         />
 
         {subtitleOverlay}
