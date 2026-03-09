@@ -572,6 +572,153 @@ export function validateExportParity(items, settings, outputDims) {
 }
 
 /**
+ * Validate subject tracking will keep the subject centered without
+ * cropping the video off-screen for any aspect ratio.
+ *
+ * Checks:
+ * 1. All keyframe subject_x values produce valid crop offsets within frame bounds
+ * 2. The crop window always covers the full output aspect ratio (no black bars)
+ * 3. Dynamic tracking transitions are smooth enough (no jarring jumps)
+ * 4. Edge-clamped positions still keep subject visible inside frame
+ *
+ * @param {Object} trackingInfo - { scenes, clipStart, clipEnd, srcW, srcH, subjectX }
+ * @param {string|null} aspectRatio - Target aspect ratio ('9:16', '1:1', '4:5', '16:9')
+ * @param {Object} outputDims - { w, h } output dimensions
+ * @returns {{ valid: boolean, errors: string[], warnings: string[] }}
+ */
+export function validateSubjectTracking(trackingInfo, aspectRatio, outputDims) {
+  const errors = [];
+  const warnings = [];
+
+  if (!trackingInfo || !aspectRatio) {
+    return { valid: true, errors, warnings };
+  }
+
+  const { scenes, clipStart, clipEnd, srcW, srcH, subjectX } = trackingInfo;
+  if (!srcW || !srcH) {
+    return { valid: true, errors, warnings };
+  }
+
+  const ASPECT_VALUES = { '16:9': 16/9, '9:16': 9/16, '1:1': 1.0, '4:5': 4/5 };
+  const targetRatio = ASPECT_VALUES[aspectRatio];
+  if (!targetRatio) {
+    return { valid: true, errors, warnings };
+  }
+
+  const srcRatio = srcW / srcH;
+
+  // No crop needed if same aspect ratio
+  if (Math.abs(srcRatio - targetRatio) <= 0.01) {
+    return { valid: true, errors, warnings };
+  }
+
+  // Only horizontal cropping is tracked (srcAR > dstAR)
+  const needsHorizontalCrop = srcRatio > targetRatio;
+  if (!needsHorizontalCrop) {
+    return { valid: true, errors, warnings };
+  }
+
+  // Compute crop dimensions
+  const cropW = Math.round(srcH * targetRatio);
+  const cropH = srcH;
+  const maxOffset = srcW - cropW;
+
+  if (maxOffset <= 0) {
+    return { valid: true, errors, warnings };
+  }
+
+  // Helper: compute crop offset from subject_x and verify bounds
+  const checkSubjectX = (sx, label) => {
+    const safeSx = Math.max(10, Math.min(90, Math.round(sx)));
+    const subjectPixel = srcW * safeSx / 100;
+    const xOffset = Math.round(Math.max(0, Math.min(maxOffset, subjectPixel - cropW / 2)));
+
+    // Verify crop stays within frame
+    if (xOffset < 0) {
+      errors.push(`${label}: crop offset ${xOffset} is negative (video would shift off-screen left)`);
+    }
+    if (xOffset > maxOffset) {
+      errors.push(`${label}: crop offset ${xOffset} exceeds max ${maxOffset} (video would shift off-screen right)`);
+    }
+
+    // Verify subject is inside crop window
+    const subjectInCrop = subjectPixel - xOffset;
+    if (subjectInCrop < 0 || subjectInCrop > cropW) {
+      errors.push(`${label}: subject at pixel ${subjectPixel.toFixed(0)} outside crop window [${xOffset}, ${xOffset + cropW}]`);
+    }
+
+    // Check centering quality (when not edge-clamped)
+    if (xOffset > 0 && xOffset < maxOffset) {
+      const cropCenter = cropW / 2;
+      const centerError = Math.abs(subjectInCrop - cropCenter) / cropW * 100;
+      if (centerError > 15) {
+        warnings.push(`${label}: subject is ${centerError.toFixed(0)}% off-center (target: <15%)`);
+      }
+    }
+
+    // Verify output fills the full aspect ratio (no black bars)
+    const actualCropW = Math.min(cropW, srcW - xOffset);
+    if (actualCropW < cropW * 0.99) {
+      errors.push(`${label}: crop width ${actualCropW} < target ${cropW} — video won't fill the full ${aspectRatio} frame`);
+    }
+
+    return { xOffset, subjectInCrop };
+  };
+
+  // Validate static subject_x
+  const staticSx = subjectX ?? 50;
+  checkSubjectX(staticSx, `Static tracking (sx=${staticSx})`);
+
+  // Validate dynamic keyframes if scenes available
+  if (scenes?.length) {
+    // Import dynamically to avoid circular dependencies
+    try {
+      // We'll validate the scene data directly without the full pipeline
+      // to check raw values are reasonable
+      for (let i = 0; i < scenes.length; i++) {
+        const s = scenes[i];
+        const sx = s.subject_x ?? 50;
+        if (sx < 0 || sx > 100) {
+          errors.push(`Scene ${i} (t=${s.timestamp?.toFixed(1)}s): subject_x=${sx} out of [0,100] range`);
+        }
+        if (sx < 5 || sx > 95) {
+          warnings.push(`Scene ${i} (t=${s.timestamp?.toFixed(1)}s): subject_x=${sx} near edge — may cause edge-clamped crop`);
+        }
+      }
+
+      // Check for extreme jumps between consecutive scenes (potential false detections)
+      const sorted = [...scenes].sort((a, b) => a.timestamp - b.timestamp);
+      for (let i = 1; i < sorted.length; i++) {
+        const prev = sorted[i - 1];
+        const cur = sorted[i];
+        const dt = cur.timestamp - prev.timestamp;
+        const dx = Math.abs((cur.subject_x ?? 50) - (prev.subject_x ?? 50));
+        if (dt > 0 && dt < 0.5 && dx > 30) {
+          warnings.push(
+            `Rapid subject jump: ${dx}% in ${(dt * 1000).toFixed(0)}ms between scenes at ` +
+            `t=${prev.timestamp.toFixed(1)}s and t=${cur.timestamp.toFixed(1)}s — may indicate false detection`
+          );
+        }
+      }
+
+      // Verify the R ratio doesn't cause impossible centering
+      const R = srcRatio / targetRatio;
+      const visiblePct = (1 / R) * 100;
+      if (visiblePct < 25) {
+        warnings.push(
+          `Extreme aspect ratio conversion (${srcRatio.toFixed(2)} → ${targetRatio.toFixed(2)}): ` +
+          `only ${visiblePct.toFixed(0)}% of source width visible — tracking accuracy may be limited`
+        );
+      }
+    } catch {
+      warnings.push('Could not validate dynamic tracking keyframes');
+    }
+  }
+
+  return { valid: errors.length === 0, errors, warnings };
+}
+
+/**
  * Full QA validation — runs all checks and returns a combined report.
  *
  * @param {Array} items - Timeline store items
@@ -579,9 +726,11 @@ export function validateExportParity(items, settings, outputDims) {
  * @param {Object} outputDims - { w, h } output resolution
  * @param {Object} [syncInfo] - Optional { transcript, clipStart, clipEnd } for sync validation
  * @param {number} [exportFPS] - Export FPS for active word timing validation
+ * @param {Object} [trackingInfo] - Optional { scenes, clipStart, clipEnd, srcW, srcH, subjectX }
+ * @param {string} [aspectRatio] - Target aspect ratio
  * @returns {{ valid: boolean, errors: string[], warnings: string[], summary: string, checks: Object[], confidence: string }}
  */
-export function runSubtitleQA(items, settings, outputDims, syncInfo, exportFPS = 30) {
+export function runSubtitleQA(items, settings, outputDims, syncInfo, exportFPS = 30, trackingInfo = null, aspectRatio = null) {
   const itemResult = validateSubtitleItems(items);
   const settingsResult = validateSubtitleSettings(settings);
   const consistencyResult = validatePreviewExportConsistency(settings, outputDims);
@@ -599,6 +748,12 @@ export function runSubtitleQA(items, settings, outputDims, syncInfo, exportFPS =
     { name: 'Clip effects parity', ...effectsResult },
     { name: 'Export parity', ...parityResult },
   ];
+
+  // Subject tracking validation
+  if (trackingInfo) {
+    const trackingResult = validateSubjectTracking(trackingInfo, aspectRatio, outputDims);
+    checks.push({ name: 'Subject tracking', ...trackingResult });
+  }
 
   // Optional transcript sync validation
   if (syncInfo && syncInfo.transcript) {

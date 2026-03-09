@@ -368,6 +368,48 @@ export default class RenderEngine {
     ctx.restore();
   }
 
+  /**
+   * Prepare subject tracking keyframes for dynamic crop positioning.
+   * Call this once before export (or per-clip) so _renderVideo can
+   * interpolate the subject position at each frame time.
+   *
+   * @param {Array} scenes - Scene objects with {timestamp, subject_x}
+   * @param {number} clipStart - Clip start time (absolute seconds)
+   * @param {number} clipEnd - Clip end time (absolute seconds)
+   * @param {number|null} srcRatio - Source video aspect ratio
+   * @param {number|null} targetRatio - Target crop aspect ratio
+   */
+  prepareSubjectTracking(scenes, clipStart, clipEnd, srcRatio, targetRatio) {
+    // Lazy-import to avoid circular deps — these are the same functions
+    // used by VideoPlayer and backend for parity
+    if (!this._stImported) {
+      try {
+        // Import will be set up by the caller via setSubjectTrackingFns
+        this._stImported = true;
+      } catch { /* noop */ }
+    }
+    if (this._processKeyframes && scenes?.length) {
+      this._subjectKeyframes = this._processKeyframes(scenes, clipStart, clipEnd, srcRatio, targetRatio);
+      this._subjectClipStart = clipStart;
+    } else {
+      this._subjectKeyframes = null;
+      this._subjectClipStart = 0;
+    }
+  }
+
+  /**
+   * Inject subject tracking functions so RenderEngine can perform
+   * dynamic keyframe interpolation matching the preview player exactly.
+   *
+   * @param {Function} processKeyframes - Full pipeline: build→cuts→compress→deadzone→smooth→holds
+   * @param {Function} interpolateSubjectX - Smoothstep interpolation at time t
+   */
+  setSubjectTrackingFns(processKeyframes, interpolateSubjectX) {
+    this._processKeyframes = processKeyframes;
+    this._interpolateSubjectX = interpolateSubjectX;
+    this._stImported = true;
+  }
+
   _renderVideo(ctx, clip, currentTime, settings, mediaElements) {
     const mediaEl = mediaElements?.get(clip.mediaRef || clip.id);
     if (!mediaEl || !(mediaEl instanceof HTMLVideoElement)) return;
@@ -387,8 +429,23 @@ export default class RenderEngine {
       if (srcAR > dstAR) {
         // Source is wider — crop horizontally
         sw = Math.round(vh * dstAR);
-        const subjectPct = clip.subjectX ?? settings.subjectX ?? 50;
-        sx = Math.round(((vw - sw) * subjectPct) / 100);
+
+        // Compute subject position: use dynamic keyframe interpolation
+        // if available (matches VideoPlayer/backend exactly), otherwise
+        // fall back to static clip.subjectX.
+        let subjectPct = clip.subjectX ?? settings.subjectX ?? 50;
+        if (this._subjectKeyframes && this._interpolateSubjectX) {
+          const relTime = currentTime - (this._subjectClipStart || 0);
+          subjectPct = this._interpolateSubjectX(this._subjectKeyframes, relTime);
+        }
+
+        // Use centering formula matching backend _center_crop_offset():
+        // Place crop window so subject pixel ends up at crop center.
+        // subject_pixel = vw * subjectPct / 100
+        // x_offset = subject_pixel - crop_width / 2, clamped to [0, vw - sw]
+        const subjectPixel = vw * subjectPct / 100;
+        const maxOffset = vw - sw;
+        sx = Math.round(Math.max(0, Math.min(maxOffset, subjectPixel - sw / 2)));
       } else {
         // Source is taller — crop vertically
         sh = Math.round(vw / dstAR);
@@ -914,5 +971,8 @@ export default class RenderEngine {
     this._speakerRates = null;
     this._speakersOrdered = null;
     this._subtitleSegments = null;
+    this._subjectKeyframes = null;
+    this._processKeyframes = null;
+    this._interpolateSubjectX = null;
   }
 }

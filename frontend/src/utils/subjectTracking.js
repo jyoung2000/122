@@ -386,7 +386,21 @@ export function processKeyframes(scenes, clipStart, clipEnd, srcRatio = null, ta
   const afterSmooth = smoothKeyframesBidirectional(afterDeadZone);
   const afterHolds = mergeHolds(afterSmooth);
 
-  return afterHolds;
+  // Final bounds enforcement — ensure every keyframe x is clamped to [0, 100]
+  // and within the safe range for the aspect ratio. This prevents any pipeline
+  // stage from producing values that would push the crop off-screen.
+  if (srcRatio && targetRatio) {
+    const range = computeSafeRange(srcRatio, targetRatio);
+    return afterHolds.map(kf => ({
+      t: kf.t,
+      x: Math.max(range.min, Math.min(range.max, Math.round(kf.x))),
+    }));
+  }
+
+  return afterHolds.map(kf => ({
+    t: kf.t,
+    x: Math.max(0, Math.min(100, Math.round(kf.x))),
+  }));
 }
 
 /**

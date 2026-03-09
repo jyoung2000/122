@@ -1695,6 +1695,77 @@ def _validate_subject_tracking(
         except ValueError:
             pass  # Already reported above
 
+    # Dynamic keyframe bounds verification — ensure every keyframe
+    # produces a valid crop offset that covers the full output frame
+    # (no off-screen crops, no black bars)
+    if has_dynamic and subject_keyframes:
+        safe_lo, safe_hi = _compute_safe_range(src_ratio, target_ratio)
+        out_of_bounds = 0
+        off_center_count = 0
+        for t, sx_val in subject_keyframes:
+            # Check keyframe values are within safe range
+            if sx_val < safe_lo or sx_val > safe_hi:
+                out_of_bounds += 1
+            # Verify the resulting crop offset is valid
+            offset = _center_crop_offset(_safe_subject_x(sx_val), src_w, crop_w)
+            if offset < 0:
+                warnings.append(
+                    f"Keyframe t={t:.2f}s sx={sx_val}: crop offset {offset} is negative (video would crop off-screen left)"
+                )
+            if offset > max_x_offset:
+                warnings.append(
+                    f"Keyframe t={t:.2f}s sx={sx_val}: crop offset {offset} > max {max_x_offset} (video would crop off-screen right)"
+                )
+            # Check the crop fills the full output width
+            actual_crop_end = offset + crop_w
+            if actual_crop_end > src_w + 1:  # +1 for rounding tolerance
+                warnings.append(
+                    f"Keyframe t={t:.2f}s sx={sx_val}: crop extends beyond source frame ({actual_crop_end} > {src_w})"
+                )
+            # Check centering quality (when not edge-clamped)
+            if offset > 0 and offset < max_x_offset:
+                subject_pixel = src_w * _safe_subject_x(sx_val) / 100
+                subject_in_crop = subject_pixel - offset
+                center_error_pct = abs(subject_in_crop - crop_w / 2) / crop_w * 100
+                if center_error_pct > 15:
+                    off_center_count += 1
+
+        if out_of_bounds > 0:
+            warnings.append(
+                f"{out_of_bounds}/{len(subject_keyframes)} keyframes outside safe range "
+                f"[{safe_lo}, {safe_hi}] — subject may be edge-clamped"
+            )
+        if off_center_count > 0:
+            warnings.append(
+                f"{off_center_count}/{len(subject_keyframes)} keyframes >15% off-center — "
+                f"tracking may not look human-edited"
+            )
+
+        # Verify smoothstep interpolation at intermediate points
+        # Sample at midpoints between consecutive keyframes to ensure
+        # intermediate values don't exceed bounds
+        for i in range(len(subject_keyframes) - 1):
+            t0, sx0 = subject_keyframes[i]
+            t1, sx1 = subject_keyframes[i + 1]
+            dt = t1 - t0
+            if dt <= 0:
+                continue
+            # Sample at 25%, 50%, 75% through the segment
+            for frac in (0.25, 0.5, 0.75):
+                # Smoothstep: f(p) = p^2 * (3 - 2p)
+                p = frac
+                eased = p * p * (3 - 2 * p)
+                interp_sx = sx0 + (sx1 - sx0) * eased
+                interp_offset = _center_crop_offset(
+                    _safe_subject_x(int(round(interp_sx))), src_w, crop_w
+                )
+                if interp_offset < 0 or interp_offset > max_x_offset:
+                    warnings.append(
+                        f"Smoothstep interpolation at t={t0 + dt * frac:.2f}s produces "
+                        f"offset={interp_offset} outside [0, {max_x_offset}] — video may crop off-screen"
+                    )
+                    break  # One warning per segment is enough
+
     if warnings:
         logger.warning(
             "Subject tracking QA found %d issue(s) for %s crop (%dx%d → %dx%d)",
@@ -3276,12 +3347,21 @@ async def export_clip(
                     after_compress = _compress_range(after_cuts)
                     after_dead_zone = _apply_dead_zone(after_compress, src_ratio=_src_ratio, target_ratio=_target_ratio)
                     after_smooth = _smooth_keyframes_bidirectional(after_dead_zone)
-                    keyframes = _merge_holds(after_smooth)
+                    after_holds = _merge_holds(after_smooth)
+
+                    # Final bounds enforcement — clamp every keyframe to safe range
+                    # to prevent any pipeline stage from producing values that push
+                    # the crop off-screen or cause black bars
+                    safe_lo, safe_hi = _compute_safe_range(_src_ratio, _target_ratio)
+                    keyframes = [
+                        (t, max(safe_lo, min(safe_hi, sx)))
+                        for t, sx in after_holds
+                    ]
 
                     logger.info(
-                        "[SubjectTracking] clip %s: pipeline stages — raw=%d → cuts=%d → compress=%d → deadzone=%d → smooth=%d → holds=%d",
+                        "[SubjectTracking] clip %s: pipeline stages — raw=%d → cuts=%d → compress=%d → deadzone=%d → smooth=%d → holds=%d → clamped=%d (safe=[%d,%d])",
                         clip_id, len(raw_kf), len(after_cuts), len(after_compress), len(after_dead_zone),
-                        len(after_smooth), len(keyframes),
+                        len(after_smooth), len(after_holds), len(keyframes), safe_lo, safe_hi,
                     )
 
                     # If pipeline collapsed to single value, keep as-is (static)

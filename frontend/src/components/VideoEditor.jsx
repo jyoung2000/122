@@ -3098,6 +3098,10 @@ export default function VideoEditor({
           endTime={effectiveClipEnd}
           aspectRatio={aspectRatio}
           transcript={transcript}
+          scenes={scenes}
+          sourceWidth={sourceWidth}
+          sourceHeight={sourceHeight}
+          subjectX={subjectX}
         />
       )}
 

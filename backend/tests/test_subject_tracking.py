@@ -21,6 +21,8 @@ from backend.services.clip_exporter import (
     _smooth_keyframes,
     _build_crop_x_expr,
     _build_filter_chain,
+    _compute_safe_range,
+    _validate_subject_tracking,
 )
 from backend.models import SceneDescription
 
@@ -618,3 +620,140 @@ class TestOllamaSubjectX:
             scenes = asyncio.get_event_loop().run_until_complete(provider.analyze_frames([frame]))
         mock_call.assert_not_awaited()
         assert scenes == []
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Off-screen crop prevention (bounds clamping)
+# ══════════════════════════════════════════════════════════════════════
+
+class TestBoundsClampingNeverCropsOffScreen:
+    """Verify that the safe range clamping ensures crop offsets never
+    go negative or exceed the source frame, for all aspect ratios.
+    This guarantees the video always fills the full output frame
+    (no black bars, no off-screen crops).
+    """
+
+    @pytest.mark.parametrize("aspect_ratio,target_ratio", [
+        ("9:16", 9/16), ("1:1", 1.0), ("4:5", 4/5),
+    ])
+    @pytest.mark.parametrize("src_w,src_h", [
+        (1920, 1080), (2560, 1440), (3840, 2160), (1280, 720),
+    ])
+    @pytest.mark.parametrize("subject_x", [0, 5, 10, 25, 50, 75, 90, 95, 100])
+    def test_crop_offset_always_valid(self, aspect_ratio, target_ratio, src_w, src_h, subject_x):
+        """Crop offset must always be in [0, max_offset] regardless of subject_x."""
+        src_ratio = src_w / src_h
+        if abs(src_ratio - target_ratio) <= 0.01:
+            return
+
+        if target_ratio < src_ratio:
+            crop_w = int(src_h * target_ratio)
+        else:
+            crop_w = src_w
+        crop_w = crop_w - (crop_w % 2)
+        max_offset = src_w - crop_w
+
+        sx = _safe_subject_x(subject_x, src_ratio=src_ratio, target_ratio=target_ratio)
+        offset = _center_crop_offset(sx, src_w, crop_w)
+
+        assert offset >= 0, (
+            f"Negative crop offset {offset} for {src_w}x{src_h}→{aspect_ratio} sx={subject_x}→safe={sx}"
+        )
+        assert offset <= max_offset, (
+            f"Crop offset {offset} > max {max_offset} for {src_w}x{src_h}→{aspect_ratio} sx={subject_x}→safe={sx}"
+        )
+        # Verify crop covers full width (no gap on right side)
+        assert offset + crop_w <= src_w, (
+            f"Crop extends beyond frame: {offset}+{crop_w}={offset+crop_w} > {src_w}"
+        )
+
+    @pytest.mark.parametrize("aspect_ratio,target_ratio", [
+        ("9:16", 9/16), ("1:1", 1.0), ("4:5", 4/5),
+    ])
+    def test_dynamic_smoothstep_never_exceeds_bounds(self, aspect_ratio, target_ratio):
+        """Smoothstep interpolation between keyframes must never produce
+        crop offsets outside [0, max_offset]."""
+        from backend.services.clip_exporter import _compute_safe_range
+
+        src_w, src_h = 1920, 1080
+        src_ratio = src_w / src_h
+
+        if abs(src_ratio - target_ratio) <= 0.01:
+            return
+
+        crop_w = int(src_h * target_ratio)
+        crop_w = crop_w - (crop_w % 2)
+        max_offset = src_w - crop_w
+
+        safe_lo, safe_hi = _compute_safe_range(src_ratio, target_ratio)
+
+        # Create keyframes at opposite safe extremes
+        keyframes = [
+            (0.0, safe_lo),
+            (2.0, safe_hi),
+            (4.0, safe_lo),
+        ]
+
+        # Sample 100 points across the timeline
+        for i in range(101):
+            t = i * 4.0 / 100
+            # Find surrounding keyframes and interpolate with smoothstep
+            for j in range(len(keyframes) - 1):
+                t0, sx0 = keyframes[j]
+                t1, sx1 = keyframes[j + 1]
+                if t0 <= t <= t1:
+                    dt = t1 - t0
+                    if dt <= 0:
+                        interp_sx = sx0
+                    else:
+                        p = (t - t0) / dt
+                        eased = p * p * (3 - 2 * p)
+                        interp_sx = sx0 + (sx1 - sx0) * eased
+                    sx_clamped = _safe_subject_x(int(round(interp_sx)), src_ratio=src_ratio, target_ratio=target_ratio)
+                    offset = _center_crop_offset(sx_clamped, src_w, crop_w)
+                    assert 0 <= offset <= max_offset, (
+                        f"Smoothstep at t={t:.2f}s sx={interp_sx:.1f}→{sx_clamped}: "
+                        f"offset {offset} outside [0, {max_offset}] for {aspect_ratio}"
+                    )
+                    break
+
+
+class TestValidateSubjectTrackingQA:
+    """Verify the enhanced QA validation catches off-screen crops and
+    validates centering quality."""
+
+    def test_static_crop_valid(self):
+        """Static crop with centered subject should pass QA."""
+        from backend.services.clip_exporter import _validate_subject_tracking
+        # Compute correct crop dimensions matching _build_filter_chain
+        crop_w = int(1080 * 9 / 16)
+        crop_w = crop_w - (crop_w % 2)  # 606
+        sx = _safe_subject_x(50)
+        x_offset = _center_crop_offset(sx, 1920, crop_w)
+        vf = f"setsar=1,crop={crop_w}:1080:{x_offset}:0,scale=1080:1920"
+        warnings = _validate_subject_tracking(
+            filter_chain=vf,
+            aspect_ratio="9:16",
+            src_w=1920, src_h=1080,
+            subject_x=50,
+            subject_keyframes=None,
+        )
+        assert len(warnings) == 0, f"Unexpected QA warnings: {warnings}"
+
+    def test_dynamic_crop_with_valid_keyframes(self):
+        """Dynamic crop with safe keyframes should pass QA."""
+        from backend.services.clip_exporter import _validate_subject_tracking
+        # Build a dynamic filter chain
+        keyframes = [(0.0, 40), (2.0, 50), (4.0, 60)]
+        vf_expr = _build_crop_x_expr(keyframes, 1312, 1920, 608)
+        vf = f"setsar=1,crop=608:1080:{vf_expr}:0,scale=1080:1920"
+        warnings = _validate_subject_tracking(
+            filter_chain=vf,
+            aspect_ratio="9:16",
+            src_w=1920, src_h=1080,
+            subject_x=50,
+            subject_keyframes=keyframes,
+        )
+        # Should have no errors about off-screen crops
+        off_screen_warnings = [w for w in warnings if "off-screen" in w or "outside" in w.lower()]
+        assert len(off_screen_warnings) == 0, f"Off-screen crop warnings: {off_screen_warnings}"

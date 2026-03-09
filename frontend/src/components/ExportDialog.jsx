@@ -31,6 +31,10 @@ export default function ExportDialog({
   jobId,
   clipId,
   transcript,
+  scenes,
+  sourceWidth = 1920,
+  sourceHeight = 1080,
+  subjectX = 50,
 }) {
   const [quality, setQuality] = useState('1080p');
   const [exportMode, setExportMode] = useState('server'); // 'server' | 'client'
@@ -61,8 +65,12 @@ export default function ExportDialog({
       exportH = Math.round(dims.h * scale);
     }
     const syncInfo = transcript ? { transcript, clipStart: startTime, clipEnd: endTime } : undefined;
-    return runSubtitleQA(timelineItems, settings, { w: exportW, h: exportH }, syncInfo, exportFPS);
-  }, [timelineItems, settings, quality, aspectRatio, transcript, startTime, endTime, exportFPS]);
+    const trackingInfo = scenes?.length ? {
+      scenes, clipStart: startTime, clipEnd: endTime,
+      srcW: sourceWidth, srcH: sourceHeight, subjectX,
+    } : null;
+    return runSubtitleQA(timelineItems, settings, { w: exportW, h: exportH }, syncInfo, exportFPS, trackingInfo, aspectRatio);
+  }, [timelineItems, settings, quality, aspectRatio, transcript, startTime, endTime, exportFPS, scenes, sourceWidth, sourceHeight, subjectX]);
 
   const handleExport = useCallback(async () => {
     setError(null);
