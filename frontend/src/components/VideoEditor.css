@@ -2636,6 +2636,15 @@ input.ve-timecode--input {
   background: var(--ve-btn-hover);
 }
 
+/* ── Track Header Controls (visibility/mute/lock toggles) ─── */
+.ve-multi-timeline__track-ctrl {
+  transition: opacity 0.15s ease;
+  flex-shrink: 0;
+}
+.ve-multi-timeline__track-ctrl:hover {
+  opacity: 1 !important;
+}
+
 /* ── Editor Layout (NLE-style) ───────────────────────── */
 .ve-editor-layout {
   display: flex;

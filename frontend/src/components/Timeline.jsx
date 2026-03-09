@@ -67,6 +67,9 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   const removeItem = useTimelineStore((s) => s.removeItem);
   const toggleSnap = useTimelineStore((s) => s.toggleSnap);
   const addTrack = useTimelineStore((s) => s.addTrack);
+  const toggleTrackVisibility = useTimelineStore((s) => s.toggleTrackVisibility);
+  const toggleTrackMute = useTimelineStore((s) => s.toggleTrackMute);
+  const toggleTrackLock = useTimelineStore((s) => s.toggleTrackLock);
   const segments = useTimelineStore((s) => s.segments);
 
   const [isDragging, setIsDragging] = useState(false);
@@ -780,19 +783,138 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         </div>
       </div>
 
-      {/* Canvas */}
-      <canvas
-        ref={canvasRef}
-        className="ve-multi-timeline__canvas"
-        style={{ width: '100%', height: Math.max(canvasHeight, 280) }}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
+      {/* Canvas area with track header overlay */}
+      <div style={{ position: 'relative' }}>
+        {/* Track header controls — overlays the canvas label area */}
+        {/* Styled like DaVinci Resolve / Premiere Pro: eye (visibility), mute, lock per track */}
+        <div
+          className="ve-multi-timeline__track-headers"
+          style={{
+            position: 'absolute',
+            left: 0,
+            top: 0,
+            width: LABEL_WIDTH - 1,
+            zIndex: 5,
+            pointerEvents: 'none',
+          }}
+        >
+          {/* Spacer for ruler */}
+          <div style={{ height: RULER_HEIGHT }} />
+          {tracks.map((track) => {
+            const isHidden = track.visible === false;
+            return (
+              <div
+                key={track.id}
+                className="ve-multi-timeline__track-header"
+                style={{
+                  height: isHidden ? 0 : TRACK_HEIGHT,
+                  marginBottom: isHidden ? 0 : TRACK_GAP,
+                  display: isHidden ? 'none' : 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'flex-end',
+                  gap: 1,
+                  padding: '0 2px',
+                  pointerEvents: 'auto',
+                }}
+              >
+                {/* Visibility toggle (eye icon) — preview only, does not affect server export */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); toggleTrackVisibility(track.id); }}
+                  title={`Hide ${track.name} from preview (still included in exported video)`}
+                  className="ve-multi-timeline__track-ctrl"
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    padding: '2px', lineHeight: 1, fontSize: 12,
+                    opacity: 0.6,
+                    color: 'var(--ve-text, #666)',
+                  }}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </svg>
+                </button>
+                {/* Mute toggle */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); toggleTrackMute(track.id); }}
+                  title={track.muted ? `Unmute ${track.name}` : `Mute ${track.name}`}
+                  className="ve-multi-timeline__track-ctrl"
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    padding: '2px', lineHeight: 1, fontSize: 9, fontWeight: 700,
+                    opacity: track.muted ? 1 : 0.35,
+                    color: track.muted ? 'var(--danger, #ef4444)' : 'var(--ve-text, #666)',
+                  }}
+                >
+                  M
+                </button>
+                {/* Lock toggle */}
+                <button
+                  onClick={(e) => { e.stopPropagation(); toggleTrackLock(track.id); }}
+                  title={track.locked ? `Unlock ${track.name}` : `Lock ${track.name}`}
+                  className="ve-multi-timeline__track-ctrl"
+                  style={{
+                    background: 'none', border: 'none', cursor: 'pointer',
+                    padding: '2px', lineHeight: 1, fontSize: 10,
+                    opacity: track.locked ? 1 : 0.35,
+                    color: track.locked ? 'var(--danger, #ef4444)' : 'var(--ve-text, #666)',
+                  }}
+                >
+                  {track.locked ? '\uD83D\uDD12' : '\uD83D\uDD13'}
+                </button>
+              </div>
+            );
+          })}
+          {/* Show hidden tracks restore buttons */}
+          {tracks.some(t => t.visible === false) && (
+            <div style={{
+              padding: '4px 2px',
+              pointerEvents: 'auto',
+            }}>
+              {tracks.filter(t => t.visible === false).map(track => (
+                <button
+                  key={track.id}
+                  onClick={(e) => { e.stopPropagation(); toggleTrackVisibility(track.id); }}
+                  title={`Show ${track.name}`}
+                  style={{
+                    display: 'flex', alignItems: 'center', gap: 3,
+                    width: '100%',
+                    background: 'none', border: '1px dashed var(--ve-chrome-border, #ccc)',
+                    borderRadius: 4,
+                    cursor: 'pointer',
+                    padding: '3px 4px',
+                    marginBottom: 2,
+                    fontSize: 9,
+                    color: 'var(--ve-text-muted, #999)',
+                    opacity: 0.7,
+                  }}
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94" />
+                    <path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19" />
+                    <line x1="1" y1="1" x2="23" y2="23" />
+                  </svg>
+                  {TRACK_ICONS[track.type] || ''} {track.name}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Canvas */}
+        <canvas
+          ref={canvasRef}
+          className="ve-multi-timeline__canvas"
+          style={{ width: '100%', height: Math.max(canvasHeight, 280) }}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
         onPointerLeave={onPointerLeave}
         onWheel={onWheel}
         onDrop={onDrop}
         onDragOver={onDragOver}
         onContextMenu={onContextMenu}
-      />
+        />
+      </div>
 
       {/* Context menu */}
       {contextMenu && (

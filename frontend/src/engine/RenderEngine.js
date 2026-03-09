@@ -282,11 +282,15 @@ export default class RenderEngine {
     // Collect visible clips at currentTime, sorted by track order (bottom-to-top)
     // Subtitle items are rendered last (on top) via the canvas engine, using the
     // same timeline store items that SubtitleOverlay uses (single source of truth).
+    //
+    // In export mode, track.visible is ignored — all tracks are included in the
+    // exported video. Track visibility is a preview-only feature (like solo/mute
+    // in DAWs vs NLEs: DaVinci Resolve, Premiere Pro treat visibility as preview-only).
     const visibleClips = [];
     for (const clip of clips) {
       if (currentTime >= clip.start && currentTime < clip.end) {
         const track = tracks.find(t => t.id === clip.trackId);
-        if (track && track.visible !== false && !track.muted) {
+        if (track && (this._exportMode || track.visible !== false) && !track.muted) {
           visibleClips.push({ clip, track, order: track.order ?? tracks.indexOf(track) });
         }
       }

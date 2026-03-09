@@ -2719,7 +2719,7 @@ export default function VideoEditor({
       </div>
 
       {/* ── Speaker Color Editor (below timeline, above controls) ── */}
-      {speakers && speakers.length > 0 && settings?.subtitlesEnabled && (
+      {!isMobile && speakers && speakers.length > 0 && settings?.subtitlesEnabled && (
         <div style={{
           display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
           padding: '8px 14px',
@@ -2956,7 +2956,7 @@ export default function VideoEditor({
       </div>
 
       {/* ── Multi-Track Editor Toggle ── */}
-      {!compact && (
+      {!compact && !isMobile && (
         <div className="ve-multitrack-toggle">
           <button
             className={`ve-multitrack-toggle__btn${showMultiTrack ? ' ve-multitrack-toggle__btn--active' : ''}${isProcessing ? ' ve-multitrack-toggle__btn--disabled' : ''}`}

@@ -1710,7 +1710,7 @@ export default function Analysis() {
             )}
             {/* Inline subtitle settings for clip preview */}
             {renderInlineSubToolbar(null)}
-            {renderPresetBar()}
+            {!isMobile && renderPresetBar()}
             {renderMarkScenePanel()}
             {renderInlineSubPanel()}
           </div>
@@ -1787,7 +1787,7 @@ export default function Analysis() {
                 <div style={{ width: 1, height: 20, background: 'var(--border)', margin: '0 4px' }} />
               </>
             )}
-            {renderPresetBar()}
+            {!isMobile && renderPresetBar()}
             {renderMarkScenePanel()}
             {renderInlineSubPanel()}
           </div>

@@ -252,6 +252,10 @@ export default class ExportEngine {
     // Pre-compute subtitle context for active word highlighting
     this.renderEngine.prepareSubtitleContext(clips);
 
+    // Enable export mode — track visibility is preview-only, all tracks
+    // are included in the exported video regardless of visibility state
+    this.renderEngine._exportMode = true;
+
     // Boost FPS if active word highlighting is enabled for smooth transitions
     const exportFPS = ExportEngine.computeOptimalFPS(clips, settings, this.fps);
 
@@ -413,6 +417,9 @@ export default class ExportEngine {
     } catch (err) {
       this.onError?.(`Export failed: ${err.message}`);
       return null;
+    } finally {
+      // Restore preview-only visibility behavior after export completes
+      if (this.renderEngine) this.renderEngine._exportMode = false;
     }
   }
 
@@ -421,6 +428,8 @@ export default class ExportEngine {
    */
   async _exportWithMediaRecorder(startTime, endTime, tracks, clips, settings, mediaElements, exportFPS) {
     const fps = exportFPS || this.fps;
+    // Export mode: include all tracks regardless of visibility state
+    if (this.renderEngine) this.renderEngine._exportMode = true;
 
     try {
       const stream = this.renderEngine.canvas.captureStream(fps);
@@ -470,6 +479,8 @@ export default class ExportEngine {
     } catch (err) {
       this.onError?.(`MediaRecorder export failed: ${err.message}`);
       return null;
+    } finally {
+      if (this.renderEngine) this.renderEngine._exportMode = false;
     }
   }
 
@@ -478,6 +489,8 @@ export default class ExportEngine {
    */
   cancel() {
     this._cancelled = true;
+    // Restore preview-only visibility behavior
+    if (this.renderEngine) this.renderEngine._exportMode = false;
   }
 
   /**
