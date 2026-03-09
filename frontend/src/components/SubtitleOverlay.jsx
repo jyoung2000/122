@@ -206,9 +206,16 @@ export default function SubtitleOverlay({
 
   // Timeline store — SINGLE SOURCE OF TRUTH for subtitle items
   const timelineItems = useTimelineStore((s) => s.items);
+  const tracks = useTimelineStore((s) => s.tracks);
   const selectedItemId = useTimelineStore((s) => s.selectedItemId);
   const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
   const updateItem = useTimelineStore((s) => s.updateItem);
+
+  // Check if subtitle track is hidden via the eye icon toggle
+  const subtitleTrackVisible = useMemo(() => {
+    const subTrack = tracks.find((t) => t.type === 'subtitle');
+    return subTrack ? subTrack.visible !== false : true;
+  }, [tracks]);
 
   const subtitlesEnabledGlobal = settings.subtitlesEnabled || false;
 
@@ -267,9 +274,9 @@ export default function SubtitleOverlay({
   // during initFromClip() in VideoEditor, so they always exist when subtitles
   // are available. This eliminates the dual-source problem.
   const subtitleItems = useMemo(() => {
-    if (!subtitlesEnabled) return [];
+    if (!subtitlesEnabled || !subtitleTrackVisible) return [];
     return timelineItems.filter((it) => it.type === 'subtitle');
-  }, [subtitlesEnabled, timelineItems]);
+  }, [subtitlesEnabled, subtitleTrackVisible, timelineItems]);
 
   // Apply maxWords splitting to subtitle items for display
   const clipSegments = useMemo(() => {

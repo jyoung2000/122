@@ -412,6 +412,7 @@ export default function VideoEditor({
   const viewportClickRef = useRef({ downTime: 0, moved: false });
   const timelineRef = useRef(null);
   const [overlayInteracting, setOverlayInteracting] = useState(false);
+  const arrowHoldRef = useRef({ key: null, interval: null });
   const waveformCanvasRef = useRef(null);
   const waveformDataRef = useRef(null);
   const audioCtxRef = useRef(null);
@@ -1762,13 +1763,21 @@ export default function VideoEditor({
           togglePlay();
           break;
         case 'ArrowLeft':
+        case 'ArrowRight': {
           e.preventDefault();
-          skipTime(e.shiftKey ? -1 : -1 / 30);
+          if (e.repeat) break; // handled by our own interval
+          const arrowDir = e.code === 'ArrowLeft' ? -1 : 1;
+          const arrowDelta = e.shiftKey ? arrowDir : arrowDir / 30;
+          skipTime(arrowDelta);
+          // Start hold-to-repeat interval
+          const hold = arrowHoldRef.current;
+          if (hold.interval) clearInterval(hold.interval);
+          hold.key = e.code;
+          hold.interval = setInterval(() => {
+            skipTime(arrowDelta);
+          }, 1000 / 15); // 15 steps per second while held
           break;
-        case 'ArrowRight':
-          e.preventDefault();
-          skipTime(e.shiftKey ? 1 : 1 / 30);
-          break;
+        }
         case 'KeyJ':
           e.preventDefault();
           setShuttleSpeed(prev => {
@@ -1900,8 +1909,29 @@ export default function VideoEditor({
           break;
       }
     };
+    const onKeyUp = (e) => {
+      if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+        const hold = arrowHoldRef.current;
+        if (hold.key === e.code && hold.interval) {
+          clearInterval(hold.interval);
+          hold.interval = null;
+          hold.key = null;
+        }
+      }
+    };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      // Clean up any lingering interval
+      const hold = arrowHoldRef.current;
+      if (hold.interval) {
+        clearInterval(hold.interval);
+        hold.interval = null;
+        hold.key = null;
+      }
+    };
   }, [showMultiTrack, togglePlay, skipTime, seekTo, toggleMute, trimmedStart, trimmedEnd, segments, selectedSegmentId, selectedSegment, currentTime, onSegmentsChange]);
 
   // ── J-K-L shuttle speed effect ──────────────────────
