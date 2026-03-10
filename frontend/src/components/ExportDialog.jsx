@@ -30,6 +30,7 @@ export default function ExportDialog({
   aspectRatio,
   jobId,
   clipId,
+  clipTitle,
   transcript,
   scenes,
   sourceWidth = 1920,
@@ -90,6 +91,7 @@ export default function ExportDialog({
         end: endTime,
         clip_id: parseInt(clipId) || 0,
         export_quality: preset.id,
+        clip_title: clipTitle || undefined,
         ...(settings || {}),
       };
 

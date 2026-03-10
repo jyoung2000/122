@@ -3217,6 +3217,7 @@ export default function VideoEditor({
           onClose={() => setShowExportDialog(false)}
           jobId={jobId}
           clipId={clipId}
+          clipTitle={title}
           settings={settings}
           startTime={clipStart}
           endTime={effectiveClipEnd}
