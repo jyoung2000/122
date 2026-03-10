@@ -87,6 +87,13 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   const [showAddTrack, setShowAddTrack] = useState(false);
   const [spaceHeld, setSpaceHeld] = useState(false);
 
+  // Ref for playhead pixel position — avoids stale closures in event handlers
+  // without recreating callbacks on every playhead update (which happens every frame).
+  const playheadRef = useRef(playhead);
+  playheadRef.current = playhead;
+  const ppsRef = useRef(pps);
+  ppsRef.current = pps;
+
   // Spacebar hold for pan mode
   useEffect(() => {
     const onKeyDown = (e) => { if (e.code === 'Space' && !e.repeat) setSpaceHeld(true); };
@@ -299,10 +306,10 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     if (phX >= contentLeft && phX <= canvasW) {
       // Playhead line with subtle glow
       ctx.save();
-      ctx.shadowColor = 'rgba(255, 59, 48, 0.4)';
-      ctx.shadowBlur = 4;
+      ctx.shadowColor = 'rgba(255, 59, 48, 0.5)';
+      ctx.shadowBlur = 6;
       ctx.strokeStyle = '#FF3B30';
-      ctx.lineWidth = 2;
+      ctx.lineWidth = 2.5;
       ctx.beginPath();
       ctx.moveTo(phX, 0);
       ctx.lineTo(phX, canvasH);
@@ -310,21 +317,21 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       ctx.restore();
       ctx.lineWidth = 1;
 
-      // Playhead handle — larger inverted triangle for easier grabbing
+      // Playhead handle — large inverted triangle for easy grabbing
       ctx.fillStyle = '#FF3B30';
       ctx.beginPath();
-      ctx.moveTo(phX - 10, 0);
-      ctx.lineTo(phX + 10, 0);
-      ctx.lineTo(phX, 14);
+      ctx.moveTo(phX - 12, 0);
+      ctx.lineTo(phX + 12, 0);
+      ctx.lineTo(phX, 18);
       ctx.closePath();
       ctx.fill();
 
       // White inner triangle for visibility
-      ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
       ctx.beginPath();
-      ctx.moveTo(phX - 5, 1);
-      ctx.lineTo(phX + 5, 1);
-      ctx.lineTo(phX, 8);
+      ctx.moveTo(phX - 6, 1);
+      ctx.lineTo(phX + 6, 1);
+      ctx.lineTo(phX, 10);
       ctx.closePath();
       ctx.fill();
     }
@@ -477,12 +484,16 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       return;
     }
 
-    // Playhead grab: check if click is near the playhead handle (ruler area or close to line)
-    const playheadPixelX = rect.left + LABEL_WIDTH + playhead * pps - scrollX;
+    // Playhead grab: check if click is near the playhead line or handle.
+    // The playhead is selectable along its entire vertical extent, and
+    // has a generous grab zone in the ruler area (triangle handle).
+    const playheadPixelX = rect.left + LABEL_WIDTH + playheadRef.current * ppsRef.current - scrollX;
     const mouseY = e.clientY - rect.top;
-    const isNearPlayhead = Math.abs(e.clientX - playheadPixelX) <= PLAYHEAD_GRAB_WIDTH;
-    const isInRulerOrNear = mouseY <= RULER_HEIGHT + 8 || isNearPlayhead;
-    if (isNearPlayhead && isInRulerOrNear) {
+    const distToPlayhead = Math.abs(e.clientX - playheadPixelX);
+    const isInRuler = mouseY <= RULER_HEIGHT + 8;
+    // Wider grab zone in ruler (triangle handle), narrower along the line
+    const grabThreshold = isInRuler ? PLAYHEAD_GRAB_WIDTH : Math.max(PLAYHEAD_GRAB_WIDTH / 2, 8);
+    if (distToPlayhead <= grabThreshold) {
       // Grab the playhead directly
       const time = getTimeFromX(e.clientX);
       setPlayhead(time);
@@ -539,7 +550,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       setIsDragging(true);
       setDragInfo({ type: 'scrub', startX: e.clientX });
     }
-  }, [hitTestItem, getTimeFromX, setPlayhead, setSelectedItemId, onSeek, activeTool, splitItem, spaceHeld, scrollX, onItemSelect]);
+  }, [hitTestItem, getTimeFromX, setPlayhead, setSelectedItemId, onSeek, activeTool, splitItem, spaceHeld, scrollX, onItemSelect, tracks, items]);
 
   useEffect(() => {
     if (!isDragging || !dragInfo) return;
@@ -619,6 +630,11 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     return () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      // Safety: if component unmounts during a drag, resume undo history
+      // to prevent it from being permanently paused.
+      if (dragInfo.type === 'move' || dragInfo.type === 'trim') {
+        useTimelineStore.temporal.getState().resume();
+      }
     };
   }, [isDragging, dragInfo, items, pps, scrollX, snapEnabled, playhead, getTimeFromX, getTrackFromY, updateItem, setPlayhead, onSeek, setScrollX]);
 
@@ -643,11 +659,12 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       return;
     }
 
-    // Check if hovering near the playhead handle for grab cursor
+    // Check if hovering near the playhead line or handle for grab cursor
     const phPixelX = rect.left + LABEL_WIDTH + playhead * pps - scrollX;
     const mouseY = e.clientY - rect.top;
-    const nearPlayhead = Math.abs(e.clientX - phPixelX) <= PLAYHEAD_GRAB_WIDTH;
-    if (nearPlayhead && (mouseY <= RULER_HEIGHT + 8 || nearPlayhead)) {
+    const isInRulerArea = mouseY <= RULER_HEIGHT + 8;
+    const phGrabThreshold = isInRulerArea ? PLAYHEAD_GRAB_WIDTH : Math.max(PLAYHEAD_GRAB_WIDTH / 2, 8);
+    if (Math.abs(e.clientX - phPixelX) <= phGrabThreshold) {
       canvas.style.cursor = 'col-resize';
       return;
     }

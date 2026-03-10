@@ -356,6 +356,10 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
       window.removeEventListener('mouseup', handleMouseUp);
+      // Safety: resume undo history if component unmounts during drag
+      if (isDragging || isResizing || isRotating) {
+        useTimelineStore.temporal.getState().resume();
+      }
     };
   }, [isDragging, isResizing, isRotating]);
 
