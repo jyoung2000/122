@@ -143,6 +143,7 @@ export default function ClipSEO() {
   useEffect(() => () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); }, []);
 
   const videoRef = useRef(null);
+  const handleVideoRef = useCallback((el) => { videoRef.current = el; }, []);
   const videoContainerRef = useRef(null);
   const wsRef = useRef(null);
   const [playing, setPlaying] = useState(false);
@@ -929,8 +930,8 @@ export default function ClipSEO() {
 
   const videoExt = job.file_path?.split('.').pop() || 'mp4';
   const videoSrc = `/api/files/${jobId}/video.${videoExt}`;
-  const clipDur = (endTime || clip.end_time) - (startTime || clip.start_time);
-  const elapsed = Math.max(0, Math.min(clipDur, currentTime - (startTime || clip.start_time)));
+  const clipDur = (endTime ?? clip.end_time) - (startTime ?? clip.start_time);
+  const elapsed = Math.max(0, Math.min(clipDur, currentTime - (startTime ?? clip.start_time)));
   const progress = clipDur > 0 ? (elapsed / clipDur) * 100 : 0;
   const scoreColor = clip.viral_score >= 80 ? 'var(--accent-amber)' : clip.viral_score >= 50 ? 'var(--accent-cyan)' : 'var(--text-secondary)';
 
@@ -1034,8 +1035,8 @@ export default function ClipSEO() {
           <div style={{ width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto 20px', position: 'relative' }}>
             <VideoEditor
               src={videoSrc}
-              clipStart={startTime || clip.start_time}
-              clipEnd={endTime || clip.end_time}
+              clipStart={startTime ?? clip.start_time}
+              clipEnd={endTime ?? clip.end_time}
               title={clip.title || `Clip ${clipId}`}
               aspectRatio={aspectRatio}
               sourceWidth={sourceDims.w}
@@ -1058,13 +1059,14 @@ export default function ClipSEO() {
               clipId={clipId}
               transcript={job.transcript || []}
               onTranscriptUpdated={fetchJob}
+              onVideoRef={handleVideoRef}
               onAspectRatioChange={(ar) => setClipSettings((prev) => ({ ...prev, aspectRatio: ar }))}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={currentTime}
                   transcript={job.transcript || []}
-                  clipStart={startTime || clip.start_time}
-                  clipEnd={endTime || clip.end_time}
+                  clipStart={startTime ?? clip.start_time}
+                  clipEnd={endTime ?? clip.end_time}
                   settings={clipSettings}
                   aspectRatio={aspectRatio}
                   sourceWidth={sourceDims.w}
@@ -1257,8 +1259,8 @@ export default function ClipSEO() {
           <div style={{ flex: '1 1 50%', minWidth: 0, maxWidth: '60%', position: 'sticky', top: 12 }}>
             <VideoEditor
               src={videoSrc}
-              clipStart={startTime || clip.start_time}
-              clipEnd={endTime || clip.end_time}
+              clipStart={startTime ?? clip.start_time}
+              clipEnd={endTime ?? clip.end_time}
               title={clip.title || `Clip ${clipId}`}
               aspectRatio={aspectRatio}
               sourceWidth={sourceDims.w}
@@ -1281,13 +1283,14 @@ export default function ClipSEO() {
               clipId={clipId}
               transcript={job.transcript || []}
               onTranscriptUpdated={fetchJob}
+              onVideoRef={handleVideoRef}
               onAspectRatioChange={(ar) => setClipSettings((prev) => ({ ...prev, aspectRatio: ar }))}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={currentTime}
                   transcript={job.transcript || []}
-                  clipStart={startTime || clip.start_time}
-                  clipEnd={endTime || clip.end_time}
+                  clipStart={startTime ?? clip.start_time}
+                  clipEnd={endTime ?? clip.end_time}
                   settings={clipSettings}
                   aspectRatio={aspectRatio}
                   sourceWidth={sourceDims.w}
@@ -1405,7 +1408,7 @@ export default function ClipSEO() {
                   onChange={(e) => setStartText(e.target.value)}
                   onBlur={() => {
                     const val = parseDuration(startText);
-                    if (val !== null && val >= 0 && val < (endTime || clip.end_time)) {
+                    if (val !== null && val >= 0 && val < (endTime ?? clip.end_time)) {
                       setStartTime(val);
                       setStartText(formatDuration(val));
                       if (videoRef.current) videoRef.current.currentTime = val;
@@ -1425,7 +1428,7 @@ export default function ClipSEO() {
                   onChange={(e) => setEndText(e.target.value)}
                   onBlur={() => {
                     const val = parseDuration(endText);
-                    if (val !== null && val > (startTime || 0)) {
+                    if (val !== null && val > (startTime ?? 0)) {
                       setEndTime(val);
                       setEndText(formatDuration(val));
                     } else {

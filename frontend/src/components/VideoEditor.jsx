@@ -228,6 +228,8 @@ export default function VideoEditor({
   onTranscriptUpdated,
   // Analysis state
   isProcessing = false,
+  // Expose internal video element to parent via callback
+  onVideoRef,
 }) {
   const { isMobile } = useResponsive();
 
@@ -951,6 +953,12 @@ export default function VideoEditor({
       videoRef.current.playbackRate = initialSpeed;
     }
   }, [initialSpeed]);
+
+  // ── Expose video element to parent via callback ────
+  useEffect(() => {
+    if (onVideoRef) onVideoRef(videoRef.current);
+    return () => { if (onVideoRef) onVideoRef(null); };
+  }, [onVideoRef]);
 
   // ── Video metadata & error ─────────────────────────
   useEffect(() => {
