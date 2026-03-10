@@ -816,13 +816,16 @@ export default function Analysis() {
     const clipTextItems = timelineItems.filter(it => it.type === 'text');
     if (clipTextItems.length > 0) {
       exportBody.text_overlays = clipTextItems.map(it => ({
-        text: it.text || '',
+        text: it.textContent || '',
         x: it.position?.x ?? 50,
         y: it.position?.y ?? 50,
-        font_size: it.fontSize || 48,
-        font_color: it.fontColor || '#FFFFFF',
-        font_family: it.fontFamily || 'sans-serif',
-        background_color: it.backgroundColor || null,
+        font_size: it.textStyle?.fontSize || 48,
+        font_color: it.textStyle?.color || '#FFFFFF',
+        font_family: it.textStyle?.fontFamily || 'sans-serif',
+        font_weight: it.textStyle?.fontWeight || 400,
+        background_color: it.textStyle?.bgColor || null,
+        outline_width: it.textStyle?.outlineWidth || 0,
+        outline_color: it.textStyle?.outlineColor || '#000000',
         start_time: it.start || 0,
         end_time: it.end || 0,
         rotation: it.transform?.rotation || 0,
@@ -931,13 +934,16 @@ export default function Analysis() {
     const textItems = timelineItems.filter(it => it.type === 'text');
     if (textItems.length > 0) {
       body.text_overlays = textItems.map(it => ({
-        text: it.text || '',
+        text: it.textContent || '',
         x: it.position?.x ?? 50,
         y: it.position?.y ?? 50,
-        font_size: it.fontSize || 48,
-        font_color: it.fontColor || '#FFFFFF',
-        font_family: it.fontFamily || 'sans-serif',
-        background_color: it.backgroundColor || null,
+        font_size: it.textStyle?.fontSize || 48,
+        font_color: it.textStyle?.color || '#FFFFFF',
+        font_family: it.textStyle?.fontFamily || 'sans-serif',
+        font_weight: it.textStyle?.fontWeight || 400,
+        background_color: it.textStyle?.bgColor || null,
+        outline_width: it.textStyle?.outlineWidth || 0,
+        outline_color: it.textStyle?.outlineColor || '#000000',
         start_time: it.start || 0,
         end_time: it.end || 0,
         rotation: it.transform?.rotation || 0,

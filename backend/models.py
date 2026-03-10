@@ -166,7 +166,10 @@ class TextOverlay(BaseModel):
     font_size: int = 48
     font_color: str = "#FFFFFF"
     font_family: str = "sans-serif"
+    font_weight: int = 400
     background_color: Optional[str] = None
+    outline_width: int = 0
+    outline_color: str = "#000000"
     start_time: float = 0.0    # relative to clip start
     end_time: float = 0.0
     rotation: float = 0.0

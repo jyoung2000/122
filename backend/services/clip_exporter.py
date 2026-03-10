@@ -3119,6 +3119,9 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
         end_t = overlay.get("end_time", 0) - clip_start
         font_path = _resolve_font_path(font_family)
 
+        outline_width = overlay.get("outline_width", 0)
+        outline_color = overlay.get("outline_color", "#000000")
+
         # Build drawtext with enable expression for timing
         dt = (
             f"drawtext=text='{text}'"
@@ -3128,6 +3131,8 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
             f":fontcolor={font_color}@{opacity:.2f}"
             f":fontfile={font_path}"
         )
+        if outline_width > 0:
+            dt += f":borderw={outline_width}:bordercolor={outline_color}"
         bg_color = overlay.get("background_color")
         if bg_color:
             dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw=5"
