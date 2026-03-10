@@ -1925,6 +1925,27 @@ ASPECT_RATIO_VALUES = {
     "4:5": 4 / 5,
 }
 
+def _compute_video_out_dims(
+    src_w: int, src_h: int,
+    aspect_ratio: str | None,
+    export_quality: str,
+) -> tuple[int, int]:
+    """Compute the output video dimensions after crop/scale.
+
+    Returns (out_w, out_h) matching what _build_filter_chain produces.
+    """
+    dims_table = ASPECT_RATIO_DIMS_BY_QUALITY.get(export_quality, ASPECT_RATIO_DIMS)
+    if aspect_ratio and aspect_ratio in dims_table:
+        out_w, out_h = dims_table[aspect_ratio]
+        return out_w - (out_w % 2), out_h - (out_h % 2)
+    target_h = QUALITY_MAX_HEIGHT.get(export_quality, 1080)
+    if src_h != target_h:
+        out_h = target_h
+        out_w = round(src_w * target_h / src_h / 2) * 2 if src_h > 0 else src_w
+        return out_w, out_h
+    return src_w, src_h
+
+
 def _compute_safe_range(src_ratio: float, target_ratio: float, edge_buffer: int = 5) -> tuple[int, int]:
     """Compute safe subject_x range for a given aspect ratio conversion.
 
@@ -3378,152 +3399,116 @@ def _resolve_media_path(src: str, job_id: str) -> str | None:
     return None
 
 
-def _render_shape_to_png(shape: dict, video_width: int, video_height: int, output_dir: str, idx: int) -> str | None:
+async def _render_shape_to_png(shape: dict, video_width: int, video_height: int, output_dir: str, idx: int) -> str | None:
     """Render a shape overlay to a temporary PNG file for FFmpeg compositing.
 
-    Uses FFmpeg's native drawing capabilities (lavfi color + drawbox) for rectangles,
-    and falls back to generating SVG→PNG for complex shapes.
-    Returns the path to the generated PNG, or None on failure.
+    Generates the shape as a simple colored rectangle/ellipse using FFmpeg lavfi
+    filters (no SVG dependency). Returns the path to the generated PNG, or None on failure.
     """
-    import tempfile
-
     shape_type = shape.get("shape_type", "rectangle")
     w_pct = shape.get("width", 20) / 100.0
     h_pct = shape.get("height", 20) / 100.0
     fill_color = shape.get("fill_color", "#FF3B30")
     stroke_color = shape.get("stroke_color", "#FFFFFF")
     stroke_width = shape.get("stroke_width", 2)
-    corner_radius = shape.get("corner_radius", 0)
 
-    # Compute pixel dimensions
-    px_w = max(4, int(video_width * w_pct))
-    px_h = max(4, int(video_height * h_pct))
+    # Compute pixel dimensions (even numbers for FFmpeg compatibility)
+    px_w = max(4, int(video_width * w_pct) // 2 * 2)
+    px_h = max(4, int(video_height * h_pct) // 2 * 2)
 
     png_path = os.path.join(output_dir, f"_shape_{idx}.png")
+    hex_fill = fill_color.lstrip('#')[:6]
+    hex_stroke = stroke_color.lstrip('#')[:6]
 
-    # Convert hex color to SVG-compatible format
-    def _hex_to_rgba(hex_color: str, opacity: float = 1.0) -> str:
-        hex_color = hex_color.lstrip('#')
-        if len(hex_color) == 6:
-            r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
-        elif len(hex_color) == 8:
-            r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
-            opacity *= int(hex_color[6:8], 16) / 255
-        else:
-            r, g, b = 255, 59, 48  # default red
-        return f"rgba({r},{g},{b},{opacity:.3f})"
-
-    # Build SVG for the shape
-    svg_content = f'<svg xmlns="http://www.w3.org/2000/svg" width="{px_w}" height="{px_h}" viewBox="0 0 {px_w} {px_h}">'
-
-    if shape_type == "rectangle":
-        rx = min(corner_radius, px_w // 2, px_h // 2)
-        inset = stroke_width / 2
-        svg_content += (
-            f'<rect x="{inset}" y="{inset}" '
-            f'width="{px_w - stroke_width}" height="{px_h - stroke_width}" '
-            f'rx="{rx}" ry="{rx}" '
-            f'fill="{fill_color}" '
-            f'stroke="{stroke_color}" stroke-width="{stroke_width}"/>'
-        )
-
-    elif shape_type in ("circle", "ellipse"):
-        cx, cy = px_w / 2, px_h / 2
-        rx = (px_w - stroke_width) / 2
-        ry = (px_h - stroke_width) / 2
-        svg_content += (
-            f'<ellipse cx="{cx}" cy="{cy}" rx="{rx}" ry="{ry}" '
-            f'fill="{fill_color}" '
-            f'stroke="{stroke_color}" stroke-width="{stroke_width}"/>'
-        )
-
-    elif shape_type == "line":
-        svg_content += (
-            f'<line x1="0" y1="0" x2="{px_w}" y2="{px_h}" '
-            f'stroke="{stroke_color}" stroke-width="{max(stroke_width, 2)}"/>'
-        )
-
-    elif shape_type == "arrow":
-        # Arrow pointing right: body + triangular head
-        svg_content += (
-            f'<polygon points="0,{px_h * 0.5} {px_w * 0.7},{px_h * 0.5} '
-            f'{px_w * 0.7},0 {px_w},{px_h * 0.5} {px_w * 0.7},{px_h} {px_w * 0.7},{px_h * 0.5}" '
-            f'fill="{fill_color}" '
-            f'stroke="{stroke_color}" stroke-width="{stroke_width}"/>'
-        )
-
-    else:
-        # Fallback: filled rectangle
-        svg_content += (
-            f'<rect x="0" y="0" width="{px_w}" height="{px_h}" '
-            f'fill="{fill_color}" stroke="{stroke_color}" stroke-width="{stroke_width}"/>'
-        )
-
-    svg_content += '</svg>'
-
-    # Write SVG to temp file and convert to PNG via FFmpeg
-    svg_path = os.path.join(output_dir, f"_shape_{idx}.svg")
     try:
-        with open(svg_path, 'w') as f:
-            f.write(svg_content)
-
-        # Use rsvg-convert if available, otherwise ffmpeg
-        # Try rsvg-convert first (better SVG support)
-        result = subprocess.run(
-            ["which", "rsvg-convert"],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            subprocess.run(
-                ["rsvg-convert", "-o", png_path, svg_path],
-                capture_output=True, check=True,
+        # Use FFmpeg lavfi to generate shape PNGs directly (no SVG dependency)
+        if shape_type in ("circle", "ellipse"):
+            # Draw filled ellipse: create colored canvas, then mask with drawbox for border
+            # FFmpeg doesn't have native ellipse, so we use a round approach:
+            # 1. Create a transparent canvas
+            # 2. Draw the ellipse using the geq filter
+            inner_w = max(2, px_w - stroke_width * 2)
+            inner_h = max(2, px_h - stroke_width * 2)
+            # Use a radial gradient approach: paint pixels inside the ellipse equation
+            vf = (
+                f"format=rgba,"
+                f"geq="
+                f"r='if(lte(hypot((X-{px_w/2})/{px_w/2},(Y-{px_h/2})/{px_h/2}),1.0)"
+                f",if(lte(hypot((X-{px_w/2})/{inner_w/2},(Y-{px_h/2})/{inner_h/2}),1.0)"
+                f",{int(hex_fill[0:2],16)},{int(hex_stroke[0:2],16)}),0)'"
+                f":g='if(lte(hypot((X-{px_w/2})/{px_w/2},(Y-{px_h/2})/{px_h/2}),1.0)"
+                f",if(lte(hypot((X-{px_w/2})/{inner_w/2},(Y-{px_h/2})/{inner_h/2}),1.0)"
+                f",{int(hex_fill[2:4],16)},{int(hex_stroke[2:4],16)}),0)'"
+                f":b='if(lte(hypot((X-{px_w/2})/{px_w/2},(Y-{px_h/2})/{px_h/2}),1.0)"
+                f",if(lte(hypot((X-{px_w/2})/{inner_w/2},(Y-{px_h/2})/{inner_h/2}),1.0)"
+                f",{int(hex_fill[4:6],16)},{int(hex_stroke[4:6],16)}),0)'"
+                f":a='if(lte(hypot((X-{px_w/2})/{px_w/2},(Y-{px_h/2})/{px_h/2}),1.0),255,0)'"
             )
+            cmd = [
+                "ffmpeg", "-y", "-f", "lavfi",
+                "-i", f"color=c=black@0:s={px_w}x{px_h}:d=1,format=rgba",
+                "-vf", vf,
+                "-frames:v", "1",
+                "-update", "1",
+                png_path,
+            ]
         else:
-            # Fallback: use ffmpeg to render SVG
-            subprocess.run(
-                [
+            # Rectangle, line, arrow — use simple colored rectangle with optional border
+            # For rectangles: fill + drawbox border
+            if shape_type in ("rectangle", "arrow", "line"):
+                if stroke_width > 0:
+                    vf = (
+                        f"drawbox=x=0:y=0:w={px_w}:h={px_h}:c=0x{hex_stroke}@1:t=fill,"
+                        f"drawbox=x={stroke_width}:y={stroke_width}"
+                        f":w={max(2,px_w-stroke_width*2)}:h={max(2,px_h-stroke_width*2)}"
+                        f":c=0x{hex_fill}@1:t=fill"
+                    )
+                else:
+                    vf = f"drawbox=x=0:y=0:w={px_w}:h={px_h}:c=0x{hex_fill}@1:t=fill"
+                cmd = [
                     "ffmpeg", "-y", "-f", "lavfi",
-                    "-i", f"color=c=black@0:s={px_w}x{px_h}:d=1,format=rgba",
-                    "-i", svg_path,
-                    "-filter_complex", "[0][1]overlay=0:0",
+                    "-i", f"color=c=0x{hex_fill}@1:s={px_w}x{px_h}:d=1,format=rgba",
+                    "-vf", vf,
                     "-frames:v", "1",
+                    "-update", "1",
                     png_path,
-                ],
-                capture_output=True, check=True,
-            )
+                ]
+            else:
+                # Fallback: solid color rectangle
+                cmd = [
+                    "ffmpeg", "-y", "-f", "lavfi",
+                    "-i", f"color=c=0x{hex_fill}@1:s={px_w}x{px_h}:d=1,format=rgba",
+                    "-frames:v", "1",
+                    "-update", "1",
+                    png_path,
+                ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            logger.warning("Shape %d (%s) rendering timed out", idx, shape_type)
+            return None
+
+        if proc.returncode != 0:
+            logger.warning("Shape %d (%s) render failed: %s", idx, shape_type,
+                           stderr.decode()[:500] if stderr else "unknown error")
+            return None
 
         if os.path.isfile(png_path):
-            logger.info("Rendered shape %s (%s) to %s (%dx%d)", idx, shape_type, png_path, px_w, px_h)
+            logger.info("Rendered shape %d (%s) to %s (%dx%d)", idx, shape_type, png_path, px_w, px_h)
             return png_path
         else:
-            logger.warning("Shape rendering produced no output: %s", png_path)
+            logger.warning("Shape %d (%s) produced no output: %s", idx, shape_type, png_path)
             return None
     except Exception as e:
         logger.warning("Failed to render shape %d (%s): %s", idx, shape_type, e)
-        # Last resort: generate a simple colored rectangle via FFmpeg lavfi
-        try:
-            hex_clean = fill_color.lstrip('#')
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-f", "lavfi",
-                    "-i", f"color=c=0x{hex_clean}:s={px_w}x{px_h}:d=1,format=rgba",
-                    "-frames:v", "1",
-                    png_path,
-                ],
-                capture_output=True, check=True,
-            )
-            if os.path.isfile(png_path):
-                return png_path
-        except Exception:
-            pass
         return None
-    finally:
-        # Clean up SVG
-        try:
-            if os.path.isfile(svg_path):
-                os.unlink(svg_path)
-        except OSError:
-            pass
 
 
 def _build_image_overlay_data(
@@ -3531,6 +3516,8 @@ def _build_image_overlay_data(
     job_id: str,
     clip_start: float,
     base_input_idx: int,
+    video_out_w: int = 1920,
+    video_out_h: int = 1080,
 ) -> tuple[list[str], str, int]:
     """Build FFmpeg input args and overlay filter chain for image overlays.
 
@@ -3540,6 +3527,11 @@ def _build_image_overlay_data(
     The overlay_filter_chain_suffix is a semicolon-separated filter segment
     that should be appended to the filter_complex.  It expects the base video
     stream to be labeled ``[vbase]`` and produces a final label ``[vimg]``.
+
+    video_out_w / video_out_h: the output video dimensions (after crop/scale).
+    Used to compute image overlay pixel sizes.  NOTE: FFmpeg's ``main_w`` /
+    ``main_h`` variables are NOT available inside the ``scale`` filter (only
+    in ``overlay`` and ``scale2ref``), so we must pre-compute pixel sizes.
 
     If no valid images are found, returns ([], "", 0).
     """
@@ -3575,11 +3567,15 @@ def _build_image_overlay_data(
         fade_in = overlay.get("fade_in", 0)
         fade_out = overlay.get("fade_out", 0)
 
-        # Scale the image input to the desired size relative to video
-        # Use overlay_w/overlay_h expressions: W=main input width, H=main input height
+        # Compute pixel dimensions for the image overlay.
+        # We use pre-computed video output dimensions instead of FFmpeg's
+        # main_w/main_h which are NOT available in the scale filter context
+        # (only in overlay and scale2ref filters).
+        scaled_w = max(2, int(video_out_w * w_pct) // 2 * 2)
+        scaled_h = max(2, int(video_out_h * h_pct) // 2 * 2)
         img_scale = (
             f"[{input_idx}:v]"
-            f"scale=trunc(main_w*{w_pct:.4f}/2)*2:trunc(main_h*{h_pct:.4f}/2)*2,"
+            f"scale={scaled_w}:{scaled_h},"
             f"format=rgba"
         )
         if opacity < 1.0:
@@ -3594,6 +3590,7 @@ def _build_image_overlay_data(
         img_scale += f"[img{i}]"
 
         # Position: x_pct/y_pct are center coordinates, convert to top-left for overlay
+        # main_w/main_h ARE valid inside the overlay filter
         x_expr = f"main_w*{x_pct:.4f}-overlay_w/2"
         y_expr = f"main_h*{y_pct:.4f}-overlay_h/2"
 
@@ -3738,7 +3735,7 @@ async def export_clip(
         shape_tmp_dir = os.path.join(output_dir, "_shapes")
         os.makedirs(shape_tmp_dir, exist_ok=True)
         for si, shape in enumerate(shape_overlays):
-            png_path = _render_shape_to_png(shape, video_width, video_height, shape_tmp_dir, si)
+            png_path = await _render_shape_to_png(shape, video_width, video_height, shape_tmp_dir, si)
             if png_path:
                 _shape_temp_files.append(png_path)
                 # Convert shape to image overlay format for the image pipeline
@@ -4316,8 +4313,12 @@ async def export_clip(
                 if has_image_overlays and image_overlays:
                     # Image inputs come after all segment video inputs
                     _img_base_idx = n  # n segment inputs → indices 0..n-1
+                    _vid_out_w, _vid_out_h = _compute_video_out_dims(
+                        video_width, video_height, aspect_ratio, export_quality,
+                    )
                     img_extra_args, img_overlay_fc, img_overlay_count = _build_image_overlay_data(
                         image_overlays, job_id, clip_start=start, base_input_idx=_img_base_idx,
+                        video_out_w=_vid_out_w, video_out_h=_vid_out_h,
                     )
                     if img_overlay_count > 0:
                         input_args += img_extra_args
@@ -4393,8 +4394,12 @@ async def export_clip(
                 _img_input_args: list[str] = []
                 if has_image_overlays and image_overlays:
                     # In global path, input 0 = video, image inputs start at 1
+                    _vid_out_w, _vid_out_h = _compute_video_out_dims(
+                        video_width, video_height, aspect_ratio, export_quality,
+                    )
                     img_extra_args, img_overlay_fc, img_overlay_count = _build_image_overlay_data(
                         image_overlays, job_id, clip_start=start, base_input_idx=1,
+                        video_out_w=_vid_out_w, video_out_h=_vid_out_h,
                     )
                     if img_overlay_count > 0:
                         _use_complex_for_images = True

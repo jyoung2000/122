@@ -93,6 +93,10 @@ export function EncodingProvider({ children }) {
 
     pushLog('info', `Export started: ${clipTitle || `Clip ${clipId}`} [${quality}]`);
 
+    // Open WebSocket BEFORE sending POST so we don't miss any messages
+    // the backend broadcasts immediately after starting the export task.
+    _openWs(jobId, clipId, clipTitle);
+
     fetch(apiEndpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -100,7 +104,6 @@ export function EncodingProvider({ children }) {
     })
       .then((res) => {
         if (!res.ok) throw new Error(`Export request failed: ${res.status}`);
-        _openWs(jobId, clipId, clipTitle);
       })
       .catch((err) => {
         activeExportsRef.current.delete(exportId);
@@ -115,7 +118,6 @@ export function EncodingProvider({ children }) {
   }, [pushLog]);
 
   const _openWs = useCallback((jobId, clipId, clipTitle) => {
-    const exportId = `${jobId}_${clipId}`;
     if (wsRefs.current[jobId]) {
       return;
     }
@@ -130,14 +132,21 @@ export function EncodingProvider({ children }) {
         // Coerce message to string to prevent React error #310
         if (msg.message != null && typeof msg.message !== 'string') msg.message = String(msg.message);
         if (msg.type === 'status' && msg.status === 'exporting') {
+          // Update ALL encoding tasks for this job (not just one clip)
           setTasks((prev) => {
-            const task = prev[exportId];
-            if (!task) return prev;
-            return { ...prev, [exportId]: {
-              ...task,
-              message: msg.message || 'Encoding...',
-              progress: msg.progress ?? task.progress ?? 0,
-            } };
+            const next = { ...prev };
+            let changed = false;
+            for (const key of Object.keys(next)) {
+              if (key.startsWith(`${jobId}_`) && next[key].status === 'encoding') {
+                next[key] = {
+                  ...next[key],
+                  message: msg.message || 'Encoding...',
+                  progress: msg.progress ?? next[key].progress ?? 0,
+                };
+                changed = true;
+              }
+            }
+            return changed ? next : prev;
           });
           pushLog('info', msg.message || 'Encoding...');
         } else if (msg.type === 'export_complete') {
@@ -157,8 +166,16 @@ export function EncodingProvider({ children }) {
             };
           });
           pushLog('success', msg.message || `Clip exported successfully`);
+          // Use the task's stored clipTitle (more reliable than closure-captured value
+          // since the WS may have been opened for a different clip on the same job)
+          const _completedTitle = (() => {
+            // Access tasks via setTasks to get current value
+            let t = null;
+            setTasks((prev) => { t = prev[completedExportId]; return prev; });
+            return t?.clipTitle || clipTitle || `Clip ${msg.clip_id}`;
+          })();
           sendNotification('Export Complete', {
-            body: `${clipTitle || `Clip ${msg.clip_id}`} is ready for download.`,
+            body: `${_completedTitle} is ready for download.`,
             tag: `export-${jobId}-${msg.clip_id}`,
           });
           if (msg.download_url && !recentDownloadsRef.current.has(msg.download_url)) {
@@ -170,7 +187,7 @@ export function EncodingProvider({ children }) {
             // immediately without a "Save As" dialog or title prompt.
             // The download attribute with an explicit filename bypasses
             // Content-Disposition: attachment which can trigger save dialogs.
-            const title = clipTitle || `Clip ${msg.clip_id}`;
+            const title = _completedTitle;
             const safeName = title.replace(/[^a-zA-Z0-9_\-\s().]/g, '').trim() || 'clip';
             const ext = (msg.download_url.split('.').pop() || 'mp4').split('?')[0];
             const downloadName = `${safeName}.${ext}`;

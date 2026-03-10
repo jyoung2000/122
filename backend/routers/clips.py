@@ -341,6 +341,7 @@ async def export_clip_endpoint(
                 "message": f"Clip {req.clip_id} export cancelled",
             })
         except Exception as e:
+            logger.exception("Export failed for clip %s in job %s", req.clip_id, job_id)
             await broadcast_ws(job_id, {
                 "type": "error",
                 "message": f"Clip {req.clip_id} export failed: {str(e)}",
