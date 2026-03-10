@@ -3037,6 +3037,67 @@ def _build_filter_chain(
     return (",".join(filters) if filters else None, False)
 
 
+# ── Font family → file path mapping for drawtext ─────────────────────
+# Maps CSS/frontend font family names to absolute font file paths.
+_FONT_FAMILY_MAP: dict[str, str] = {
+    "DM Sans": "/usr/share/fonts/truetype/dmsans/DMSans.ttf",
+    "dm sans": "/usr/share/fonts/truetype/dmsans/DMSans.ttf",
+    "Liberation Sans": "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "Liberation Serif": "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+    "Liberation Mono": "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+    "DejaVu Sans": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "DejaVu Serif": "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    "DejaVu Sans Mono": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "FreeSans": "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "Montserrat": "/usr/share/fonts/truetype/google-fonts/Montserrat.ttf",
+    "Open Sans": "/usr/share/fonts/truetype/google-fonts/OpenSans.ttf",
+    "Roboto": "/usr/share/fonts/truetype/google-fonts/Roboto.ttf",
+    "Poppins": "/usr/share/fonts/truetype/google-fonts/Poppins-Regular.ttf",
+    "Inter": "/usr/share/fonts/truetype/google-fonts/Inter.ttf",
+    "Nunito": "/usr/share/fonts/truetype/google-fonts/Nunito.ttf",
+    "Lato": "/usr/share/fonts/truetype/google-fonts/Lato-Regular.ttf",
+    "Oswald": "/usr/share/fonts/truetype/google-fonts/Oswald.ttf",
+    "Playfair Display": "/usr/share/fonts/truetype/google-fonts/PlayfairDisplay.ttf",
+    "Bebas Neue": "/usr/share/fonts/truetype/google-fonts/BebasNeue-Regular.ttf",
+    # Common CSS fallbacks
+    "sans-serif": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "serif": "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    "monospace": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "Arial": "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "Helvetica": "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "Times New Roman": "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+    "Courier New": "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+}
+_DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+_CUSTOM_FONTS_DIR = "/data/fonts"
+
+
+def _resolve_font_path(font_family: str) -> str:
+    """Resolve a CSS font family name to an absolute .ttf path.
+
+    Checks the built-in mapping first, then custom uploaded fonts dir.
+    """
+    # Direct match
+    if font_family in _FONT_FAMILY_MAP:
+        path = _FONT_FAMILY_MAP[font_family]
+        if os.path.isfile(path):
+            return path
+    # Case-insensitive fallback
+    for name, path in _FONT_FAMILY_MAP.items():
+        if name.lower() == font_family.lower():
+            if os.path.isfile(path):
+                return path
+    # Check custom uploaded fonts
+    if os.path.isdir(_CUSTOM_FONTS_DIR):
+        for fname in os.listdir(_CUSTOM_FONTS_DIR):
+            base = os.path.splitext(fname)[0]
+            if base.lower() == font_family.lower().replace(" ", ""):
+                fpath = os.path.join(_CUSTOM_FONTS_DIR, fname)
+                if os.path.isfile(fpath):
+                    return fpath
+    return _DEFAULT_FONT
+
+
 def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> str:
     """Build FFmpeg drawtext filter chain for text overlays.
 
@@ -3056,6 +3117,7 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
         opacity = overlay.get("opacity", 1.0)
         start_t = overlay.get("start_time", 0) - clip_start
         end_t = overlay.get("end_time", 0) - clip_start
+        font_path = _resolve_font_path(font_family)
 
         # Build drawtext with enable expression for timing
         dt = (
@@ -3064,7 +3126,7 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
             f":y=h*{y_pct:.4f}-th/2"
             f":fontsize={font_size}"
             f":fontcolor={font_color}@{opacity:.2f}"
-            f":fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+            f":fontfile={font_path}"
         )
         bg_color = overlay.get("background_color")
         if bg_color:
@@ -3074,6 +3136,126 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
         parts.append(dt)
 
     return ",".join(parts)
+
+
+def _resolve_image_path(src: str, job_id: str) -> str | None:
+    """Resolve an image overlay src (URL or path) to a filesystem path.
+
+    Handles:
+    - /api/files/{job_id}/media/{filename} → /data/uploads/{job_id}/media/{filename}
+    - Absolute filesystem paths
+    - Bare filenames looked up in the job's media directory
+    """
+    if not src:
+        return None
+    # URL path from frontend: /api/files/{job_id}/media/{filename}
+    api_prefix = f"/api/files/{job_id}/media/"
+    if src.startswith(api_prefix):
+        filename = src[len(api_prefix):]
+        path = f"/data/uploads/{job_id}/media/{filename}"
+        if os.path.isfile(path):
+            return path
+        logger.warning("Image overlay file not found: %s", path)
+        return None
+    # Generic /api/files/ pattern (different job_id in path)
+    if src.startswith("/api/files/"):
+        # Extract job_id and filename from URL: /api/files/<jid>/media/<fname>
+        parts = src.split("/")
+        if len(parts) >= 5 and parts[3] == "media" or (len(parts) >= 6 and parts[4] == "media"):
+            # /api/files/<jid>/media/<fname>
+            try:
+                idx = parts.index("media")
+                jid = parts[idx - 1]
+                fname = "/".join(parts[idx + 1:])
+                path = f"/data/uploads/{jid}/media/{fname}"
+                if os.path.isfile(path):
+                    return path
+            except (ValueError, IndexError):
+                pass
+        logger.warning("Could not resolve image overlay URL: %s", src)
+        return None
+    # Absolute path
+    if os.path.isabs(src) and os.path.isfile(src):
+        return src
+    # Bare filename — look in job media dir
+    media_dir = f"/data/uploads/{job_id}/media"
+    path = os.path.join(media_dir, os.path.basename(src))
+    if os.path.isfile(path):
+        return path
+    logger.warning("Image overlay not found: src=%s, job_id=%s", src, job_id)
+    return None
+
+
+def _build_image_overlay_data(
+    image_overlays: list,
+    job_id: str,
+    clip_start: float,
+    base_input_idx: int,
+) -> tuple[list[str], str, int]:
+    """Build FFmpeg input args and overlay filter chain for image overlays.
+
+    Returns:
+        (extra_input_args, overlay_filter_chain_suffix, num_valid_images)
+
+    The overlay_filter_chain_suffix is a semicolon-separated filter segment
+    that should be appended to the filter_complex.  It expects the base video
+    stream to be labeled ``[vbase]`` and produces a final label ``[vimg]``.
+
+    If no valid images are found, returns ([], "", 0).
+    """
+    extra_args: list[str] = []
+    valid_overlays: list[tuple[int, dict]] = []  # (input_idx, overlay_dict)
+
+    for overlay in image_overlays:
+        src = overlay.get("src", "")
+        img_path = _resolve_image_path(src, job_id)
+        if not img_path:
+            continue
+        input_idx = base_input_idx + len(extra_args) // 2  # each image adds -i path (2 args)
+        extra_args += ["-i", img_path]
+        valid_overlays.append((input_idx, overlay))
+
+    if not valid_overlays:
+        return [], "", 0
+
+    # Build overlay filter chain: [vbase][N:v]overlay=...[tmp0]; [tmp0][N+1:v]overlay=...[tmp1]; ...
+    fc_parts: list[str] = []
+    for i, (input_idx, overlay) in enumerate(valid_overlays):
+        x_pct = overlay.get("x", 50) / 100.0
+        y_pct = overlay.get("y", 50) / 100.0
+        w_pct = overlay.get("width", 30) / 100.0
+        h_pct = overlay.get("height", 30) / 100.0
+        opacity = overlay.get("opacity", 1.0)
+        start_t = overlay.get("start_time", 0) - clip_start
+        end_t = overlay.get("end_time", 0) - clip_start
+
+        in_label = "[vbase]" if i == 0 else f"[vtmp{i - 1}]"
+        out_label = f"[vtmp{i}]" if i < len(valid_overlays) - 1 else "[vimg]"
+
+        # Scale the image input to the desired size relative to video
+        # Use overlay_w/overlay_h expressions: W=main input width, H=main input height
+        img_scale = (
+            f"[{input_idx}:v]"
+            f"scale=trunc(main_w*{w_pct:.4f}/2)*2:trunc(main_h*{h_pct:.4f}/2)*2,"
+            f"format=rgba"
+        )
+        if opacity < 1.0:
+            img_scale += f",colorchannelmixer=aa={opacity:.3f}"
+        img_scale += f"[img{i}]"
+
+        # Position: x_pct/y_pct are center coordinates, convert to top-left for overlay
+        x_expr = f"main_w*{x_pct:.4f}-overlay_w/2"
+        y_expr = f"main_h*{y_pct:.4f}-overlay_h/2"
+
+        overlay_filter = f"{in_label}[img{i}]overlay={x_expr}:{y_expr}"
+        if end_t > start_t:
+            overlay_filter += f":enable='between(t,{max(0, start_t):.3f},{end_t:.3f})'"
+        overlay_filter += out_label
+
+        fc_parts.append(img_scale)
+        fc_parts.append(overlay_filter)
+
+    return extra_args, ";".join(fc_parts), len(valid_overlays)
 
 
 async def export_clip(
@@ -3699,6 +3881,27 @@ async def export_clip(
                     fc_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=0[finalv]")
                     map_args = ["-map", "[finalv]"]
 
+                # --- Image overlay filters (applied after concat) ---
+                if has_image_overlays and image_overlays:
+                    # Image inputs come after all segment video inputs
+                    _img_base_idx = n  # n segment inputs → indices 0..n-1
+                    img_extra_args, img_overlay_fc, img_overlay_count = _build_image_overlay_data(
+                        image_overlays, job_id, clip_start=start, base_input_idx=_img_base_idx,
+                    )
+                    if img_overlay_count > 0:
+                        input_args += img_extra_args
+                        # Rename [finalv] to [vbase] for overlay chain input
+                        # Replace the last fc_line's [finalv] with [vbase]
+                        fc_lines[-1] = fc_lines[-1].replace("[finalv]", "[vbase]", 1)
+                        # Append image overlay filters; produces [vimg]
+                        fc_lines.append(img_overlay_fc)
+                        # Update map to use [vimg] instead of [finalv]
+                        map_args = [m.replace("[finalv]", "[vimg]") for m in map_args]
+                        logger.info(
+                            "Image overlays for clip %s (per-seg): %d images applied after concat",
+                            clip_id, img_overlay_count,
+                        )
+
                 full_fc = ";".join(fc_lines)
                 logger.info(
                     "Per-segment speed filter_complex for clip %s:\n%s",
@@ -3754,6 +3957,22 @@ async def export_clip(
                     af_parts.append(f"volume='{expr}':eval=frame")
                 af = ",".join(af_parts) if af_parts else None
 
+                # --- Image overlay integration for global path ---
+                _use_complex_for_images = False
+                _img_input_args: list[str] = []
+                if has_image_overlays and image_overlays:
+                    # In global path, input 0 = video, image inputs start at 1
+                    img_extra_args, img_overlay_fc, img_overlay_count = _build_image_overlay_data(
+                        image_overlays, job_id, clip_start=start, base_input_idx=1,
+                    )
+                    if img_overlay_count > 0:
+                        _use_complex_for_images = True
+                        _img_input_args = img_extra_args
+                        logger.info(
+                            "Image overlays for clip %s (global): %d images",
+                            clip_id, img_overlay_count,
+                        )
+
                 # -t is an OUTPUT option (placed after -i), so it caps
                 # the output duration.  When speed != 1.0, the output
                 # duration differs from the input duration: a 10s clip at
@@ -3769,7 +3988,16 @@ async def export_clip(
                     "-i", video_path,
                     "-t", str(output_dur),
                 ]
-                if vf:
+                # Add image overlay inputs after the main video input
+                if _img_input_args:
+                    cmd += _img_input_args
+
+                if _use_complex_for_images:
+                    # Build complex filter: [0:v]<existing_vf>[vbase]; <img_overlay_chain>
+                    base_chain = f"[0:v]{vf}[vbase]" if vf else "[0:v]null[vbase]"
+                    full_fc = f"{base_chain};{img_overlay_fc}"
+                    cmd += ["-filter_complex", full_fc, "-map", "[vimg]", "-map", "0:a?"]
+                elif vf:
                     if is_complex:
                         cmd += ["-filter_complex", vf, "-map", "[out]", "-map", "0:a?"]
                     else:
