@@ -466,20 +466,11 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
 
   const toggleSection = (name) => setExpandedSections(prev => ({ ...prev, [name]: !prev[name] }));
 
-  if (!item) {
-    return (
-      <div className="ve-properties ve-properties--empty">
-        <span className="ve-properties__placeholder">
-          Select a timeline item to edit properties
-        </span>
-      </div>
-    );
-  }
-
   // ── Live QA: validate item type matches track and properties are correct ──
-  const itemTrack = tracks.find((t) => t.id === item.trackId);
+  // NOTE: This useMemo MUST be before any early returns to satisfy Rules of Hooks.
+  const itemTrack = item ? tracks.find((t) => t.id === item.trackId) : null;
   const trackTypeMismatch = useMemo(() => {
-    if (!itemTrack) return null;
+    if (!item || !itemTrack) return null;
     const allowed = {
       video: ['video'], overlay: ['text', 'shape', 'image', 'overlay'],
       audio: ['audio'], subtitle: ['subtitle'],
@@ -489,7 +480,17 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
       return `Item type "${item.type}" is on incompatible track "${itemTrack.name}" (${itemTrack.type})`;
     }
     return null;
-  }, [item.type, item.trackId, itemTrack]);
+  }, [item, itemTrack]);
+
+  if (!item) {
+    return (
+      <div className="ve-properties ve-properties--empty">
+        <span className="ve-properties__placeholder">
+          Select a timeline item to edit properties
+        </span>
+      </div>
+    );
+  }
 
   const duration = item.end - item.start;
   const isVisual = item.type !== 'audio';
