@@ -94,15 +94,23 @@ export default function ExportDialog({
         endTime,
       };
 
-      // Include multi-track editor video effects so export matches preview 1:1
+      // Include multi-track editor video effects + transform so export matches preview 1:1
       const videoItem = timelineItems.find(it => it.type === 'video');
-      if (videoItem?.effects) {
-        const fx = videoItem.effects;
+      if (videoItem) {
+        const fx = videoItem.effects || {};
+        const pos = videoItem.position || {};
+        const sz = videoItem.size || {};
+        const rot = videoItem.transform?.rotation || 0;
+        const fadeIn = videoItem.fadeIn || 0;
+        const fadeOut = videoItem.fadeOut || 0;
         const hasEffects = (fx.brightness || 0) !== 0 || (fx.contrast || 0) !== 0 ||
           (fx.saturation || 0) !== 0 || (fx.blur || 0) > 0 ||
           (fx.hueRotate || 0) > 0 || (fx.sepia || 0) > 0 ||
           (videoItem.opacity ?? 1) < 1;
-        if (hasEffects) {
+        const hasTransform = (pos.x != null && pos.x !== 50) || (pos.y != null && pos.y !== 50) ||
+          (sz.w != null && sz.w !== 100) || (sz.h != null && sz.h !== 100) ||
+          rot !== 0 || fadeIn > 0 || fadeOut > 0;
+        if (hasEffects || hasTransform) {
           exportPayload.video_effects = {
             brightness: fx.brightness || 0,
             contrast: fx.contrast || 0,
@@ -111,6 +119,13 @@ export default function ExportDialog({
             hue_rotate: fx.hueRotate || 0,
             sepia: fx.sepia || 0,
             opacity: videoItem.opacity ?? 1,
+            position_x: pos.x ?? 50,
+            position_y: pos.y ?? 50,
+            width: sz.w ?? 100,
+            height: sz.h ?? 100,
+            rotation: rot,
+            fade_in: fadeIn,
+            fade_out: fadeOut,
           };
         }
       }
