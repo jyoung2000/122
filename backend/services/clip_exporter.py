@@ -3011,7 +3011,7 @@ def _build_filter_chain(
             filters.append(f"eq={':'.join(eq_parts)}")
 
         # hue rotation: frontend uses hue-rotate(Xdeg), FFmpeg uses hue=h=X
-        if video_effects.get("hue_rotate", 0) > 0:
+        if video_effects.get("hue_rotate", 0) != 0:
             filters.append(f"hue=h={video_effects['hue_rotate']:.1f}")
 
         # blur: frontend uses blur(Xpx), FFmpeg uses boxblur=X:X
@@ -3086,18 +3086,22 @@ def _build_filter_chain(
                     f"rotate={rad:.6f}:fillcolor=black:ow=rotw({rad:.6f}):oh=roth({rad:.6f})"
                 )
 
-            # Position offset: crop/pad to shift the video within the frame.
+            # Position offset: pad to a larger canvas, overlay at offset, then crop.
             # Preview positions the center of the video at (pos_x%, pos_y%)
-            # relative to the viewport. We pad to a canvas then crop back
-            # to the original frame dimensions.
+            # relative to the viewport. We use pad+crop so that after any
+            # prior scale/rotate the dimensions are handled correctly via iw/ih.
             if pos_x != 50 or pos_y != 50:
-                # Offset in pixels: positive = shift right/down from center
-                ox_expr = f"(iw*{(pos_x - 50) / 100:.4f})"
-                oy_expr = f"(ih*{(pos_y - 50) / 100:.4f})"
+                # Offset in pixels relative to current stream dimensions
+                ox_pct = (pos_x - 50) / 100.0
+                oy_pct = (pos_y - 50) / 100.0
+                # Pad to 3x canvas centered, then crop back with offset
+                filters.append(
+                    f"pad=w=3*iw:h=3*ih:x=iw:y=ih:color=black"
+                )
                 filters.append(
                     f"crop=w={src_w}:h={src_h}"
-                    f":x=iw/2-{src_w}/2-{ox_expr}"
-                    f":y=ih/2-{src_h}/2-{oy_expr}"
+                    f":x=iw/2-{src_w}/2-({src_w}*{ox_pct:.4f})"
+                    f":y=ih/2-{src_h}/2-({src_h}*{oy_pct:.4f})"
                 )
 
         # Fade in/out on main video
@@ -3162,16 +3166,50 @@ _FONT_FAMILY_MAP: dict[str, str] = {
     "Times New Roman": "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
     "Courier New": "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
 }
+# Bold font variants — used when font_weight >= 600
+_FONT_BOLD_MAP: dict[str, str] = {
+    "DM Sans": "/usr/share/fonts/truetype/dmsans/DMSans-Bold.ttf",
+    "dm sans": "/usr/share/fonts/truetype/dmsans/DMSans-Bold.ttf",
+    "Liberation Sans": "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "Liberation Serif": "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    "Liberation Mono": "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+    "DejaVu Sans": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "DejaVu Serif": "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    "DejaVu Sans Mono": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+    "FreeSans": "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    "Poppins": "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf",
+    "Lato": "/usr/share/fonts/truetype/google-fonts/Lato-Bold.ttf",
+    "Bebas Neue": "/usr/share/fonts/truetype/google-fonts/BebasNeue-Regular.ttf",
+    "Arial": "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "Helvetica": "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "Times New Roman": "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    "Courier New": "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+}
 _DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 _CUSTOM_FONTS_DIR = "/data/fonts"
 
 
-def _resolve_font_path(font_family: str) -> str:
+def _resolve_font_path(font_family: str, font_weight: int = 400) -> str:
     """Resolve a CSS font family name to an absolute .ttf path.
 
     Checks the built-in mapping first, then custom uploaded fonts dir.
+    When font_weight >= 600 (semi-bold/bold), prefer the bold variant.
     """
-    # Direct match
+    is_bold = font_weight >= 600
+
+    # Try bold variant first when weight is bold
+    if is_bold:
+        if font_family in _FONT_BOLD_MAP:
+            path = _FONT_BOLD_MAP[font_family]
+            if os.path.isfile(path):
+                return path
+        # Case-insensitive bold fallback
+        for name, path in _FONT_BOLD_MAP.items():
+            if name.lower() == font_family.lower():
+                if os.path.isfile(path):
+                    return path
+
+    # Direct match (regular weight)
     if font_family in _FONT_FAMILY_MAP:
         path = _FONT_FAMILY_MAP[font_family]
         if os.path.isfile(path):
@@ -3211,7 +3249,10 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
         opacity = overlay.get("opacity", 1.0)
         start_t = overlay.get("start_time", 0) - clip_start
         end_t = overlay.get("end_time", 0) - clip_start
-        font_path = _resolve_font_path(font_family)
+        font_weight = overlay.get("font_weight", 400)
+        if isinstance(font_weight, str):
+            font_weight = 700 if font_weight.lower() == "bold" else 400
+        font_path = _resolve_font_path(font_family, font_weight=font_weight)
 
         outline_width = overlay.get("outline_width", 0)
         outline_color = overlay.get("outline_color", "#000000")
@@ -3229,18 +3270,40 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
                 alpha_parts.append(f"if(lt(t-{safe_start:.3f},{fade_in:.3f}),(t-{safe_start:.3f})/{fade_in:.3f},1)")
             if fade_out > 0:
                 # Ramp from 1 to 0 over fade_out seconds before end
-                fo_start = end_t - clip_start - fade_out
-                alpha_parts.append(f"if(gt(t,{fo_start:.3f}),({end_t - clip_start:.3f}-t)/{fade_out:.3f},1)")
+                fo_start = end_t - fade_out
+                alpha_parts.append(f"if(gt(t,{fo_start:.3f}),({end_t:.3f}-t)/{fade_out:.3f},1)")
             alpha_expr = "*".join(alpha_parts)
         else:
             alpha_expr = f"{opacity:.2f}"
+
+        # Text animation support (matches RenderEngine canvas animations)
+        animation = overlay.get("animation", "")
+        y_expr = f"h*{y_pct:.4f}-th/2"
+        fontsize_expr = str(font_size)
+
+        if animation == "slide-up" and end_t > start_t:
+            # Slide up from 30px below over 0.5s
+            anim_dur = 0.5
+            y_expr = (
+                f"h*{y_pct:.4f}-th/2"
+                f"+if(lt(t-{safe_start:.3f},{anim_dur})"
+                f",(1-(t-{safe_start:.3f})/{anim_dur})*30,0)"
+            )
+        elif animation == "pop" and end_t > start_t:
+            # Scale from 50% to 100% over 0.3s with overshoot
+            anim_dur = 0.3
+            fontsize_expr = (
+                f"if(lt(t-{safe_start:.3f},{anim_dur})"
+                f",{font_size}*(0.5+0.5*(t-{safe_start:.3f})/{anim_dur})"
+                f",{font_size})"
+            )
 
         # Build drawtext with enable expression for timing
         dt = (
             f"drawtext=text='{text}'"
             f":x=w*{x_pct:.4f}-tw/2"
-            f":y=h*{y_pct:.4f}-th/2"
-            f":fontsize={font_size}"
+            f":y={y_expr}"
+            f":fontsize='{fontsize_expr}'"
             f":fontcolor={font_color}"
             f":fontfile={font_path}"
             f":alpha='{alpha_expr}'"
@@ -3251,7 +3314,7 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
         if bg_color:
             dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw=5"
         if end_t > start_t:
-            dt += f":enable='between(t,{safe_start:.3f},{end_t - clip_start:.3f})'"
+            dt += f":enable='between(t,{safe_start:.3f},{end_t:.3f})'"
         parts.append(dt)
 
     return ",".join(parts)
@@ -3368,7 +3431,7 @@ def _build_image_overlay_data(
         if fade_in > 0:
             img_scale += f",fade=t=in:st={safe_start:.3f}:d={fade_in:.3f}:alpha=1"
         if fade_out > 0 and end_t > start_t:
-            fo_start = end_t - clip_start - fade_out
+            fo_start = end_t - fade_out
             img_scale += f",fade=t=out:st={max(0, fo_start):.3f}:d={fade_out:.3f}:alpha=1"
         img_scale += f"[img{i}]"
 
@@ -3412,6 +3475,7 @@ async def export_clip(
     video_effects: dict | None = None,
     text_overlays: list | None = None,
     image_overlays: list | None = None,
+    audio_overlays: list | None = None,
 ) -> str:
     """Export a clip from video using FFmpeg.
 
@@ -3504,7 +3568,8 @@ async def export_clip(
     ))
     has_text_overlays = bool(text_overlays) and len(text_overlays) > 0
     has_image_overlays = bool(image_overlays) and len(image_overlays) > 0
-    needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments or has_seg_speed or has_video_effects or has_text_overlays or has_image_overlays
+    has_audio_overlays = bool(audio_overlays) and len(audio_overlays) > 0
+    needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments or has_seg_speed or has_video_effects or has_text_overlays or has_image_overlays or has_audio_overlays
     filter_parts = []
     if aspect_ratio:
         filter_parts.append(f"crop to {aspect_ratio}")
@@ -3527,6 +3592,8 @@ async def export_clip(
         filter_parts.append(f"{len(text_overlays)} text overlay(s)")
     if has_image_overlays:
         filter_parts.append(f"{len(image_overlays)} image overlay(s)")
+    if has_audio_overlays:
+        filter_parts.append(f"{len(audio_overlays)} audio overlay(s)")
     filter_desc = " + ".join(filter_parts) if filter_parts else "stream copy"
 
     await _notify(f"Preparing clip {clip_id} ({clip_dur:.1f}s) — {filter_desc}")
@@ -4134,11 +4201,85 @@ async def export_clip(
                 if _img_input_args:
                     cmd += _img_input_args
 
+                # Audio overlay inputs (background music, SFX)
+                _audio_overlay_input_args: list[str] = []
+                _audio_overlay_fc_parts: list[str] = []
+                if has_audio_overlays and audio_overlays:
+                    # Determine next input index after video (0) and image overlays
+                    _ao_base_idx = 1 + (len(_img_input_args) // 2 if _img_input_args else 0)
+                    _ao_labels: list[str] = []
+                    for ao_i, ao in enumerate(audio_overlays):
+                        ao_src = ao.get("src", "")
+                        if not ao_src or not os.path.isfile(ao_src):
+                            continue
+                        ao_start = max(0, ao.get("start_time", 0) - start)
+                        ao_end = ao.get("end_time", 0) - start
+                        ao_vol = ao.get("volume", 1.0)
+                        ao_fade_in = ao.get("fade_in", 0)
+                        ao_fade_out = ao.get("fade_out", 0)
+                        ao_idx = _ao_base_idx + len(_ao_labels)
+                        _audio_overlay_input_args += ["-i", ao_src]
+                        # Build per-overlay audio filter: trim, delay, volume, fade
+                        ao_chain = f"[{ao_idx}:a]"
+                        ao_filters = []
+                        if ao_vol != 1.0:
+                            ao_filters.append(f"volume={ao_vol:.3f}")
+                        if ao_fade_in > 0:
+                            ao_filters.append(f"afade=t=in:st=0:d={ao_fade_in:.3f}")
+                        if ao_fade_out > 0 and ao_end > ao_start:
+                            ao_fo_start = max(0, ao_end - ao_start - ao_fade_out)
+                            ao_filters.append(f"afade=t=out:st={ao_fo_start:.3f}:d={ao_fade_out:.3f}")
+                        if ao_start > 0:
+                            ao_filters.append(f"adelay={int(ao_start * 1000)}|{int(ao_start * 1000)}")
+                        ao_label = f"[ao{ao_i}]"
+                        if ao_filters:
+                            ao_chain += ",".join(ao_filters) + ao_label
+                        else:
+                            ao_chain += f"anull{ao_label}"
+                        _audio_overlay_fc_parts.append(ao_chain)
+                        _ao_labels.append(ao_label)
+                    if _ao_labels:
+                        # Mix main audio with overlay audio tracks
+                        main_audio_label = "[0:a]"
+                        if af:
+                            main_audio_label = "[amain]"
+                            _audio_overlay_fc_parts.insert(0, f"[0:a]{af}[amain]")
+                            af = None  # consumed into filter_complex
+                        mix_inputs = main_audio_label + "".join(_ao_labels)
+                        _audio_overlay_fc_parts.append(
+                            f"{mix_inputs}amix=inputs={1 + len(_ao_labels)}:duration=first:dropout_transition=0[aout]"
+                        )
+                        cmd += _audio_overlay_input_args
+                        logger.info(
+                            "Audio overlays for clip %s: %d tracks",
+                            clip_id, len(_ao_labels),
+                        )
+
                 if _use_complex_for_images:
                     # Build complex filter: [0:v]<existing_vf>[vbase]; <img_overlay_chain>
                     base_chain = f"[0:v]{vf}[vbase]" if vf else "[0:v]null[vbase]"
                     full_fc = f"{base_chain};{img_overlay_fc}"
-                    cmd += ["-filter_complex", full_fc, "-map", "[vimg]", "-map", "0:a?"]
+                    if _audio_overlay_fc_parts:
+                        full_fc += ";" + ";".join(_audio_overlay_fc_parts)
+                        cmd += ["-filter_complex", full_fc, "-map", "[vimg]", "-map", "[aout]"]
+                    else:
+                        cmd += ["-filter_complex", full_fc, "-map", "[vimg]", "-map", "0:a?"]
+                elif _audio_overlay_fc_parts:
+                    # No image overlays but have audio overlays — need filter_complex for audio mixing
+                    fc_parts_list = []
+                    if vf:
+                        if is_complex:
+                            fc_parts_list.append(vf)
+                        else:
+                            fc_parts_list.append(f"[0:v]{vf}[vout]")
+                    fc_parts_list.extend(_audio_overlay_fc_parts)
+                    full_fc = ";".join(fc_parts_list)
+                    cmd += ["-filter_complex", full_fc]
+                    if vf:
+                        cmd += ["-map", "[vout]" if not is_complex else "[out]"]
+                    else:
+                        cmd += ["-map", "0:v"]
+                    cmd += ["-map", "[aout]"]
                 elif vf:
                     if is_complex:
                         cmd += ["-filter_complex", vf, "-map", "[out]", "-map", "0:a?"]

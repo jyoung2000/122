@@ -9,6 +9,7 @@ import SubtitleOverlay from '../components/SubtitleOverlay';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import sanitizeJob from '../utils/sanitizeJob';
+import useTimelineStore from '../stores/timelineStore';
 
 function formatDuration(seconds) {
   if (!seconds && seconds !== 0) return '0:00';
@@ -109,6 +110,9 @@ function getCurrentWordIndex(segment, relativeTime) {
 
 export default function ClipSEO() {
   const { jobId, clipId } = useParams();
+  // Multi-track editor timeline state (global zustand store)
+  const timelineItems = useTimelineStore((s) => s.items);
+  const timelineMediaLibrary = useTimelineStore((s) => s.mediaLibrary);
   const [job, setJob] = useState(null);
   const [clip, setClip] = useState(null);
   const [seo, setSeo] = useState(null);
@@ -742,9 +746,89 @@ export default function ClipSEO() {
         speed: s.speed || 1.0,
       }));
     }
+    // Include multi-track editor video effects + transform so export matches preview
+    const videoItem = timelineItems.find(it => it.type === 'video');
+    if (videoItem) {
+      const fx = videoItem.effects || {};
+      const pos = videoItem.position || {};
+      const sz = videoItem.size || {};
+      const rot = videoItem.transform?.rotation || 0;
+      const fadeIn = videoItem.fadeIn || 0;
+      const fadeOut = videoItem.fadeOut || 0;
+      const hasEffects = (fx.brightness || 0) !== 0 || (fx.contrast || 0) !== 0 ||
+        (fx.saturation || 0) !== 0 || (fx.blur || 0) > 0 ||
+        (fx.hueRotate || 0) !== 0 || (fx.sepia || 0) > 0 ||
+        (videoItem.opacity ?? 1) < 1;
+      const hasTransform = (pos.x != null && pos.x !== 50) || (pos.y != null && pos.y !== 50) ||
+        (sz.w != null && sz.w !== 100) || (sz.h != null && sz.h !== 100) ||
+        rot !== 0 || fadeIn > 0 || fadeOut > 0;
+      if (hasEffects || hasTransform) {
+        body.video_effects = {
+          brightness: fx.brightness || 0,
+          contrast: fx.contrast || 0,
+          saturation: fx.saturation || 0,
+          blur: fx.blur || 0,
+          hue_rotate: fx.hueRotate || 0,
+          sepia: fx.sepia || 0,
+          opacity: videoItem.opacity ?? 1,
+          position_x: pos.x ?? 50,
+          position_y: pos.y ?? 50,
+          width: sz.w ?? 100,
+          height: sz.h ?? 100,
+          rotation: rot,
+          fade_in: fadeIn,
+          fade_out: fadeOut,
+        };
+      }
+    }
+    // Include text overlays from the timeline
+    const clipTextItems = timelineItems.filter(it => it.type === 'text');
+    if (clipTextItems.length > 0) {
+      body.text_overlays = clipTextItems.map(it => ({
+        text: it.textContent || '',
+        x: it.position?.x ?? 50,
+        y: it.position?.y ?? 50,
+        font_size: it.textStyle?.fontSize || 48,
+        font_color: it.textStyle?.color || '#FFFFFF',
+        font_family: it.textStyle?.fontFamily || 'sans-serif',
+        font_weight: it.textStyle?.fontWeight || 400,
+        background_color: it.textStyle?.bgColor || null,
+        outline_width: it.textStyle?.outlineWidth || 0,
+        outline_color: it.textStyle?.outlineColor || '#000000',
+        start_time: it.start || 0,
+        end_time: it.end || 0,
+        rotation: it.transform?.rotation || 0,
+        opacity: it.opacity ?? 1,
+        fade_in: it.fadeIn || 0,
+        fade_out: it.fadeOut || 0,
+      }));
+    }
+    // Include image overlays from the timeline
+    const clipImageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
+    if (clipImageItems.length > 0) {
+      body.image_overlays = clipImageItems.map(it => {
+        let src = it.src || '';
+        if (!src && it.mediaRef) {
+          const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
+          src = mediaEntry?.url || it.mediaRef;
+        }
+        return {
+          src,
+          x: it.position?.x ?? 50,
+          y: it.position?.y ?? 50,
+          width: it.size?.w ?? 30,
+          height: it.size?.h ?? 30,
+          start_time: it.start || 0,
+          end_time: it.end || 0,
+          opacity: it.opacity ?? 1,
+          fade_in: it.fadeIn || 0,
+          fade_out: it.fadeOut || 0,
+        };
+      });
+    }
     encoding.startExport(jobId, parseInt(clipId), clip?.title || `Clip ${clipId}`, body);
     showToast(`Exporting "${clip?.title || `Clip ${clipId}`}"...`, 'info');
-  }, [jobId, clipId, clip, startTime, endTime, clipSettings, encoding, editorTrim, editorVolume, editorSpeed, editorSegments]);
+  }, [jobId, clipId, clip, startTime, endTime, clipSettings, encoding, editorTrim, editorVolume, editorSpeed, editorSegments, timelineItems, timelineMediaLibrary]);
 
   const handleApplySettings = useCallback((applied) => {
     setClipSettings(applied);

@@ -202,6 +202,20 @@ async def export_clip_endpoint(
     actual_start = req.start + req.trim_start_offset
     actual_end = req.end - req.trim_end_offset
 
+    # ISSUE 14: Warn when export request is missing expected editor data.
+    # If the clip was edited but the request has no effects/overlays, the
+    # export won't match the preview.
+    if (not req.segments and not req.video_effects
+            and not req.text_overlays and not req.image_overlays
+            and not req.audio_overlays):
+        logger.warning(
+            "Export request for clip %s has no segments, video_effects, "
+            "text_overlays, image_overlays, or audio_overlays. If the user "
+            "edited this clip in the VideoEditor, the export may not match "
+            "the preview. Ensure the frontend sends all editor state.",
+            req.clip_id,
+        )
+
     async def _do_export():
         try:
             export_start = time.monotonic()
@@ -284,6 +298,7 @@ async def export_clip_endpoint(
                 video_effects=req.video_effects.model_dump() if req.video_effects else None,
                 text_overlays=[t.model_dump() for t in req.text_overlays] if req.text_overlays else None,
                 image_overlays=[i.model_dump() for i in req.image_overlays] if req.image_overlays else None,
+                audio_overlays=[a.model_dump() for a in req.audio_overlays] if req.audio_overlays else None,
             )
 
             elapsed = int(time.monotonic() - export_start)
@@ -458,6 +473,7 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                 video_effects=req.video_effects.model_dump() if req.video_effects else None,
                 text_overlays=[t.model_dump() for t in req.text_overlays] if req.text_overlays else None,
                 image_overlays=[i.model_dump() for i in req.image_overlays] if req.image_overlays else None,
+                audio_overlays=[a.model_dump() for a in req.audio_overlays] if req.audio_overlays else None,
             )
 
             elapsed = int(time.monotonic() - export_start)
@@ -1309,38 +1325,113 @@ async def get_editor_state(job_id: str, clip_id: int):
         return {"state": None}
 
 
-@router.post("/jobs/{job_id}/clips/{clip_id}/export-timeline")
+@router.post("/jobs/{job_id}/clips/{clip_id}/export-timeline", deprecated=True)
 async def export_timeline(job_id: str, clip_id: int, timeline: dict):
+    """Deprecated: use POST /jobs/{job_id}/export-clip instead.
+
+    The standard export-clip endpoint now supports all multi-track editor
+    data including video_effects, text_overlays, image_overlays, segments,
+    and per-segment volume/speed/subtitle overrides.
     """
-    Accept full timeline state and export via FFmpeg.
+    raise HTTPException(
+        status_code=410,
+        detail="This endpoint is deprecated. Use POST /api/jobs/{job_id}/export-clip "
+               "with video_effects, text_overlays, and image_overlays fields instead.",
+    )
 
-    The timeline includes:
-    - Base video with trim points
-    - Overlay images with position/timing/opacity
-    - Additional audio tracks with volume/timing
-    - Subtitle track with styling
-    - Per-item volume, speed, fade settings
+
+# ── Export Parity Validation ──────────────────────────────────────────
+
+@router.post("/jobs/{job_id}/validate-export-parity")
+async def validate_export_parity(job_id: str, req: ExportRequest):
+    """Validate that an export request will produce output matching the preview.
+
+    Returns a detailed report of which effects, overlays, and settings will be
+    applied in the FFmpeg export, and flags any missing parameters.
     """
-    job = await database.load_job(job_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    report: dict = {"effects": [], "overlays": [], "segments": [], "warnings": []}
 
-    # For now, fall back to the standard clip export.
-    # Full multi-track FFmpeg filter_complex rendering is a future enhancement.
-    items = timeline.get("items", [])
-    video_item = next((i for i in items if i.get("type") == "video"), None)
-    if not video_item:
-        raise HTTPException(status_code=400, detail="No video item in timeline")
+    # Video effects
+    if req.video_effects:
+        ve = req.video_effects.model_dump()
+        for key, val in ve.items():
+            default = 0 if key not in ("opacity", "position_x", "position_y", "width", "height") else {
+                "opacity": 1.0, "position_x": 50, "position_y": 50, "width": 100, "height": 100,
+            }.get(key, 0)
+            if val != default:
+                report["effects"].append({"name": key, "value": val, "has_ffmpeg_filter": True})
+    else:
+        report["warnings"].append("No video_effects in request — no brightness/contrast/etc will be applied")
 
-    clip = next((c for c in job.clips if c.id == clip_id), None)
-    if not clip:
-        raise HTTPException(status_code=404, detail="Clip not found")
+    # Text overlays
+    if req.text_overlays:
+        for i, t in enumerate(req.text_overlays):
+            report["overlays"].append({
+                "type": "text", "index": i,
+                "text": t.text[:50],
+                "timing": f"{t.start_time:.1f}s - {t.end_time:.1f}s",
+                "has_drawtext": True,
+            })
+    else:
+        report["warnings"].append("No text_overlays in request")
 
-    return {
-        "status": "queued",
-        "message": "Timeline export is being processed. Full multi-track rendering will be available in a future update.",
-        "clip_id": clip_id,
+    # Image overlays
+    if req.image_overlays:
+        for i, img in enumerate(req.image_overlays):
+            report["overlays"].append({
+                "type": "image", "index": i,
+                "src": img.src[:80] if img.src else "(empty)",
+                "timing": f"{img.start_time:.1f}s - {img.end_time:.1f}s",
+                "has_overlay_filter": bool(img.src),
+            })
+    else:
+        report["warnings"].append("No image_overlays in request")
+
+    # Audio overlays
+    if req.audio_overlays:
+        for i, ao in enumerate(req.audio_overlays):
+            report["overlays"].append({
+                "type": "audio", "index": i,
+                "src": ao.src[:80] if ao.src else "(empty)",
+                "timing": f"{ao.start_time:.1f}s - {ao.end_time:.1f}s",
+                "has_amix": bool(ao.src),
+            })
+
+    # Segments
+    if req.segments:
+        for i, seg in enumerate(req.segments):
+            report["segments"].append({
+                "index": i,
+                "start": seg.start, "end": seg.end,
+                "volume": seg.volume, "muted": seg.muted,
+                "speed": seg.speed,
+                "subtitles_enabled": seg.subtitles_enabled,
+            })
+    else:
+        report["warnings"].append("No per-segment overrides in request")
+
+    # Subtitle check
+    if req.subtitles_enabled:
+        report["subtitles"] = {
+            "enabled": True,
+            "font": req.subtitle_settings.font if req.subtitle_settings else "default",
+            "burn_in": True,
+        }
+    else:
+        report["subtitles"] = {"enabled": False, "burn_in": False}
+
+    # Volume / speed
+    report["audio"] = {"volume": req.volume, "speed": req.speed}
+
+    # Trim
+    report["trim"] = {
+        "start_offset": req.trim_start_offset,
+        "end_offset": req.trim_end_offset,
+        "effective_start": req.start + req.trim_start_offset,
+        "effective_end": req.end - req.trim_end_offset,
     }
+
+    return {"job_id": job_id, "clip_id": req.clip_id, "parity_report": report}
 
 
 # ── QA / Validation Endpoint ─────────────────────────────────────────

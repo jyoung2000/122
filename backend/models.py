@@ -200,6 +200,16 @@ class ImageOverlay(BaseModel):
     fade_out: float = 0.0      # seconds
 
 
+class AudioOverlay(BaseModel):
+    """Additional audio item from multi-track editor (background music, SFX)."""
+    src: str = ""              # path or URL to audio file
+    start_time: float = 0.0   # start on the timeline (seconds)
+    end_time: float = 0.0     # end on the timeline (seconds)
+    volume: float = 1.0       # 0.0 to 2.0 gain
+    fade_in: float = 0.0      # seconds
+    fade_out: float = 0.0     # seconds
+
+
 class ExportRequest(BaseModel):
     start: float
     end: float
@@ -220,6 +230,7 @@ class ExportRequest(BaseModel):
     video_effects: Optional[VideoEffects] = None
     text_overlays: list[TextOverlay] = []
     image_overlays: list[ImageOverlay] = []
+    audio_overlays: list[AudioOverlay] = []  # Additional audio items (music, SFX)
 
 
 class FullVideoExportRequest(BaseModel):
