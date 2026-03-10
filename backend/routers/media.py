@@ -49,9 +49,19 @@ def _load_meta(media_dir: str) -> dict:
 
 
 def _save_meta(media_dir: str, meta: dict):
+    """Atomically write metadata to prevent corruption on crash.
+
+    Writes to a temporary file first, then renames (atomic on POSIX).
+    This ensures _meta.json is never partially written — if the container
+    crashes mid-write, the old file remains intact.
+    """
     path = _meta_path(media_dir)
-    with open(path, "w") as f:
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "w") as f:
         json.dump(meta, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
 
 
 def detect_media_type(filename: str) -> str | None:

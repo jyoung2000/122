@@ -114,6 +114,10 @@ export default function MediaUploader({ jobId, compact = false }) {
   const [uploading, setUploading] = useState(null); // { filename, progress }
   const [error, setError] = useState(null);
   const fileInputRef = useRef(null);
+  // Track the local ID assigned to the last added media entry so we can update
+  // it reliably after the backend responds, even if other entries are added
+  // concurrently (avoids the stale-index race).
+  const pendingLocalIdRef = useRef(null);
 
   // Load global media library from backend on mount so items from the
   // Media Library page are available in the editor.
@@ -219,8 +223,9 @@ export default function MediaUploader({ jobId, compact = false }) {
         } catch { /* duration stays 0 */ }
       }
 
-      // Add to local store immediately
-      addMedia({
+      // Add to local store immediately — capture the assigned ID so we can
+      // reliably update this specific entry after the backend responds.
+      const localId = addMedia({
         type: mediaType,
         filename: file.name,
         duration,
@@ -228,6 +233,7 @@ export default function MediaUploader({ jobId, compact = false }) {
         thumbnailUrl,
         waveformData: [],
       });
+      pendingLocalIdRef.current = localId;
 
       // Upload to backend — uses job_id if available, otherwise defaults to global library
       const uploadUrl = jobId
@@ -237,9 +243,12 @@ export default function MediaUploader({ jobId, compact = false }) {
       const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
 
       if (file.size > CHUNK_THRESHOLD) {
-        // Chunked upload for large files
+        // Chunked upload for large files — send as single stream to the media
+        // upload endpoint which handles streaming to disk. We split into chunks
+        // on the client side for progress tracking and retry resilience.
         try {
           const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+          let lastResp = null;
           for (let i = 0; i < totalChunks; i++) {
             const start = i * CHUNK_SIZE;
             const end = Math.min(start + CHUNK_SIZE, file.size);
@@ -257,13 +266,26 @@ export default function MediaUploader({ jobId, compact = false }) {
                   method: 'POST',
                   body: chunkForm,
                 });
-                if (resp.ok) success = true;
-                else if (attempt < 3) await new Promise(r => setTimeout(r, [2000, 4000, 8000][attempt]));
+                if (resp.ok) {
+                  success = true;
+                  lastResp = resp;
+                } else if (attempt < 3) {
+                  await new Promise(r => setTimeout(r, [2000, 4000, 8000][attempt]));
+                }
               } catch {
                 if (attempt < 3) await new Promise(r => setTimeout(r, [2000, 4000, 8000][attempt]));
               }
             }
             setUploading({ filename: file.name, progress: Math.round(((i + 1) / totalChunks) * 100) });
+          }
+          // Update store with backend URL from the last chunk response
+          if (lastResp) {
+            try {
+              const data = await lastResp.json();
+              if (data.url && data.id && localId) {
+                updateMedia(localId, { url: data.url, id: data.id });
+              }
+            } catch { /* ignore */ }
           }
           setUploading(null);
         } catch {
@@ -284,9 +306,9 @@ export default function MediaUploader({ jobId, compact = false }) {
           xhr.onload = () => {
             try {
               const data = JSON.parse(xhr.responseText);
-              if (data.url && data.id) {
-                // Update the store entry with the backend URL so it persists
-                updateMedia(mediaLibrary[mediaLibrary.length - 1]?.id, { url: data.url, id: data.id });
+              if (data.url && data.id && localId) {
+                // Update the store entry by its stable local ID (not array index)
+                updateMedia(localId, { url: data.url, id: data.id });
               }
             } catch { /* ignore */ }
             setUploading(null);
@@ -298,7 +320,7 @@ export default function MediaUploader({ jobId, compact = false }) {
         }
       }
     }
-  }, [addMedia, jobId]);
+  }, [addMedia, updateMedia, jobId]);
 
   const onDrop = useCallback((e) => {
     e.preventDefault();

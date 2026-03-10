@@ -18,15 +18,79 @@ async function getDB() {
   });
 }
 
+/**
+ * Reconcile media library entries with the backend.
+ *
+ * After IndexedDB recovery or page reload, some media entries may have stale
+ * blob: URLs (which are invalidated when the page unloads). This function
+ * fetches the authoritative media list from the backend and:
+ * 1. Replaces any stale blob: URLs with the backend URL
+ * 2. Adds any backend media that is missing from the local store
+ * 3. Leaves entries with valid backend URLs untouched
+ *
+ * This ensures uploaded media persists across container restarts and browser
+ * cache clears — only explicit user deletion removes media.
+ */
+async function reconcileMediaLibrary(jobId) {
+  const updateMedia = useTimelineStore.getState().updateMedia;
+  const addMedia = useTimelineStore.getState().addMedia;
+
+  // Fetch both job-specific and global library media
+  const urls = ['/api/media/list'];
+  if (jobId && jobId !== '_library') {
+    urls.push(`/api/media/list?job_id=${jobId}`);
+  }
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const data = await res.json();
+      const backendItems = data.items || [];
+
+      const currentLibrary = useTimelineStore.getState().mediaLibrary;
+      const currentById = new Map(currentLibrary.map(m => [m.id, m]));
+
+      for (const backendItem of backendItems) {
+        const existing = currentById.get(backendItem.id);
+        if (existing) {
+          // Entry exists locally — update URL if it's a stale blob: URL
+          // or if the backend URL has changed
+          if (
+            existing.url.startsWith('blob:') ||
+            (!existing.url.startsWith('/api/') && backendItem.url)
+          ) {
+            updateMedia(existing.id, { url: backendItem.url });
+          }
+        } else {
+          // Entry missing locally — add from backend
+          addMedia({
+            id: backendItem.id,
+            type: backendItem.type,
+            filename: backendItem.filename,
+            url: backendItem.url,
+            thumbnailUrl: backendItem.type === 'image' ? backendItem.url : '',
+            duration: 0,
+          });
+        }
+      }
+    } catch {
+      // Backend unavailable — skip reconciliation
+    }
+  }
+}
+
 export default function useTimelinePersistence(jobId, clipId) {
   const exportState = useTimelineStore((s) => s.exportState);
   const importState = useTimelineStore((s) => s.importState);
   const tracks = useTimelineStore((s) => s.tracks);
   const items = useTimelineStore((s) => s.items);
+  const mediaLibrary = useTimelineStore((s) => s.mediaLibrary);
   const [recovered, setRecovered] = useState(false);
 
   const saveTimerRef = useRef(null);
   const serverTimerRef = useRef(null);
+  const reconcileRef = useRef(false);
   const key = `${jobId || 'unknown'}_${clipId || 'default'}`;
 
   // ── Load from IndexedDB on mount ──────────────────────────────────────────
@@ -47,11 +111,19 @@ export default function useTimelinePersistence(jobId, clipId) {
       } catch {
         // IndexedDB unavailable — no recovery
       }
+
+      // Reconcile media URLs with backend after recovery (or on fresh load)
+      if (!cancelled && !reconcileRef.current) {
+        reconcileRef.current = true;
+        await reconcileMediaLibrary(jobId);
+      }
     })();
     return () => { cancelled = true; };
   }, [jobId, clipId, key]);
 
   // ── Auto-save to IndexedDB (debounced) ────────────────────────────────────
+  // Triggers on tracks, items, OR mediaLibrary changes so new uploads are
+  // persisted immediately (not just on the 60s server sync interval).
   useEffect(() => {
     if (!jobId) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
@@ -72,7 +144,7 @@ export default function useTimelinePersistence(jobId, clipId) {
     return () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
-  }, [tracks, items, jobId, clipId, key, exportState]);
+  }, [tracks, items, mediaLibrary, jobId, clipId, key, exportState]);
 
   // ── Server sync every 60s ─────────────────────────────────────────────────
   const syncToServer = useCallback(async () => {
