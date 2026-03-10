@@ -86,12 +86,11 @@ export default function ExportDialog({
     if (exportMode === 'server') {
       const preset = QUALITY_PRESETS.find(p => p.id === quality) || QUALITY_PRESETS[1];
       const exportPayload = {
-        quality: preset.id,
+        start: startTime,
+        end: endTime,
+        clip_id: parseInt(clipId) || 0,
+        export_quality: preset.id,
         ...(settings || {}),
-        ...(jobId ? { jobId } : {}),
-        ...(clipId ? { clipId } : {}),
-        startTime,
-        endTime,
       };
 
       // Include multi-track editor video effects + transform so export matches preview 1:1
@@ -177,10 +176,30 @@ export default function ExportDialog({
         });
       }
 
+      // Include audio overlays from the timeline
+      const audioItems = timelineItems.filter(it => it.type === 'audio');
+      if (audioItems.length > 0) {
+        exportPayload.audio_overlays = audioItems.map(it => {
+          let src = it.src || '';
+          if (!src && it.mediaRef) {
+            const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
+            src = mediaEntry?.url || it.mediaRef;
+          }
+          return {
+            src,
+            start_time: it.start || 0,
+            end_time: it.end || 0,
+            volume: it.volume ?? 1,
+            fade_in: it.fadeIn || 0,
+            fade_out: it.fadeOut || 0,
+          };
+        });
+      }
+
       if (onServerExport) {
         onServerExport(exportPayload);
       } else if (jobId && clipId) {
-        fetch(`/api/export/${jobId}/${clipId}`, {
+        fetch(`/api/jobs/${jobId}/export-clip`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(exportPayload),

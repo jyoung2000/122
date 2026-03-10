@@ -826,6 +826,25 @@ export default function ClipSEO() {
         };
       });
     }
+    // Include audio overlays from the timeline
+    const clipAudioItems = timelineItems.filter(it => it.type === 'audio');
+    if (clipAudioItems.length > 0) {
+      body.audio_overlays = clipAudioItems.map(it => {
+        let src = it.src || '';
+        if (!src && it.mediaRef) {
+          const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
+          src = mediaEntry?.url || it.mediaRef;
+        }
+        return {
+          src,
+          start_time: it.start || 0,
+          end_time: it.end || 0,
+          volume: it.volume ?? 1,
+          fade_in: it.fadeIn || 0,
+          fade_out: it.fadeOut || 0,
+        };
+      });
+    }
     encoding.startExport(jobId, parseInt(clipId), clip?.title || `Clip ${clipId}`, body);
     showToast(`Exporting "${clip?.title || `Clip ${clipId}`}"...`, 'info');
   }, [jobId, clipId, clip, startTime, endTime, clipSettings, encoding, editorTrim, editorVolume, editorSpeed, editorSegments, timelineItems, timelineMediaLibrary]);

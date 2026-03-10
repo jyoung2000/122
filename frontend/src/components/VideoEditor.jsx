@@ -4,6 +4,7 @@ import useResponsive from '../hooks/useResponsive';
 import useTimelineStore from '../stores/timelineStore';
 import useTimelinePersistence from '../hooks/useTimelinePersistence';
 import useKeyboardShortcuts from '../hooks/useKeyboardShortcuts';
+import useEncodingManager from '../hooks/useEncodingManager';
 import Timeline from './Timeline';
 import TimelineOverlay from './TimelineOverlay';
 import MediaUploader from './MediaUploader';
@@ -244,6 +245,13 @@ export default function VideoEditor({
   const updateTimelineItem = useTimelineStore((s) => s.updateItem);
   const timelineTracks = useTimelineStore((s) => s.tracks);
   const { recovered } = useTimelinePersistence(jobId, clipId);
+  const encoding = useEncodingManager();
+
+  const handleServerExport = useCallback((payload) => {
+    if (jobId && clipId) {
+      encoding.startExport(jobId, parseInt(clipId), title || `Clip ${clipId}`, payload);
+    }
+  }, [jobId, clipId, title, encoding]);
 
   // ── Live QA: validate editor state and auto-fix track compatibility issues ──
   // Runs when tracks/items/selection change (NOT on every playhead frame update)
@@ -3218,7 +3226,7 @@ export default function VideoEditor({
           sourceWidth={sourceWidth}
           sourceHeight={sourceHeight}
           subjectX={subjectX}
-          onServerExport={null}
+          onServerExport={handleServerExport}
         />
       )}
 

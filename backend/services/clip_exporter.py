@@ -3320,8 +3320,8 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
     return ",".join(parts)
 
 
-def _resolve_image_path(src: str, job_id: str) -> str | None:
-    """Resolve an image overlay src (URL or path) to a filesystem path.
+def _resolve_media_path(src: str, job_id: str) -> str | None:
+    """Resolve an overlay src (URL or path) to a filesystem path.
 
     Handles:
     - /api/files/{job_id}/media/{filename} → /data/uploads/{job_id}/media/{filename}
@@ -3337,7 +3337,7 @@ def _resolve_image_path(src: str, job_id: str) -> str | None:
         path = f"/data/uploads/{job_id}/media/{filename}"
         if os.path.isfile(path):
             return path
-        logger.warning("Image overlay file not found: %s", path)
+        logger.warning("Overlay media file not found: %s", path)
         return None
     # Generic /api/files/ pattern (different job_id in path)
     if src.startswith("/api/files/"):
@@ -3354,17 +3354,27 @@ def _resolve_image_path(src: str, job_id: str) -> str | None:
                     return path
             except (ValueError, IndexError):
                 pass
-        logger.warning("Could not resolve image overlay URL: %s", src)
+        # Also try global media library
+        global_dir = "/data/uploads/_library/media"
+        basename = parts[-1] if parts else ""
+        if basename:
+            gpath = os.path.join(global_dir, basename)
+            if os.path.isfile(gpath):
+                return gpath
+        logger.warning("Could not resolve overlay media URL: %s", src)
         return None
     # Absolute path
     if os.path.isabs(src) and os.path.isfile(src):
         return src
-    # Bare filename — look in job media dir
+    # Bare filename — look in job media dir, then global library
     media_dir = f"/data/uploads/{job_id}/media"
     path = os.path.join(media_dir, os.path.basename(src))
     if os.path.isfile(path):
         return path
-    logger.warning("Image overlay not found: src=%s, job_id=%s", src, job_id)
+    global_path = os.path.join("/data/uploads/_library/media", os.path.basename(src))
+    if os.path.isfile(global_path):
+        return global_path
+    logger.warning("Overlay media not found: src=%s, job_id=%s", src, job_id)
     return None
 
 
@@ -3390,7 +3400,7 @@ def _build_image_overlay_data(
 
     for overlay in image_overlays:
         src = overlay.get("src", "")
-        img_path = _resolve_image_path(src, job_id)
+        img_path = _resolve_media_path(src, job_id)
         if not img_path:
             continue
         input_idx = base_input_idx + len(extra_args) // 2  # each image adds -i path (2 args)
@@ -4209,8 +4219,10 @@ async def export_clip(
                     _ao_base_idx = 1 + (len(_img_input_args) // 2 if _img_input_args else 0)
                     _ao_labels: list[str] = []
                     for ao_i, ao in enumerate(audio_overlays):
-                        ao_src = ao.get("src", "")
-                        if not ao_src or not os.path.isfile(ao_src):
+                        ao_src_raw = ao.get("src", "")
+                        ao_src = _resolve_media_path(ao_src_raw, job_id) if ao_src_raw else None
+                        if not ao_src:
+                            logger.warning("Audio overlay not found: src=%s, job_id=%s", ao_src_raw, job_id)
                             continue
                         ao_start = max(0, ao.get("start_time", 0) - start)
                         ao_end = ao.get("end_time", 0) - start
