@@ -2964,16 +2964,46 @@ def _build_filter_chain(
         filters.append(f"scale={out_w}:{out_h}")
 
     # Apply video effects (brightness/contrast/saturation/blur/hue/sepia)
-    # These must match the CSS filter() values used in the frontend RenderEngine
+    # These must match the CSS filter() values used in the frontend preview.
+    #
+    # CSS filter mappings:
+    #   brightness(factor) — multiplies each RGB channel by factor
+    #   contrast(factor)   — scales around midpoint: factor*(c-0.5)+0.5
+    #   saturate(factor)   — saturation multiplier
+    #
+    # FFmpeg eq filter:
+    #   brightness — ADDITIVE offset on luma (NOT the same as CSS brightness!)
+    #   contrast   — multiplier around midpoint (matches CSS)
+    #   saturation — multiplier (matches CSS)
     if video_effects:
+        # brightness: CSS brightness(1+val/100) is a linear RGB multiply.
+        # FFmpeg eq brightness is ADDITIVE on luma, which produces a
+        # completely different look.  Use colorlevels to scale the RGB
+        # input range which gives a true multiplicative brightness.
+        brightness_val = video_effects.get("brightness", 0)
+        if brightness_val != 0:
+            factor = 1 + brightness_val / 100
+            if factor >= 1.0:
+                # Brighten: map input [0, 1/factor] → output [0, 1]
+                inv = 1.0 / factor
+                filters.append(
+                    f"colorlevels=rimin=0:rimax={inv:.4f}"
+                    f":gimin=0:gimax={inv:.4f}"
+                    f":bimin=0:bimax={inv:.4f}"
+                )
+            else:
+                # Darken: map input [0, 1] → output [0, factor]
+                filters.append(
+                    f"colorlevels=romin=0:romax={factor:.4f}"
+                    f":gomin=0:gomax={factor:.4f}"
+                    f":bomin=0:bomax={factor:.4f}"
+                )
+
         eq_parts = []
-        # brightness: frontend uses brightness(1 + val/100), FFmpeg eq uses brightness=val/100
-        if video_effects.get("brightness", 0) != 0:
-            eq_parts.append(f"brightness={video_effects['brightness'] / 100:.4f}")
-        # contrast: frontend uses contrast(1 + val/100), FFmpeg eq uses contrast=1+val/100
+        # contrast: CSS contrast(1+val/100) matches FFmpeg eq contrast multiplier
         if video_effects.get("contrast", 0) != 0:
             eq_parts.append(f"contrast={1 + video_effects['contrast'] / 100:.4f}")
-        # saturation: frontend uses saturate(1 + val/100), FFmpeg eq uses saturation=1+val/100
+        # saturation: CSS saturate(1+val/100) matches FFmpeg eq saturation multiplier
         if video_effects.get("saturation", 0) != 0:
             eq_parts.append(f"saturation={1 + video_effects['saturation'] / 100:.4f}")
         if eq_parts:
