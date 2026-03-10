@@ -156,6 +156,14 @@ class VideoEffects(BaseModel):
     hue_rotate: float = 0.0    # 0 to 360 degrees (maps to FFmpeg hue)
     sepia: float = 0.0         # 0 to 100 (maps to FFmpeg colorchannelmixer)
     opacity: float = 1.0       # 0 to 1 (maps to FFmpeg colorchannelmixer alpha)
+    # Video transform — position/size/rotation from Properties panel
+    position_x: float = 50.0   # 0-100% (50 = centered)
+    position_y: float = 50.0   # 0-100% (50 = centered)
+    width: float = 100.0       # 0-200% of frame (100 = original)
+    height: float = 100.0      # 0-200% of frame (100 = original)
+    rotation: float = 0.0      # degrees
+    fade_in: float = 0.0       # seconds
+    fade_out: float = 0.0      # seconds
 
 
 class TextOverlay(BaseModel):

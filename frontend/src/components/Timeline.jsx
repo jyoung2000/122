@@ -502,6 +502,8 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       if (itemTrack?.locked) {
         // Selection allowed, but no drag/trim
       } else if (hit.edge === 'left' || hit.edge === 'right') {
+        // Pause undo history during drag so intermediate frames don't flood it
+        useTimelineStore.temporal.getState().pause();
         setIsDragging(true);
         setDragInfo({
           type: 'trim',
@@ -514,6 +516,8 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
           startX: e.clientX,
         });
       } else {
+        // Pause undo history during drag so intermediate frames don't flood it
+        useTimelineStore.temporal.getState().pause();
         setIsDragging(true);
         setDragInfo({
           type: 'move',
@@ -602,6 +606,10 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     };
 
     const onUp = () => {
+      // Resume undo history so the final drag state is recorded as one snapshot
+      if (dragInfo.type === 'move' || dragInfo.type === 'trim') {
+        useTimelineStore.temporal.getState().resume();
+      }
       setIsDragging(false);
       setDragInfo(null);
     };

@@ -169,6 +169,8 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
     onInteraction?.(true);
 
     const rect = getContainerRect();
+    // Pause undo history during drag so intermediate frames don't flood it
+    useTimelineStore.temporal.getState().pause();
     dragState.current = {
       type: 'drag',
       startMouseX: e.clientX,
@@ -189,6 +191,8 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
     onInteraction?.(true);
 
     const rect = getContainerRect();
+    // Pause undo history during resize so intermediate frames don't flood it
+    useTimelineStore.temporal.getState().pause();
     dragState.current = {
       type: 'resize',
       handle: handleId,
@@ -218,6 +222,8 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
     const centerX = rect.left + (effectivePos.x / 100) * rect.width;
     const centerY = rect.top + (effectivePos.y / 100) * rect.height;
 
+    // Pause undo history during rotation so intermediate frames don't flood it
+    useTimelineStore.temporal.getState().pause();
     dragState.current = {
       type: 'rotate',
       centerX,
@@ -336,6 +342,8 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
     };
 
     const handleMouseUp = () => {
+      // Resume undo history so the final state is recorded as one snapshot
+      useTimelineStore.temporal.getState().resume();
       dragState.current = null;
       setIsDragging(false);
       setIsResizing(false);

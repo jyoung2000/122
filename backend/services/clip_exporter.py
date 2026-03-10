@@ -2809,6 +2809,7 @@ def _build_filter_chain(
     video_path: str | None = None,
     start_time: float = 0,
     video_effects: dict | None = None,
+    clip_duration: float = 0,
 ) -> tuple[str | None, bool]:
     """Build FFmpeg video filter chain.
 
@@ -3045,13 +3046,76 @@ def _build_filter_chain(
         if opacity_val < 1.0:
             filters.append(f"colorchannelmixer=aa={opacity_val:.3f}")
 
+        # ── Video transform: position, size, rotation, fades ──
+        # These match the CSS transform applied in the preview viewport.
+        pos_x = video_effects.get("position_x", 50)
+        pos_y = video_effects.get("position_y", 50)
+        vid_w = video_effects.get("width", 100)
+        vid_h = video_effects.get("height", 100)
+        vid_rot = video_effects.get("rotation", 0)
+        vid_fade_in = video_effects.get("fade_in", 0)
+        vid_fade_out = video_effects.get("fade_out", 0)
+
+        has_transform = (
+            pos_x != 50 or pos_y != 50 or
+            vid_w != 100 or vid_h != 100 or
+            vid_rot != 0
+        )
+
+        if has_transform:
+            # To apply position/size/rotation we need a complex filter:
+            # 1. Scale the video to the desired size
+            # 2. Rotate if needed
+            # 3. Overlay onto a background at the desired position
+            #
+            # Since this changes from a simple chain to a complex graph,
+            # we handle it by inserting scale + rotate + crop filters.
+            #
+            # Size: scale the video relative to original dimensions
+            if vid_w != 100 or vid_h != 100:
+                sw = vid_w / 100.0
+                sh = vid_h / 100.0
+                filters.append(
+                    f"scale=trunc(iw*{sw:.4f}/2)*2:trunc(ih*{sh:.4f}/2)*2"
+                )
+
+            # Rotation: FFmpeg rotate filter (radians, with transparent fill)
+            if vid_rot != 0:
+                rad = vid_rot * 3.14159265 / 180.0
+                filters.append(
+                    f"rotate={rad:.6f}:fillcolor=black:ow=rotw({rad:.6f}):oh=roth({rad:.6f})"
+                )
+
+            # Position offset: crop/pad to shift the video within the frame.
+            # Preview positions the center of the video at (pos_x%, pos_y%)
+            # relative to the viewport. We pad to a canvas then crop back
+            # to the original frame dimensions.
+            if pos_x != 50 or pos_y != 50:
+                # Offset in pixels: positive = shift right/down from center
+                ox_expr = f"(iw*{(pos_x - 50) / 100:.4f})"
+                oy_expr = f"(ih*{(pos_y - 50) / 100:.4f})"
+                filters.append(
+                    f"crop=w={src_w}:h={src_h}"
+                    f":x=iw/2-{src_w}/2-{ox_expr}"
+                    f":y=ih/2-{src_h}/2-{oy_expr}"
+                )
+
+        # Fade in/out on main video
+        if vid_fade_in > 0:
+            filters.append(f"fade=t=in:st=0:d={vid_fade_in:.3f}")
+        if vid_fade_out > 0 and clip_duration > 0:
+            fade_out_start = max(0, clip_duration - vid_fade_out)
+            filters.append(f"fade=t=out:st={fade_out_start:.3f}:d={vid_fade_out:.3f}")
+
         logger.info(
             "Video effects applied: brightness=%.1f contrast=%.1f saturation=%.1f "
-            "blur=%.1f hue=%.1f sepia=%.1f opacity=%.2f",
+            "blur=%.1f hue=%.1f sepia=%.1f opacity=%.2f "
+            "pos=(%.1f,%.1f) size=(%.1f,%.1f) rot=%.1f fade_in=%.1f fade_out=%.1f",
             video_effects.get("brightness", 0), video_effects.get("contrast", 0),
             video_effects.get("saturation", 0), video_effects.get("blur", 0),
             video_effects.get("hue_rotate", 0), video_effects.get("sepia", 0),
             video_effects.get("opacity", 1.0),
+            pos_x, pos_y, vid_w, vid_h, vid_rot, vid_fade_in, vid_fade_out,
         )
 
     if sub:
@@ -3422,10 +3486,22 @@ async def export_clip(
             if abs(seg.get("speed", 1.0) - 1.0) > 0.001:
                 has_seg_speed = True
                 break
-    has_video_effects = bool(video_effects) and any(
-        video_effects.get(k, 0) != (1.0 if k == "opacity" else 0)
-        for k in ("brightness", "contrast", "saturation", "blur", "hue_rotate", "sepia", "opacity")
-    )
+    has_video_effects = bool(video_effects) and any((
+        video_effects.get("brightness", 0) != 0,
+        video_effects.get("contrast", 0) != 0,
+        video_effects.get("saturation", 0) != 0,
+        video_effects.get("blur", 0) != 0,
+        video_effects.get("hue_rotate", 0) != 0,
+        video_effects.get("sepia", 0) != 0,
+        video_effects.get("opacity", 1.0) != 1.0,
+        video_effects.get("position_x", 50) != 50,
+        video_effects.get("position_y", 50) != 50,
+        video_effects.get("width", 100) != 100,
+        video_effects.get("height", 100) != 100,
+        video_effects.get("rotation", 0) != 0,
+        video_effects.get("fade_in", 0) > 0,
+        video_effects.get("fade_out", 0) > 0,
+    ))
     has_text_overlays = bool(text_overlays) and len(text_overlays) > 0
     has_image_overlays = bool(image_overlays) and len(image_overlays) > 0
     needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments or has_seg_speed or has_video_effects or has_text_overlays or has_image_overlays
@@ -3802,6 +3878,7 @@ async def export_clip(
                 video_path=video_path,
                 start_time=start,
                 video_effects=video_effects if has_video_effects else None,
+                clip_duration=end - start,
             )
 
             # Append text overlay drawtext filters
