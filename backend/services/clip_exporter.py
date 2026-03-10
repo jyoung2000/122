@@ -3672,10 +3672,10 @@ async def export_clip(
         # Truncate to avoid excessively long filenames
         if len(safe_title) > 120:
             safe_title = safe_title[:120].rstrip()
-        output_path = os.path.join(output_dir, f"[{quality_tag}]{safe_title}.mp4")
+        output_path = os.path.join(output_dir, f"[{quality_tag}] {safe_title}.mp4")
     else:
         output_path = os.path.join(
-            output_dir, f"[{quality_tag}]clip_{clip_id}_{int(start)}_{int(end)}.mp4"
+            output_dir, f"[{quality_tag}] clip_{clip_id}_{int(start)}_{int(end)}.mp4"
         )
 
     # Delete any pre-existing output file to ensure we never serve a stale
