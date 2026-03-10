@@ -4,11 +4,11 @@ import { temporal } from 'zundo';
 
 // ── Default track setup ─────────────────────────────────────────────────────
 const createDefaultTracks = () => [
-  { id: 'v1', type: 'video', name: 'Video', order: 0, muted: false, locked: false, visible: true },
-  { id: 'v2', type: 'overlay', name: 'Overlay', order: 1, muted: false, locked: false, visible: true },
-  { id: 't1', type: 'subtitle', name: 'Subtitles', order: 2, muted: false, locked: false, visible: true },
-  { id: 'a2', type: 'audio', name: 'Music', order: 3, muted: false, locked: false, visible: true },
-  { id: 'a1', type: 'audio', name: 'Audio', order: 4, muted: false, locked: false, visible: true },
+  { id: 't1', type: 'subtitle', name: 'Subtitles', order: 4, muted: false, locked: false, visible: true },
+  { id: 'v2', type: 'overlay', name: 'Overlay', order: 3, muted: false, locked: false, visible: true },
+  { id: 'v1', type: 'video', name: 'Video', order: 2, muted: false, locked: false, visible: true },
+  { id: 'a2', type: 'audio', name: 'Music', order: 1, muted: false, locked: false, visible: true },
+  { id: 'a1', type: 'audio', name: 'Audio', order: 0, muted: false, locked: false, visible: true },
 ];
 
 // Track-item type compatibility map
@@ -124,10 +124,13 @@ const useTimelineStore = create(
       // Track operations
       addTrack: (type, name) => set((state) => {
         const id = `${type.charAt(0)}${state.tracks.length + 1}-${Date.now().toString(36)}`;
+        // New tracks are added at the bottom of the timeline (lowest z-order = 0)
+        // Bump all existing track order values up by 1
+        state.tracks.forEach((t) => { t.order += 1; });
         state.tracks.push({
           id, type,
           name: name || `${type} ${state.tracks.length + 1}`,
-          order: state.tracks.length,
+          order: 0,
           muted: false, locked: false, visible: true,
         });
       }),
@@ -165,8 +168,9 @@ const useTimelineStore = create(
         if (toIndex < 0 || toIndex >= state.tracks.length) return;
         const [moved] = state.tracks.splice(fromIndex, 1);
         state.tracks.splice(toIndex, 0, moved);
-        // Recalculate order values to match array position
-        state.tracks.forEach((t, i) => { t.order = i; });
+        // Recalculate order values: top of timeline (index 0) = highest z-index
+        const len = state.tracks.length;
+        state.tracks.forEach((t, i) => { t.order = len - 1 - i; });
       }),
 
       // Item operations
