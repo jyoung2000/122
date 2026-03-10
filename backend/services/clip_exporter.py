@@ -4409,20 +4409,23 @@ async def export_clip(
                             clip_id, img_overlay_count,
                         )
 
-                # -t is an OUTPUT option (placed after -i), so it caps
-                # the output duration.  When speed != 1.0, the output
-                # duration differs from the input duration: a 10s clip at
-                # 0.5x produces 20s of output, at 2x produces 5s.
-                # Use the speed-adjusted duration so slow-motion clips
-                # aren't truncated and fast clips don't have trailing
-                # silence.
+                # -t must be an OUTPUT option to correctly cap the output
+                # duration.  FFmpeg applies options BETWEEN two -i flags to
+                # the NEXT input, not the output.  When image/audio overlay
+                # inputs follow the video input, placing -t before them
+                # makes it an input option for the overlay file (useless for
+                # images), and the video input loses its duration limit —
+                # causing FFmpeg to encode from -ss to the END of the source.
+                #
+                # Fix: build the command without -t here, then append -t as
+                # one of the last OUTPUT options (before the output file).
                 output_dur = (end - start) / speed if has_speed else (end - start)
                 cmd = [
                     "ffmpeg", "-y",
                     *_gpu_decode_args_for_filter(),
                     "-ss", str(start),
+                    "-t", str(end - start),      # INPUT -t: raw source duration
                     "-i", video_path,
-                    "-t", str(output_dur),
                 ]
                 # Add image overlay inputs after the main video input
                 if _img_input_args:
@@ -4531,6 +4534,11 @@ async def export_clip(
                 ]
                 if app_settings.FFMPEG_FASTSTART:
                     cmd += ["-movflags", "+faststart"]
+                # OUTPUT -t: limit output duration (speed-adjusted).
+                # This is critical when speed != 1.0 (e.g. 0.5x makes
+                # output 2x longer than input).
+                if has_speed and abs(speed - 1.0) > 0.001:
+                    cmd += ["-t", str(output_dur)]
                 cmd += ["-progress", "pipe:1"]
                 cmd.append(output_path)
 
@@ -4593,6 +4601,22 @@ async def export_clip(
                                 pass
                         raise asyncio.CancelledError("Export cancelled by user")
 
+                    # Safety timeout: if encoding takes 60x the clip
+                    # duration (or at least 10 minutes), something is
+                    # likely wrong. Kill FFmpeg to unblock the pipeline.
+                    _max_encode_s = max(600, _clip_dur * 60)
+                    if _elapsed_s > _max_encode_s:
+                        logger.error(
+                            "Encoding timeout for clip %s: %.0fs elapsed (limit=%.0fs, clip=%.1fs)",
+                            clip_id, _elapsed_s, _max_encode_s, _clip_dur,
+                        )
+                        proc.kill()
+                        await proc.wait()
+                        raise RuntimeError(
+                            f"Encoding timed out after {int(_elapsed_s)}s "
+                            f"(expected ~{int(_clip_dur)}s of output)"
+                        )
+
                     _elapsed_s = _now - _enc_start
                     _elapsed = int(_elapsed_s)
                     if _current_out_time > 0.5 and _elapsed_s > 2 and _clip_dur > 0:
@@ -4609,6 +4633,11 @@ async def export_clip(
                         )
                     else:
                         await _notify(f"Encoding clip {clip_id} [{_enc_label}]... ({_elapsed}s elapsed)")
+
+            # Encoding frames done — FFmpeg may still be finalizing
+            # (writing moov atom for faststart, flushing encoder).
+            _enc_elapsed = int(_time.monotonic() - _enc_start)
+            await _notify(f"Encoding clip {clip_id} [{_enc_label}]... 100% — finalizing ({_enc_elapsed}s)")
 
             await proc.wait()
             await _stderr_task
@@ -4681,6 +4710,7 @@ async def export_clip(
                     raise RuntimeError(f"Clip export failed: {stderr.decode()[:2000]}")
 
         # QA validation: verify the exported file is valid
+        await _notify(f"Validating export for clip {clip_id}...")
         # Use speed-adjusted duration so the check matches actual output
         if has_seg_speed:
             qa_expected_dur = sum((tl["end"] - tl["start"]) / tl["speed"] for tl in timeline)
