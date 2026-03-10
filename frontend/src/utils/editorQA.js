@@ -204,11 +204,12 @@ export function validateLayerRendering(tracks, items, currentTime) {
     it => currentTime >= it.start && currentTime < it.end
   );
 
-  // Group by track and check render order
+  // Group by track and check render order (based on track type, not track.order)
+  const compositingPriority = { audio: 0, video: 1, overlay: 2, subtitle: 3 };
   const renderOrder = visibleItems
     .map(it => {
       const track = trackMap.get(it.trackId);
-      return { item: it, track, order: track?.order ?? 0 };
+      return { item: it, track, order: compositingPriority[track?.type] ?? 1 };
     })
     .sort((a, b) => a.order - b.order);
 

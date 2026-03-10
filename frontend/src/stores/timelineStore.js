@@ -20,6 +20,22 @@ export const TRACK_ALLOWED_TYPES = {
   subtitle: ['subtitle'],
 };
 
+// Fixed compositing priority by track type.
+// Higher values render on top. This ensures overlays and subtitles
+// are ALWAYS rendered above the video track, regardless of the visual
+// arrangement in the timeline UI.
+export const TRACK_COMPOSITING_PRIORITY = {
+  audio: 0,
+  video: 1,
+  overlay: 2,
+  subtitle: 3,
+};
+
+// Get the compositing priority for a track, based on its type.
+export function getCompositingOrder(track) {
+  return TRACK_COMPOSITING_PRIORITY[track?.type] ?? 1;
+}
+
 // Check if an item type is compatible with a track type
 function isTrackCompatible(itemType, trackType) {
   const allowed = TRACK_ALLOWED_TYPES[trackType];
@@ -124,13 +140,11 @@ const useTimelineStore = create(
       // Track operations
       addTrack: (type, name) => set((state) => {
         const id = `${type.charAt(0)}${state.tracks.length + 1}-${Date.now().toString(36)}`;
-        // New tracks are added at the bottom of the timeline (lowest z-order = 0)
-        // Bump all existing track order values up by 1
-        state.tracks.forEach((t) => { t.order += 1; });
+        // New tracks get compositing order based on their TYPE
         state.tracks.push({
           id, type,
           name: name || `${type} ${state.tracks.length + 1}`,
-          order: 0,
+          order: TRACK_COMPOSITING_PRIORITY[type] ?? 1,
           muted: false, locked: false, visible: true,
         });
       }),
@@ -160,17 +174,20 @@ const useTimelineStore = create(
         if (track) track.visible = !track.visible;
       }),
 
-      // Reorder tracks: move track at fromIndex to toIndex, recalculate order values.
-      // Order values drive z-index in both preview (TimelineOverlay) and export (RenderEngine).
+      // Reorder tracks: move track at fromIndex to toIndex.
+      // The visual position in the timeline UI changes, but the compositing
+      // order is always determined by track TYPE (see TRACK_COMPOSITING_PRIORITY).
+      // This ensures overlays and subtitles always render on top of video.
       reorderTracks: (fromIndex, toIndex) => set((state) => {
         if (fromIndex === toIndex) return;
         if (fromIndex < 0 || fromIndex >= state.tracks.length) return;
         if (toIndex < 0 || toIndex >= state.tracks.length) return;
         const [moved] = state.tracks.splice(fromIndex, 1);
         state.tracks.splice(toIndex, 0, moved);
-        // Recalculate order values: top of timeline (index 0) = highest z-index
-        const len = state.tracks.length;
-        state.tracks.forEach((t, i) => { t.order = len - 1 - i; });
+        // Assign order based on track TYPE, not position — compositing is type-based
+        state.tracks.forEach((t) => {
+          t.order = TRACK_COMPOSITING_PRIORITY[t.type] ?? 1;
+        });
       }),
 
       // Item operations
@@ -565,11 +582,17 @@ const useTimelineStore = create(
         return { tracks, items, mediaLibrary, duration, project, segments, subtitleSettings };
       },
 
-      // Import state from persistence
+      // Import state from persistence — normalizes track order values
+      // to ensure overlays/subtitles always composite on top of video.
       importState: (state) => {
         if (state && state.tracks && state.items) {
+          // Normalize track order values based on type, not persisted order
+          const normalizedTracks = state.tracks.map(t => ({
+            ...t,
+            order: TRACK_COMPOSITING_PRIORITY[t.type] ?? 1,
+          }));
           set({
-            tracks: state.tracks,
+            tracks: normalizedTracks,
             items: state.items,
             mediaLibrary: state.mediaLibrary || [],
             duration: state.duration || 0,

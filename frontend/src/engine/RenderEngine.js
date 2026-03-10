@@ -291,7 +291,10 @@ export default class RenderEngine {
       if (currentTime >= clip.start && currentTime < clip.end) {
         const track = tracks.find(t => t.id === clip.trackId);
         if (track && (this._exportMode || track.visible !== false) && !track.muted) {
-          visibleClips.push({ clip, track, order: track.order ?? tracks.indexOf(track) });
+          // Use fixed compositing priority based on track type so overlays
+          // and subtitles always render on top of video, regardless of UI order.
+          const typePriority = { audio: 0, video: 1, overlay: 2, subtitle: 3 };
+          visibleClips.push({ clip, track, order: typePriority[track.type] ?? 1 });
         }
       }
     }
