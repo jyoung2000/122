@@ -284,6 +284,7 @@ export default function Analysis() {
   // ── Multi-track editor timeline items (for export) ──
   const timelineItems = useTimelineStore((s) => s.items);
   const timelineTracks = useTimelineStore((s) => s.tracks);
+  const timelineMediaLibrary = useTimelineStore((s) => s.mediaLibrary);
 
   // ── Server is source of truth for subtitle settings ──
   // When the job loads from the backend, apply server-stored settings (ignoring
@@ -830,22 +831,34 @@ export default function Analysis() {
         end_time: it.end || 0,
         rotation: it.transform?.rotation || 0,
         opacity: it.opacity ?? 1,
+        fade_in: it.fadeIn || 0,
+        fade_out: it.fadeOut || 0,
       }));
     }
 
     // Include image overlays from the timeline
     const clipImageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
     if (clipImageItems.length > 0) {
-      exportBody.image_overlays = clipImageItems.map(it => ({
-        src: it.src || it.mediaRef || '',
-        x: it.position?.x ?? 50,
-        y: it.position?.y ?? 50,
-        width: it.size?.w ?? 30,
-        height: it.size?.h ?? 30,
-        start_time: it.start || 0,
-        end_time: it.end || 0,
-        opacity: it.opacity ?? 1,
-      }));
+      exportBody.image_overlays = clipImageItems.map(it => {
+        // Resolve mediaRef ID to actual URL (same as preview rendering)
+        let src = it.src || '';
+        if (!src && it.mediaRef) {
+          const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
+          src = mediaEntry?.url || it.mediaRef;
+        }
+        return {
+          src,
+          x: it.position?.x ?? 50,
+          y: it.position?.y ?? 50,
+          width: it.size?.w ?? 30,
+          height: it.size?.h ?? 30,
+          start_time: it.start || 0,
+          end_time: it.end || 0,
+          opacity: it.opacity ?? 1,
+          fade_in: it.fadeIn || 0,
+          fade_out: it.fadeOut || 0,
+        };
+      });
     }
 
     encoding.startExport(jobId, clip.id, clip.title || `Clip ${clip.id}`, exportBody);
@@ -948,22 +961,33 @@ export default function Analysis() {
         end_time: it.end || 0,
         rotation: it.transform?.rotation || 0,
         opacity: it.opacity ?? 1,
+        fade_in: it.fadeIn || 0,
+        fade_out: it.fadeOut || 0,
       }));
     }
 
     // Include image overlays from the timeline
     const imageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
     if (imageItems.length > 0) {
-      body.image_overlays = imageItems.map(it => ({
-        src: it.src || it.mediaRef || '',
-        x: it.position?.x ?? 50,
-        y: it.position?.y ?? 50,
-        width: it.size?.w ?? 30,
-        height: it.size?.h ?? 30,
-        start_time: it.start || 0,
-        end_time: it.end || 0,
-        opacity: it.opacity ?? 1,
-      }));
+      body.image_overlays = imageItems.map(it => {
+        let src = it.src || '';
+        if (!src && it.mediaRef) {
+          const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
+          src = mediaEntry?.url || it.mediaRef;
+        }
+        return {
+          src,
+          x: it.position?.x ?? 50,
+          y: it.position?.y ?? 50,
+          width: it.size?.w ?? 30,
+          height: it.size?.h ?? 30,
+          start_time: it.start || 0,
+          end_time: it.end || 0,
+          opacity: it.opacity ?? 1,
+          fade_in: it.fadeIn || 0,
+          fade_out: it.fadeOut || 0,
+        };
+      });
     }
 
     encoding.startExport(jobId, 0, job.filename || 'Full Video', body, {

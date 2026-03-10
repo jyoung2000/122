@@ -174,6 +174,8 @@ class TextOverlay(BaseModel):
     end_time: float = 0.0
     rotation: float = 0.0
     opacity: float = 1.0
+    fade_in: float = 0.0       # seconds
+    fade_out: float = 0.0      # seconds
 
 
 class ImageOverlay(BaseModel):
@@ -186,6 +188,8 @@ class ImageOverlay(BaseModel):
     start_time: float = 0.0
     end_time: float = 0.0
     opacity: float = 1.0
+    fade_in: float = 0.0       # seconds
+    fade_out: float = 0.0      # seconds
 
 
 class ExportRequest(BaseModel):

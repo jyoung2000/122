@@ -3121,6 +3121,25 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
 
         outline_width = overlay.get("outline_width", 0)
         outline_color = overlay.get("outline_color", "#000000")
+        fade_in = overlay.get("fade_in", 0)
+        fade_out = overlay.get("fade_out", 0)
+
+        # Build alpha expression with fade in/out support
+        # FFmpeg drawtext alpha accepts an expression evaluated per frame
+        safe_start = max(0, start_t)
+        has_fade = (fade_in > 0 or fade_out > 0) and end_t > start_t
+        if has_fade:
+            alpha_parts = [f"{opacity:.2f}"]
+            if fade_in > 0:
+                # Ramp from 0 to 1 over fade_in seconds after start
+                alpha_parts.append(f"if(lt(t-{safe_start:.3f},{fade_in:.3f}),(t-{safe_start:.3f})/{fade_in:.3f},1)")
+            if fade_out > 0:
+                # Ramp from 1 to 0 over fade_out seconds before end
+                fo_start = end_t - clip_start - fade_out
+                alpha_parts.append(f"if(gt(t,{fo_start:.3f}),({end_t - clip_start:.3f}-t)/{fade_out:.3f},1)")
+            alpha_expr = "*".join(alpha_parts)
+        else:
+            alpha_expr = f"{opacity:.2f}"
 
         # Build drawtext with enable expression for timing
         dt = (
@@ -3128,8 +3147,9 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
             f":x=w*{x_pct:.4f}-tw/2"
             f":y=h*{y_pct:.4f}-th/2"
             f":fontsize={font_size}"
-            f":fontcolor={font_color}@{opacity:.2f}"
+            f":fontcolor={font_color}"
             f":fontfile={font_path}"
+            f":alpha='{alpha_expr}'"
         )
         if outline_width > 0:
             dt += f":borderw={outline_width}:bordercolor={outline_color}"
@@ -3137,7 +3157,7 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
         if bg_color:
             dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw=5"
         if end_t > start_t:
-            dt += f":enable='between(t,{max(0, start_t):.3f},{end_t:.3f})'"
+            dt += f":enable='between(t,{safe_start:.3f},{end_t - clip_start:.3f})'"
         parts.append(dt)
 
     return ",".join(parts)
@@ -3237,6 +3257,9 @@ def _build_image_overlay_data(
         in_label = "[vbase]" if i == 0 else f"[vtmp{i - 1}]"
         out_label = f"[vtmp{i}]" if i < len(valid_overlays) - 1 else "[vimg]"
 
+        fade_in = overlay.get("fade_in", 0)
+        fade_out = overlay.get("fade_out", 0)
+
         # Scale the image input to the desired size relative to video
         # Use overlay_w/overlay_h expressions: W=main input width, H=main input height
         img_scale = (
@@ -3246,6 +3269,13 @@ def _build_image_overlay_data(
         )
         if opacity < 1.0:
             img_scale += f",colorchannelmixer=aa={opacity:.3f}"
+        # Apply fade in/out on the image alpha channel
+        safe_start = max(0, start_t)
+        if fade_in > 0:
+            img_scale += f",fade=t=in:st={safe_start:.3f}:d={fade_in:.3f}:alpha=1"
+        if fade_out > 0 and end_t > start_t:
+            fo_start = end_t - clip_start - fade_out
+            img_scale += f",fade=t=out:st={max(0, fo_start):.3f}:d={fade_out:.3f}:alpha=1"
         img_scale += f"[img{i}]"
 
         # Position: x_pct/y_pct are center coordinates, convert to top-left for overlay

@@ -48,6 +48,7 @@ export default function ExportDialog({
 
   // Run subtitle QA validation
   const timelineItems = useTimelineStore((s) => s.items);
+  const timelineMediaLibrary = useTimelineStore((s) => s.mediaLibrary);
 
   // Compute optimal FPS (may be boosted for active word highlighting)
   const exportFPS = useMemo(() => {
@@ -132,22 +133,33 @@ export default function ExportDialog({
           end_time: it.end || 0,
           rotation: it.transform?.rotation || 0,
           opacity: it.opacity ?? 1,
+          fade_in: it.fadeIn || 0,
+          fade_out: it.fadeOut || 0,
         }));
       }
 
       // Include image overlays from the timeline
       const imageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
       if (imageItems.length > 0) {
-        exportPayload.image_overlays = imageItems.map(it => ({
-          src: it.src || it.mediaRef || '',
-          x: it.position?.x ?? 50,
-          y: it.position?.y ?? 50,
-          width: it.size?.w ?? 30,
-          height: it.size?.h ?? 30,
-          start_time: it.start || 0,
-          end_time: it.end || 0,
-          opacity: it.opacity ?? 1,
-        }));
+        exportPayload.image_overlays = imageItems.map(it => {
+          let src = it.src || '';
+          if (!src && it.mediaRef) {
+            const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
+            src = mediaEntry?.url || it.mediaRef;
+          }
+          return {
+            src,
+            x: it.position?.x ?? 50,
+            y: it.position?.y ?? 50,
+            width: it.size?.w ?? 30,
+            height: it.size?.h ?? 30,
+            start_time: it.start || 0,
+            end_time: it.end || 0,
+            opacity: it.opacity ?? 1,
+            fade_in: it.fadeIn || 0,
+            fade_out: it.fadeOut || 0,
+          };
+        });
       }
 
       if (onServerExport) {
