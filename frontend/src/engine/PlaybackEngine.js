@@ -326,7 +326,8 @@ export default class PlaybackEngine {
     this.pause();
     this._clearReversePlayback();
 
-    for (const [id] of this._mediaPool) {
+    const ids = [...this._mediaPool.keys()];
+    for (const id of ids) {
       this.unregisterMedia(id);
     }
     this._mediaPool.clear();

@@ -217,7 +217,7 @@ const useTimelineStore = create(
           volume: item.volume ?? 1.0,
           speed: item.speed ?? 1.0,
           opacity: item.opacity ?? 1.0,
-          position: item.position || (itemType === 'video' ? { x: 0, y: 0 } : { x: 50, y: 50 }),
+          position: item.position || { x: 50, y: 50 },
           size: item.size || (itemType === 'image' || itemType === 'overlay' ? { w: 30, h: 30 } : { w: 100, h: 100 }),
           transform: item.transform || { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 },
           effects: item.effects || { brightness: 0, contrast: 0, saturation: 0, blur: 0, hueRotate: 0, sepia: 0 },
@@ -234,6 +234,7 @@ const useTimelineStore = create(
           shapeType: item.shapeType || null,
           shapeStyle: item.shapeStyle || null,
           subjectX: item.subjectX ?? 50,
+          clipSettings: item.clipSettings || null,
         };
         set((state) => {
           state.items.push(newItem);

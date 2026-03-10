@@ -318,7 +318,7 @@ export default function VideoEditor({
               opacity: 1.0,
               position: { x: 50, y: 90 },
               size: { w: 100, h: 100 },
-              effects: [],
+              effects: {},
               fadeIn: 0,
               fadeOut: 0,
               subtitleText: seg.text,
@@ -528,6 +528,13 @@ export default function VideoEditor({
     if (!showMultiTrack) return false;
     const videoTrack = timelineTracks.find((t) => t.type === 'video');
     return videoTrack?.visible === false;
+  }, [showMultiTrack, timelineTracks]);
+
+  // Check if audio tracks are muted (for preview audio)
+  const audioTrackMuted = useMemo(() => {
+    if (!showMultiTrack) return false;
+    const audioTracks = timelineTracks.filter((t) => t.type === 'audio');
+    return audioTracks.length > 0 && audioTracks.every((t) => t.muted === true);
   }, [showMultiTrack, timelineTracks]);
 
   // Sync video timeline item properties → actual video element
@@ -1370,7 +1377,7 @@ export default function VideoEditor({
     const t = video.currentTime;
     const inSegment = segments.length > 0 && segments.some(s => t >= s.start && t < s.end);
     if (!inSegment) {
-      const effectiveVol = isMuted ? 0 : volume;
+      const effectiveVol = (isMuted || audioTrackMuted) ? 0 : volume;
       if (gainNodeRef.current) {
         // Web Audio path: set GainNode, video.volume = 1
         video.volume = 1;
@@ -1388,7 +1395,7 @@ export default function VideoEditor({
     if (!selectedSegmentId && !activeSegmentId) {
       onVolumeChange?.(isMuted ? 0 : volume / 100);
     }
-  }, [volume, isMuted, onVolumeChange, segments, selectedSegmentId, activeSegmentId]);
+  }, [volume, isMuted, audioTrackMuted, onVolumeChange, segments, selectedSegmentId, activeSegmentId]);
 
   // ── Apply speed changes ────────────────────────────
   useEffect(() => {
@@ -1792,8 +1799,9 @@ export default function VideoEditor({
   // ── Keyboard shortcuts (J-K-L shuttle control) ─────
   useEffect(() => {
     const onKeyDown = (e) => {
-      // Don't capture keys when typing in inputs
+      // Don't capture keys when typing in inputs or contenteditable elements
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+      if (e.target.contentEditable === 'true' || e.target.closest('[contenteditable="true"]')) return;
       // Prevent native video element keyboard handling
       if (e.target.tagName === 'VIDEO') e.target.blur();
 
@@ -1987,9 +1995,16 @@ export default function VideoEditor({
 
   // ── J-K-L shuttle speed effect ──────────────────────
   useEffect(() => {
-    if (shuttleSpeed === 0) return;
     const video = videoRef.current;
     if (!video) return;
+
+    if (shuttleSpeed === 0) {
+      // Restore original playback rate and pause when shuttle stops
+      video.playbackRate = speed;
+      video.pause();
+      setPlaying(false);
+      return;
+    }
 
     if (shuttleSpeed > 0) {
       video.playbackRate = shuttleSpeed;
@@ -2010,7 +2025,7 @@ export default function VideoEditor({
       }, 1000 / 30);
       return () => clearInterval(interval);
     }
-  }, [shuttleSpeed, trimmedStart]);
+  }, [shuttleSpeed, trimmedStart, speed]);
 
   // ── Volume icon selector ───────────────────────────
   const VolumeIcon = useMemo(() => {

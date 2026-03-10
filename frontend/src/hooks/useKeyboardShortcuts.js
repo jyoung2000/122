@@ -15,6 +15,7 @@ export default function useKeyboardShortcuts({
 } = {}) {
   const setActiveTool = useTimelineStore((s) => s.setActiveTool);
   const selectedItemId = useTimelineStore((s) => s.selectedItemId);
+  const selectedItemIds = useTimelineStore((s) => s.selectedItemIds);
   const removeItem = useTimelineStore((s) => s.removeItem);
   const splitItem = useTimelineStore((s) => s.splitItem);
   const playhead = useTimelineStore((s) => s.playhead);
@@ -140,12 +141,17 @@ export default function useKeyboardShortcuts({
         useTimelineStore.getState().toggleSnap();
         break;
 
-      // Delete selected
+      // Delete selected (supports multi-select)
       case 'Delete':
       case 'Backspace':
-        if (selectedItemId && !e.target.closest('[contenteditable]')) {
-          e.preventDefault();
-          removeItem(selectedItemId);
+        if (!e.target.closest('[contenteditable]')) {
+          const idsToDelete = selectedItemIds.length > 0 ? selectedItemIds : (selectedItemId ? [selectedItemId] : []);
+          if (idsToDelete.length > 0) {
+            e.preventDefault();
+            for (const id of idsToDelete) {
+              removeItem(id);
+            }
+          }
         }
         break;
 
@@ -171,7 +177,7 @@ export default function useKeyboardShortcuts({
         break;
     }
   }, [enabled, onTogglePlay, onSeek, onSkipTime, onToggleMute, onShuttleSpeed,
-      setActiveTool, selectedItemId, removeItem, splitItem, playhead, items]);
+      setActiveTool, selectedItemId, selectedItemIds, removeItem, splitItem, playhead, items]);
 
   const handleKeyUp = useCallback((e) => {
     if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {

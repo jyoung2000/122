@@ -86,6 +86,18 @@ function TextOverlayItem({ item, elapsed, duration }) {
     const t = elapsed / 0.3;
     const scale = 0.5 + 0.5 * (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
     animTransform = `scale(${scale})`;
+  } else if (anim === 'bounce' && elapsed < 0.6) {
+    const t = elapsed / 0.6;
+    // Bounce easing: overshoot then settle
+    const bounce = t < 0.4
+      ? (t / 0.4) * 1.2
+      : t < 0.7
+        ? 1.2 - (t - 0.4) / 0.3 * 0.3
+        : t < 0.85
+          ? 0.9 + (t - 0.7) / 0.15 * 0.1
+          : 1.0;
+    animAlpha = Math.min(1, t * 2);
+    animTransform = `scale(${bounce}) translateY(${(1 - Math.min(1, t * 2)) * -20}px)`;
   }
 
   // Typewriter
