@@ -372,15 +372,16 @@ async def serve_file(job_id: str, path: str, request: Request):
         return Response(status_code=404, content="File not found")
 
     file_size = os.path.getsize(file_path)
-    content_type = "video/mp4"
-    if file_path.endswith(".jpg") or file_path.endswith(".jpeg"):
-        content_type = "image/jpeg"
-    elif file_path.endswith(".png"):
-        content_type = "image/png"
-    elif file_path.endswith(".webm"):
-        content_type = "video/webm"
-    elif file_path.endswith(".mov"):
-        content_type = "video/quicktime"
+    ext = os.path.splitext(file_path)[1].lower()
+    _CONTENT_TYPES = {
+        ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime",
+        ".mkv": "video/x-matroska",
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+        ".gif": "image/gif", ".webp": "image/webp",
+        ".mp3": "audio/mpeg", ".wav": "audio/wav", ".aac": "audio/aac",
+        ".ogg": "audio/ogg", ".flac": "audio/flac",
+    }
+    content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")
 
     # Handle Range requests for video seeking
     range_header = request.headers.get("range")

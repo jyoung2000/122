@@ -1,5 +1,6 @@
 """Media upload endpoint for the multi-track video editor."""
 
+import json
 import os
 import uuid
 import logging
@@ -14,6 +15,8 @@ logger = logging.getLogger("clipai.media")
 router = APIRouter()
 
 UPLOAD_DIR = "/data/uploads"
+# Special job_id used for the global media library (not tied to any job)
+GLOBAL_LIBRARY_ID = "_library"
 ALLOWED_EXTENSIONS = {
     "video": {".mp4", ".mov", ".webm", ".mkv"},
     "audio": {".mp3", ".wav", ".aac", ".ogg", ".flac"},
@@ -29,6 +32,28 @@ MAX_SIZES = {
 _STREAM_BUF = 1024 * 1024  # 1 MB
 
 
+def _meta_path(media_dir: str) -> str:
+    """Path to the JSON metadata file that stores original filenames."""
+    return os.path.join(media_dir, "_meta.json")
+
+
+def _load_meta(media_dir: str) -> dict:
+    path = _meta_path(media_dir)
+    if os.path.isfile(path):
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _save_meta(media_dir: str, meta: dict):
+    path = _meta_path(media_dir)
+    with open(path, "w") as f:
+        json.dump(meta, f)
+
+
 def detect_media_type(filename: str) -> str | None:
     ext = Path(filename).suffix.lower()
     for media_type, extensions in ALLOWED_EXTENSIONS.items():
@@ -40,10 +65,11 @@ def detect_media_type(filename: str) -> str | None:
 @router.post("/api/media/upload")
 async def upload_media(
     file: UploadFile = File(...),
-    job_id: str = Query(...),
+    job_id: str = Query(default=GLOBAL_LIBRARY_ID),
 ):
     """Accept media upload for the multi-track editor, store to data/uploads/{job_id}/media/.
 
+    When job_id is omitted it defaults to the global media library (_library).
     Streams file to disk in chunks to avoid loading large files into memory.
     """
     media_type = detect_media_type(file.filename or "")
@@ -91,6 +117,12 @@ async def upload_media(
         logger.error("Disk error writing media %s: %s", safe_filename, exc)
         raise HTTPException(status_code=507, detail="Server storage error")
 
+    # Save original filename in metadata
+    original_name = file.filename or safe_filename
+    meta = _load_meta(media_dir)
+    meta[media_id] = {"original_filename": original_name}
+    _save_meta(media_dir, meta)
+
     logger.info("Uploaded media %s (%s, %d bytes) for job %s", safe_filename, media_type, total_written, job_id)
 
     # Build URL for frontend
@@ -98,7 +130,7 @@ async def upload_media(
 
     return JSONResponse({
         "id": media_id,
-        "filename": file.filename,
+        "filename": original_name,
         "type": media_type,
         "size": total_written,
         "url": url,
@@ -106,14 +138,18 @@ async def upload_media(
 
 
 @router.get("/api/media/list")
-async def list_media(job_id: str = Query(...)):
-    """List all uploaded media files for a job."""
+async def list_media(job_id: str = Query(default=GLOBAL_LIBRARY_ID)):
+    """List all uploaded media files for a job (defaults to global library)."""
     media_dir = os.path.join(UPLOAD_DIR, job_id, "media")
     if not os.path.isdir(media_dir):
         return JSONResponse({"items": []})
 
+    meta = _load_meta(media_dir)
+
     items = []
     for fname in sorted(os.listdir(media_dir)):
+        if fname.startswith("_"):
+            continue  # skip metadata files
         fpath = os.path.join(media_dir, fname)
         if not os.path.isfile(fpath):
             continue
@@ -121,9 +157,10 @@ async def list_media(job_id: str = Query(...)):
         if not media_type:
             continue
         media_id = Path(fname).stem
+        original_name = meta.get(media_id, {}).get("original_filename", fname)
         items.append({
             "id": media_id,
-            "filename": fname,
+            "filename": original_name,
             "type": media_type,
             "size": os.path.getsize(fpath),
             "url": f"/api/files/{job_id}/media/{fname}",
@@ -132,16 +169,22 @@ async def list_media(job_id: str = Query(...)):
 
 
 @router.delete("/api/media/{media_id}")
-async def delete_media(media_id: str, job_id: str = Query(...)):
+async def delete_media(media_id: str, job_id: str = Query(default=GLOBAL_LIBRARY_ID)):
     """Delete an uploaded media file."""
     media_dir = os.path.join(UPLOAD_DIR, job_id, "media")
     if not os.path.isdir(media_dir):
         raise HTTPException(status_code=404, detail="Media not found")
 
     for fname in os.listdir(media_dir):
+        if fname.startswith("_"):
+            continue
         if Path(fname).stem == media_id:
             fpath = os.path.join(media_dir, fname)
             os.remove(fpath)
+            # Clean up metadata
+            meta = _load_meta(media_dir)
+            meta.pop(media_id, None)
+            _save_meta(media_dir, meta)
             logger.info("Deleted media %s for job %s", fname, job_id)
             return JSONResponse({"deleted": True, "id": media_id})
 

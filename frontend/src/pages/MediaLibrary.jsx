@@ -92,6 +92,47 @@ export default function MediaLibrary() {
   const [selected, setSelected] = useState(new Set());
   const [selectMode, setSelectMode] = useState(false);
   const [fonts, setFonts] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // Load media from backend global library on mount
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch('/api/media/list');
+        if (!res.ok) throw new Error('Failed to load');
+        const data = await res.json();
+        if (cancelled) return;
+        const existing = useTimelineStore.getState().mediaLibrary;
+        const existingIds = new Set(existing.map(m => m.id));
+        // Add any backend items not already in the store
+        for (const item of data.items || []) {
+          if (!existingIds.has(item.id)) {
+            addMedia({
+              id: item.id,
+              type: item.type,
+              filename: item.filename,
+              url: item.url,
+              thumbnailUrl: item.type === 'image' ? item.url : '',
+              duration: 0,
+            });
+          }
+        }
+        // Remove any store items that are no longer on the backend
+        // (blob URLs that were never persisted are cleared)
+        const backendIds = new Set((data.items || []).map(i => i.id));
+        const stale = existing.filter(m => !backendIds.has(m.id) && !m.url?.startsWith('blob:'));
+        for (const m of stale) {
+          removeMedia(m.id);
+        }
+      } catch (err) {
+        console.warn('Failed to load media library from backend:', err);
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Fetch uploaded fonts
   useEffect(() => {
@@ -187,14 +228,31 @@ export default function MediaLibrary() {
     return f;
   })();
 
-  const handleFiles = useCallback((files) => {
-    Array.from(files).forEach((file) => {
+  const handleFiles = useCallback(async (fileList) => {
+    const files = Array.from(fileList);
+    for (const file of files) {
       const ext = file.name.split('.').pop().toLowerCase();
       let type = 'video';
       if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) type = 'image';
       else if (['mp3', 'wav', 'ogg', 'aac', 'flac', 'm4a'].includes(ext)) type = 'audio';
 
-      const url = URL.createObjectURL(file);
+      // Upload to backend first so it persists
+      let backendUrl = '';
+      let mediaId = '';
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        const res = await fetch('/api/media/upload', { method: 'POST', body: formData });
+        if (res.ok) {
+          const data = await res.json();
+          backendUrl = data.url;
+          mediaId = data.id;
+        }
+      } catch (err) {
+        console.warn('Backend upload failed, using local blob:', err);
+      }
+
+      const url = backendUrl || URL.createObjectURL(file);
 
       // Generate thumbnail for video files
       if (type === 'video') {
@@ -202,12 +260,11 @@ export default function MediaLibrary() {
         video.muted = true;
         video.playsInline = true;
         video.preload = 'auto';
-        // Note: don't set crossOrigin for same-origin blob/server URLs
         let added = false;
         const addOnce = (thumbUrl, dur) => {
           if (added) return;
           added = true;
-          addMedia({ type, filename: file.name, url, thumbnailUrl: thumbUrl, duration: dur });
+          addMedia({ id: mediaId || undefined, type, filename: file.name, url, thumbnailUrl: thumbUrl, duration: dur });
         };
         const captureFrame = () => {
           try {
@@ -249,6 +306,7 @@ export default function MediaLibrary() {
         }, 10000);
       } else {
         addMedia({
+          id: mediaId || undefined,
           type,
           filename: file.name,
           url,
@@ -256,7 +314,7 @@ export default function MediaLibrary() {
           duration: 0,
         });
       }
-    });
+    }
   }, [addMedia]);
 
   const handleFontUpload = useCallback(async (files) => {
@@ -301,10 +359,16 @@ export default function MediaLibrary() {
     setSelected(new Set());
   }, []);
 
-  const deleteSelected = useCallback(() => {
+  const deleteSelected = useCallback(async () => {
     if (selected.size === 0) return;
     const count = selected.size;
     if (!window.confirm(`Delete ${count} item${count > 1 ? 's' : ''} from the media library? Any timeline items referencing them will also be removed.`)) return;
+    // Delete from backend
+    for (const id of selected) {
+      try {
+        await fetch(`/api/media/${id}`, { method: 'DELETE' });
+      } catch { /* ignore */ }
+    }
     removeMediaBatch(Array.from(selected));
     setSelected(new Set());
     setSelectMode(false);
@@ -619,9 +683,10 @@ export default function MediaLibrary() {
                     </span>
                     {!selectMode && (
                       <button
-                        onClick={(e) => {
+                        onClick={async (e) => {
                           e.stopPropagation();
                           if (window.confirm(`Delete "${media.filename}" from the media library?`)) {
+                            try { await fetch(`/api/media/${media.id}`, { method: 'DELETE' }); } catch { /* ignore */ }
                             removeMedia(media.id);
                           }
                         }}
