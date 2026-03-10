@@ -87,13 +87,6 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   const [showAddTrack, setShowAddTrack] = useState(false);
   const [spaceHeld, setSpaceHeld] = useState(false);
 
-  // Ref for playhead pixel position — avoids stale closures in event handlers
-  // without recreating callbacks on every playhead update (which happens every frame).
-  const playheadRef = useRef(playhead);
-  playheadRef.current = playhead;
-  const ppsRef = useRef(pps);
-  ppsRef.current = pps;
-
   // Spacebar hold for pan mode
   useEffect(() => {
     const onKeyDown = (e) => { if (e.code === 'Space' && !e.repeat) setSpaceHeld(true); };
@@ -105,6 +98,13 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
 
   const basePPS = compact ? 40 : 60;
   const pps = basePPS * zoom;
+
+  // Ref for playhead pixel position — avoids stale closures in event handlers
+  // without recreating callbacks on every playhead update (which happens every frame).
+  const playheadRef = useRef(playhead);
+  playheadRef.current = playhead;
+  const ppsRef = useRef(pps);
+  ppsRef.current = pps;
 
   // ── Canvas rendering ──────────────────────────────────────────────────────
   const draw = useCallback(() => {
