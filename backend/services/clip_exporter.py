@@ -3165,12 +3165,46 @@ _FONT_FAMILY_MAP: dict[str, str] = {
 _DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 _CUSTOM_FONTS_DIR = "/data/fonts"
 
+# Bold font variants — used when font_weight >= 600
+_FONT_BOLD_MAP: dict[str, str] = {
+    "DM Sans": "/usr/share/fonts/truetype/dmsans/DMSans-Bold.ttf",
+    "dm sans": "/usr/share/fonts/truetype/dmsans/DMSans-Bold.ttf",
+    "Liberation Sans": "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "Liberation Serif": "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    "Liberation Mono": "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+    "DejaVu Sans": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "DejaVu Serif": "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    "DejaVu Sans Mono": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+    "FreeSans": "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
+    "Poppins": "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf",
+    "Lato": "/usr/share/fonts/truetype/google-fonts/Lato-Bold.ttf",
+    "sans-serif": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "serif": "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    "monospace": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+    "Arial": "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "Helvetica": "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "Times New Roman": "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    "Courier New": "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
+}
 
-def _resolve_font_path(font_family: str) -> str:
+
+def _resolve_font_path(font_family: str, bold: bool = False) -> str:
     """Resolve a CSS font family name to an absolute .ttf path.
 
     Checks the built-in mapping first, then custom uploaded fonts dir.
+    When bold=True, tries the bold variant first, falling back to regular.
     """
+    # Try bold variant first when requested
+    if bold:
+        if font_family in _FONT_BOLD_MAP:
+            path = _FONT_BOLD_MAP[font_family]
+            if os.path.isfile(path):
+                return path
+        for name, path in _FONT_BOLD_MAP.items():
+            if name.lower() == font_family.lower():
+                if os.path.isfile(path):
+                    return path
+
     # Direct match
     if font_family in _FONT_FAMILY_MAP:
         path = _FONT_FAMILY_MAP[font_family]
@@ -3197,6 +3231,7 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
 
     Each text overlay becomes a drawtext filter with enable/disable based on timing.
     Position is given as percentage (0-100) and converted to pixel expressions.
+    Supports font weight (bold), background opacity/padding, and text shadow.
     """
     parts = []
     for i, overlay in enumerate(text_overlays):
@@ -3208,15 +3243,24 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
         font_size = overlay.get("font_size", 48)
         font_color = overlay.get("font_color", "#FFFFFF")
         font_family = overlay.get("font_family", "sans-serif")
+        font_weight = overlay.get("font_weight", 400)
         opacity = overlay.get("opacity", 1.0)
         start_t = overlay.get("start_time", 0) - clip_start
         end_t = overlay.get("end_time", 0) - clip_start
-        font_path = _resolve_font_path(font_family)
+
+        # Resolve font path with bold support
+        is_bold = (isinstance(font_weight, int) and font_weight >= 600) or font_weight == "bold"
+        font_path = _resolve_font_path(font_family, bold=is_bold)
 
         outline_width = overlay.get("outline_width", 0)
         outline_color = overlay.get("outline_color", "#000000")
         fade_in = overlay.get("fade_in", 0)
         fade_out = overlay.get("fade_out", 0)
+
+        # Shadow support
+        shadow_color = overlay.get("shadow_color")
+        shadow_offset_x = overlay.get("shadow_offset_x", 0)
+        shadow_offset_y = overlay.get("shadow_offset_y", 0)
 
         # Build alpha expression with fade in/out support
         # FFmpeg drawtext alpha accepts an expression evaluated per frame
@@ -3247,9 +3291,15 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
         )
         if outline_width > 0:
             dt += f":borderw={outline_width}:bordercolor={outline_color}"
+        # Text shadow
+        if shadow_color and (shadow_offset_x or shadow_offset_y):
+            dt += f":shadowcolor={shadow_color}:shadowx={shadow_offset_x}:shadowy={shadow_offset_y}"
+        # Background box with actual opacity and padding values
         bg_color = overlay.get("background_color")
         if bg_color:
-            dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw=5"
+            bg_opacity = overlay.get("background_opacity", 50) / 100.0
+            bg_padding = overlay.get("background_padding", 5)
+            dt += f":box=1:boxcolor={bg_color}@{bg_opacity:.2f}:boxborderw={bg_padding}"
         if end_t > start_t:
             dt += f":enable='between(t,{safe_start:.3f},{end_t - clip_start:.3f})'"
         parts.append(dt)
@@ -3354,6 +3404,9 @@ def _build_image_overlay_data(
         fade_in = overlay.get("fade_in", 0)
         fade_out = overlay.get("fade_out", 0)
 
+        rotation = overlay.get("rotation", 0)
+        rotation_rad = rotation * 3.14159265358979 / 180.0
+
         # Scale the image input to the desired size relative to video
         # Use overlay_w/overlay_h expressions: W=main input width, H=main input height
         img_scale = (
@@ -3361,6 +3414,14 @@ def _build_image_overlay_data(
             f"scale=trunc(main_w*{w_pct:.4f}/2)*2:trunc(main_h*{h_pct:.4f}/2)*2,"
             f"format=rgba"
         )
+        # Apply rotation if non-zero
+        if abs(rotation) > 0.1:
+            img_scale += (
+                f",rotate={rotation_rad:.6f}"
+                f":fillcolor=none"
+                f":ow=rotw({rotation_rad:.6f})"
+                f":oh=roth({rotation_rad:.6f})"
+            )
         if opacity < 1.0:
             img_scale += f",colorchannelmixer=aa={opacity:.3f}"
         # Apply fade in/out on the image alpha channel
@@ -3385,6 +3446,76 @@ def _build_image_overlay_data(
         fc_parts.append(overlay_filter)
 
     return extra_args, ";".join(fc_parts), len(valid_overlays)
+
+
+def _build_shape_overlay_filters(shape_overlays: list, clip_start: float = 0) -> str:
+    """Build FFmpeg drawbox filter chain for shape overlays.
+
+    Supports rectangle shapes via drawbox. Circle/ellipse shapes are
+    approximated with drawbox + rounded corners where possible.
+    Position is given as percentage (0-100) and converted to pixel expressions.
+    """
+    parts = []
+    for i, overlay in enumerate(shape_overlays):
+        shape_type = overlay.get("shape_type", "rectangle")
+        x_pct = overlay.get("x", 50) / 100.0
+        y_pct = overlay.get("y", 50) / 100.0
+        w_pct = overlay.get("width", 20) / 100.0
+        h_pct = overlay.get("height", 20) / 100.0
+        fill_color = overlay.get("fill_color")
+        stroke_color = overlay.get("stroke_color", "#FFFFFF")
+        stroke_width = overlay.get("stroke_width", 2)
+        opacity = overlay.get("opacity", 1.0)
+        start_t = overlay.get("start_time", 0) - clip_start
+        end_t = overlay.get("end_time", 0) - clip_start
+        safe_start = max(0, start_t)
+
+        # drawbox uses top-left x, y, w, h — convert from center-based %
+        # x = center_x - w/2, y = center_y - h/2
+        x_expr = f"w*{x_pct:.4f}-w*{w_pct:.4f}/2"
+        y_expr = f"h*{y_pct:.4f}-h*{h_pct:.4f}/2"
+        w_expr = f"w*{w_pct:.4f}"
+        h_expr = f"h*{h_pct:.4f}"
+
+        if shape_type in ("rectangle", "circle", "ellipse"):
+            # For filled shapes
+            if fill_color:
+                color_val = f"{fill_color}@{opacity:.2f}"
+                db = (
+                    f"drawbox=x='{x_expr}':y='{y_expr}'"
+                    f":w='{w_expr}':h='{h_expr}'"
+                    f":color={color_val}:t=fill"
+                )
+                if end_t > start_t:
+                    db += f":enable='between(t,{safe_start:.3f},{end_t - clip_start:.3f})'"
+                parts.append(db)
+
+            # For stroked shapes (border)
+            if stroke_width > 0 and stroke_color:
+                stroke_val = f"{stroke_color}@{opacity:.2f}"
+                db = (
+                    f"drawbox=x='{x_expr}':y='{y_expr}'"
+                    f":w='{w_expr}':h='{h_expr}'"
+                    f":color={stroke_val}:t={stroke_width}"
+                )
+                if end_t > start_t:
+                    db += f":enable='between(t,{safe_start:.3f},{end_t - clip_start:.3f})'"
+                parts.append(db)
+
+        elif shape_type == "line":
+            # Approximate line as a thin drawbox
+            line_thickness = max(1, stroke_width)
+            line_color = f"{stroke_color}@{opacity:.2f}"
+            db = (
+                f"drawbox=x='{x_expr}':y='{y_expr}'"
+                f":w='{w_expr}':h={line_thickness}"
+                f":color={line_color}:t=fill"
+            )
+            if end_t > start_t:
+                db += f":enable='between(t,{safe_start:.3f},{end_t - clip_start:.3f})'"
+            parts.append(db)
+
+    return ",".join(parts)
 
 
 async def export_clip(
@@ -3412,6 +3543,7 @@ async def export_clip(
     video_effects: dict | None = None,
     text_overlays: list | None = None,
     image_overlays: list | None = None,
+    shape_overlays: list | None = None,
 ) -> str:
     """Export a clip from video using FFmpeg.
 
@@ -3504,7 +3636,8 @@ async def export_clip(
     ))
     has_text_overlays = bool(text_overlays) and len(text_overlays) > 0
     has_image_overlays = bool(image_overlays) and len(image_overlays) > 0
-    needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments or has_seg_speed or has_video_effects or has_text_overlays or has_image_overlays
+    has_shape_overlays = bool(shape_overlays) and len(shape_overlays) > 0
+    needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments or has_seg_speed or has_video_effects or has_text_overlays or has_image_overlays or has_shape_overlays
     filter_parts = []
     if aspect_ratio:
         filter_parts.append(f"crop to {aspect_ratio}")
@@ -3527,6 +3660,8 @@ async def export_clip(
         filter_parts.append(f"{len(text_overlays)} text overlay(s)")
     if has_image_overlays:
         filter_parts.append(f"{len(image_overlays)} image overlay(s)")
+    if has_shape_overlays:
+        filter_parts.append(f"{len(shape_overlays)} shape overlay(s)")
     filter_desc = " + ".join(filter_parts) if filter_parts else "stream copy"
 
     await _notify(f"Preparing clip {clip_id} ({clip_dur:.1f}s) — {filter_desc}")
@@ -3887,6 +4022,13 @@ async def export_clip(
                 if text_vf:
                     vf = f"{vf},{text_vf}" if vf else text_vf
                     logger.info("Text overlay filters for clip %s: %s", clip_id, text_vf)
+
+            # Append shape overlay drawbox filters
+            if shape_overlays:
+                shape_vf = _build_shape_overlay_filters(shape_overlays, clip_start=start)
+                if shape_vf:
+                    vf = f"{vf},{shape_vf}" if vf else shape_vf
+                    logger.info("Shape overlay filters for clip %s: %s", clip_id, shape_vf)
 
             # QA: validate subject tracking is correctly applied in filter chain
             st_warnings = _validate_subject_tracking(

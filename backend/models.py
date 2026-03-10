@@ -176,8 +176,14 @@ class TextOverlay(BaseModel):
     font_family: str = "sans-serif"
     font_weight: int = 400
     background_color: Optional[str] = None
+    background_opacity: int = 50       # 0-100
+    background_padding: int = 5        # pixels
     outline_width: int = 0
     outline_color: str = "#000000"
+    shadow_color: Optional[str] = None
+    shadow_blur: int = 0
+    shadow_offset_x: int = 0
+    shadow_offset_y: int = 0
     start_time: float = 0.0    # relative to clip start
     end_time: float = 0.0
     rotation: float = 0.0
@@ -195,6 +201,26 @@ class ImageOverlay(BaseModel):
     height: float = 30         # size % (0-100)
     start_time: float = 0.0
     end_time: float = 0.0
+    opacity: float = 1.0
+    fade_in: float = 0.0       # seconds
+    fade_out: float = 0.0      # seconds
+    rotation: float = 0.0      # degrees
+
+
+class ShapeOverlay(BaseModel):
+    """Shape overlay for FFmpeg drawbox/overlay filter."""
+    shape_type: str = "rectangle"  # rectangle, circle, ellipse, arrow, line
+    x: float = 50              # position % (0-100), center
+    y: float = 50              # position % (0-100), center
+    width: float = 20          # size % (0-100)
+    height: float = 20         # size % (0-100)
+    fill_color: Optional[str] = None      # hex color or None for no fill
+    stroke_color: str = "#FFFFFF"
+    stroke_width: int = 2
+    corner_radius: int = 0
+    start_time: float = 0.0
+    end_time: float = 0.0
+    rotation: float = 0.0      # degrees
     opacity: float = 1.0
     fade_in: float = 0.0       # seconds
     fade_out: float = 0.0      # seconds
@@ -220,6 +246,7 @@ class ExportRequest(BaseModel):
     video_effects: Optional[VideoEffects] = None
     text_overlays: list[TextOverlay] = []
     image_overlays: list[ImageOverlay] = []
+    shape_overlays: list[ShapeOverlay] = []
 
 
 class FullVideoExportRequest(BaseModel):
@@ -238,6 +265,7 @@ class FullVideoExportRequest(BaseModel):
     video_effects: Optional[VideoEffects] = None
     text_overlays: list[TextOverlay] = []
     image_overlays: list[ImageOverlay] = []
+    shape_overlays: list[ShapeOverlay] = []
 
 
 class UpdateClipTitleRequest(BaseModel):

@@ -7,6 +7,7 @@ import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
 import sanitizeJob, { sanitizeSubtitleSettings } from '../utils/sanitizeJob';
+import { buildSubtitleSettings } from '../utils/buildExportPayload';
 
 function formatDuration(seconds) {
   if (!seconds) return '-';
@@ -815,31 +816,7 @@ export default function ViralClips() {
     if (cs.aspectRatio) body.aspect_ratio = cs.aspectRatio;
     body.subtitles_enabled = cs.subtitlesEnabled || false;
     if (cs.subtitlesEnabled) {
-      body.subtitle_settings = {
-        font: cs.subtitleFont || 'DM Sans',
-        size: cs.subtitleSize ?? 30,
-        font_weight: cs.subtitleFontWeight || 'bold',
-        font_color: cs.subtitleFontColor || '#FFFFFF',
-        position: cs.subtitlePosition || 'bottom',
-        speaker_colors: cs.speakerColors || {},
-        use_speaker_colors: cs.useSpeakerColors ?? true,
-        background_enabled: cs.subtitleBgEnabled ?? false,
-        background_color: cs.subtitleBgColor || '#000000',
-        background_opacity: cs.subtitleBgOpacity ?? 75,
-        background_radius: cs.subtitleBgRadius ?? 0,
-        outline_color: cs.subtitleOutlineColor || '#000000',
-        outline_opacity: cs.subtitleOutlineOpacity ?? 100,
-        outline_width: cs.subtitleOutlineWidth ?? 2,
-        show_speaker_labels: cs.showSpeakerLabels ?? false,
-        max_width: cs.subtitleMaxWidth ?? 90,
-        offset_v: cs.subtitleOffsetV ?? 4,
-        max_words: cs.subtitleMaxWords ?? 0,
-        active_word_enabled: cs.activeWordEnabled ?? false,
-        active_word_color: cs.activeWordColor || '#FFD700',
-        active_word_outline_color: cs.activeWordOutlineColor || '#000000',
-        active_word_bg_color: cs.activeWordBgColor || '#000000',
-        active_word_bg_opacity: cs.activeWordBgOpacity ?? 0,
-      };
+      body.subtitle_settings = buildSubtitleSettings(cs);
     }
     // Include playback volume/speed if non-default
     if (cs.playbackVolume != null && cs.playbackVolume !== 100) body.volume = cs.playbackVolume / 100;

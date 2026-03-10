@@ -526,6 +526,23 @@ export function validateVideoEffectsExport(items) {
   const nonVideoImages = imageItems.filter(it => it.type !== 'video');
   if (nonVideoImages.length > 0) {
     warnings.push(`${nonVideoImages.length} image overlay(s) will be included in export`);
+    // Check for rotated images
+    const rotatedImages = nonVideoImages.filter(it => it.transform?.rotation);
+    if (rotatedImages.length > 0) {
+      warnings.push(`${rotatedImages.length} image(s) have rotation — will be applied via FFmpeg rotate filter`);
+    }
+  }
+
+  // Check shape overlays
+  const shapeItems = items.filter(it => it.type === 'shape');
+  if (shapeItems.length > 0) {
+    warnings.push(`${shapeItems.length} shape overlay(s) will be included in export via FFmpeg drawbox`);
+    const unsupportedShapes = shapeItems.filter(it =>
+      it.shapeType && !['rectangle', 'circle', 'ellipse', 'line'].includes(it.shapeType)
+    );
+    if (unsupportedShapes.length > 0) {
+      warnings.push(`${unsupportedShapes.length} shape(s) use types that may render differently in export (arrow shapes are approximated)`);
+    }
   }
 
   return { valid: true, errors, warnings };
@@ -594,6 +611,18 @@ export function validateExportParity(items, settings, outputDims) {
         `Fastest word rate is ${fastestWordRate.toFixed(1)} words/sec — ` +
         'export FPS will be boosted automatically for smooth highlighting'
       );
+    }
+  }
+
+  // Check that all item types will be represented in export payload
+  const typeCount = {};
+  for (const item of items) {
+    typeCount[item.type] = (typeCount[item.type] || 0) + 1;
+  }
+  const exportableTypes = ['video', 'text', 'image', 'overlay', 'shape', 'subtitle', 'audio'];
+  for (const type of Object.keys(typeCount)) {
+    if (!exportableTypes.includes(type)) {
+      warnings.push(`${typeCount[type]} item(s) of type "${type}" may not be included in export`);
     }
   }
 

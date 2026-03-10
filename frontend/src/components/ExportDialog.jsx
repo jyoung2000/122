@@ -1,7 +1,9 @@
 import React, { useState, useCallback, useRef, useMemo } from 'react';
 import ExportEngine from '../engine/ExportEngine';
 import useTimelineStore from '../stores/timelineStore';
+import useEncodingManager from '../hooks/useEncodingManager';
 import { runSubtitleQA } from '../utils/subtitleQA';
+import { buildExportPayload, buildSubtitleSettings } from '../utils/buildExportPayload';
 
 const QUALITY_PRESETS = [
   { id: '720p', label: '720p', w: 1280, h: 720, bitrate: 4_000_000 },
@@ -45,6 +47,7 @@ export default function ExportDialog({
   const exportEngineRef = useRef(null);
 
   const canClientExport = ExportEngine.isWebCodecsAvailable();
+  const encoding = useEncodingManager();
 
   // Run subtitle QA validation
   const timelineItems = useTimelineStore((s) => s.items);
@@ -85,106 +88,29 @@ export default function ExportDialog({
 
     if (exportMode === 'server') {
       const preset = QUALITY_PRESETS.find(p => p.id === quality) || QUALITY_PRESETS[1];
-      const exportPayload = {
-        quality: preset.id,
-        ...(settings || {}),
-        ...(jobId ? { jobId } : {}),
-        ...(clipId ? { clipId } : {}),
+
+      // Build properly structured payload matching backend ExportRequest model
+      const exportPayload = buildExportPayload({
         startTime,
         endTime,
-      };
-
-      // Include multi-track editor video effects + transform so export matches preview 1:1
-      const videoItem = timelineItems.find(it => it.type === 'video');
-      if (videoItem) {
-        const fx = videoItem.effects || {};
-        const pos = videoItem.position || {};
-        const sz = videoItem.size || {};
-        const rot = videoItem.transform?.rotation || 0;
-        const fadeIn = videoItem.fadeIn || 0;
-        const fadeOut = videoItem.fadeOut || 0;
-        const hasEffects = (fx.brightness || 0) !== 0 || (fx.contrast || 0) !== 0 ||
-          (fx.saturation || 0) !== 0 || (fx.blur || 0) > 0 ||
-          (fx.hueRotate || 0) > 0 || (fx.sepia || 0) > 0 ||
-          (videoItem.opacity ?? 1) < 1;
-        const hasTransform = (pos.x != null && pos.x !== 50) || (pos.y != null && pos.y !== 50) ||
-          (sz.w != null && sz.w !== 100) || (sz.h != null && sz.h !== 100) ||
-          rot !== 0 || fadeIn > 0 || fadeOut > 0;
-        if (hasEffects || hasTransform) {
-          exportPayload.video_effects = {
-            brightness: fx.brightness || 0,
-            contrast: fx.contrast || 0,
-            saturation: fx.saturation || 0,
-            blur: fx.blur || 0,
-            hue_rotate: fx.hueRotate || 0,
-            sepia: fx.sepia || 0,
-            opacity: videoItem.opacity ?? 1,
-            position_x: pos.x ?? 50,
-            position_y: pos.y ?? 50,
-            width: sz.w ?? 100,
-            height: sz.h ?? 100,
-            rotation: rot,
-            fade_in: fadeIn,
-            fade_out: fadeOut,
-          };
-        }
-      }
-
-      // Include text overlays from the timeline
-      const textItems = timelineItems.filter(it => it.type === 'text');
-      if (textItems.length > 0) {
-        exportPayload.text_overlays = textItems.map(it => ({
-          text: it.textContent || '',
-          x: it.position?.x ?? 50,
-          y: it.position?.y ?? 50,
-          font_size: it.textStyle?.fontSize || 48,
-          font_color: it.textStyle?.color || '#FFFFFF',
-          font_family: it.textStyle?.fontFamily || 'sans-serif',
-          font_weight: it.textStyle?.fontWeight || 400,
-          background_color: it.textStyle?.bgColor || null,
-          outline_width: it.textStyle?.outlineWidth || 0,
-          outline_color: it.textStyle?.outlineColor || '#000000',
-          start_time: it.start || 0,
-          end_time: it.end || 0,
-          rotation: it.transform?.rotation || 0,
-          opacity: it.opacity ?? 1,
-          fade_in: it.fadeIn || 0,
-          fade_out: it.fadeOut || 0,
-        }));
-      }
-
-      // Include image overlays from the timeline
-      const imageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
-      if (imageItems.length > 0) {
-        exportPayload.image_overlays = imageItems.map(it => {
-          let src = it.src || '';
-          if (!src && it.mediaRef) {
-            const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
-            src = mediaEntry?.url || it.mediaRef;
-          }
-          return {
-            src,
-            x: it.position?.x ?? 50,
-            y: it.position?.y ?? 50,
-            width: it.size?.w ?? 30,
-            height: it.size?.h ?? 30,
-            start_time: it.start || 0,
-            end_time: it.end || 0,
-            opacity: it.opacity ?? 1,
-            fade_in: it.fadeIn || 0,
-            fade_out: it.fadeOut || 0,
-          };
-        });
-      }
+        clipId,
+        exportQuality: preset.id,
+        aspectRatio: aspectRatio || null,
+        settings: settings || {},
+        timelineItems,
+        mediaLibrary: timelineMediaLibrary,
+      });
 
       if (onServerExport) {
         onServerExport(exportPayload);
       } else if (jobId && clipId) {
-        fetch(`/api/export/${jobId}/${clipId}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(exportPayload),
-        }).catch(() => {});
+        // Use encoding manager for proper export lifecycle with WebSocket progress
+        try {
+          encoding.startExport(jobId, clipId, `Clip ${clipId}`, exportPayload);
+        } catch (err) {
+          setError(`Export failed: ${err.message}`);
+          return;
+        }
       }
       onClose?.();
       return;
