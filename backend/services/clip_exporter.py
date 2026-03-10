@@ -3270,6 +3270,9 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
         opacity = overlay.get("opacity", 1.0)
         start_t = overlay.get("start_time", 0) - clip_start
         end_t = overlay.get("end_time", 0) - clip_start
+        # Skip overlays entirely outside the clip time range
+        if end_t <= 0:
+            continue
         font_weight = overlay.get("font_weight", 400)
         if isinstance(font_weight, str):
             font_weight = 700 if font_weight.lower() == "bold" else 400
@@ -3539,6 +3542,10 @@ def _build_image_overlay_data(
     valid_overlays: list[tuple[int, dict]] = []  # (input_idx, overlay_dict)
 
     for overlay in image_overlays:
+        # Skip overlays entirely outside the clip time range
+        overlay_end_t = overlay.get("end_time", 0) - clip_start
+        if overlay_end_t <= 0:
+            continue
         src = overlay.get("src", "")
         img_path = _resolve_media_path(src, job_id)
         if not img_path:
@@ -4604,6 +4611,7 @@ async def export_clip(
                     # Safety timeout: if encoding takes 60x the clip
                     # duration (or at least 10 minutes), something is
                     # likely wrong. Kill FFmpeg to unblock the pipeline.
+                    _elapsed_s = _now - _enc_start
                     _max_encode_s = max(600, _clip_dur * 60)
                     if _elapsed_s > _max_encode_s:
                         logger.error(
@@ -4617,7 +4625,6 @@ async def export_clip(
                             f"(expected ~{int(_clip_dur)}s of output)"
                         )
 
-                    _elapsed_s = _now - _enc_start
                     _elapsed = int(_elapsed_s)
                     if _current_out_time > 0.5 and _elapsed_s > 2 and _clip_dur > 0:
                         _speed = _current_out_time / _elapsed_s
