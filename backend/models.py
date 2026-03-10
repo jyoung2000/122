@@ -200,6 +200,25 @@ class ImageOverlay(BaseModel):
     fade_out: float = 0.0      # seconds
 
 
+class ShapeOverlay(BaseModel):
+    """Shape overlay rendered as a temporary PNG and composited via FFmpeg overlay."""
+    shape_type: str = "rectangle"  # rectangle | circle | ellipse | line | arrow
+    x: float = 50              # center position % (0-100)
+    y: float = 50              # center position % (0-100)
+    width: float = 20          # size % (0-100)
+    height: float = 20         # size % (0-100)
+    fill_color: str = "#FF3B30"
+    stroke_color: str = "#FFFFFF"
+    stroke_width: int = 2
+    corner_radius: int = 0     # for rectangles
+    start_time: float = 0.0
+    end_time: float = 0.0
+    rotation: float = 0.0
+    opacity: float = 1.0
+    fade_in: float = 0.0      # seconds
+    fade_out: float = 0.0     # seconds
+
+
 class AudioOverlay(BaseModel):
     """Additional audio item from multi-track editor (background music, SFX)."""
     src: str = ""              # path or URL to audio file
@@ -230,6 +249,7 @@ class ExportRequest(BaseModel):
     video_effects: Optional[VideoEffects] = None
     text_overlays: list[TextOverlay] = []
     image_overlays: list[ImageOverlay] = []
+    shape_overlays: list[ShapeOverlay] = []
     audio_overlays: list[AudioOverlay] = []  # Additional audio items (music, SFX)
 
 
@@ -249,6 +269,7 @@ class FullVideoExportRequest(BaseModel):
     video_effects: Optional[VideoEffects] = None
     text_overlays: list[TextOverlay] = []
     image_overlays: list[ImageOverlay] = []
+    shape_overlays: list[ShapeOverlay] = []
 
 
 class UpdateClipTitleRequest(BaseModel):

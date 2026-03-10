@@ -298,6 +298,7 @@ async def export_clip_endpoint(
                 video_effects=req.video_effects.model_dump() if req.video_effects else None,
                 text_overlays=[t.model_dump() for t in req.text_overlays] if req.text_overlays else None,
                 image_overlays=[i.model_dump() for i in req.image_overlays] if req.image_overlays else None,
+                shape_overlays=[s.model_dump() for s in req.shape_overlays] if req.shape_overlays else None,
                 audio_overlays=[a.model_dump() for a in req.audio_overlays] if req.audio_overlays else None,
             )
 
@@ -473,7 +474,8 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                 video_effects=req.video_effects.model_dump() if req.video_effects else None,
                 text_overlays=[t.model_dump() for t in req.text_overlays] if req.text_overlays else None,
                 image_overlays=[i.model_dump() for i in req.image_overlays] if req.image_overlays else None,
-                audio_overlays=[a.model_dump() for a in req.audio_overlays] if req.audio_overlays else None,
+                shape_overlays=[s.model_dump() for s in req.shape_overlays] if hasattr(req, 'shape_overlays') and req.shape_overlays else None,
+                audio_overlays=[a.model_dump() for a in req.audio_overlays] if hasattr(req, 'audio_overlays') and req.audio_overlays else None,
             )
 
             elapsed = int(time.monotonic() - export_start)

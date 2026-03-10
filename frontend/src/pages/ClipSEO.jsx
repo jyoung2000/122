@@ -826,6 +826,27 @@ export default function ClipSEO() {
         };
       });
     }
+    // Include shape overlays from the timeline
+    const clipShapeItems = timelineItems.filter(it => it.type === 'shape');
+    if (clipShapeItems.length > 0) {
+      body.shape_overlays = clipShapeItems.map(it => ({
+        shape_type: it.shapeType || 'rectangle',
+        x: it.position?.x ?? 50,
+        y: it.position?.y ?? 50,
+        width: it.size?.w ?? 20,
+        height: it.size?.h ?? 20,
+        fill_color: it.shapeStyle?.fillColor || '#FF3B30',
+        stroke_color: it.shapeStyle?.strokeColor || '#FFFFFF',
+        stroke_width: it.shapeStyle?.strokeWidth || 2,
+        corner_radius: it.shapeStyle?.cornerRadius || 0,
+        start_time: it.start || 0,
+        end_time: it.end || 0,
+        rotation: it.transform?.rotation || 0,
+        opacity: it.opacity ?? 1,
+        fade_in: it.fadeIn || 0,
+        fade_out: it.fadeOut || 0,
+      }));
+    }
     // Include audio overlays from the timeline
     const clipAudioItems = timelineItems.filter(it => it.type === 'audio');
     if (clipAudioItems.length > 0) {

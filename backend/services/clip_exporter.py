@@ -3378,6 +3378,154 @@ def _resolve_media_path(src: str, job_id: str) -> str | None:
     return None
 
 
+def _render_shape_to_png(shape: dict, video_width: int, video_height: int, output_dir: str, idx: int) -> str | None:
+    """Render a shape overlay to a temporary PNG file for FFmpeg compositing.
+
+    Uses FFmpeg's native drawing capabilities (lavfi color + drawbox) for rectangles,
+    and falls back to generating SVG→PNG for complex shapes.
+    Returns the path to the generated PNG, or None on failure.
+    """
+    import tempfile
+
+    shape_type = shape.get("shape_type", "rectangle")
+    w_pct = shape.get("width", 20) / 100.0
+    h_pct = shape.get("height", 20) / 100.0
+    fill_color = shape.get("fill_color", "#FF3B30")
+    stroke_color = shape.get("stroke_color", "#FFFFFF")
+    stroke_width = shape.get("stroke_width", 2)
+    corner_radius = shape.get("corner_radius", 0)
+
+    # Compute pixel dimensions
+    px_w = max(4, int(video_width * w_pct))
+    px_h = max(4, int(video_height * h_pct))
+
+    png_path = os.path.join(output_dir, f"_shape_{idx}.png")
+
+    # Convert hex color to SVG-compatible format
+    def _hex_to_rgba(hex_color: str, opacity: float = 1.0) -> str:
+        hex_color = hex_color.lstrip('#')
+        if len(hex_color) == 6:
+            r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+        elif len(hex_color) == 8:
+            r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+            opacity *= int(hex_color[6:8], 16) / 255
+        else:
+            r, g, b = 255, 59, 48  # default red
+        return f"rgba({r},{g},{b},{opacity:.3f})"
+
+    # Build SVG for the shape
+    svg_content = f'<svg xmlns="http://www.w3.org/2000/svg" width="{px_w}" height="{px_h}" viewBox="0 0 {px_w} {px_h}">'
+
+    if shape_type == "rectangle":
+        rx = min(corner_radius, px_w // 2, px_h // 2)
+        inset = stroke_width / 2
+        svg_content += (
+            f'<rect x="{inset}" y="{inset}" '
+            f'width="{px_w - stroke_width}" height="{px_h - stroke_width}" '
+            f'rx="{rx}" ry="{rx}" '
+            f'fill="{fill_color}" '
+            f'stroke="{stroke_color}" stroke-width="{stroke_width}"/>'
+        )
+
+    elif shape_type in ("circle", "ellipse"):
+        cx, cy = px_w / 2, px_h / 2
+        rx = (px_w - stroke_width) / 2
+        ry = (px_h - stroke_width) / 2
+        svg_content += (
+            f'<ellipse cx="{cx}" cy="{cy}" rx="{rx}" ry="{ry}" '
+            f'fill="{fill_color}" '
+            f'stroke="{stroke_color}" stroke-width="{stroke_width}"/>'
+        )
+
+    elif shape_type == "line":
+        svg_content += (
+            f'<line x1="0" y1="0" x2="{px_w}" y2="{px_h}" '
+            f'stroke="{stroke_color}" stroke-width="{max(stroke_width, 2)}"/>'
+        )
+
+    elif shape_type == "arrow":
+        # Arrow pointing right: body + triangular head
+        svg_content += (
+            f'<polygon points="0,{px_h * 0.5} {px_w * 0.7},{px_h * 0.5} '
+            f'{px_w * 0.7},0 {px_w},{px_h * 0.5} {px_w * 0.7},{px_h} {px_w * 0.7},{px_h * 0.5}" '
+            f'fill="{fill_color}" '
+            f'stroke="{stroke_color}" stroke-width="{stroke_width}"/>'
+        )
+
+    else:
+        # Fallback: filled rectangle
+        svg_content += (
+            f'<rect x="0" y="0" width="{px_w}" height="{px_h}" '
+            f'fill="{fill_color}" stroke="{stroke_color}" stroke-width="{stroke_width}"/>'
+        )
+
+    svg_content += '</svg>'
+
+    # Write SVG to temp file and convert to PNG via FFmpeg
+    svg_path = os.path.join(output_dir, f"_shape_{idx}.svg")
+    try:
+        with open(svg_path, 'w') as f:
+            f.write(svg_content)
+
+        # Use rsvg-convert if available, otherwise ffmpeg
+        # Try rsvg-convert first (better SVG support)
+        result = subprocess.run(
+            ["which", "rsvg-convert"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            subprocess.run(
+                ["rsvg-convert", "-o", png_path, svg_path],
+                capture_output=True, check=True,
+            )
+        else:
+            # Fallback: use ffmpeg to render SVG
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-f", "lavfi",
+                    "-i", f"color=c=black@0:s={px_w}x{px_h}:d=1,format=rgba",
+                    "-i", svg_path,
+                    "-filter_complex", "[0][1]overlay=0:0",
+                    "-frames:v", "1",
+                    png_path,
+                ],
+                capture_output=True, check=True,
+            )
+
+        if os.path.isfile(png_path):
+            logger.info("Rendered shape %s (%s) to %s (%dx%d)", idx, shape_type, png_path, px_w, px_h)
+            return png_path
+        else:
+            logger.warning("Shape rendering produced no output: %s", png_path)
+            return None
+    except Exception as e:
+        logger.warning("Failed to render shape %d (%s): %s", idx, shape_type, e)
+        # Last resort: generate a simple colored rectangle via FFmpeg lavfi
+        try:
+            hex_clean = fill_color.lstrip('#')
+            subprocess.run(
+                [
+                    "ffmpeg", "-y", "-f", "lavfi",
+                    "-i", f"color=c=0x{hex_clean}:s={px_w}x{px_h}:d=1,format=rgba",
+                    "-frames:v", "1",
+                    png_path,
+                ],
+                capture_output=True, check=True,
+            )
+            if os.path.isfile(png_path):
+                return png_path
+        except Exception:
+            pass
+        return None
+    finally:
+        # Clean up SVG
+        try:
+            if os.path.isfile(svg_path):
+                os.unlink(svg_path)
+        except OSError:
+            pass
+
+
 def _build_image_overlay_data(
     image_overlays: list,
     job_id: str,
@@ -3485,6 +3633,7 @@ async def export_clip(
     video_effects: dict | None = None,
     text_overlays: list | None = None,
     image_overlays: list | None = None,
+    shape_overlays: list | None = None,
     audio_overlays: list | None = None,
 ) -> str:
     """Export a clip from video using FFmpeg.
@@ -3578,7 +3727,39 @@ async def export_clip(
     ))
     has_text_overlays = bool(text_overlays) and len(text_overlays) > 0
     has_image_overlays = bool(image_overlays) and len(image_overlays) > 0
+    has_shape_overlays = bool(shape_overlays) and len(shape_overlays) > 0
     has_audio_overlays = bool(audio_overlays) and len(audio_overlays) > 0
+
+    # Render shape overlays as temporary PNGs and merge into image_overlays
+    _shape_temp_files: list[str] = []
+    if has_shape_overlays:
+        if image_overlays is None:
+            image_overlays = []
+        shape_tmp_dir = os.path.join(output_dir, "_shapes")
+        os.makedirs(shape_tmp_dir, exist_ok=True)
+        for si, shape in enumerate(shape_overlays):
+            png_path = _render_shape_to_png(shape, video_width, video_height, shape_tmp_dir, si)
+            if png_path:
+                _shape_temp_files.append(png_path)
+                # Convert shape to image overlay format for the image pipeline
+                image_overlays.append({
+                    "src": png_path,
+                    "x": shape.get("x", 50),
+                    "y": shape.get("y", 50),
+                    "width": shape.get("width", 20),
+                    "height": shape.get("height", 20),
+                    "start_time": shape.get("start_time", 0),
+                    "end_time": shape.get("end_time", 0),
+                    "opacity": shape.get("opacity", 1.0),
+                    "fade_in": shape.get("fade_in", 0),
+                    "fade_out": shape.get("fade_out", 0),
+                })
+                logger.info("Shape %d (%s) rendered to PNG: %s", si, shape.get("shape_type"), png_path)
+            else:
+                logger.warning("Shape %d (%s) failed to render, skipping", si, shape.get("shape_type"))
+        # Recompute has_image_overlays after merging shapes
+        has_image_overlays = bool(image_overlays) and len(image_overlays) > 0
+
     needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments or has_seg_speed or has_video_effects or has_text_overlays or has_image_overlays or has_audio_overlays
     filter_parts = []
     if aspect_ratio:
@@ -3602,6 +3783,8 @@ async def export_clip(
         filter_parts.append(f"{len(text_overlays)} text overlay(s)")
     if has_image_overlays:
         filter_parts.append(f"{len(image_overlays)} image overlay(s)")
+    if has_shape_overlays:
+        filter_parts.append(f"{len(shape_overlays)} shape overlay(s)")
     if has_audio_overlays:
         filter_parts.append(f"{len(audio_overlays)} audio overlay(s)")
     filter_desc = " + ".join(filter_parts) if filter_parts else "stream copy"
@@ -3638,6 +3821,35 @@ async def export_clip(
                 subtitle_settings.get("max_words"),
                 subtitle_settings.get("active_word_enabled"),
             )
+
+        # Log overlay track QA summary
+        _overlay_summary = []
+        if has_text_overlays:
+            _overlay_summary.append(f"text={len(text_overlays)}")
+            for ti, to in enumerate(text_overlays):
+                logger.info("  Text overlay %d: text=%r, pos=(%.0f%%,%.0f%%), time=%.1f-%.1f, font_size=%s",
+                    ti, (to.get("text", ""))[:40], to.get("x", 50), to.get("y", 50),
+                    to.get("start_time", 0), to.get("end_time", 0), to.get("font_size", 48))
+        if has_image_overlays:
+            _overlay_summary.append(f"image={len(image_overlays)}")
+            for ii, io_item in enumerate(image_overlays):
+                logger.info("  Image overlay %d: src=%s, pos=(%.0f%%,%.0f%%), size=(%.0f%%x%.0f%%), time=%.1f-%.1f",
+                    ii, os.path.basename(io_item.get("src", ""))[:60], io_item.get("x", 50), io_item.get("y", 50),
+                    io_item.get("width", 30), io_item.get("height", 30),
+                    io_item.get("start_time", 0), io_item.get("end_time", 0))
+        if has_shape_overlays:
+            _overlay_summary.append(f"shape={len(shape_overlays)}")
+            for si_q, so in enumerate(shape_overlays):
+                logger.info("  Shape overlay %d: type=%s, pos=(%.0f%%,%.0f%%), size=(%.0f%%x%.0f%%), time=%.1f-%.1f, fill=%s",
+                    si_q, so.get("shape_type", "rectangle"), so.get("x", 50), so.get("y", 50),
+                    so.get("width", 20), so.get("height", 20),
+                    so.get("start_time", 0), so.get("end_time", 0), so.get("fill_color", "?"))
+        if has_audio_overlays:
+            _overlay_summary.append(f"audio={len(audio_overlays)}")
+        if _overlay_summary:
+            logger.info("Overlay QA for clip %s: %s", clip_id, ", ".join(_overlay_summary))
+        else:
+            logger.info("Overlay QA for clip %s: no overlay items", clip_id)
 
         # Generate ASS subtitle file if subtitles are enabled
         if subtitles_enabled and transcript:
@@ -4489,3 +4701,17 @@ async def export_clip(
                 os.unlink(ass_path)
             except OSError:
                 pass
+        # Clean up shape temp files
+        for _sf in _shape_temp_files:
+            try:
+                if os.path.isfile(_sf):
+                    os.unlink(_sf)
+            except OSError:
+                pass
+        # Clean up shape temp directory
+        shape_tmp_dir = os.path.join(output_dir, "_shapes")
+        try:
+            if os.path.isdir(shape_tmp_dir):
+                os.rmdir(shape_tmp_dir)  # only removes if empty
+        except OSError:
+            pass

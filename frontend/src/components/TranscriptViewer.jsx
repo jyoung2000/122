@@ -128,7 +128,7 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
   };
 
   const copyAll = () => {
-    const text = toTXT(transcript);
+    const text = toTXT(timeFiltered);
     navigator.clipboard.writeText(text);
   };
 
@@ -469,7 +469,7 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
           }}
         />
         <button
-          onClick={() => download(toTXT(transcript), 'transcript.txt')}
+          onClick={() => download(toTXT(timeFiltered), 'transcript.txt')}
           style={{
             padding: '8px 12px',
             background: 'var(--bg-elevated)',
@@ -482,7 +482,7 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
           .txt
         </button>
         <button
-          onClick={() => download(toSRT(transcript), 'transcript.srt')}
+          onClick={() => download(toSRT(timeFiltered), 'transcript.srt')}
           style={{
             padding: '8px 12px',
             background: 'var(--bg-elevated)',

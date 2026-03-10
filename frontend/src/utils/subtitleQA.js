@@ -528,7 +528,31 @@ export function validateVideoEffectsExport(items) {
     warnings.push(`${nonVideoImages.length} image overlay(s) will be included in export`);
   }
 
-  return { valid: true, errors, warnings };
+  // Check shape overlays
+  const shapeItems = items.filter(it => it.type === 'shape');
+  if (shapeItems.length > 0) {
+    const shapeTypes = shapeItems.map(it => it.shapeType || 'rectangle');
+    warnings.push(`${shapeItems.length} shape overlay(s) will be included in export (${[...new Set(shapeTypes)].join(', ')})`);
+    // Validate shape timing
+    for (const shape of shapeItems) {
+      if ((shape.start || 0) >= (shape.end || 0)) {
+        errors.push(`Shape "${shape.id}" has invalid timing (start >= end) — will not appear in export`);
+      }
+    }
+  }
+
+  // Check audio overlays
+  const audioItems = items.filter(it => it.type === 'audio');
+  if (audioItems.length > 0) {
+    const missingSrc = audioItems.filter(it => !it.src && !it.mediaRef);
+    if (missingSrc.length > 0) {
+      errors.push(`${missingSrc.length} audio overlay(s) missing source file — will not be included in export`);
+    } else {
+      warnings.push(`${audioItems.length} audio overlay(s) will be mixed into export`);
+    }
+  }
+
+  return { valid: errors.length === 0, errors, warnings };
 }
 
 /**
