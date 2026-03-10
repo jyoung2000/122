@@ -586,13 +586,31 @@ const useTimelineStore = create(
       // to ensure overlays/subtitles always composite on top of video.
       importState: (state) => {
         if (state && state.tracks && state.items) {
-          // Normalize track order values based on type, not persisted order
-          const normalizedTracks = state.tracks.map(t => ({
-            ...t,
-            order: TRACK_COMPOSITING_PRIORITY[t.type] ?? 1,
-          }));
+          // Start from the canonical default track list (correct order and IDs),
+          // then merge per-track settings (muted, locked, visible) from the
+          // persisted state so user preferences survive.  Any extra tracks that
+          // were added by the user (beyond the 5 defaults) are appended at the
+          // end in their original order.
+          const defaults = createDefaultTracks();
+          const defaultIds = new Set(defaults.map(t => t.id));
+          const savedById = Object.fromEntries(state.tracks.map(t => [t.id, t]));
+
+          const merged = defaults.map(def => {
+            const saved = savedById[def.id];
+            if (saved) {
+              return { ...def, muted: saved.muted ?? def.muted, locked: saved.locked ?? def.locked, visible: saved.visible ?? def.visible };
+            }
+            return def;
+          });
+          // Append any user-added tracks that aren't in the defaults
+          for (const t of state.tracks) {
+            if (!defaultIds.has(t.id)) {
+              merged.push({ ...t, order: TRACK_COMPOSITING_PRIORITY[t.type] ?? 1 });
+            }
+          }
+
           set({
-            tracks: normalizedTracks,
+            tracks: merged,
             items: state.items,
             mediaLibrary: state.mediaLibrary || [],
             duration: state.duration || 0,
