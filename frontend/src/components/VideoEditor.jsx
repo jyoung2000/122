@@ -443,7 +443,7 @@ export default function VideoEditor({
   const timelineRef = useRef(null);
   const [overlayInteracting, setOverlayInteracting] = useState(false);
   const arrowHoldRef = useRef({ key: null, interval: null });
-  const skipTimeRef = useRef(skipTime);
+  const skipTimeRef = useRef(null);
   const waveformCanvasRef = useRef(null);
   const waveformDataRef = useRef(null);
   const audioCtxRef = useRef(null);
