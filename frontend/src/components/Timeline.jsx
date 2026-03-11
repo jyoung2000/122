@@ -615,26 +615,15 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         return;
       }
 
-      // Alt+Click: select only this item (override group)
-      if (e.altKey) {
-        setSelectedItemId(hit.item.id);
-        onItemSelect?.(hit.item);
-        // Continue to drag logic below
-      } else if (hit.item.groupId) {
-        // Group-aware selection: select all items with same groupId
+      // Alt+Click: select all group members (group-aware selection)
+      if (e.altKey && hit.item.groupId) {
         const groupMembers = items.filter(it => it.groupId === hit.item.groupId).map(it => it.id);
         setSelectedItemIds(groupMembers);
-        // Set primary to clicked item
         useTimelineStore.setState({ selectedItemId: hit.item.id });
         onItemSelect?.(hit.item);
-      } else if (!selectedItemIds.includes(hit.item.id)) {
-        // Plain click on non-group, non-selected item: single select
-        setSelectedItemId(hit.item.id);
-        onItemSelect?.(hit.item);
+        // Continue to drag logic below
       } else {
-        // Clicked an already-selected item without modifier: reduce selection to
-        // just this item. This prevents stale multi-selections from causing
-        // unintended multi-item drags.
+        // Plain click: always single-select the clicked item
         setSelectedItemId(hit.item.id);
         onItemSelect?.(hit.item);
       }

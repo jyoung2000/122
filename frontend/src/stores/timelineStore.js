@@ -163,6 +163,31 @@ function clampTrimRight(newEnd, siblings, itemStart) {
   return Math.min(newEnd, minEnd);
 }
 
+/**
+ * Resolve all overlaps on each track by pushing overlapping items forward.
+ * Items are processed left-to-right; if an item overlaps a previous one,
+ * its start is pushed to the previous item's end.
+ */
+function resolveAllOverlaps(items) {
+  // Group items by track
+  const byTrack = {};
+  for (const item of items) {
+    (byTrack[item.trackId] || (byTrack[item.trackId] = [])).push(item);
+  }
+  for (const trackId of Object.keys(byTrack)) {
+    const trackItems = byTrack[trackId].sort((a, b) => a.start - b.start);
+    for (let i = 1; i < trackItems.length; i++) {
+      const prev = trackItems[i - 1];
+      const curr = trackItems[i];
+      if (curr.start < prev.end) {
+        const dur = curr.end - curr.start;
+        curr.start = prev.end;
+        curr.end = curr.start + dur;
+      }
+    }
+  }
+}
+
 // ── Group ID helpers ────────────────────────────────────────────────────────
 let _groupIdCounter = 1;
 const nextGroupId = () => `g${_groupIdCounter++}`;
@@ -381,6 +406,7 @@ const useTimelineStore = create(
         }
         set((state) => {
           state.items.push(newItem);
+          resolveAllOverlaps(state.items);
           state.duration = Math.max(state.duration, newItem.end);
         });
         return id;
@@ -393,6 +419,7 @@ const useTimelineStore = create(
           if (track?.locked) return; // Cannot remove items from locked tracks
         }
         state.items = state.items.filter(i => i.id !== itemId);
+        resolveAllOverlaps(state.items);
         state.duration = computeTimelineDuration(state.items);
         if (state.selectedItemId === itemId) {
           state.selectedItemId = null;
@@ -411,6 +438,7 @@ const useTimelineStore = create(
         );
         if (idsToRemove.size === 0) return;
         state.items = state.items.filter(i => !idsToRemove.has(i.id));
+        resolveAllOverlaps(state.items);
         state.duration = computeTimelineDuration(state.items);
         if (idsToRemove.has(state.selectedItemId)) {
           state.selectedItemId = null;
@@ -468,6 +496,7 @@ const useTimelineStore = create(
             item.end = maxEnd;
           }
         }
+        resolveAllOverlaps(state.items);
         state.duration = computeTimelineDuration(state.items);
       }),
 
@@ -485,6 +514,7 @@ const useTimelineStore = create(
             item.end = clamped + dur;
           }
         }
+        resolveAllOverlaps(state.items);
         state.duration = computeTimelineDuration(state.items);
       }),
 
@@ -560,6 +590,7 @@ const useTimelineStore = create(
 
         state.items[idx].end = time;
         state.items.push(item2);
+        resolveAllOverlaps(state.items);
         state.duration = computeTimelineDuration(state.items);
         state.selectedItemId = newId;
         state.selectedItemIds = [newId];
@@ -593,6 +624,7 @@ const useTimelineStore = create(
           clone.end = clamped + cloneDur;
         }
         state.items.push(clone);
+        resolveAllOverlaps(state.items);
         state.duration = computeTimelineDuration(state.items);
         state.selectedItemId = newId;
         state.selectedItemIds = [newId];
@@ -615,6 +647,7 @@ const useTimelineStore = create(
           item.start = newStart;
           item.end = newStart + dur;
         }
+        resolveAllOverlaps(state.items);
         state.duration = computeTimelineDuration(state.items);
       }),
 
@@ -795,6 +828,9 @@ const useTimelineStore = create(
           });
         }
 
+        // Resolve any overlaps from source data before snapshotting
+        resolveAllOverlaps(items);
+
         // Snapshot original subtitle timings so user can reset after accidental moves
         const originalSubtitles = items
           .filter((it) => it.type === 'subtitle')
@@ -886,9 +922,13 @@ const useTimelineStore = create(
             }
           }
 
+          // Resolve any overlaps in persisted data
+          const rehydratedItems = [...state.items];
+          resolveAllOverlaps(rehydratedItems);
+
           set({
             tracks: merged,
-            items: state.items,
+            items: rehydratedItems,
             mediaLibrary: state.mediaLibrary || [],
             duration: state.duration || 0,
             project: state.project || { name: 'Untitled', resolution: { w: 1920, h: 1080 }, fps: 30, aspectRatio: null, backgroundColor: '#000000' },
