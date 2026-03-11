@@ -112,7 +112,7 @@ function ColorField({ label, value, onChange }) {
 }
 
 /* ── SubtitleProperties — edits global SubtitleOverlay (Subs On) settings ── */
-function SubtitleProperties({ item, update, settings, onSettingsChange }) {
+function SubtitleProperties({ item, update, settings, onSettingsChange, customFonts = [] }) {
   const s = settings || {};
   const set = (key, val) => onSettingsChange && onSettingsChange({ ...s, [key]: val });
 
@@ -913,7 +913,7 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
 
       {/* ── Subtitle — edits the global SubtitleOverlay (Subs On) settings ── */}
       {item.type === 'subtitle' && (
-        <SubtitleProperties item={item} update={update} settings={settings} onSettingsChange={onSettingsChange} />
+        <SubtitleProperties item={item} update={update} settings={settings} onSettingsChange={onSettingsChange} customFonts={customFonts} />
       )}
 
       {/* ── Transition ── */}

@@ -300,10 +300,17 @@ export default class ExportEngine {
         hardwareAcceleration: 'prefer-hardware',
       });
 
-      // Pre-load fonts for all subtitle clips
+      // Pre-load fonts for subtitle and all text overlay clips
       const subSettings = settings?.subtitle || settings || {};
-      const fontName = subSettings.subtitleFont || 'DM Sans';
-      await this.renderEngine.loadFont(fontName);
+      const subFont = subSettings.subtitleFont || 'DM Sans';
+      await this.renderEngine.loadFont(subFont);
+      const textFonts = new Set(
+        clips.filter(c => c.type === 'text' && c.textStyle?.fontFamily)
+          .map(c => c.textStyle.fontFamily)
+      );
+      for (const fn of textFonts) {
+        await this.renderEngine.loadFont(fn);
+      }
 
       // Step through time and encode each frame
       for (let i = 0; i < totalFrames; i++) {

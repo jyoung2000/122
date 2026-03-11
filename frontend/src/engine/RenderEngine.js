@@ -247,13 +247,30 @@ export default class RenderEngine {
 
   /**
    * Pre-load a font via FontFace API so canvas text rendering works.
+   * Resolves custom fonts from /api/fonts if not in the builtin map.
    */
   async loadFont(fontName, url) {
     if (this._fontCache.has(fontName)) return;
     try {
-      const builtinUrl = url || BUILTIN_FONT_FILES[fontName];
-      if (!builtinUrl) return;
-      const face = new FontFace(fontName, `url(${builtinUrl})`);
+      let fontUrl = url || BUILTIN_FONT_FILES[fontName];
+      // For custom fonts not in the builtin map, look up via /api/fonts
+      if (!fontUrl) {
+        if (!this._customFontMap) {
+          try {
+            const res = await fetch('/api/fonts');
+            const fonts = res.ok ? await res.json() : [];
+            this._customFontMap = {};
+            for (const f of fonts) {
+              if (f.name && f.url) this._customFontMap[f.name] = f.url;
+            }
+          } catch {
+            this._customFontMap = {};
+          }
+        }
+        fontUrl = this._customFontMap[fontName];
+      }
+      if (!fontUrl) return;
+      const face = new FontFace(fontName, `url(${fontUrl})`);
       await face.load();
       document.fonts.add(face);
       this._fontCache.add(fontName);
@@ -278,6 +295,19 @@ export default class RenderEngine {
     ctx.clearRect(0, 0, width, height);
     ctx.fillStyle = settings.backgroundColor || '#000000';
     ctx.fillRect(0, 0, width, height);
+
+    // Ensure fonts for text/subtitle clips are loaded (fire-and-forget — the
+    // font will be available on the next frame if not yet cached).
+    for (const clip of clips) {
+      if (clip.type === 'text') {
+        const fn = clip.textStyle?.fontFamily;
+        if (fn && !this._fontCache.has(fn)) this.loadFont(fn);
+      } else if (clip.type === 'subtitle') {
+        const subS = settings?.subtitle || settings || {};
+        const fn = subS.subtitleFont || 'DM Sans';
+        if (!this._fontCache.has(fn)) this.loadFont(fn);
+      }
+    }
 
     // Collect visible clips at currentTime, sorted by track order (bottom-to-top)
     // Subtitle items are rendered last (on top) via the canvas engine, using the
