@@ -61,6 +61,14 @@ export function getMaxItemDuration(item, mediaLibrary) {
   return maxDur > 0 ? maxDur : Infinity;
 }
 
+/**
+ * Recompute timeline duration from the furthest item end.
+ */
+function computeTimelineDuration(items) {
+  if (items.length === 0) return 0;
+  return Math.max(...items.map(it => it.end || 0));
+}
+
 let _itemIdCounter = 1;
 const nextItemId = () => `item-${_itemIdCounter++}`;
 const nextMediaId = () => `media-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -92,6 +100,7 @@ const useTimelineStore = create(
       zoom: 1.0,
       scrollX: 0,
       snapEnabled: true,
+      snapLine: null, // { time: number } | null — active snap guide position
       selectedItemId: null,
       selectedItemIds: [],
       isPlaying: false,
@@ -136,6 +145,7 @@ const useTimelineStore = create(
       setZoom: (z) => set({ zoom: Math.max(0.01, Math.min(10, z)) }),
       setScrollX: (x) => set({ scrollX: Math.max(0, x) }),
       toggleSnap: () => set((state) => { state.snapEnabled = !state.snapEnabled; }),
+      setSnapLine: (line) => set({ snapLine: line }),
       setSelectedItemId: (id) => set({ selectedItemId: id, selectedItemIds: id ? [id] : [] }),
       setSelectedItemIds: (ids) => set({ selectedItemIds: ids, selectedItemId: ids[0] || null }),
       setActiveTool: (tool) => set({ activeTool: tool }),
@@ -264,6 +274,7 @@ const useTimelineStore = create(
           if (track?.locked) return; // Cannot remove items from locked tracks
         }
         state.items = state.items.filter(i => i.id !== itemId);
+        state.duration = computeTimelineDuration(state.items);
         if (state.selectedItemId === itemId) {
           state.selectedItemId = null;
           state.selectedItemIds = [];
@@ -295,11 +306,13 @@ const useTimelineStore = create(
             item.end = maxEnd;
           }
         }
+        state.duration = computeTimelineDuration(state.items);
       }),
 
       updateItemWithSnapshot: (itemId, updates) => set((state) => {
         const item = state.items.find(i => i.id === itemId);
         if (item) Object.assign(item, updates);
+        state.duration = computeTimelineDuration(state.items);
       }),
 
       // Reset all subtitle items to their original timing/position from initFromClip
@@ -369,6 +382,7 @@ const useTimelineStore = create(
 
         state.items[idx].end = time;
         state.items.push(item2);
+        state.duration = computeTimelineDuration(state.items);
         state.selectedItemId = newId;
         state.selectedItemIds = [newId];
       }),
@@ -393,6 +407,7 @@ const useTimelineStore = create(
           }
         }
         state.items.push(clone);
+        state.duration = computeTimelineDuration(state.items);
         state.selectedItemId = newId;
         state.selectedItemIds = [newId];
       }),
@@ -407,6 +422,7 @@ const useTimelineStore = create(
           item.end = item.start + dur;
           if (targetTrackId) item.trackId = targetTrackId;
         }
+        state.duration = computeTimelineDuration(state.items);
       }),
 
       // Media library

@@ -7,7 +7,6 @@ const TRACK_GAP = 1;
 const LABEL_WIDTH = 120;
 const HANDLE_WIDTH = 6;
 const HANDLE_HIT_AREA = 12;
-const SNAP_THRESHOLD_PX = 5;
 const RULER_HEIGHT = 28;
 const PLAYHEAD_GRAB_WIDTH = 16; // px on each side of playhead for grab detection
 
@@ -42,6 +41,42 @@ function formatTimeMs(s) {
   const sec = Math.floor(s % 60);
   const ms = Math.floor((s % 1) * 100);
   return `${m}:${sec.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
+}
+
+/**
+ * Find the nearest snap target for a given time value.
+ * Returns { snappedTime, snapTarget } or null if no snap found.
+ */
+function findSnapTarget(candidateTime, items, excludeItemId, playhead, duration, pps) {
+  // Adaptive threshold: larger zone when zoomed out, smaller when zoomed in
+  const threshold = Math.max(5, Math.min(12, 600 / pps));
+
+  const targets = new Set();
+  targets.add(0);
+  targets.add(playhead);
+  if (duration > 0) targets.add(duration);
+
+  for (const item of items) {
+    if (item.id === excludeItemId) continue;
+    targets.add(item.start);
+    targets.add(item.end);
+  }
+
+  let bestDist = Infinity;
+  let bestTarget = null;
+
+  for (const target of targets) {
+    const distPx = Math.abs((candidateTime - target) * pps);
+    if (distPx < threshold && distPx < bestDist) {
+      bestDist = distPx;
+      bestTarget = target;
+    }
+  }
+
+  if (bestTarget !== null) {
+    return { snappedTime: bestTarget, snapTarget: bestTarget };
+  }
+  return null;
 }
 
 export default function Timeline({ compact = false, onSeek, onItemSelect }) {
@@ -139,7 +174,8 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     else if (pps < 60) interval = 2;
     else if (pps > 120) interval = 0.5;
 
-    const maxTime = duration || 30;
+    const maxItemEnd = items.length > 0 ? Math.max(...items.map(it => it.end || 0)) : 0;
+    const maxTime = Math.max(duration || 0, maxItemEnd, 30) * 1.05;
     for (let t = 0; t <= maxTime; t += interval) {
       const x = contentLeft + t * pps - sx;
       if (x < contentLeft - 10 || x > canvasW + 10) continue;
@@ -335,6 +371,35 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       ctx.lineTo(phX, 10);
       ctx.closePath();
       ctx.fill();
+    }
+
+    // ── Snap guide line ──
+    const snapLine = useTimelineStore.getState().snapLine;
+    if (snapLine && isDragging) {
+      const snapX = contentLeft + snapLine.time * pps - sx;
+      if (snapX >= contentLeft && snapX <= canvasW) {
+        ctx.save();
+        ctx.strokeStyle = '#00D4FF';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 0.9;
+        ctx.beginPath();
+        ctx.moveTo(snapX, RULER_HEIGHT);
+        ctx.lineTo(snapX, canvasH);
+        ctx.stroke();
+
+        // Small diamond indicator at top
+        ctx.fillStyle = '#00D4FF';
+        ctx.beginPath();
+        ctx.moveTo(snapX, RULER_HEIGHT - 1);
+        ctx.lineTo(snapX - 4, RULER_HEIGHT + 5);
+        ctx.lineTo(snapX, RULER_HEIGHT + 11);
+        ctx.lineTo(snapX + 4, RULER_HEIGHT + 5);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.restore();
+      }
     }
 
     // ── Hover indicator ──
@@ -571,16 +636,41 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       } else if (dragInfo.type === 'trim') {
         const item = items.find((i) => i.id === dragInfo.itemId);
         if (!item) return;
+        const mediaLib = useTimelineStore.getState().mediaLibrary;
+        const maxDur = getMaxItemDuration(item, mediaLib);
+        const setSnapLine = useTimelineStore.getState().setSnapLine;
+
         if (dragInfo.edge === 'left') {
-          const newStart = Math.max(0, Math.min(dragInfo.origEnd - 0.1, time));
+          let newStart = Math.max(0, Math.min(dragInfo.origEnd - 0.1, time));
+          if (maxDur < Infinity) {
+            const minStart = dragInfo.origEnd - maxDur;
+            newStart = Math.max(newStart, minStart);
+          }
+          if (snapEnabled) {
+            const snap = findSnapTarget(newStart, items, dragInfo.itemId, playhead, duration, pps);
+            if (snap) {
+              newStart = Math.max(maxDur < Infinity ? dragInfo.origEnd - maxDur : 0, snap.snappedTime);
+              setSnapLine({ time: snap.snapTarget });
+            } else {
+              setSnapLine(null);
+            }
+          }
           updateItem(dragInfo.itemId, { start: newStart });
         } else {
           let newEnd = Math.max(dragInfo.origStart + 0.1, time);
-          // Clamp right edge to source media duration for video/audio items
-          const mediaLib = useTimelineStore.getState().mediaLibrary;
-          const maxDur = getMaxItemDuration(item, mediaLib);
           if (maxDur < Infinity) {
             newEnd = Math.min(newEnd, item.start + maxDur);
+          }
+          if (snapEnabled) {
+            const snap = findSnapTarget(newEnd, items, dragInfo.itemId, playhead, duration, pps);
+            if (snap) {
+              newEnd = maxDur < Infinity
+                ? Math.min(snap.snappedTime, item.start + maxDur)
+                : snap.snappedTime;
+              setSnapLine({ time: snap.snapTarget });
+            } else {
+              setSnapLine(null);
+            }
           }
           updateItem(dragInfo.itemId, { end: newEnd });
         }
@@ -589,20 +679,23 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         let newStart = Math.max(0, dragInfo.origStart + dx);
         const dur = dragInfo.origEnd - dragInfo.origStart;
 
-        // Snap
+        // Snap (both edges of the moving item)
+        const setSnapLine = useTimelineStore.getState().setSnapLine;
         if (snapEnabled) {
-          const edges = items
-            .filter((i) => i.id !== dragInfo.itemId)
-            .flatMap((i) => [i.start, i.end]);
-          edges.push(playhead);
-          for (const edge of edges) {
-            if (Math.abs((newStart - edge) * pps) < SNAP_THRESHOLD_PX) {
-              newStart = edge; break;
-            }
-            if (Math.abs((newStart + dur - edge) * pps) < SNAP_THRESHOLD_PX) {
-              newStart = edge - dur; break;
-            }
+          const snapStart = findSnapTarget(newStart, items, dragInfo.itemId, playhead, duration, pps);
+          const snapEnd = findSnapTarget(newStart + dur, items, dragInfo.itemId, playhead, duration, pps);
+
+          if (snapStart && (!snapEnd || Math.abs(snapStart.snappedTime - newStart) * pps <= Math.abs(snapEnd.snappedTime - (newStart + dur)) * pps)) {
+            newStart = snapStart.snappedTime;
+            setSnapLine({ time: snapStart.snapTarget });
+          } else if (snapEnd) {
+            newStart = snapEnd.snappedTime - dur;
+            setSnapLine({ time: snapEnd.snapTarget });
+          } else {
+            setSnapLine(null);
           }
+        } else {
+          setSnapLine(null);
         }
 
         const track = getTrackFromY(e.clientY);
@@ -628,6 +721,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       if (dragInfo.type === 'move' || dragInfo.type === 'trim') {
         useTimelineStore.temporal.getState().resume();
       }
+      useTimelineStore.getState().setSnapLine(null);
       setIsDragging(false);
       setDragInfo(null);
     };
@@ -795,11 +889,15 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         <button
           className="ve-btn"
           onClick={() => {
-            // Fit entire duration in view
+            // Fit entire content extent in view
             const canvas = canvasRef.current;
-            if (canvas && duration > 0) {
+            if (canvas) {
+              const maxEnd = items.length > 0
+                ? Math.max(...items.map(it => it.end || 0))
+                : duration || 30;
+              const fitDuration = maxEnd * 1.05 || 30;
               const availableWidth = canvas.getBoundingClientRect().width - LABEL_WIDTH;
-              const fitZoom = Math.max(0.01, availableWidth / (duration * basePPS));
+              const fitZoom = Math.max(0.01, availableWidth / (fitDuration * basePPS));
               setZoom(fitZoom);
               setScrollX(0);
             }
