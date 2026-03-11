@@ -588,16 +588,14 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     }
 
     // Playhead grab: check if click is near the playhead line or handle.
-    // The playhead is selectable along its entire vertical extent, and
-    // has a generous grab zone in the ruler area (triangle handle).
+    // Only grab the playhead directly from the ruler area (triangle handle).
+    // Clicks on items near the playhead should select the item, not grab the playhead.
     const playheadPixelX = rect.left + LABEL_WIDTH + playheadRef.current * ppsRef.current - scrollX;
     const mouseY = e.clientY - rect.top;
     const distToPlayhead = Math.abs(e.clientX - playheadPixelX);
     const isInRuler = mouseY <= RULER_HEIGHT + 8;
-    // Wider grab zone in ruler (triangle handle), narrower along the line
-    const grabThreshold = isInRuler ? PLAYHEAD_GRAB_WIDTH : Math.max(PLAYHEAD_GRAB_WIDTH / 2, 8);
-    if (distToPlayhead <= grabThreshold) {
-      // Grab the playhead directly
+    if (isInRuler && distToPlayhead <= PLAYHEAD_GRAB_WIDTH) {
+      // Grab the playhead directly from the ruler
       const time = getTimeFromX(e.clientX);
       setPlayhead(time);
       onSeek?.(time);
@@ -672,14 +670,22 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         });
       }
     } else {
-      // Click on empty area: seek
+      // No item hit — check if near playhead line for grab, otherwise seek
       const time = getTimeFromX(e.clientX);
-      setPlayhead(time);
-      setSelectedItemId(null);
-      onSeek?.(time);
-
-      setIsDragging(true);
-      setDragInfo({ type: 'scrub', startX: e.clientX });
+      if (!isInRuler && distToPlayhead <= Math.max(PLAYHEAD_GRAB_WIDTH / 2, 8)) {
+        // Grab the playhead line directly
+        setPlayhead(time);
+        onSeek?.(time);
+        setIsDragging(true);
+        setDragInfo({ type: 'scrub', startX: e.clientX });
+      } else {
+        // Click on empty area: seek + deselect
+        setPlayhead(time);
+        setSelectedItemId(null);
+        onSeek?.(time);
+        setIsDragging(true);
+        setDragInfo({ type: 'scrub', startX: e.clientX });
+      }
     }
   }, [hitTestItem, getTimeFromX, setPlayhead, setSelectedItemId, setSelectedItemIds, toggleSelectedItem, onSeek, activeTool, splitItem, spaceHeld, scrollX, onItemSelect, tracks, items, selectedItemIds]);
 
@@ -837,12 +843,11 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       return;
     }
 
-    // Check if hovering near the playhead line or handle for grab cursor
+    // Check if hovering near the playhead handle in the ruler area for grab cursor
     const phPixelX = rect.left + LABEL_WIDTH + playhead * pps - scrollX;
     const mouseY = e.clientY - rect.top;
     const isInRulerArea = mouseY <= RULER_HEIGHT + 8;
-    const phGrabThreshold = isInRulerArea ? PLAYHEAD_GRAB_WIDTH : Math.max(PLAYHEAD_GRAB_WIDTH / 2, 8);
-    if (Math.abs(e.clientX - phPixelX) <= phGrabThreshold) {
+    if (isInRulerArea && Math.abs(e.clientX - phPixelX) <= PLAYHEAD_GRAB_WIDTH) {
       canvas.style.cursor = 'col-resize';
       return;
     }
@@ -850,6 +855,9 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     const hit = hitTestItem(e.clientX, e.clientY);
     if (hit) {
       canvas.style.cursor = hit.edge === 'left' || hit.edge === 'right' ? 'col-resize' : 'grab';
+    } else if (!isInRulerArea && Math.abs(e.clientX - phPixelX) <= Math.max(PLAYHEAD_GRAB_WIDTH / 2, 8)) {
+      // Show col-resize cursor on the playhead line outside ruler when no item is under cursor
+      canvas.style.cursor = 'col-resize';
     } else {
       canvas.style.cursor = 'pointer';
     }
