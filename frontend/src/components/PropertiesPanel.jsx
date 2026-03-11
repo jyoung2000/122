@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState, useRef } from 'react';
-import useTimelineStore from '../stores/timelineStore';
+import useTimelineStore, { getMaxItemDuration } from '../stores/timelineStore';
 import {
   loadPresetsForType,
   savePreset,
@@ -433,6 +433,7 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
   const tracks = useTimelineStore((s) => s.tracks);
   const updateItem = useTimelineStore((s) => s.updateItem);
   const removeItem = useTimelineStore((s) => s.removeItem);
+  const mediaLibrary = useTimelineStore((s) => s.mediaLibrary);
   const [expandedSections, setExpandedSections] = useState({});
 
   const item = useMemo(
@@ -543,7 +544,7 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
         <label className="ve-properties__label">Timing</label>
         <div className="ve-properties__row">
           <NumField label="Start" value={parseFloat(item.start.toFixed(2))} min={0} max={item.end - 0.1} step={0.01} onChange={(v) => update('start', v)} />
-          <NumField label="End" value={parseFloat(item.end.toFixed(2))} min={item.start + 0.1} max={9999} step={0.01} onChange={(v) => update('end', v)} />
+          <NumField label="End" value={parseFloat(item.end.toFixed(2))} min={item.start + 0.1} max={item.start + getMaxItemDuration(item, mediaLibrary)} step={0.01} onChange={(v) => update('end', v)} />
           <div className="ve-properties__field">
             <span className="ve-properties__field-label">Duration</span>
             <span className="ve-properties__field-value">{formatTime(duration)}</span>

@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react';
-import useTimelineStore from '../stores/timelineStore';
+import useTimelineStore, { getMaxItemDuration } from '../stores/timelineStore';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const TRACK_HEIGHT = 64;
@@ -575,7 +575,13 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
           const newStart = Math.max(0, Math.min(dragInfo.origEnd - 0.1, time));
           updateItem(dragInfo.itemId, { start: newStart });
         } else {
-          const newEnd = Math.max(dragInfo.origStart + 0.1, time);
+          let newEnd = Math.max(dragInfo.origStart + 0.1, time);
+          // Clamp right edge to source media duration for video/audio items
+          const mediaLib = useTimelineStore.getState().mediaLibrary;
+          const maxDur = getMaxItemDuration(item, mediaLib);
+          if (maxDur < Infinity) {
+            newEnd = Math.min(newEnd, item.start + maxDur);
+          }
           updateItem(dragInfo.itemId, { end: newEnd });
         }
       } else if (dragInfo.type === 'move') {

@@ -47,6 +47,20 @@ function findCompatibleTrack(tracks, itemType) {
   return tracks.find((t) => isTrackCompatible(itemType, t.type)) || null;
 }
 
+/**
+ * Compute the maximum allowed duration for a video/audio item based on its
+ * source media duration and current trimStart. Non-media items return Infinity.
+ */
+export function getMaxItemDuration(item, mediaLibrary) {
+  if (item.type !== 'video' && item.type !== 'audio') return Infinity;
+  if (!item.mediaRef) return Infinity;
+  const media = mediaLibrary.find(m => m.id === item.mediaRef);
+  if (!media || !media.duration || media.duration <= 0) return Infinity;
+  const trimStart = item.trimStart || 0;
+  const maxDur = media.duration - trimStart;
+  return maxDur > 0 ? maxDur : Infinity;
+}
+
 let _itemIdCounter = 1;
 const nextItemId = () => `item-${_itemIdCounter++}`;
 const nextMediaId = () => `media-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -273,6 +287,14 @@ const useTimelineStore = create(
           }
         }
         Object.assign(item, updates);
+        // Clamp end so video/audio items never exceed source media duration
+        const maxDur = getMaxItemDuration(item, state.mediaLibrary);
+        if (maxDur < Infinity) {
+          const maxEnd = item.start + maxDur;
+          if (item.end > maxEnd) {
+            item.end = maxEnd;
+          }
+        }
       }),
 
       updateItemWithSnapshot: (itemId, updates) => set((state) => {
@@ -362,6 +384,14 @@ const useTimelineStore = create(
           start: item.end,
           end: item.end + dur,
         };
+        // Clamp duplicated video/audio items to source media duration
+        const maxDur = getMaxItemDuration(clone, state.mediaLibrary);
+        if (maxDur < Infinity) {
+          const maxEnd = clone.start + maxDur;
+          if (clone.end > maxEnd) {
+            clone.end = maxEnd;
+          }
+        }
         state.items.push(clone);
         state.selectedItemId = newId;
         state.selectedItemIds = [newId];
