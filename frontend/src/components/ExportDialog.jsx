@@ -145,6 +145,32 @@ export default function ExportDialog({
         setError(`Warning: ${overlays.warnings.length} overlay(s) skipped from export — media files not yet uploaded. The export will proceed without them.`);
       }
 
+      // Diagnostic logging: full export payload for debugging overlay/settings issues
+      console.log('[ExportDialog] Export payload:', JSON.stringify({
+        clip_id: exportPayload.clip_id,
+        start: exportPayload.start,
+        end: exportPayload.end,
+        aspect_ratio: exportPayload.aspect_ratio,
+        subtitles_enabled: exportPayload.subtitles_enabled,
+        subtitle_settings: exportPayload.subtitle_settings ? 'YES' : 'NO',
+        video_effects: exportPayload.video_effects ? 'YES' : 'NO',
+        volume: exportPayload.volume,
+        speed: exportPayload.speed,
+        trim: [exportPayload.trim_start_offset || 0, exportPayload.trim_end_offset || 0],
+        segments: exportPayload.segments?.length || 0,
+        text_overlays: exportPayload.text_overlays?.length || 0,
+        image_overlays: exportPayload.image_overlays?.length || 0,
+        shape_overlays: exportPayload.shape_overlays?.length || 0,
+        audio_overlays: exportPayload.audio_overlays?.length || 0,
+        timelineItems_total: timelineItems.length,
+        timelineItems_types: [...new Set(timelineItems.map(it => it.type))],
+      }));
+      if (exportPayload.text_overlays?.length) {
+        for (const t of exportPayload.text_overlays) {
+          console.log(`[ExportDialog] Text overlay: "${(t.text || '').slice(0, 30)}" at (${t.x}%, ${t.y}%) t=${t.start_time}-${t.end_time}s font=${t.font_family}`);
+        }
+      }
+
       if (onServerExport) {
         onServerExport(exportPayload);
       } else if (jobId && clipId) {

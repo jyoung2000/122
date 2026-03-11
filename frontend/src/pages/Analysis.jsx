@@ -16,7 +16,7 @@ import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
 import useTimelineStore from '../stores/timelineStore';
-import { buildOverlayPayload, buildVideoEffectsPayload } from '../utils/buildExportPayload';
+import { buildOverlayPayload, buildVideoEffectsPayload, mapSubtitleSettings } from '../utils/buildExportPayload';
 
 // Speaker color palette (must match SubtitleOverlay / ClipSettingsPanel / VideoEditor)
 const DEFAULT_SPEAKER_PALETTE = ['#00D9FF', '#F59E0B', '#10B981', '#A78BFA', '#EF4444', '#EC4899'];
@@ -751,31 +751,7 @@ export default function Analysis() {
       exportBody.subtitles_enabled = needsSubtitles;
       exportBody.global_subtitles_enabled = globalSubsOn;
       if (needsSubtitles) {
-        exportBody.subtitle_settings = {
-          font: cs.subtitleFont || 'DM Sans',
-          size: cs.subtitleSize ?? 30,
-          font_weight: cs.subtitleFontWeight || 'bold',
-          font_color: cs.subtitleFontColor || '#FFFFFF',
-          position: cs.subtitlePosition || 'bottom',
-          speaker_colors: cs.speakerColors || {},
-          use_speaker_colors: cs.useSpeakerColors ?? true,
-          background_enabled: cs.subtitleBgEnabled ?? false,
-          background_color: cs.subtitleBgColor || '#000000',
-          background_opacity: cs.subtitleBgOpacity ?? 75,
-          background_radius: cs.subtitleBgRadius ?? 0,
-          outline_color: cs.subtitleOutlineColor || '#000000',
-          outline_opacity: cs.subtitleOutlineOpacity ?? 100,
-          outline_width: cs.subtitleOutlineWidth ?? 2,
-          show_speaker_labels: cs.showSpeakerLabels ?? false,
-          max_width: cs.subtitleMaxWidth ?? 90,
-          offset_v: cs.subtitleOffsetV ?? 4,
-          max_words: cs.subtitleMaxWords ?? 0,
-          active_word_enabled: cs.activeWordEnabled ?? false,
-          active_word_color: cs.activeWordColor || '#FFD700',
-          active_word_outline_color: cs.activeWordOutlineColor || '#000000',
-          active_word_bg_color: cs.activeWordBgColor || '#000000',
-          active_word_bg_opacity: cs.activeWordBgOpacity ?? 0,
-        };
+        exportBody.subtitle_settings = mapSubtitleSettings(cs);
       }
     }
     // Include VideoEditor trim/volume/speed/segments params
@@ -794,40 +770,8 @@ export default function Analysis() {
       }));
     }
     // Include multi-track editor video effects + transform so export matches preview
-    const videoItem = timelineItems.find(it => it.type === 'video');
-    if (videoItem) {
-      const fx = videoItem.effects || {};
-      const pos = videoItem.position || {};
-      const sz = videoItem.size || {};
-      const rot = videoItem.transform?.rotation || 0;
-      const fadeIn = videoItem.fadeIn || 0;
-      const fadeOut = videoItem.fadeOut || 0;
-      const hasEffects = (fx.brightness || 0) !== 0 || (fx.contrast || 0) !== 0 ||
-        (fx.saturation || 0) !== 0 || (fx.blur || 0) > 0 ||
-        (fx.hueRotate || 0) > 0 || (fx.sepia || 0) > 0 ||
-        (videoItem.opacity ?? 1) < 1;
-      const hasTransform = (pos.x != null && pos.x !== 50) || (pos.y != null && pos.y !== 50) ||
-        (sz.w != null && sz.w !== 100) || (sz.h != null && sz.h !== 100) ||
-        rot !== 0 || fadeIn > 0 || fadeOut > 0;
-      if (hasEffects || hasTransform) {
-        exportBody.video_effects = {
-          brightness: fx.brightness || 0,
-          contrast: fx.contrast || 0,
-          saturation: fx.saturation || 0,
-          blur: fx.blur || 0,
-          hue_rotate: fx.hueRotate || 0,
-          sepia: fx.sepia || 0,
-          opacity: videoItem.opacity ?? 1,
-          position_x: pos.x ?? 50,
-          position_y: pos.y ?? 50,
-          width: sz.w ?? 100,
-          height: sz.h ?? 100,
-          rotation: rot,
-          fade_in: fadeIn,
-          fade_out: fadeOut,
-        };
-      }
-    }
+    const videoEffects = buildVideoEffectsPayload(timelineItems);
+    if (videoEffects) exportBody.video_effects = videoEffects;
 
     // Build overlay arrays via shared utility (consistent filtering + validation)
     const overlays = buildOverlayPayload({
@@ -842,6 +786,24 @@ export default function Analysis() {
     if (overlays.warnings.length > 0) {
       for (const w of overlays.warnings) console.warn(`[Export] ${w}`);
     }
+
+    // Diagnostic logging: full export payload for debugging overlay/settings issues
+    console.log('[Analysis Export] clip:', clip.id, 'payload:', JSON.stringify({
+      aspect_ratio: exportBody.aspect_ratio,
+      subtitles_enabled: exportBody.subtitles_enabled,
+      subtitle_settings: exportBody.subtitle_settings ? 'YES' : 'NO',
+      video_effects: exportBody.video_effects ? 'YES' : 'NO',
+      volume: exportBody.volume,
+      speed: exportBody.speed,
+      trim: [exportBody.trim_start_offset || 0, exportBody.trim_end_offset || 0],
+      segments: exportBody.segments?.length || 0,
+      text_overlays: exportBody.text_overlays?.length || 0,
+      image_overlays: exportBody.image_overlays?.length || 0,
+      shape_overlays: exportBody.shape_overlays?.length || 0,
+      audio_overlays: exportBody.audio_overlays?.length || 0,
+      timelineItems_total: timelineItems.length,
+      timelineItems_types: [...new Set(timelineItems.map(it => it.type))],
+    }));
 
     encoding.startExport(jobId, clip.id, clip.title || `Clip ${clip.id}`, exportBody);
     showToast(`Exporting "${clip.title || `Clip ${clip.id}`}" at ${quality}...`, 'info');
@@ -859,31 +821,7 @@ export default function Analysis() {
     body.subtitles_enabled = fvNeedsSubtitles;
     body.global_subtitles_enabled = fvGlobalSubsOn;
     if (fvNeedsSubtitles) {
-      body.subtitle_settings = {
-        font: cs.subtitleFont || 'DM Sans',
-        size: cs.subtitleSize ?? 30,
-        font_weight: cs.subtitleFontWeight || 'bold',
-        font_color: cs.subtitleFontColor || '#FFFFFF',
-        position: cs.subtitlePosition || 'bottom',
-        speaker_colors: cs.speakerColors || {},
-        use_speaker_colors: cs.useSpeakerColors ?? true,
-        background_enabled: cs.subtitleBgEnabled ?? false,
-        background_color: cs.subtitleBgColor || '#000000',
-        background_opacity: cs.subtitleBgOpacity ?? 75,
-        background_radius: cs.subtitleBgRadius ?? 0,
-        outline_color: cs.subtitleOutlineColor || '#000000',
-        outline_opacity: cs.subtitleOutlineOpacity ?? 100,
-        outline_width: cs.subtitleOutlineWidth ?? 2,
-        show_speaker_labels: cs.showSpeakerLabels ?? false,
-        max_width: cs.subtitleMaxWidth ?? 90,
-        offset_v: cs.subtitleOffsetV ?? 4,
-        max_words: cs.subtitleMaxWords ?? 0,
-        active_word_enabled: cs.activeWordEnabled ?? false,
-        active_word_color: cs.activeWordColor || '#FFD700',
-        active_word_outline_color: cs.activeWordOutlineColor || '#000000',
-        active_word_bg_color: cs.activeWordBgColor || '#000000',
-        active_word_bg_opacity: cs.activeWordBgOpacity ?? 0,
-      };
+      body.subtitle_settings = mapSubtitleSettings(cs);
     }
     // Include trim/volume/speed from VideoEditor
     if (fullVideoRange) {

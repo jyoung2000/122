@@ -10,7 +10,7 @@ import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import sanitizeJob from '../utils/sanitizeJob';
 import useTimelineStore from '../stores/timelineStore';
-import { buildOverlayPayload, buildVideoEffectsPayload } from '../utils/buildExportPayload';
+import { buildOverlayPayload, buildVideoEffectsPayload, mapSubtitleSettings } from '../utils/buildExportPayload';
 
 function formatDuration(seconds) {
   if (!seconds && seconds !== 0) return '0:00';
@@ -707,31 +707,7 @@ export default function ClipSEO() {
       global_subtitles_enabled: globalSubsOn,
     };
     if (needsSubtitles) {
-      body.subtitle_settings = {
-        font: subtitleFont,
-        size: subtitleSize,
-        font_weight: subtitleFontWeight,
-        font_color: subtitleFontColor,
-        position: subtitlePosition,
-        speaker_colors: speakerColors,
-        use_speaker_colors: useSpeakerColors,
-        background_enabled: subtitleBgEnabled,
-        background_color: subtitleBgColor,
-        background_opacity: subtitleBgOpacity,
-        background_radius: subtitleBgRadius,
-        outline_color: subtitleOutlineColor,
-        outline_opacity: subtitleOutlineOpacity,
-        outline_width: subtitleOutlineWidth,
-        show_speaker_labels: showSpeakerLabels,
-        max_width: subtitleMaxWidth,
-        offset_v: subtitleOffsetV,
-        max_words: subtitleMaxWords,
-        active_word_enabled: activeWordEnabled,
-        active_word_color: activeWordColor,
-        active_word_outline_color: activeWordOutlineColor,
-        active_word_bg_color: activeWordBgColor,
-        active_word_bg_opacity: activeWordBgOpacity,
-      };
+      body.subtitle_settings = mapSubtitleSettings(clipSettings);
     }
     // Include VideoEditor trim/volume/speed/segments params
     if (editorTrim.trimStart > 0) body.trim_start_offset = editorTrim.trimStart;
@@ -749,40 +725,9 @@ export default function ClipSEO() {
       }));
     }
     // Include multi-track editor video effects + transform so export matches preview
-    const videoItem = timelineItems.find(it => it.type === 'video');
-    if (videoItem) {
-      const fx = videoItem.effects || {};
-      const pos = videoItem.position || {};
-      const sz = videoItem.size || {};
-      const rot = videoItem.transform?.rotation || 0;
-      const fadeIn = videoItem.fadeIn || 0;
-      const fadeOut = videoItem.fadeOut || 0;
-      const hasEffects = (fx.brightness || 0) !== 0 || (fx.contrast || 0) !== 0 ||
-        (fx.saturation || 0) !== 0 || (fx.blur || 0) > 0 ||
-        (fx.hueRotate || 0) !== 0 || (fx.sepia || 0) > 0 ||
-        (videoItem.opacity ?? 1) < 1;
-      const hasTransform = (pos.x != null && pos.x !== 50) || (pos.y != null && pos.y !== 50) ||
-        (sz.w != null && sz.w !== 100) || (sz.h != null && sz.h !== 100) ||
-        rot !== 0 || fadeIn > 0 || fadeOut > 0;
-      if (hasEffects || hasTransform) {
-        body.video_effects = {
-          brightness: fx.brightness || 0,
-          contrast: fx.contrast || 0,
-          saturation: fx.saturation || 0,
-          blur: fx.blur || 0,
-          hue_rotate: fx.hueRotate || 0,
-          sepia: fx.sepia || 0,
-          opacity: videoItem.opacity ?? 1,
-          position_x: pos.x ?? 50,
-          position_y: pos.y ?? 50,
-          width: sz.w ?? 100,
-          height: sz.h ?? 100,
-          rotation: rot,
-          fade_in: fadeIn,
-          fade_out: fadeOut,
-        };
-      }
-    }
+    const videoEffects = buildVideoEffectsPayload(timelineItems);
+    if (videoEffects) body.video_effects = videoEffects;
+
     // Build overlay arrays via shared utility (consistent filtering + validation)
     const overlays = buildOverlayPayload({
       timelineItems,

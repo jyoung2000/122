@@ -8,7 +8,7 @@ import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
 import sanitizeJob, { sanitizeSubtitleSettings } from '../utils/sanitizeJob';
 import useTimelineStore from '../stores/timelineStore';
-import { buildOverlayPayload, buildVideoEffectsPayload } from '../utils/buildExportPayload';
+import { buildOverlayPayload, buildVideoEffectsPayload, mapSubtitleSettings } from '../utils/buildExportPayload';
 
 function formatDuration(seconds) {
   if (!seconds) return '-';
@@ -822,71 +822,15 @@ export default function ViralClips() {
     body.subtitles_enabled = globalSubsOn;
     body.global_subtitles_enabled = globalSubsOn;
     if (globalSubsOn) {
-      body.subtitle_settings = {
-        font: cs.subtitleFont || 'DM Sans',
-        size: cs.subtitleSize ?? 30,
-        font_weight: cs.subtitleFontWeight || 'bold',
-        font_color: cs.subtitleFontColor || '#FFFFFF',
-        position: cs.subtitlePosition || 'bottom',
-        speaker_colors: cs.speakerColors || {},
-        use_speaker_colors: cs.useSpeakerColors ?? true,
-        background_enabled: cs.subtitleBgEnabled ?? false,
-        background_color: cs.subtitleBgColor || '#000000',
-        background_opacity: cs.subtitleBgOpacity ?? 75,
-        background_radius: cs.subtitleBgRadius ?? 0,
-        outline_color: cs.subtitleOutlineColor || '#000000',
-        outline_opacity: cs.subtitleOutlineOpacity ?? 100,
-        outline_width: cs.subtitleOutlineWidth ?? 2,
-        show_speaker_labels: cs.showSpeakerLabels ?? false,
-        max_width: cs.subtitleMaxWidth ?? 90,
-        offset_v: cs.subtitleOffsetV ?? 4,
-        max_words: cs.subtitleMaxWords ?? 0,
-        active_word_enabled: cs.activeWordEnabled ?? false,
-        active_word_color: cs.activeWordColor || '#FFD700',
-        active_word_outline_color: cs.activeWordOutlineColor || '#000000',
-        active_word_bg_color: cs.activeWordBgColor || '#000000',
-        active_word_bg_opacity: cs.activeWordBgOpacity ?? 0,
-      };
+      body.subtitle_settings = mapSubtitleSettings(cs);
     }
     // Include playback volume/speed if non-default
     if (cs.playbackVolume != null && cs.playbackVolume !== 100) body.volume = cs.playbackVolume / 100;
     if (cs.playbackSpeed != null && cs.playbackSpeed !== 1.0) body.speed = cs.playbackSpeed;
 
     // Include multi-track editor video effects + transform so export matches preview
-    const videoItem = timelineItems.find(it => it.type === 'video');
-    if (videoItem) {
-      const fx = videoItem.effects || {};
-      const pos = videoItem.position || {};
-      const sz = videoItem.size || {};
-      const rot = videoItem.transform?.rotation || 0;
-      const fadeIn = videoItem.fadeIn || 0;
-      const fadeOut = videoItem.fadeOut || 0;
-      const hasEffects = (fx.brightness || 0) !== 0 || (fx.contrast || 0) !== 0 ||
-        (fx.saturation || 0) !== 0 || (fx.blur || 0) > 0 ||
-        (fx.hueRotate || 0) !== 0 || (fx.sepia || 0) > 0 ||
-        (videoItem.opacity ?? 1) < 1;
-      const hasTransform = (pos.x != null && pos.x !== 50) || (pos.y != null && pos.y !== 50) ||
-        (sz.w != null && sz.w !== 100) || (sz.h != null && sz.h !== 100) ||
-        rot !== 0 || fadeIn > 0 || fadeOut > 0;
-      if (hasEffects || hasTransform) {
-        body.video_effects = {
-          brightness: fx.brightness || 0,
-          contrast: fx.contrast || 0,
-          saturation: fx.saturation || 0,
-          blur: fx.blur || 0,
-          hue_rotate: fx.hueRotate || 0,
-          sepia: fx.sepia || 0,
-          opacity: videoItem.opacity ?? 1,
-          position_x: pos.x ?? 50,
-          position_y: pos.y ?? 50,
-          width: sz.w ?? 100,
-          height: sz.h ?? 100,
-          rotation: rot,
-          fade_in: fadeIn,
-          fade_out: fadeOut,
-        };
-      }
-    }
+    const videoEffects = buildVideoEffectsPayload(timelineItems);
+    if (videoEffects) body.video_effects = videoEffects;
 
     // Build overlay arrays via shared utility (consistent filtering + validation)
     const overlays = buildOverlayPayload({
@@ -901,6 +845,18 @@ export default function ViralClips() {
     if (overlays.warnings.length > 0) {
       for (const w of overlays.warnings) console.warn(`[Export] ${w}`);
     }
+
+    // Diagnostic logging: full export payload for debugging overlay/settings issues
+    console.log('[ViralClips Export] clip:', clip.id, 'payload:', JSON.stringify({
+      aspect_ratio: body.aspect_ratio,
+      subtitles_enabled: body.subtitles_enabled,
+      subtitle_settings: body.subtitle_settings ? 'YES' : 'NO',
+      video_effects: body.video_effects ? 'YES' : 'NO',
+      text_overlays: body.text_overlays?.length || 0,
+      image_overlays: body.image_overlays?.length || 0,
+      shape_overlays: body.shape_overlays?.length || 0,
+      audio_overlays: body.audio_overlays?.length || 0,
+    }));
 
     encoding.startExport(jobId, clip.id, clip.title || `Clip ${clip.id}`, body);
     showToast(`Exporting "${clip.title || `Clip ${clip.id}`}" at ${quality}...`, 'info');

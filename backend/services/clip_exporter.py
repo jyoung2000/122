@@ -3240,14 +3240,34 @@ def _resolve_font_path(font_family: str, font_weight: int = 400) -> str:
         if name.lower() == font_family.lower():
             if os.path.isfile(path):
                 return path
-    # Check custom uploaded fonts
-    if os.path.isdir(_CUSTOM_FONTS_DIR):
-        for fname in os.listdir(_CUSTOM_FONTS_DIR):
-            base = os.path.splitext(fname)[0]
-            if base.lower() == font_family.lower().replace(" ", ""):
-                fpath = os.path.join(_CUSTOM_FONTS_DIR, fname)
-                if os.path.isfile(fpath):
-                    return fpath
+    # Check custom uploaded fonts in multiple directories
+    _font_search_dirs = [_CUSTOM_FONTS_DIR]
+    # Also check job-specific font uploads if job_id context is available
+    for fdir in _font_search_dirs:
+        if os.path.isdir(fdir):
+            normalized_family = font_family.lower().replace(" ", "")
+            for fname in os.listdir(fdir):
+                base = os.path.splitext(fname)[0]
+                # Match by normalized name (case-insensitive, no spaces)
+                if base.lower().replace(" ", "") == normalized_family:
+                    fpath = os.path.join(fdir, fname)
+                    if os.path.isfile(fpath):
+                        logger.info("Custom font resolved: '%s' → %s", font_family, fpath)
+                        return fpath
+                # Also match bold variants: "FontName-Bold" or "FontNameBold"
+                if is_bold and (
+                    base.lower().replace(" ", "") == f"{normalized_family}-bold"
+                    or base.lower().replace(" ", "") == f"{normalized_family}bold"
+                ):
+                    fpath = os.path.join(fdir, fname)
+                    if os.path.isfile(fpath):
+                        logger.info("Custom bold font resolved: '%s' (weight=%d) → %s", font_family, font_weight, fpath)
+                        return fpath
+    logger.warning(
+        "Font '%s' (weight=%d) not found in built-in maps or custom dirs (%s) — "
+        "falling back to default: %s",
+        font_family, font_weight, _CUSTOM_FONTS_DIR, _DEFAULT_FONT,
+    )
     return _DEFAULT_FONT
 
 
@@ -3286,6 +3306,19 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
         if isinstance(font_weight, str):
             font_weight = 700 if font_weight.lower() == "bold" else 400
         font_path = _resolve_font_path(font_family, font_weight=font_weight)
+
+        # Validate font file exists — fallback to default if missing
+        if not os.path.isfile(font_path):
+            logger.error(
+                "FONT NOT FOUND: %s (family='%s', weight=%d) — text overlay %d will use fallback",
+                font_path, font_family, font_weight, i + 1,
+            )
+            warnings.append(f"Text overlay {i+1}: font '{font_family}' not found, using default font")
+            font_path = _DEFAULT_FONT
+            if not os.path.isfile(font_path):
+                logger.error("FALLBACK FONT ALSO MISSING: %s — skipping text overlay %d", font_path, i + 1)
+                warnings.append(f"Text overlay {i+1}: no fonts available — skipped entirely")
+                continue
 
         outline_width = overlay.get("outline_width", 0)
         outline_color = overlay.get("outline_color", "#000000")
@@ -3513,7 +3546,11 @@ async def _render_shape_to_png(shape: dict, video_width: int, video_height: int,
             return None
 
         if os.path.isfile(png_path):
-            logger.info("Rendered shape %d (%s) to %s (%dx%d)", idx, shape_type, png_path, px_w, px_h)
+            file_size = os.path.getsize(png_path)
+            logger.info("Rendered shape %d (%s) to %s (%dx%d, %d bytes)", idx, shape_type, png_path, px_w, px_h, file_size)
+            if file_size == 0:
+                logger.warning("Shape %d (%s) produced empty PNG (0 bytes): %s", idx, shape_type, png_path)
+                return None
             return png_path
         else:
             logger.warning("Shape %d (%s) produced no output: %s", idx, shape_type, png_path)
@@ -3560,9 +3597,20 @@ def _build_image_overlay_data(
         src = overlay.get("src", "")
         img_path = _resolve_media_path(src, job_id)
         if not img_path:
-            logger.warning("Image overlay %d: src '%s' could not be resolved — SKIPPED", i, src[:80] if src else "(empty)")
-            warnings.append(f"Image overlay {i+1}: source file not found ({os.path.basename(src) if src else 'unknown'})")
+            # Log detailed resolution failure for debugging
+            basename = os.path.basename(src) if src else ""
+            tried_paths = []
+            if src:
+                tried_paths.append(f"/data/uploads/{job_id}/media/{basename}")
+                tried_paths.append(f"/data/uploads/_library/media/{basename}")
+            logger.warning(
+                "Image overlay %d: src '%s' could not be resolved — SKIPPED. Tried paths: %s",
+                i, src[:80] if src else "(empty)", tried_paths,
+            )
+            warnings.append(f"Image overlay {i+1}: source file not found ({basename or 'unknown'})")
             continue
+        else:
+            logger.info("Image overlay %d: src '%s' → resolved to %s", i, src[:60] if src else "(empty)", img_path)
         input_idx = base_input_idx + len(extra_args) // 2  # each image adds -i path (2 args)
         extra_args += ["-i", img_path]
         valid_overlays.append((input_idx, overlay))
@@ -3780,6 +3828,19 @@ async def export_clip(
         has_image_overlays = bool(image_overlays) and len(image_overlays) > 0
 
     needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments or has_seg_speed or has_video_effects or has_text_overlays or has_image_overlays or has_audio_overlays
+
+    # Diagnostic: log the needs_filters decision with all contributing flags
+    logger.info(
+        "EXPORT DECISION clip %s: needs_filters=%s — reasons: aspect=%s subs=%s "
+        "quality_scale=%s speed=%s volume=%s segments=%s seg_speed=%s "
+        "video_effects=%s text_overlays=%s image_overlays=%s shape_overlays=%s audio_overlays=%s",
+        clip_id, needs_filters,
+        bool(aspect_ratio), subtitles_enabled, needs_quality_scale,
+        has_speed, has_volume, has_segments, has_seg_speed,
+        has_video_effects, has_text_overlays, has_image_overlays,
+        has_shape_overlays, has_audio_overlays,
+    )
+
     filter_parts = []
     if aspect_ratio:
         filter_parts.append(f"crop to {aspect_ratio}")
