@@ -109,6 +109,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   const toggleTrackVisibility = useTimelineStore((s) => s.toggleTrackVisibility);
   const toggleTrackMute = useTimelineStore((s) => s.toggleTrackMute);
   const toggleTrackLock = useTimelineStore((s) => s.toggleTrackLock);
+  const updateTrack = useTimelineStore((s) => s.updateTrack);
   const reorderTracks = useTimelineStore((s) => s.reorderTracks);
   const resetSubtitleTimings = useTimelineStore((s) => s.resetSubtitleTimings);
   const groupItems = useTimelineStore((s) => s.groupItems);
@@ -119,6 +120,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   // Track drag-to-reorder state
   const [dragTrackIdx, setDragTrackIdx] = useState(null);
   const [dragOverTrackIdx, setDragOverTrackIdx] = useState(null);
+  const [renamingTrackId, setRenamingTrackId] = useState(null);
 
   const [isDragging, setIsDragging] = useState(false);
   const [dragInfo, setDragInfo] = useState(null);
@@ -1102,7 +1104,39 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
                     <circle cx="2" cy="5" r="1" /><circle cx="6" cy="5" r="1" />
                     <circle cx="2" cy="8" r="1" /><circle cx="6" cy="8" r="1" />
                   </svg>
-                  {TRACK_ICONS[track.type] || ''} {track.name}
+                  {TRACK_ICONS[track.type] || ''}{' '}
+                  {renamingTrackId === track.id ? (
+                    <input
+                      autoFocus
+                      defaultValue={track.name}
+                      onBlur={(e) => {
+                        const val = e.target.value.trim();
+                        if (val && val !== track.name) updateTrack(track.id, { name: val });
+                        setRenamingTrackId(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') { e.target.blur(); }
+                        else if (e.key === 'Escape') { setRenamingTrackId(null); }
+                        e.stopPropagation();
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      style={{
+                        fontSize: 10, fontWeight: 500, width: '100%',
+                        background: 'var(--ve-surface, #222)', color: 'var(--ve-text, #ccc)',
+                        border: '1px solid var(--accent, #0A84FF)', borderRadius: 2,
+                        padding: '0 2px', outline: 'none', minWidth: 0,
+                      }}
+                    />
+                  ) : (
+                    <span
+                      onDoubleClick={(e) => { e.stopPropagation(); setRenamingTrackId(track.id); }}
+                      style={{ cursor: 'text', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}
+                      title="Double-click to rename"
+                    >
+                      {track.name}
+                    </span>
+                  )}
                 </span>
                 {/* Controls row */}
                 <div style={{ display: 'flex', gap: 1 }}>
