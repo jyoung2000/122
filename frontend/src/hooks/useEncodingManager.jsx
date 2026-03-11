@@ -188,9 +188,18 @@ export function EncodingProvider({ children }) {
             // The download attribute with an explicit filename bypasses
             // Content-Disposition: attachment which can trigger save dialogs.
             const title = _completedTitle;
-            const safeName = title.replace(/[^a-zA-Z0-9_\-\s().]/g, '').trim() || 'clip';
+            // Retrieve quality from the task object (stored at startExport time)
+            let exportQuality = '1080p';
+            setTasks((prev) => {
+              const task = prev[completedExportId];
+              if (task?.exportQuality) exportQuality = task.exportQuality;
+              return prev; // no mutation
+            });
+            const qualityTag = exportQuality.toUpperCase();
+            // Allow brackets in the regex so the [QUALITY] prefix survives
+            const safeName = title.replace(/[^a-zA-Z0-9_\-\s().\[\]]/g, '').trim() || 'clip';
             const ext = (msg.download_url.split('.').pop() || 'mp4').split('?')[0];
-            const downloadName = `${safeName}.${ext}`;
+            const downloadName = `[${qualityTag}] ${safeName}.${ext}`;
             fetch(msg.download_url)
               .then((res) => res.blob())
               .then((blob) => {

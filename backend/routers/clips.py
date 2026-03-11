@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -384,7 +385,7 @@ async def export_clip_endpoint(
             await broadcast_ws(job_id, {
                 "type": "export_complete",
                 "clip_id": req.clip_id,
-                "download_url": f"/api/files/{job_id}/clips/{os.path.basename(output_path)}?t={int(time.time())}",
+                "download_url": f"/api/files/{job_id}/clips/{quote(os.path.basename(output_path))}?t={int(time.time())}",
                 "message": f"Clip {req.clip_id} exported in {elapsed}s [{req.export_quality or '1080p'}]",
                 "qa_passed": True,
             })
@@ -559,7 +560,7 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
             await broadcast_ws(job_id, {
                 "type": "export_complete",
                 "clip_id": 0,
-                "download_url": f"/api/files/{job_id}/clips/{os.path.basename(output_path)}?t={int(time.time())}",
+                "download_url": f"/api/files/{job_id}/clips/{quote(os.path.basename(output_path))}?t={int(time.time())}",
                 "message": f"Full video exported in {elapsed}s [{req.export_quality or '1080p'}]",
                 "qa_passed": True,
             })
@@ -1028,7 +1029,7 @@ async def list_clips(job_id: str):
         {
             "clip_id": c.get("clip_id"),
             "filename": c.get("filename"),
-            "download_url": f"/api/files/{job_id}/clips/{c.get('filename')}",
+            "download_url": f"/api/files/{job_id}/clips/{quote(c.get('filename', ''))}",
             "start": c.get("start"),
             "end": c.get("end"),
         }
