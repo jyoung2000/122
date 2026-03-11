@@ -129,6 +129,28 @@ export default function ClipSEO() {
   const [shortsElapsed, setShortsElapsed] = useState(0);
   const [longFormElapsed, setLongFormElapsed] = useState(0);
 
+  // Custom uploaded fonts
+  const [customFonts, setCustomFonts] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/fonts')
+      .then(r => r.ok ? r.json() : [])
+      .then(fonts => {
+        if (cancelled || !Array.isArray(fonts)) return;
+        setCustomFonts(fonts);
+        for (const f of fonts) {
+          const ruleId = `custom-font-${f.filename}`;
+          if (document.getElementById(ruleId)) continue;
+          const style = document.createElement('style');
+          style.id = ruleId;
+          style.textContent = `@font-face { font-family: '${f.name}'; src: url('${f.url}'); font-display: swap; }`;
+          document.head.appendChild(style);
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
   // Debounced save for user edits to SEO data
   const saveTimerRef = useRef(null);
   const saveClipSeo = useCallback((fields) => {
@@ -1060,6 +1082,11 @@ export default function ClipSEO() {
                     {['DM Sans', 'Montserrat', 'Open Sans', 'Roboto', 'Poppins', 'Inter', 'Nunito', 'Lato', 'Oswald', 'Playfair Display', 'Bebas Neue'].map(f => (
                       <option key={f} value={f}>{f}</option>
                     ))}
+                    {customFonts.length > 0 && (
+                      <optgroup label="Custom Fonts">
+                        {customFonts.map(f => <option key={f.name} value={f.name}>{f.name}</option>)}
+                      </optgroup>
+                    )}
                   </select>
                 </div>
                 {/* Size */}

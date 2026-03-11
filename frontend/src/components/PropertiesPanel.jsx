@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState, useRef } from 'react';
+import React, { useCallback, useMemo, useState, useRef, useEffect } from 'react';
 import useTimelineStore, { getMaxItemDuration } from '../stores/timelineStore';
 import {
   loadPresetsForType,
@@ -147,6 +147,13 @@ function SubtitleProperties({ item, update, settings, onSettingsChange }) {
               className="ve-properties__select"
             >
               {FONT_OPTIONS.map(f => <option key={f} value={f}>{f}</option>)}
+                  {customFonts.length > 0 && (
+                    <optgroup label="Custom Fonts">
+                      {customFonts.filter(f => f.name && !FONT_OPTIONS.includes(f.name)).map(f => (
+                        <option key={f.name} value={f.name}>{f.name}</option>
+                      ))}
+                    </optgroup>
+                  )}
             </select>
           </div>
           <div className="ve-properties__field">
@@ -467,6 +474,32 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
 
   const toggleSection = (name) => setExpandedSections(prev => ({ ...prev, [name]: !prev[name] }));
 
+  // Fetch custom uploaded fonts from the backend and inject @font-face rules
+  // so both the dropdown and the canvas preview can use them.
+  const [customFonts, setCustomFonts] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/fonts')
+      .then(r => r.ok ? r.json() : [])
+      .then(fonts => {
+        if (cancelled || !Array.isArray(fonts)) return;
+        setCustomFonts(fonts);
+        // Inject @font-face rules for each custom font so the browser
+        // can render them in the canvas preview and the dropdown.
+        for (const f of fonts) {
+          const ruleId = `custom-font-${f.filename}`;
+          if (document.getElementById(ruleId)) continue;
+          const style = document.createElement('style');
+          style.id = ruleId;
+          style.textContent = `@font-face { font-family: '${f.name}'; src: url('${f.url}'); font-display: swap; }`;
+          document.head.appendChild(style);
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+
   // ── Live QA: validate item type matches track and properties are correct ──
   // NOTE: This useMemo MUST be before any early returns to satisfy Rules of Hooks.
   const itemTrack = item ? tracks.find((t) => t.id === item.trackId) : null;
@@ -718,6 +751,13 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
                   className="ve-properties__select"
                 >
                   {FONT_OPTIONS.map(f => <option key={f} value={f}>{f}</option>)}
+                  {customFonts.length > 0 && (
+                    <optgroup label="Custom Fonts">
+                      {customFonts.filter(f => f.name && !FONT_OPTIONS.includes(f.name)).map(f => (
+                        <option key={f.name} value={f.name}>{f.name}</option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
               </div>
               <div className="ve-properties__field">
