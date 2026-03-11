@@ -8,6 +8,7 @@ import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
 import sanitizeJob, { sanitizeSubtitleSettings } from '../utils/sanitizeJob';
 import useTimelineStore from '../stores/timelineStore';
+import { buildOverlayPayload, buildVideoEffectsPayload } from '../utils/buildExportPayload';
 
 function formatDuration(seconds) {
   if (!seconds) return '-';
@@ -887,94 +888,18 @@ export default function ViralClips() {
       }
     }
 
-    // Include text overlays from the timeline
-    // Timeline items use clip-relative times (0-based), convert to absolute
-    const clipTextItems = timelineItems.filter(it => it.type === 'text');
-    if (clipTextItems.length > 0) {
-      body.text_overlays = clipTextItems.map(it => ({
-        text: it.textContent || '',
-        x: it.position?.x ?? 50,
-        y: it.position?.y ?? 50,
-        font_size: it.textStyle?.fontSize || 48,
-        font_color: it.textStyle?.color || '#FFFFFF',
-        font_family: it.textStyle?.fontFamily || 'sans-serif',
-        font_weight: it.textStyle?.fontWeight || 400,
-        background_color: it.textStyle?.bgColor || null,
-        outline_width: it.textStyle?.outlineWidth || 0,
-        outline_color: it.textStyle?.outlineColor || '#000000',
-        start_time: (it.start || 0) + clip.start_time,
-        end_time: (it.end || 0) + clip.start_time,
-        rotation: it.transform?.rotation || 0,
-        opacity: it.opacity ?? 1,
-        fade_in: it.fadeIn || 0,
-        fade_out: it.fadeOut || 0,
-      }));
-    }
-
-    // Include image overlays from the timeline
-    const clipImageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
-    if (clipImageItems.length > 0) {
-      body.image_overlays = clipImageItems.map(it => {
-        let src = it.src || '';
-        if (!src && it.mediaRef) {
-          const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
-          src = mediaEntry?.url || it.mediaRef;
-        }
-        return {
-          src,
-          x: it.position?.x ?? 50,
-          y: it.position?.y ?? 50,
-          width: it.size?.w ?? 30,
-          height: it.size?.h ?? 30,
-          start_time: (it.start || 0) + clip.start_time,
-          end_time: (it.end || 0) + clip.start_time,
-          opacity: it.opacity ?? 1,
-          fade_in: it.fadeIn || 0,
-          fade_out: it.fadeOut || 0,
-        };
-      });
-    }
-
-    // Include shape overlays from the timeline
-    const clipShapeItems = timelineItems.filter(it => it.type === 'shape');
-    if (clipShapeItems.length > 0) {
-      body.shape_overlays = clipShapeItems.map(it => ({
-        shape_type: it.shapeType || 'rectangle',
-        x: it.position?.x ?? 50,
-        y: it.position?.y ?? 50,
-        width: it.size?.w ?? 20,
-        height: it.size?.h ?? 20,
-        fill_color: it.shapeStyle?.fillColor || '#FF3B30',
-        stroke_color: it.shapeStyle?.strokeColor || '#FFFFFF',
-        stroke_width: it.shapeStyle?.strokeWidth || 2,
-        corner_radius: it.shapeStyle?.cornerRadius || 0,
-        start_time: (it.start || 0) + clip.start_time,
-        end_time: (it.end || 0) + clip.start_time,
-        rotation: it.transform?.rotation || 0,
-        opacity: it.opacity ?? 1,
-        fade_in: it.fadeIn || 0,
-        fade_out: it.fadeOut || 0,
-      }));
-    }
-
-    // Include audio overlays from the timeline
-    const clipAudioItems = timelineItems.filter(it => it.type === 'audio');
-    if (clipAudioItems.length > 0) {
-      body.audio_overlays = clipAudioItems.map(it => {
-        let src = it.src || '';
-        if (!src && it.mediaRef) {
-          const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
-          src = mediaEntry?.url || it.mediaRef;
-        }
-        return {
-          src,
-          start_time: (it.start || 0) + clip.start_time,
-          end_time: (it.end || 0) + clip.start_time,
-          volume: it.volume ?? 1,
-          fade_in: it.fadeIn || 0,
-          fade_out: it.fadeOut || 0,
-        };
-      });
+    // Build overlay arrays via shared utility (consistent filtering + validation)
+    const overlays = buildOverlayPayload({
+      timelineItems,
+      mediaLibrary: timelineMediaLibrary,
+      clipStart: clip.start_time,
+    });
+    if (overlays.textOverlays.length > 0) body.text_overlays = overlays.textOverlays;
+    if (overlays.imageOverlays.length > 0) body.image_overlays = overlays.imageOverlays;
+    if (overlays.shapeOverlays.length > 0) body.shape_overlays = overlays.shapeOverlays;
+    if (overlays.audioOverlays.length > 0) body.audio_overlays = overlays.audioOverlays;
+    if (overlays.warnings.length > 0) {
+      for (const w of overlays.warnings) console.warn(`[Export] ${w}`);
     }
 
     encoding.startExport(jobId, clip.id, clip.title || `Clip ${clip.id}`, body);

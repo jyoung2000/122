@@ -2,6 +2,7 @@ import React, { useState, useCallback, useRef, useMemo } from 'react';
 import ExportEngine from '../engine/ExportEngine';
 import useTimelineStore from '../stores/timelineStore';
 import { runSubtitleQA } from '../utils/subtitleQA';
+import { buildOverlayPayload, buildVideoEffectsPayload, mapSubtitleSettings } from '../utils/buildExportPayload';
 
 const QUALITY_PRESETS = [
   { id: '720p', label: '720p', w: 1280, h: 720, bitrate: 4_000_000 },
@@ -92,153 +93,56 @@ export default function ExportDialog({
         clip_id: parseInt(clipId) || 0,
         export_quality: preset.id,
         clip_title: clipTitle || undefined,
-        ...(settings || {}),
       };
 
-      // Include multi-track editor video effects + transform so export matches preview 1:1
-      const videoItem = timelineItems.find(it => it.type === 'video');
-      if (videoItem) {
-        const fx = videoItem.effects || {};
-        const pos = videoItem.position || {};
-        const sz = videoItem.size || {};
-        const rot = videoItem.transform?.rotation || 0;
-        const fadeIn = videoItem.fadeIn || 0;
-        const fadeOut = videoItem.fadeOut || 0;
-        const hasEffects = (fx.brightness || 0) !== 0 || (fx.contrast || 0) !== 0 ||
-          (fx.saturation || 0) !== 0 || (fx.blur || 0) > 0 ||
-          (fx.hueRotate || 0) > 0 || (fx.sepia || 0) > 0 ||
-          (videoItem.opacity ?? 1) < 1;
-        const hasTransform = (pos.x != null && pos.x !== 50) || (pos.y != null && pos.y !== 50) ||
-          (sz.w != null && sz.w !== 100) || (sz.h != null && sz.h !== 100) ||
-          rot !== 0 || fadeIn > 0 || fadeOut > 0;
-        if (hasEffects || hasTransform) {
-          exportPayload.video_effects = {
-            brightness: fx.brightness || 0,
-            contrast: fx.contrast || 0,
-            saturation: fx.saturation || 0,
-            blur: fx.blur || 0,
-            hue_rotate: fx.hueRotate || 0,
-            sepia: fx.sepia || 0,
-            opacity: videoItem.opacity ?? 1,
-            position_x: pos.x ?? 50,
-            position_y: pos.y ?? 50,
-            width: sz.w ?? 100,
-            height: sz.h ?? 100,
-            rotation: rot,
-            fade_in: fadeIn,
-            fade_out: fadeOut,
-          };
+      // Map camelCase clipSettings → snake_case backend fields (not a blind spread)
+      if (settings) {
+        if (settings.aspectRatio) {
+          exportPayload.aspect_ratio = settings.aspectRatio;
+        }
+        const globalSubsOn = settings.subtitlesEnabled || false;
+        exportPayload.subtitles_enabled = globalSubsOn;
+        exportPayload.global_subtitles_enabled = globalSubsOn;
+        if (globalSubsOn) {
+          exportPayload.subtitle_settings = mapSubtitleSettings(settings);
         }
       }
 
-      // Include text overlays from the timeline
-      const textItems = timelineItems.filter(it => it.type === 'text');
-      if (textItems.length > 0) {
-        exportPayload.text_overlays = textItems.map(it => ({
-          text: it.textContent || '',
-          x: it.position?.x ?? 50,
-          y: it.position?.y ?? 50,
-          font_size: it.textStyle?.fontSize || 48,
-          font_color: it.textStyle?.color || '#FFFFFF',
-          font_family: it.textStyle?.fontFamily || 'sans-serif',
-          font_weight: it.textStyle?.fontWeight || 400,
-          background_color: it.textStyle?.bgColor || null,
-          outline_width: it.textStyle?.outlineWidth || 0,
-          outline_color: it.textStyle?.outlineColor || '#000000',
-          start_time: (it.start || 0) + startTime,
-          end_time: (it.end || 0) + startTime,
-          rotation: it.transform?.rotation || 0,
-          opacity: it.opacity ?? 1,
-          fade_in: it.fadeIn || 0,
-          fade_out: it.fadeOut || 0,
+      // Pull volume, speed, trim, segments from timeline store
+      const storeState = useTimelineStore.getState();
+      if (storeState.volume !== 100) exportPayload.volume = storeState.volume / 100;
+      if (Math.abs(storeState.speed - 1.0) > 0.001) exportPayload.speed = storeState.speed;
+      if (storeState.trimStartOffset > 0) exportPayload.trim_start_offset = storeState.trimStartOffset;
+      if (storeState.trimEndOffset > 0) exportPayload.trim_end_offset = storeState.trimEndOffset;
+      if (storeState.segments?.length > 0) {
+        exportPayload.segments = storeState.segments.map(s => ({
+          start: s.start, end: s.end,
+          volume: (s.muted ? 0 : s.volume) / 100,
+          muted: s.muted,
+          subtitles_enabled: s.subtitlesEnabled,
+          subject_tracking_enabled: s.subjectTrackingEnabled !== false,
+          speed: s.speed || 1.0,
         }));
       }
 
-      // Include image overlays from the timeline
-      const imageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
-      let skippedOverlays = 0;
-      if (imageItems.length > 0) {
-        exportPayload.image_overlays = imageItems
-          .map(it => {
-            let src = it.src || '';
-            if (!src && it.mediaRef) {
-              const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
-              src = mediaEntry?.url || '';
-            }
-            // Skip items with unresolvable sources (blob URLs, empty)
-            if (!src || src.startsWith('blob:')) {
-              console.warn(`[Export] Skipping image overlay "${it.id}" — source not uploaded: ${src}`);
-              skippedOverlays++;
-              return null;
-            }
-            return {
-              src,
-              x: it.position?.x ?? 50,
-              y: it.position?.y ?? 50,
-              width: it.size?.w ?? 30,
-              height: it.size?.h ?? 30,
-              start_time: (it.start || 0) + startTime,
-              end_time: (it.end || 0) + startTime,
-              opacity: it.opacity ?? 1,
-              fade_in: it.fadeIn || 0,
-              fade_out: it.fadeOut || 0,
-            };
-          })
-          .filter(Boolean);
-      }
+      // Video effects + transform from multi-track editor
+      const videoEffects = buildVideoEffectsPayload(timelineItems);
+      if (videoEffects) exportPayload.video_effects = videoEffects;
 
-      // Include shape overlays from the timeline
-      const shapeItems = timelineItems.filter(it => it.type === 'shape');
-      if (shapeItems.length > 0) {
-        exportPayload.shape_overlays = shapeItems.map(it => ({
-          shape_type: it.shapeType || 'rectangle',
-          x: it.position?.x ?? 50,
-          y: it.position?.y ?? 50,
-          width: it.size?.w ?? 20,
-          height: it.size?.h ?? 20,
-          fill_color: it.shapeStyle?.fillColor || '#FF3B30',
-          stroke_color: it.shapeStyle?.strokeColor || '#FFFFFF',
-          stroke_width: it.shapeStyle?.strokeWidth || 2,
-          corner_radius: it.shapeStyle?.cornerRadius || 0,
-          start_time: (it.start || 0) + startTime,
-          end_time: (it.end || 0) + startTime,
-          rotation: it.transform?.rotation || 0,
-          opacity: it.opacity ?? 1,
-          fade_in: it.fadeIn || 0,
-          fade_out: it.fadeOut || 0,
-        }));
-      }
+      // Build overlay arrays via shared utility (consistent filtering + validation)
+      const overlays = buildOverlayPayload({
+        timelineItems,
+        mediaLibrary: timelineMediaLibrary,
+        clipStart: startTime,
+      });
+      if (overlays.textOverlays.length > 0) exportPayload.text_overlays = overlays.textOverlays;
+      if (overlays.imageOverlays.length > 0) exportPayload.image_overlays = overlays.imageOverlays;
+      if (overlays.shapeOverlays.length > 0) exportPayload.shape_overlays = overlays.shapeOverlays;
+      if (overlays.audioOverlays.length > 0) exportPayload.audio_overlays = overlays.audioOverlays;
 
-      // Include audio overlays from the timeline
-      const audioItems = timelineItems.filter(it => it.type === 'audio');
-      if (audioItems.length > 0) {
-        exportPayload.audio_overlays = audioItems
-          .map(it => {
-            let src = it.src || '';
-            if (!src && it.mediaRef) {
-              const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
-              src = mediaEntry?.url || '';
-            }
-            if (!src || src.startsWith('blob:')) {
-              console.warn(`[Export] Skipping audio overlay "${it.id}" — source not uploaded: ${src}`);
-              skippedOverlays++;
-              return null;
-            }
-            return {
-              src,
-              start_time: (it.start || 0) + startTime,
-              end_time: (it.end || 0) + startTime,
-              volume: it.volume ?? 1,
-              fade_in: it.fadeIn || 0,
-              fade_out: it.fadeOut || 0,
-            };
-          })
-          .filter(Boolean);
-      }
-
-      if (skippedOverlays > 0) {
-        console.warn(`[Export] ${skippedOverlays} overlay(s) skipped — media not yet uploaded or source unavailable`);
-        setError(`Warning: ${skippedOverlays} overlay(s) skipped from export — media files not yet uploaded. The export will proceed without them.`);
+      if (overlays.warnings.length > 0) {
+        for (const w of overlays.warnings) console.warn(`[Export] ${w}`);
+        setError(`Warning: ${overlays.warnings.length} overlay(s) skipped from export — media files not yet uploaded. The export will proceed without them.`);
       }
 
       if (onServerExport) {

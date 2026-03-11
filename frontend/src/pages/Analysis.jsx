@@ -16,6 +16,7 @@ import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
 import useTimelineStore from '../stores/timelineStore';
+import { buildOverlayPayload, buildVideoEffectsPayload } from '../utils/buildExportPayload';
 
 // Speaker color palette (must match SubtitleOverlay / ClipSettingsPanel / VideoEditor)
 const DEFAULT_SPEAKER_PALETTE = ['#00D9FF', '#F59E0B', '#10B981', '#A78BFA', '#EF4444', '#EC4899'];
@@ -828,95 +829,18 @@ export default function Analysis() {
       }
     }
 
-    // Include text overlays from the timeline
-    // Timeline items use clip-relative times (0-based), convert to absolute
-    const clipTextItems = timelineItems.filter(it => it.type === 'text');
-    if (clipTextItems.length > 0) {
-      exportBody.text_overlays = clipTextItems.map(it => ({
-        text: it.textContent || '',
-        x: it.position?.x ?? 50,
-        y: it.position?.y ?? 50,
-        font_size: it.textStyle?.fontSize || 48,
-        font_color: it.textStyle?.color || '#FFFFFF',
-        font_family: it.textStyle?.fontFamily || 'sans-serif',
-        font_weight: it.textStyle?.fontWeight || 400,
-        background_color: it.textStyle?.bgColor || null,
-        outline_width: it.textStyle?.outlineWidth || 0,
-        outline_color: it.textStyle?.outlineColor || '#000000',
-        start_time: (it.start || 0) + clip.start_time,
-        end_time: (it.end || 0) + clip.start_time,
-        rotation: it.transform?.rotation || 0,
-        opacity: it.opacity ?? 1,
-        fade_in: it.fadeIn || 0,
-        fade_out: it.fadeOut || 0,
-      }));
-    }
-
-    // Include image overlays from the timeline
-    const clipImageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
-    if (clipImageItems.length > 0) {
-      exportBody.image_overlays = clipImageItems.map(it => {
-        // Resolve mediaRef ID to actual URL (same as preview rendering)
-        let src = it.src || '';
-        if (!src && it.mediaRef) {
-          const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
-          src = mediaEntry?.url || it.mediaRef;
-        }
-        return {
-          src,
-          x: it.position?.x ?? 50,
-          y: it.position?.y ?? 50,
-          width: it.size?.w ?? 30,
-          height: it.size?.h ?? 30,
-          start_time: (it.start || 0) + clip.start_time,
-          end_time: (it.end || 0) + clip.start_time,
-          opacity: it.opacity ?? 1,
-          fade_in: it.fadeIn || 0,
-          fade_out: it.fadeOut || 0,
-        };
-      });
-    }
-
-    // Include shape overlays from the timeline
-    const clipShapeItems = timelineItems.filter(it => it.type === 'shape');
-    if (clipShapeItems.length > 0) {
-      exportBody.shape_overlays = clipShapeItems.map(it => ({
-        shape_type: it.shapeType || 'rectangle',
-        x: it.position?.x ?? 50,
-        y: it.position?.y ?? 50,
-        width: it.size?.w ?? 20,
-        height: it.size?.h ?? 20,
-        fill_color: it.shapeStyle?.fillColor || '#FF3B30',
-        stroke_color: it.shapeStyle?.strokeColor || '#FFFFFF',
-        stroke_width: it.shapeStyle?.strokeWidth || 2,
-        corner_radius: it.shapeStyle?.cornerRadius || 0,
-        start_time: (it.start || 0) + clip.start_time,
-        end_time: (it.end || 0) + clip.start_time,
-        rotation: it.transform?.rotation || 0,
-        opacity: it.opacity ?? 1,
-        fade_in: it.fadeIn || 0,
-        fade_out: it.fadeOut || 0,
-      }));
-    }
-
-    // Include audio overlays from the timeline
-    const clipAudioItems = timelineItems.filter(it => it.type === 'audio');
-    if (clipAudioItems.length > 0) {
-      exportBody.audio_overlays = clipAudioItems.map(it => {
-        let src = it.src || '';
-        if (!src && it.mediaRef) {
-          const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
-          src = mediaEntry?.url || it.mediaRef;
-        }
-        return {
-          src,
-          start_time: (it.start || 0) + clip.start_time,
-          end_time: (it.end || 0) + clip.start_time,
-          volume: it.volume ?? 1,
-          fade_in: it.fadeIn || 0,
-          fade_out: it.fadeOut || 0,
-        };
-      });
+    // Build overlay arrays via shared utility (consistent filtering + validation)
+    const overlays = buildOverlayPayload({
+      timelineItems,
+      mediaLibrary: timelineMediaLibrary,
+      clipStart: clip.start_time,
+    });
+    if (overlays.textOverlays.length > 0) exportBody.text_overlays = overlays.textOverlays;
+    if (overlays.imageOverlays.length > 0) exportBody.image_overlays = overlays.imageOverlays;
+    if (overlays.shapeOverlays.length > 0) exportBody.shape_overlays = overlays.shapeOverlays;
+    if (overlays.audioOverlays.length > 0) exportBody.audio_overlays = overlays.audioOverlays;
+    if (overlays.warnings.length > 0) {
+      for (const w of overlays.warnings) console.warn(`[Export] ${w}`);
     }
 
     encoding.startExport(jobId, clip.id, clip.title || `Clip ${clip.id}`, exportBody);
@@ -980,87 +904,23 @@ export default function Analysis() {
         speed: s.speed || 1.0,
       }));
     }
-    // Include multi-track editor video effects + transform so export matches preview
-    const fvVideoItem = timelineItems.find(it => it.type === 'video');
-    if (fvVideoItem) {
-      const fx = fvVideoItem.effects || {};
-      const pos = fvVideoItem.position || {};
-      const sz = fvVideoItem.size || {};
-      const rot = fvVideoItem.transform?.rotation || 0;
-      const fadeIn = fvVideoItem.fadeIn || 0;
-      const fadeOut = fvVideoItem.fadeOut || 0;
-      const hasEffects = (fx.brightness || 0) !== 0 || (fx.contrast || 0) !== 0 ||
-        (fx.saturation || 0) !== 0 || (fx.blur || 0) > 0 ||
-        (fx.hueRotate || 0) > 0 || (fx.sepia || 0) > 0 ||
-        (fvVideoItem.opacity ?? 1) < 1;
-      const hasTransform = (pos.x != null && pos.x !== 50) || (pos.y != null && pos.y !== 50) ||
-        (sz.w != null && sz.w !== 100) || (sz.h != null && sz.h !== 100) ||
-        rot !== 0 || fadeIn > 0 || fadeOut > 0;
-      if (hasEffects || hasTransform) {
-        body.video_effects = {
-          brightness: fx.brightness || 0,
-          contrast: fx.contrast || 0,
-          saturation: fx.saturation || 0,
-          blur: fx.blur || 0,
-          hue_rotate: fx.hueRotate || 0,
-          sepia: fx.sepia || 0,
-          opacity: fvVideoItem.opacity ?? 1,
-          position_x: pos.x ?? 50,
-          position_y: pos.y ?? 50,
-          width: sz.w ?? 100,
-          height: sz.h ?? 100,
-          rotation: rot,
-          fade_in: fadeIn,
-          fade_out: fadeOut,
-        };
-      }
-    }
+    // Video effects from multi-track editor
+    const fvVideoEffects = buildVideoEffectsPayload(timelineItems);
+    if (fvVideoEffects) body.video_effects = fvVideoEffects;
 
-    // Include text overlays from the timeline
-    const textItems = timelineItems.filter(it => it.type === 'text');
-    if (textItems.length > 0) {
-      body.text_overlays = textItems.map(it => ({
-        text: it.textContent || '',
-        x: it.position?.x ?? 50,
-        y: it.position?.y ?? 50,
-        font_size: it.textStyle?.fontSize || 48,
-        font_color: it.textStyle?.color || '#FFFFFF',
-        font_family: it.textStyle?.fontFamily || 'sans-serif',
-        font_weight: it.textStyle?.fontWeight || 400,
-        background_color: it.textStyle?.bgColor || null,
-        outline_width: it.textStyle?.outlineWidth || 0,
-        outline_color: it.textStyle?.outlineColor || '#000000',
-        start_time: it.start || 0,
-        end_time: it.end || 0,
-        rotation: it.transform?.rotation || 0,
-        opacity: it.opacity ?? 1,
-        fade_in: it.fadeIn || 0,
-        fade_out: it.fadeOut || 0,
-      }));
-    }
-
-    // Include image overlays from the timeline
-    const imageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
-    if (imageItems.length > 0) {
-      body.image_overlays = imageItems.map(it => {
-        let src = it.src || '';
-        if (!src && it.mediaRef) {
-          const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
-          src = mediaEntry?.url || it.mediaRef;
-        }
-        return {
-          src,
-          x: it.position?.x ?? 50,
-          y: it.position?.y ?? 50,
-          width: it.size?.w ?? 30,
-          height: it.size?.h ?? 30,
-          start_time: it.start || 0,
-          end_time: it.end || 0,
-          opacity: it.opacity ?? 1,
-          fade_in: it.fadeIn || 0,
-          fade_out: it.fadeOut || 0,
-        };
-      });
+    // Build overlay arrays via shared utility
+    // For full-video export, clipStart is 0 (timeline items are already video-relative)
+    const fvOverlays = buildOverlayPayload({
+      timelineItems,
+      mediaLibrary: timelineMediaLibrary,
+      clipStart: 0,
+    });
+    if (fvOverlays.textOverlays.length > 0) body.text_overlays = fvOverlays.textOverlays;
+    if (fvOverlays.imageOverlays.length > 0) body.image_overlays = fvOverlays.imageOverlays;
+    if (fvOverlays.shapeOverlays.length > 0) body.shape_overlays = fvOverlays.shapeOverlays;
+    if (fvOverlays.audioOverlays.length > 0) body.audio_overlays = fvOverlays.audioOverlays;
+    if (fvOverlays.warnings.length > 0) {
+      for (const w of fvOverlays.warnings) console.warn(`[Export] ${w}`);
     }
 
     encoding.startExport(jobId, 0, job.filename || 'Full Video', body, {

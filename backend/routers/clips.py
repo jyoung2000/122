@@ -254,6 +254,33 @@ async def export_clip_endpoint(
                 "message": f"Starting export for clip {req.clip_id} ({clip_dur:.1f}s) [{req.export_quality or '1080p'}]",
             })
 
+            # Pre-flight diagnostic logging
+            logger.info(
+                "EXPORT PRE-FLIGHT clip %s: text_overlays=%d, image_overlays=%d, "
+                "shape_overlays=%d, audio_overlays=%d, video_effects=%s, "
+                "subtitles=%s, aspect=%s, quality=%s, trim=(%.2f, %.2f)",
+                req.clip_id,
+                len(req.text_overlays or []),
+                len(req.image_overlays or []),
+                len(req.shape_overlays or []),
+                len(req.audio_overlays or []),
+                bool(req.video_effects),
+                req.subtitles_enabled,
+                req.aspect_ratio,
+                req.export_quality,
+                req.trim_start_offset,
+                req.trim_end_offset,
+            )
+            for ti, t_ov in enumerate(req.text_overlays or []):
+                logger.info("  TEXT[%d]: text=%r pos=(%.0f%%,%.0f%%) time=%.1f-%.1f",
+                            ti, (t_ov.text or "")[:30], t_ov.x, t_ov.y, t_ov.start_time, t_ov.end_time)
+            for ii, i_ov in enumerate(req.image_overlays or []):
+                logger.info("  IMAGE[%d]: src=%r pos=(%.0f%%,%.0f%%) time=%.1f-%.1f",
+                            ii, (i_ov.src or "")[:60], i_ov.x, i_ov.y, i_ov.start_time, i_ov.end_time)
+            for ai, a_ov in enumerate(req.audio_overlays or []):
+                logger.info("  AUDIO[%d]: src=%r time=%.1f-%.1f vol=%.1f",
+                            ai, (a_ov.src or "")[:60], a_ov.start_time, a_ov.end_time, a_ov.volume)
+
             # Log subject tracking status for this export
             if settings.SUBJECT_TRACKING_ENABLED and clip_scenes:
                 tracking_type = "dynamic" if len(clip_scenes) > 1 else "static"

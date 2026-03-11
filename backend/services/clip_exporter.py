@@ -2882,7 +2882,7 @@ def _build_filter_chain(
     # Recompute after precrop may have changed effective dimensions
     needs_quality_scale = (effective_h != target_h)
 
-    if not aspect_ratio and not ass_path and not needs_quality_scale and not precrop_filter:
+    if not aspect_ratio and not ass_path and not needs_quality_scale and not precrop_filter and not video_effects:
         return None, False
 
     out_w, out_h = effective_w, effective_h
@@ -3263,7 +3263,10 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
     parts = []
     warnings: list[str] = []
     for i, overlay in enumerate(text_overlays):
-        text = overlay.get("text", "").replace("'", "\\'").replace(":", "\\:")
+        text = overlay.get("text", "")
+        # Escape all FFmpeg drawtext special characters (backslash first)
+        for ch in ('\\', "'", ':', '%', '{', '}', ';', '[', ']'):
+            text = text.replace(ch, f'\\{ch}')
         if not text:
             warnings.append(f"Text overlay {i+1}: empty text — skipped")
             continue
@@ -3746,6 +3749,7 @@ async def export_clip(
 
     # Render shape overlays as temporary PNGs and merge into image_overlays
     _shape_temp_files: list[str] = []
+    _shape_warnings: list[str] = []
     if has_shape_overlays:
         if image_overlays is None:
             image_overlays = []
@@ -3771,6 +3775,7 @@ async def export_clip(
                 logger.info("Shape %d (%s) rendered to PNG: %s", si, shape.get("shape_type"), png_path)
             else:
                 logger.warning("Shape %d (%s) failed to render, skipping", si, shape.get("shape_type"))
+                _shape_warnings.append(f"Shape {si+1} ({shape.get('shape_type', 'unknown')}): failed to render — skipped")
         # Recompute has_image_overlays after merging shapes
         has_image_overlays = bool(image_overlays) and len(image_overlays) > 0
 
@@ -4188,7 +4193,7 @@ async def export_clip(
             # For per-segment speed paths, text overlays must be applied AFTER
             # the concat (not per-segment) because the per-segment PTS
             # manipulation makes drawtext enable='between(t,...)' timing wrong.
-            _overlay_warnings: list[str] = []
+            _overlay_warnings: list[str] = list(_shape_warnings)
             _text_vf_for_post_concat = ""
             if has_text_overlays and text_overlays:
                 text_vf, _tw = _build_text_overlay_filters(text_overlays, clip_start=start)
