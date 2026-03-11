@@ -961,7 +961,7 @@ export default function ClipSEO() {
       {/* ── EDITOR MODE: Full-width NLE above, settings + content below ── */}
       {(isMobile || layoutMode === 'editor') && (
         <>
-          <div style={{ width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto 20px', position: 'relative' }}>
+          <div style={{ width: isMobile ? '100%' : '90vw', margin: '0 auto 20px', position: 'relative' }}>
             <VideoEditor
               src={videoSrc}
               clipStart={startTime ?? clip.start_time}
