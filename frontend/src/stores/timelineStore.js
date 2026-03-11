@@ -435,7 +435,7 @@ const useTimelineStore = create(
           }
         }
         Object.assign(item, updates);
-        // Overlap prevention: clamp start/end if they changed
+        // Overlap prevention: clamp start/end if they changed or item moved to new track
         if (updates.start !== undefined || updates.end !== undefined || updates.trackId !== undefined) {
           const targetTrackId = item.trackId;
           const siblings = getTrackSiblings(state.items, targetTrackId, [item.id]);
@@ -452,6 +452,11 @@ const useTimelineStore = create(
             } else if (updates.end !== undefined && updates.start === undefined) {
               // Right trim
               item.end = clampTrimRight(item.end, siblings, item.start);
+            } else {
+              // Track-only change (no explicit start/end): clamp to avoid overlaps on new track
+              const clamped = clampMoveToTrack(dur, item.start, siblings);
+              item.start = clamped;
+              item.end = clamped + dur;
             }
           }
         }
@@ -468,7 +473,18 @@ const useTimelineStore = create(
 
       updateItemWithSnapshot: (itemId, updates) => set((state) => {
         const item = state.items.find(i => i.id === itemId);
-        if (item) Object.assign(item, updates);
+        if (!item) return;
+        Object.assign(item, updates);
+        // Overlap prevention when timing or track changes
+        if (updates.start !== undefined || updates.end !== undefined || updates.trackId !== undefined) {
+          const siblings = getTrackSiblings(state.items, item.trackId, [item.id]);
+          if (siblings.length > 0) {
+            const dur = item.end - item.start;
+            const clamped = clampMoveToTrack(dur, item.start, siblings);
+            item.start = clamped;
+            item.end = clamped + dur;
+          }
+        }
         state.duration = computeTimelineDuration(state.items);
       }),
 
@@ -480,14 +496,19 @@ const useTimelineStore = create(
         // Remove all current subtitle items
         state.items = state.items.filter((it) => it.type !== 'subtitle');
 
-        // Re-create subtitles from the original snapshot
-        originals.forEach((orig) => {
+        // Re-create subtitles from the original snapshot, resolving overlaps
+        let lastEnd = 0;
+        const sortedOrig = [...originals].sort((a, b) => a.start - b.start);
+        sortedOrig.forEach((orig) => {
+          const adjStart = Math.max(orig.start, lastEnd);
+          if (adjStart >= orig.end) return; // Skip degenerate
+          lastEnd = orig.end;
           state.items.push({
             id: nextItemId(),
             trackId: 't1',
             type: 'subtitle',
             mediaRef: null,
-            start: orig.start,
+            start: adjStart,
             end: orig.end,
             trimStart: 0,
             trimEnd: null,
@@ -562,6 +583,14 @@ const useTimelineStore = create(
           if (clone.end > maxEnd) {
             clone.end = maxEnd;
           }
+        }
+        // Overlap prevention: clamp duplicate to a non-overlapping position
+        const siblings = getTrackSiblings(state.items, clone.trackId, [newId]);
+        if (siblings.length > 0) {
+          const cloneDur = clone.end - clone.start;
+          const clamped = clampMoveToTrack(cloneDur, clone.start, siblings);
+          clone.start = clamped;
+          clone.end = clamped + cloneDur;
         }
         state.items.push(clone);
         state.duration = computeTimelineDuration(state.items);
@@ -713,12 +742,19 @@ const useTimelineStore = create(
           },
         ];
 
-        // Add subtitle items if provided
+        // Add subtitle items if provided — resolve overlaps from server data
+        let lastSubEnd = 0;
         if (Array.isArray(subtitleSegments)) {
           subtitleSegments.forEach((seg, segIdx) => {
             if (seg.end > clipStart && seg.start < clipEnd) {
-              const clampedStart = Math.max(seg.start, clipStart);
+              let clampedStart = Math.max(seg.start, clipStart);
               const clampedEnd = Math.min(seg.end, clipEnd);
+              // Ensure no overlap with the previous subtitle on the same track
+              const relStart = clampedStart - clipStart;
+              const relEnd = clampedEnd - clipStart;
+              const adjStart = Math.max(relStart, lastSubEnd);
+              if (adjStart >= relEnd) return; // Skip degenerate segments
+              lastSubEnd = relEnd;
               // Preserve word-level timestamps for accurate active word highlighting
               let segWords = null;
               if (seg.words && Array.isArray(seg.words)) {
@@ -735,8 +771,8 @@ const useTimelineStore = create(
                 trackId: 't1',
                 type: 'subtitle',
                 mediaRef: null,
-                start: clampedStart - clipStart,
-                end: clampedEnd - clipStart,
+                start: adjStart,
+                end: relEnd,
                 trimStart: 0,
                 trimEnd: null,
                 volume: 1.0,
