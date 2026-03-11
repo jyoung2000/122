@@ -989,10 +989,10 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
                   height: TRACK_HEIGHT,
                   marginBottom: TRACK_GAP,
                   display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
+                  flexDirection: 'column',
+                  justifyContent: 'center',
                   gap: 2,
-                  padding: '0 4px',
+                  padding: '2px 4px',
                   pointerEvents: 'auto',
                   opacity: isHidden ? 0.5 : (dragTrackIdx === trackIdx ? 0.4 : 1),
                   cursor: 'grab',
@@ -1008,7 +1008,6 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
                   whiteSpace: 'nowrap',
                   overflow: 'hidden',
                   textOverflow: 'ellipsis',
-                  flex: 1,
                   display: 'flex',
                   alignItems: 'center',
                   gap: 3,
@@ -1023,7 +1022,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
                   {TRACK_ICONS[track.type] || ''} {track.name}
                 </span>
                 {/* Controls row */}
-                <div style={{ display: 'flex', gap: 1, flexShrink: 0 }}>
+                <div style={{ display: 'flex', gap: 1 }}>
                   {/* Visibility toggle (eye icon) — preview only */}
                   <button
                     onClick={(e) => { e.stopPropagation(); toggleTrackVisibility(track.id); }}
