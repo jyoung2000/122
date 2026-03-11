@@ -15,6 +15,7 @@ export default function useKeyboardShortcuts({
 } = {}) {
   const setActiveTool = useTimelineStore((s) => s.setActiveTool);
   const removeItem = useTimelineStore((s) => s.removeItem);
+  const removeItems = useTimelineStore((s) => s.removeItems);
   const splitItem = useTimelineStore((s) => s.splitItem);
 
   // Arrow key hold-to-repeat state
@@ -161,7 +162,7 @@ export default function useKeyboardShortcuts({
         useTimelineStore.getState().toggleSnap();
         break;
 
-      // Delete selected (supports multi-select) — read from store at call time
+      // Delete selected (supports multi-select) — single undo snapshot
       case 'Delete':
       case 'Backspace':
         if (!e.target.closest('[contenteditable]')) {
@@ -171,8 +172,10 @@ export default function useKeyboardShortcuts({
             : (state.selectedItemId ? [state.selectedItemId] : []);
           if (idsToDelete.length > 0) {
             e.preventDefault();
-            for (const id of idsToDelete) {
-              removeItem(id);
+            if (idsToDelete.length === 1) {
+              removeItem(idsToDelete[0]);
+            } else {
+              removeItems(idsToDelete);
             }
           }
         }
@@ -200,7 +203,7 @@ export default function useKeyboardShortcuts({
         break;
     }
   }, [enabled, onTogglePlay, onSeek, onToggleMute, onShuttleSpeed,
-      setActiveTool, removeItem, splitItem]);
+      setActiveTool, removeItem, removeItems, splitItem]);
 
   const handleKeyUp = useCallback((e) => {
     if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {

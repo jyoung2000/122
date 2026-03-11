@@ -400,6 +400,24 @@ const useTimelineStore = create(
         }
       }),
 
+      // Batch-remove multiple items in a single undo snapshot
+      removeItems: (itemIds) => set((state) => {
+        const lockedTrackIds = new Set(state.tracks.filter(t => t.locked).map(t => t.id));
+        const idsToRemove = new Set(
+          itemIds.filter(id => {
+            const item = state.items.find(i => i.id === id);
+            return item && !lockedTrackIds.has(item.trackId);
+          })
+        );
+        if (idsToRemove.size === 0) return;
+        state.items = state.items.filter(i => !idsToRemove.has(i.id));
+        state.duration = computeTimelineDuration(state.items);
+        if (idsToRemove.has(state.selectedItemId)) {
+          state.selectedItemId = null;
+        }
+        state.selectedItemIds = state.selectedItemIds.filter(id => !idsToRemove.has(id));
+      }),
+
       updateItem: (itemId, updates) => set((state) => {
         const item = state.items.find(i => i.id === itemId);
         if (!item) return;
@@ -812,30 +830,23 @@ const useTimelineStore = create(
         return { tracks, items, mediaLibrary, duration, project, segments, subtitleSettings };
       },
 
-      // Import state from persistence — normalizes track order values
-      // to ensure overlays/subtitles always composite on top of video.
+      // Import state from persistence — preserves saved track order so that
+      // user reordering and added tracks survive container restarts.
       importState: (state) => {
         if (state && state.tracks && state.items) {
-          // Start from the canonical default track list (correct order and IDs),
-          // then merge per-track settings (muted, locked, visible) from the
-          // persisted state so user preferences survive.  Any extra tracks that
-          // were added by the user (beyond the 5 defaults) are appended at the
-          // end in their original order.
+          // Use saved track order as the source of truth. The array order
+          // IS the compositing order (index 0 = top of UI = renders on top).
+          // Only add missing default tracks if they were removed from saved state.
           const defaults = createDefaultTracks();
-          const defaultIds = new Set(defaults.map(t => t.id));
-          const savedById = Object.fromEntries(state.tracks.map(t => [t.id, t]));
+          const savedIds = new Set(state.tracks.map(t => t.id));
 
-          const merged = defaults.map(def => {
-            const saved = savedById[def.id];
-            if (saved) {
-              return { ...def, muted: saved.muted ?? def.muted, locked: saved.locked ?? def.locked, visible: saved.visible ?? def.visible };
-            }
-            return def;
-          });
-          // Append any user-added tracks that aren't in the defaults
-          for (const t of state.tracks) {
-            if (!defaultIds.has(t.id)) {
-              merged.push({ ...t });
+          // Start with all saved tracks in their persisted order
+          const merged = state.tracks.map(t => ({ ...t }));
+
+          // Append any default tracks missing from saved state (safety net)
+          for (const def of defaults) {
+            if (!savedIds.has(def.id)) {
+              merged.push({ ...def });
             }
           }
 
@@ -854,10 +865,12 @@ const useTimelineStore = create(
     {
       // Zundo temporal config
       limit: 100,
-      // Only track undo-able state (exclude playback, UI transient state)
+      // Track undo-able state (exclude playback position, UI transient state).
+      // duration is included so undo/redo properly restores the timeline extent.
       partialize: (state) => ({
         tracks: state.tracks,
         items: state.items,
+        duration: state.duration,
         project: state.project,
         segments: state.segments,
       }),
