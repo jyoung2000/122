@@ -15,13 +15,23 @@
  * @param {Array}  params.timelineItems  - Items from useTimelineStore
  * @param {Array}  params.mediaLibrary   - Media library from useTimelineStore
  * @param {number} params.clipStart      - Clip start time in source video (absolute)
+ * @param {Array}  [params.tracks]       - Tracks array for position-based compositing order
  * @returns {{ textOverlays: Array, imageOverlays: Array, shapeOverlays: Array, audioOverlays: Array, warnings: string[] }}
  */
-export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart }) {
+export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tracks }) {
   const warnings = [];
 
+  // Track-position sorting: items on higher tracks (lower index) should appear
+  // later in the array so they render on top in FFmpeg filter chains.
+  const getTrackOrder = (item) => {
+    if (!tracks) return 0;
+    const idx = tracks.findIndex(t => t.id === item.trackId);
+    return idx >= 0 ? tracks.length - idx : 0;
+  };
+
   // ── Text overlays ──
-  const textItems = timelineItems.filter(it => it.type === 'text');
+  const textItems = timelineItems.filter(it => it.type === 'text')
+    .sort((a, b) => getTrackOrder(a) - getTrackOrder(b));
   const textOverlays = textItems.map(it => ({
     text: it.textContent || '',
     x: it.position?.x ?? 50,
@@ -42,7 +52,8 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart }) 
   }));
 
   // ── Image overlays ──
-  const imageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
+  const imageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay')
+    .sort((a, b) => getTrackOrder(a) - getTrackOrder(b));
   const imageOverlays = [];
   for (const it of imageItems) {
     let src = it.src || '';
@@ -69,7 +80,8 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart }) 
   }
 
   // ── Shape overlays ──
-  const shapeItems = timelineItems.filter(it => it.type === 'shape');
+  const shapeItems = timelineItems.filter(it => it.type === 'shape')
+    .sort((a, b) => getTrackOrder(a) - getTrackOrder(b));
   const shapeOverlays = shapeItems.map(it => ({
     shape_type: it.shapeType || 'rectangle',
     x: it.position?.x ?? 50,

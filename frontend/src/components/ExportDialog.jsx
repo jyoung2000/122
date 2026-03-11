@@ -134,6 +134,7 @@ export default function ExportDialog({
         timelineItems,
         mediaLibrary: timelineMediaLibrary,
         clipStart: startTime,
+        tracks: useTimelineStore.getState().tracks,
       });
       if (overlays.textOverlays.length > 0) exportPayload.text_overlays = overlays.textOverlays;
       if (overlays.imageOverlays.length > 0) exportPayload.image_overlays = overlays.imageOverlays;

@@ -778,6 +778,7 @@ export default function Analysis() {
       timelineItems,
       mediaLibrary: timelineMediaLibrary,
       clipStart: clip.start_time,
+      tracks: useTimelineStore.getState().tracks,
     });
     if (overlays.textOverlays.length > 0) exportBody.text_overlays = overlays.textOverlays;
     if (overlays.imageOverlays.length > 0) exportBody.image_overlays = overlays.imageOverlays;
@@ -852,6 +853,7 @@ export default function Analysis() {
       timelineItems,
       mediaLibrary: timelineMediaLibrary,
       clipStart: 0,
+      tracks: useTimelineStore.getState().tracks,
     });
     if (fvOverlays.textOverlays.length > 0) body.text_overlays = fvOverlays.textOverlays;
     if (fvOverlays.imageOverlays.length > 0) body.image_overlays = fvOverlays.imageOverlays;

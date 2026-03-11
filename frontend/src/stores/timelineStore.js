@@ -4,11 +4,11 @@ import { temporal } from 'zundo';
 
 // ── Default track setup ─────────────────────────────────────────────────────
 const createDefaultTracks = () => [
-  { id: 't1', type: 'subtitle', name: 'Subtitles', order: 4, muted: false, locked: false, visible: true },
-  { id: 'v2', type: 'overlay', name: 'Overlay', order: 3, muted: false, locked: false, visible: true },
-  { id: 'v1', type: 'video', name: 'Video', order: 2, muted: false, locked: false, visible: true },
-  { id: 'a2', type: 'audio', name: 'Music', order: 1, muted: false, locked: false, visible: true },
-  { id: 'a1', type: 'audio', name: 'Audio', order: 0, muted: false, locked: false, visible: true },
+  { id: 't1', type: 'subtitle', name: 'Subtitles', muted: false, locked: false, visible: true },
+  { id: 'v2', type: 'overlay', name: 'Overlay', muted: false, locked: false, visible: true },
+  { id: 'v1', type: 'video', name: 'Video', muted: false, locked: false, visible: true },
+  { id: 'a2', type: 'audio', name: 'Music', muted: false, locked: false, visible: true },
+  { id: 'a1', type: 'audio', name: 'Audio', muted: false, locked: false, visible: true },
 ];
 
 // Track-item type compatibility map
@@ -31,9 +31,21 @@ export const TRACK_COMPOSITING_PRIORITY = {
   subtitle: 3,
 };
 
-// Get the compositing priority for a track, based on its type.
-export function getCompositingOrder(track) {
-  return TRACK_COMPOSITING_PRIORITY[track?.type] ?? 1;
+/**
+ * Get the compositing order for a track based on its position in the tracks array.
+ * Higher tracks in the UI (lower array index) render ON TOP (higher compositing value).
+ * This ensures the visual track stack in the timeline matches the rendering layer order.
+ *
+ * @param {Object} track - The track object
+ * @param {Array} tracks - The full tracks array (needed to find position)
+ * @returns {number} Compositing order (higher = rendered later = on top)
+ */
+export function getCompositingOrder(track, tracks) {
+  if (!track || !tracks) return 0;
+  const idx = tracks.findIndex(t => t.id === track.id);
+  if (idx < 0) return 0;
+  // Invert: index 0 (top of UI) gets the highest value (renders last = on top)
+  return tracks.length - idx;
 }
 
 // Check if an item type is compatible with a track type
@@ -269,11 +281,9 @@ const useTimelineStore = create(
       // Track operations
       addTrack: (type, name) => set((state) => {
         const id = `${type.charAt(0)}${state.tracks.length + 1}-${Date.now().toString(36)}`;
-        // New tracks get compositing order based on their TYPE
         state.tracks.push({
           id, type,
           name: name || `${type} ${state.tracks.length + 1}`,
-          order: TRACK_COMPOSITING_PRIORITY[type] ?? 1,
           muted: false, locked: false, visible: true,
         });
       }),
@@ -304,19 +314,14 @@ const useTimelineStore = create(
       }),
 
       // Reorder tracks: move track at fromIndex to toIndex.
-      // The visual position in the timeline UI changes, but the compositing
-      // order is always determined by track TYPE (see TRACK_COMPOSITING_PRIORITY).
-      // This ensures overlays and subtitles always render on top of video.
+      // Compositing order is determined by array position — index 0 (top of UI)
+      // renders on top. No separate order field needed.
       reorderTracks: (fromIndex, toIndex) => set((state) => {
         if (fromIndex === toIndex) return;
         if (fromIndex < 0 || fromIndex >= state.tracks.length) return;
         if (toIndex < 0 || toIndex >= state.tracks.length) return;
         const [moved] = state.tracks.splice(fromIndex, 1);
         state.tracks.splice(toIndex, 0, moved);
-        // Assign order based on track TYPE, not position — compositing is type-based
-        state.tracks.forEach((t) => {
-          t.order = TRACK_COMPOSITING_PRIORITY[t.type] ?? 1;
-        });
       }),
 
       // Item operations
@@ -830,7 +835,7 @@ const useTimelineStore = create(
           // Append any user-added tracks that aren't in the defaults
           for (const t of state.tracks) {
             if (!defaultIds.has(t.id)) {
-              merged.push({ ...t, order: TRACK_COMPOSITING_PRIORITY[t.type] ?? 1 });
+              merged.push({ ...t });
             }
           }
 

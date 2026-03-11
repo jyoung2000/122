@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import useTimelineStore, { getCompositingOrder } from '../stores/timelineStore';
+import useTimelineStore from '../stores/timelineStore';
 import { hexToRgba } from '../utils/colorUtils';
 
 /**
@@ -30,12 +30,11 @@ export default function TimelineOverlay({ currentTime = 0, clipStart = 0 }) {
         if (track && track.visible === false) return false;
         return true;
       })
-      // Sort by track-type compositing priority so overlays and subtitles
-      // always render on top of video, regardless of UI track arrangement.
+      // Sort by track position: items on higher tracks (lower index) render later (on top)
       .sort((a, b) => {
-        const trackA = tracks.find((t) => t.id === a.trackId);
-        const trackB = tracks.find((t) => t.id === b.trackId);
-        return getCompositingOrder(trackA) - getCompositingOrder(trackB);
+        const idxA = tracks.findIndex((t) => t.id === a.trackId);
+        const idxB = tracks.findIndex((t) => t.id === b.trackId);
+        return idxB - idxA;
       });
   }, [items, absTime, tracks]);
 

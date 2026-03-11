@@ -755,6 +755,7 @@ export default function ClipSEO() {
       timelineItems,
       mediaLibrary: timelineMediaLibrary,
       clipStart: startTime,
+      tracks: useTimelineStore.getState().tracks,
     });
     if (overlays.textOverlays.length > 0) body.text_overlays = overlays.textOverlays;
     if (overlays.imageOverlays.length > 0) body.image_overlays = overlays.imageOverlays;

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useMemo, useEffect } from 'react';
-import useTimelineStore, { getCompositingOrder } from '../stores/timelineStore';
+import useTimelineStore from '../stores/timelineStore';
 
 /**
  * InteractiveOverlay renders selectable, draggable, resizable, and rotatable
@@ -34,11 +34,11 @@ export default function InteractiveOverlay({ currentTime = 0, clipStart = 0, con
         if (track && track.visible === false) return false;
         return true;
       })
-      // Sort by track order so interactive handles match visual z-layering
+      // Sort by track position: items on higher tracks (lower index) render later (on top)
       .sort((a, b) => {
-        const trackA = tracks.find((t) => t.id === a.trackId);
-        const trackB = tracks.find((t) => t.id === b.trackId);
-        return getCompositingOrder(trackA) - getCompositingOrder(trackB);
+        const idxA = tracks.findIndex((t) => t.id === a.trackId);
+        const idxB = tracks.findIndex((t) => t.id === b.trackId);
+        return idxB - idxA;
       });
   }, [items, absTime, tracks]);
 

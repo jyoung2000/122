@@ -837,6 +837,7 @@ export default function ViralClips() {
       timelineItems,
       mediaLibrary: timelineMediaLibrary,
       clipStart: clip.start_time,
+      tracks: useTimelineStore.getState().tracks,
     });
     if (overlays.textOverlays.length > 0) body.text_overlays = overlays.textOverlays;
     if (overlays.imageOverlays.length > 0) body.image_overlays = overlays.imageOverlays;
