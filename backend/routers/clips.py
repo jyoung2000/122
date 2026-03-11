@@ -202,6 +202,32 @@ async def export_clip_endpoint(
     actual_start = req.start + req.trim_start_offset
     actual_end = req.end - req.trim_end_offset
 
+    # Adjust overlay times to account for trim offset.
+    # Overlay times from the frontend are computed as (item.start + req.start),
+    # but the backend uses actual_start (= req.start + trim_start_offset) as
+    # clip_start for overlay positioning.  Without this correction, overlays
+    # would be shifted earlier by trim_start_offset seconds.
+    if req.trim_start_offset:
+        _trim = req.trim_start_offset
+        for _ol_list in (req.text_overlays, req.image_overlays,
+                         req.shape_overlays, req.audio_overlays):
+            if _ol_list:
+                for _ol in _ol_list:
+                    _ol.start_time += _trim
+                    _ol.end_time += _trim
+
+    # Warn if any image/audio overlay src looks like a blob URL (client-only)
+    for _ol_list, _label in ((req.image_overlays, "image"), (req.audio_overlays, "audio")):
+        if _ol_list:
+            for _ol in _ol_list:
+                _src = getattr(_ol, "src", "") or ""
+                if _src.startswith("blob:"):
+                    logger.warning(
+                        "Export request for clip %s has %s overlay with blob URL src=%s — "
+                        "this cannot be resolved server-side and will be skipped",
+                        req.clip_id, _label, _src[:80],
+                    )
+
     # ISSUE 14: Warn when export request is missing expected editor data.
     # If the clip was edited but the request has no effects/overlays, the
     # export won't match the preview.

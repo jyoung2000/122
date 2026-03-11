@@ -156,26 +156,35 @@ export default function ExportDialog({
 
       // Include image overlays from the timeline
       const imageItems = timelineItems.filter(it => it.type === 'image' || it.type === 'overlay');
+      let skippedOverlays = 0;
       if (imageItems.length > 0) {
-        exportPayload.image_overlays = imageItems.map(it => {
-          let src = it.src || '';
-          if (!src && it.mediaRef) {
-            const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
-            src = mediaEntry?.url || it.mediaRef;
-          }
-          return {
-            src,
-            x: it.position?.x ?? 50,
-            y: it.position?.y ?? 50,
-            width: it.size?.w ?? 30,
-            height: it.size?.h ?? 30,
-            start_time: (it.start || 0) + startTime,
-            end_time: (it.end || 0) + startTime,
-            opacity: it.opacity ?? 1,
-            fade_in: it.fadeIn || 0,
-            fade_out: it.fadeOut || 0,
-          };
-        });
+        exportPayload.image_overlays = imageItems
+          .map(it => {
+            let src = it.src || '';
+            if (!src && it.mediaRef) {
+              const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
+              src = mediaEntry?.url || '';
+            }
+            // Skip items with unresolvable sources (blob URLs, empty)
+            if (!src || src.startsWith('blob:')) {
+              console.warn(`[Export] Skipping image overlay "${it.id}" — source not uploaded: ${src}`);
+              skippedOverlays++;
+              return null;
+            }
+            return {
+              src,
+              x: it.position?.x ?? 50,
+              y: it.position?.y ?? 50,
+              width: it.size?.w ?? 30,
+              height: it.size?.h ?? 30,
+              start_time: (it.start || 0) + startTime,
+              end_time: (it.end || 0) + startTime,
+              opacity: it.opacity ?? 1,
+              fade_in: it.fadeIn || 0,
+              fade_out: it.fadeOut || 0,
+            };
+          })
+          .filter(Boolean);
       }
 
       // Include shape overlays from the timeline
@@ -203,21 +212,33 @@ export default function ExportDialog({
       // Include audio overlays from the timeline
       const audioItems = timelineItems.filter(it => it.type === 'audio');
       if (audioItems.length > 0) {
-        exportPayload.audio_overlays = audioItems.map(it => {
-          let src = it.src || '';
-          if (!src && it.mediaRef) {
-            const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
-            src = mediaEntry?.url || it.mediaRef;
-          }
-          return {
-            src,
-            start_time: (it.start || 0) + startTime,
-            end_time: (it.end || 0) + startTime,
-            volume: it.volume ?? 1,
-            fade_in: it.fadeIn || 0,
-            fade_out: it.fadeOut || 0,
-          };
-        });
+        exportPayload.audio_overlays = audioItems
+          .map(it => {
+            let src = it.src || '';
+            if (!src && it.mediaRef) {
+              const mediaEntry = timelineMediaLibrary.find(m => m.id === it.mediaRef);
+              src = mediaEntry?.url || '';
+            }
+            if (!src || src.startsWith('blob:')) {
+              console.warn(`[Export] Skipping audio overlay "${it.id}" — source not uploaded: ${src}`);
+              skippedOverlays++;
+              return null;
+            }
+            return {
+              src,
+              start_time: (it.start || 0) + startTime,
+              end_time: (it.end || 0) + startTime,
+              volume: it.volume ?? 1,
+              fade_in: it.fadeIn || 0,
+              fade_out: it.fadeOut || 0,
+            };
+          })
+          .filter(Boolean);
+      }
+
+      if (skippedOverlays > 0) {
+        console.warn(`[Export] ${skippedOverlays} overlay(s) skipped — media not yet uploaded or source unavailable`);
+        setError(`Warning: ${skippedOverlays} overlay(s) skipped from export — media files not yet uploaded. The export will proceed without them.`);
       }
 
       if (onServerExport) {

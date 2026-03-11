@@ -108,6 +108,7 @@ function generateVideoThumbnail(file) {
 export default function MediaUploader({ jobId, compact = false }) {
   const addMedia = useTimelineStore((s) => s.addMedia);
   const updateMedia = useTimelineStore((s) => s.updateMedia);
+  const replaceMediaId = useTimelineStore((s) => s.replaceMediaId);
   const removeMedia = useTimelineStore((s) => s.removeMedia);
   const mediaLibrary = useTimelineStore((s) => s.mediaLibrary);
   const [dragOver, setDragOver] = useState(false);
@@ -283,7 +284,7 @@ export default function MediaUploader({ jobId, compact = false }) {
             try {
               const data = await lastResp.json();
               if (data.url && data.id && localId) {
-                updateMedia(localId, { url: data.url, id: data.id });
+                replaceMediaId(localId, data.id, { url: data.url });
               }
             } catch { /* ignore */ }
           }
@@ -307,8 +308,8 @@ export default function MediaUploader({ jobId, compact = false }) {
             try {
               const data = JSON.parse(xhr.responseText);
               if (data.url && data.id && localId) {
-                // Update the store entry by its stable local ID (not array index)
-                updateMedia(localId, { url: data.url, id: data.id });
+                // Replace local ID with server ID and update all mediaRef pointers
+                replaceMediaId(localId, data.id, { url: data.url });
               }
             } catch { /* ignore */ }
             setUploading(null);
@@ -320,7 +321,7 @@ export default function MediaUploader({ jobId, compact = false }) {
         }
       }
     }
-  }, [addMedia, updateMedia, jobId]);
+  }, [addMedia, updateMedia, replaceMediaId, jobId]);
 
   const onDrop = useCallback((e) => {
     e.preventDefault();

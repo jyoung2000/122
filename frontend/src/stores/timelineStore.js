@@ -399,7 +399,26 @@ const useTimelineStore = create(
 
       updateMedia: (mediaId, updates) => set((state) => {
         const item = state.mediaLibrary.find(m => m.id === mediaId);
-        if (item) Object.assign(item, updates);
+        if (item) {
+          // Never mutate the `id` field — it would break mediaRef lookups
+          // from timeline items that still reference the original local ID.
+          const { id: _ignoredId, ...safeUpdates } = updates;
+          Object.assign(item, safeUpdates);
+        }
+      }),
+
+      // Replace a media entry's ID and update all timeline items that reference it.
+      // Use this when the backend returns a server-assigned ID after upload.
+      replaceMediaId: (oldId, newId, updates) => set((state) => {
+        const entry = state.mediaLibrary.find(m => m.id === oldId);
+        if (entry) {
+          Object.assign(entry, updates || {}, { id: newId });
+          for (const item of state.items) {
+            if (item.mediaRef === oldId) {
+              item.mediaRef = newId;
+            }
+          }
+        }
       }),
 
       removeMedia: (mediaId) => set((state) => {

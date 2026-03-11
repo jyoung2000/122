@@ -3251,16 +3251,21 @@ def _resolve_font_path(font_family: str, font_weight: int = 400) -> str:
     return _DEFAULT_FONT
 
 
-def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> str:
+def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> tuple[str, list[str]]:
     """Build FFmpeg drawtext filter chain for text overlays.
 
     Each text overlay becomes a drawtext filter with enable/disable based on timing.
     Position is given as percentage (0-100) and converted to pixel expressions.
+
+    Returns:
+        (filter_chain_string, list_of_warning_messages)
     """
     parts = []
+    warnings: list[str] = []
     for i, overlay in enumerate(text_overlays):
         text = overlay.get("text", "").replace("'", "\\'").replace(":", "\\:")
         if not text:
+            warnings.append(f"Text overlay {i+1}: empty text — skipped")
             continue
         x_pct = overlay.get("x", 50) / 100.0
         y_pct = overlay.get("y", 50) / 100.0
@@ -3272,6 +3277,7 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
         end_t = overlay.get("end_time", 0) - clip_start
         # Skip overlays entirely outside the clip time range
         if end_t <= 0:
+            warnings.append(f"Text overlay {i+1}: outside clip time range (end_t={end_t:.2f}s) — skipped")
             continue
         font_weight = overlay.get("font_weight", 400)
         if isinstance(font_weight, str):
@@ -3341,7 +3347,7 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> s
             dt += f":enable='between(t,{safe_start:.3f},{end_t:.3f})'"
         parts.append(dt)
 
-    return ",".join(parts)
+    return ",".join(parts), warnings
 
 
 def _resolve_media_path(src: str, job_id: str) -> str | None:
@@ -3521,11 +3527,11 @@ def _build_image_overlay_data(
     base_input_idx: int,
     video_out_w: int = 1920,
     video_out_h: int = 1080,
-) -> tuple[list[str], str, int]:
+) -> tuple[list[str], str, int, list[str]]:
     """Build FFmpeg input args and overlay filter chain for image overlays.
 
     Returns:
-        (extra_input_args, overlay_filter_chain_suffix, num_valid_images)
+        (extra_input_args, overlay_filter_chain_suffix, num_valid_images, warnings)
 
     The overlay_filter_chain_suffix is a semicolon-separated filter segment
     that should be appended to the filter_complex.  It expects the base video
@@ -3536,26 +3542,30 @@ def _build_image_overlay_data(
     ``main_h`` variables are NOT available inside the ``scale`` filter (only
     in ``overlay`` and ``scale2ref``), so we must pre-compute pixel sizes.
 
-    If no valid images are found, returns ([], "", 0).
+    If no valid images are found, returns ([], "", 0, warnings).
     """
     extra_args: list[str] = []
     valid_overlays: list[tuple[int, dict]] = []  # (input_idx, overlay_dict)
+    warnings: list[str] = []
 
-    for overlay in image_overlays:
+    for i, overlay in enumerate(image_overlays):
         # Skip overlays entirely outside the clip time range
         overlay_end_t = overlay.get("end_time", 0) - clip_start
         if overlay_end_t <= 0:
+            warnings.append(f"Image overlay {i+1}: outside clip time range — skipped")
             continue
         src = overlay.get("src", "")
         img_path = _resolve_media_path(src, job_id)
         if not img_path:
+            logger.warning("Image overlay %d: src '%s' could not be resolved — SKIPPED", i, src[:80] if src else "(empty)")
+            warnings.append(f"Image overlay {i+1}: source file not found ({os.path.basename(src) if src else 'unknown'})")
             continue
         input_idx = base_input_idx + len(extra_args) // 2  # each image adds -i path (2 args)
         extra_args += ["-i", img_path]
         valid_overlays.append((input_idx, overlay))
 
     if not valid_overlays:
-        return [], "", 0
+        return [], "", 0, warnings
 
     # Build overlay filter chain: [vbase][N:v]overlay=...[tmp0]; [tmp0][N+1:v]overlay=...[tmp1]; ...
     fc_parts: list[str] = []
@@ -3609,7 +3619,7 @@ def _build_image_overlay_data(
         fc_parts.append(img_scale)
         fc_parts.append(overlay_filter)
 
-    return extra_args, ";".join(fc_parts), len(valid_overlays)
+    return extra_args, ";".join(fc_parts), len(valid_overlays), warnings
 
 
 async def export_clip(
@@ -4174,12 +4184,23 @@ async def export_clip(
                 clip_duration=end - start,
             )
 
-            # Append text overlay drawtext filters
+            # Append text overlay drawtext filters.
+            # For per-segment speed paths, text overlays must be applied AFTER
+            # the concat (not per-segment) because the per-segment PTS
+            # manipulation makes drawtext enable='between(t,...)' timing wrong.
+            _overlay_warnings: list[str] = []
+            _text_vf_for_post_concat = ""
             if has_text_overlays and text_overlays:
-                text_vf = _build_text_overlay_filters(text_overlays, clip_start=start)
+                text_vf, _tw = _build_text_overlay_filters(text_overlays, clip_start=start)
+                _overlay_warnings.extend(_tw)
                 if text_vf:
-                    vf = f"{vf},{text_vf}" if vf else text_vf
-                    logger.info("Text overlay filters for clip %s: %s", clip_id, text_vf)
+                    if has_seg_speed:
+                        # Defer: apply after concat in the per-segment path
+                        _text_vf_for_post_concat = text_vf
+                        logger.info("Text overlay filters for clip %s (deferred for post-concat): %s", clip_id, text_vf)
+                    else:
+                        vf = f"{vf},{text_vf}" if vf else text_vf
+                        logger.info("Text overlay filters for clip %s: %s", clip_id, text_vf)
 
             # QA: validate subject tracking is correctly applied in filter chain
             st_warnings = _validate_subject_tracking(
@@ -4323,10 +4344,11 @@ async def export_clip(
                     _vid_out_w, _vid_out_h = _compute_video_out_dims(
                         video_width, video_height, aspect_ratio, export_quality,
                     )
-                    img_extra_args, img_overlay_fc, img_overlay_count = _build_image_overlay_data(
+                    img_extra_args, img_overlay_fc, img_overlay_count, _iw = _build_image_overlay_data(
                         image_overlays, job_id, clip_start=start, base_input_idx=_img_base_idx,
                         video_out_w=_vid_out_w, video_out_h=_vid_out_h,
                     )
+                    _overlay_warnings.extend(_iw)
                     if img_overlay_count > 0:
                         input_args += img_extra_args
                         # Rename [finalv] to [vbase] for overlay chain input
@@ -4340,6 +4362,21 @@ async def export_clip(
                             "Image overlays for clip %s (per-seg): %d images applied after concat",
                             clip_id, img_overlay_count,
                         )
+
+                # Apply deferred text overlays after concat (and after image overlays)
+                if _text_vf_for_post_concat:
+                    # Determine the current video output label
+                    # It's either [vimg] (if image overlays were applied) or [finalv]
+                    if any("[vimg]" in m for m in map_args):
+                        # Rename [vimg] to [vtxt_in], apply text, produce [vtxt_out]
+                        fc_lines[-1] = fc_lines[-1].replace("[vimg]", "[vtxt_in]", 1)
+                        fc_lines.append(f"[vtxt_in]{_text_vf_for_post_concat}[vtxt_out]")
+                        map_args = [m.replace("[vimg]", "[vtxt_out]") for m in map_args]
+                    else:
+                        # Rename [finalv] to [vtxt_in], apply text, produce [finalv]
+                        fc_lines[-1] = fc_lines[-1].replace("[finalv]", "[vtxt_in]", 1)
+                        fc_lines.append(f"[vtxt_in]{_text_vf_for_post_concat}[finalv]")
+                    logger.info("Text overlays applied post-concat for clip %s", clip_id)
 
                 full_fc = ";".join(fc_lines)
                 logger.info(
@@ -4404,10 +4441,11 @@ async def export_clip(
                     _vid_out_w, _vid_out_h = _compute_video_out_dims(
                         video_width, video_height, aspect_ratio, export_quality,
                     )
-                    img_extra_args, img_overlay_fc, img_overlay_count = _build_image_overlay_data(
+                    img_extra_args, img_overlay_fc, img_overlay_count, _iw = _build_image_overlay_data(
                         image_overlays, job_id, clip_start=start, base_input_idx=1,
                         video_out_w=_vid_out_w, video_out_h=_vid_out_h,
                     )
+                    _overlay_warnings.extend(_iw)
                     if img_overlay_count > 0:
                         _use_complex_for_images = True
                         _img_input_args = img_extra_args
@@ -4548,6 +4586,13 @@ async def export_clip(
                     cmd += ["-t", str(output_dur)]
                 cmd += ["-progress", "pipe:1"]
                 cmd.append(output_path)
+
+            # Surface overlay skip warnings to the user before encoding
+            if _overlay_warnings:
+                await _notify(f"WARNING: {len(_overlay_warnings)} overlay(s) skipped during export")
+                for _ow in _overlay_warnings:
+                    await _notify(f"  ⚠ {_ow}")
+                    logger.warning("Overlay skip (clip %s): %s", clip_id, _ow)
 
             logger.info("FFmpeg export command for clip %s: %s", clip_id, " ".join(cmd))
             logger.info("FFmpeg filter chain for clip %s: %s", clip_id, vf or "(none)")
