@@ -874,6 +874,18 @@ const useTimelineStore = create(
         project: state.project,
         segments: state.segments,
       }),
+      // Only create undo snapshots when tracked properties actually change.
+      // Immer's structural sharing keeps the same reference for unchanged
+      // sub-trees, so reference equality per field is both correct and fast.
+      // Without this, every set() call (e.g. setPlayhead at 30fps) creates a
+      // snapshot, flooding the undo stack with no-op entries and pushing out
+      // real changes like element deletions.
+      equality: (pastState, currentState) =>
+        pastState.tracks === currentState.tracks &&
+        pastState.items === currentState.items &&
+        pastState.duration === currentState.duration &&
+        pastState.project === currentState.project &&
+        pastState.segments === currentState.segments,
     }
   )
 );
