@@ -443,6 +443,7 @@ export default function VideoEditor({
   const timelineRef = useRef(null);
   const [overlayInteracting, setOverlayInteracting] = useState(false);
   const arrowHoldRef = useRef({ key: null, interval: null });
+  const skipTimeRef = useRef(skipTime);
   const waveformCanvasRef = useRef(null);
   const waveformDataRef = useRef(null);
   const audioCtxRef = useRef(null);
@@ -1804,6 +1805,17 @@ export default function VideoEditor({
     return () => window.removeEventListener('click', onClick);
   }, [showSpeedMenu]);
 
+  // Keep refs in sync for keyboard effect (avoids stale closures / effect re-runs)
+  skipTimeRef.current = skipTime;
+  const currentTimeRef = useRef(currentTime);
+  currentTimeRef.current = currentTime;
+  const segmentsRef = useRef(segments);
+  segmentsRef.current = segments;
+  const selectedSegmentIdRef = useRef(selectedSegmentId);
+  selectedSegmentIdRef.current = selectedSegmentId;
+  const selectedSegmentRef = useRef(selectedSegment);
+  selectedSegmentRef.current = selectedSegment;
+
   // ── Keyboard shortcuts (J-K-L shuttle control) ─────
   useEffect(() => {
     const onKeyDown = (e) => {
@@ -1835,13 +1847,13 @@ export default function VideoEditor({
           if (e.repeat) break; // handled by our own interval
           const arrowDir = e.code === 'ArrowLeft' ? -1 : 1;
           const arrowDelta = e.shiftKey ? arrowDir : arrowDir / 30;
-          skipTime(arrowDelta);
+          skipTimeRef.current(arrowDelta);
           // Start hold-to-repeat interval
           const hold = arrowHoldRef.current;
           if (hold.interval) clearInterval(hold.interval);
           hold.key = e.code;
           hold.interval = setInterval(() => {
-            skipTime(arrowDelta);
+            skipTimeRef.current?.(arrowDelta);
           }, 1000 / 15); // 15 steps per second while held
           break;
         }
@@ -1887,20 +1899,21 @@ export default function VideoEditor({
         case 'KeyS': {
           if (showMultiTrack) break;
           e.preventDefault();
-          const splitTime = videoRef.current?.currentTime ?? currentTime;
+          const splitTime = videoRef.current?.currentTime ?? currentTimeRef.current;
           // Split existing segment at playhead, or create a new one
-          const existingSeg = segments.find(s => splitTime > s.start + 0.5 && splitTime < s.end - 0.5);
+          const existingSeg = segmentsRef.current.find(s => splitTime > s.start + 0.5 && splitTime < s.end - 0.5);
           if (existingSeg) {
             const seg1 = { ...existingSeg, end: splitTime };
             const newId = `seg_${segmentIdRef.current++}`;
+            const segs = segmentsRef.current;
             const seg2 = {
               ...existingSeg,
               id: newId,
               start: splitTime,
-              label: `Segment ${segments.length + 1}`,
-              color: SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length],
+              label: `Segment ${segs.length + 1}`,
+              color: SEGMENT_COLORS[segs.length % SEGMENT_COLORS.length],
             };
-            const next = segments.map(s => s.id === existingSeg.id ? seg1 : s);
+            const next = segs.map(s => s.id === existingSeg.id ? seg1 : s);
             next.push(seg2);
             next.sort((a, b) => a.start - b.start);
             setSegments(next);
@@ -1908,6 +1921,7 @@ export default function VideoEditor({
             setSelectedSegmentId(newId);
           } else {
             const halfDur = 2;
+            const segs = segmentsRef.current;
             const newSeg = {
               id: `seg_${segmentIdRef.current++}`,
               start: Math.max(trimmedStart, splitTime - halfDur),
@@ -1916,10 +1930,10 @@ export default function VideoEditor({
               muted: false,
               subtitlesEnabled: true,
               speed: 1.0,
-              color: SEGMENT_COLORS[segments.length % SEGMENT_COLORS.length],
-              label: `Segment ${segments.length + 1}`,
+              color: SEGMENT_COLORS[segs.length % SEGMENT_COLORS.length],
+              label: `Segment ${segs.length + 1}`,
             };
-            const next = [...segments, newSeg].sort((a, b) => a.start - b.start);
+            const next = [...segs, newSeg].sort((a, b) => a.start - b.start);
             setSegments(next);
             onSegmentsChange?.(next);
             setSelectedSegmentId(newSeg.id);
@@ -1929,9 +1943,10 @@ export default function VideoEditor({
         case 'Delete':
         case 'Backspace': {
           if (showMultiTrack) break;
-          if (selectedSegmentId) {
+          const delSegId = selectedSegmentIdRef.current;
+          if (delSegId) {
             e.preventDefault();
-            const next = segments.filter(s => s.id !== selectedSegmentId);
+            const next = segmentsRef.current.filter(s => s.id !== delSegId);
             setSegments(next);
             onSegmentsChange?.(next);
             setSelectedSegmentId(null);
@@ -1940,38 +1955,39 @@ export default function VideoEditor({
         }
         case 'Escape':
           if (showMultiTrack) break;
-          if (selectedSegmentId) {
+          if (selectedSegmentIdRef.current) {
             e.preventDefault();
             setSelectedSegmentId(null);
           }
           break;
         case 'Tab': {
           if (showMultiTrack) break;
-          if (segments.length > 0) {
+          const segsTab = segmentsRef.current;
+          if (segsTab.length > 0) {
             e.preventDefault();
-            const curIdx = segments.findIndex(s => s.id === selectedSegmentId);
+            const curIdx = segsTab.findIndex(s => s.id === selectedSegmentIdRef.current);
             if (e.shiftKey) {
-              const prevIdx = curIdx <= 0 ? segments.length - 1 : curIdx - 1;
-              setSelectedSegmentId(segments[prevIdx].id);
+              const prevIdx = curIdx <= 0 ? segsTab.length - 1 : curIdx - 1;
+              setSelectedSegmentId(segsTab[prevIdx].id);
             } else {
-              const nextIdx = curIdx < 0 || curIdx >= segments.length - 1 ? 0 : curIdx + 1;
-              setSelectedSegmentId(segments[nextIdx].id);
+              const nextIdx = curIdx < 0 || curIdx >= segsTab.length - 1 ? 0 : curIdx + 1;
+              setSelectedSegmentId(segsTab[nextIdx].id);
             }
           }
           break;
         }
         case 'BracketLeft':
           if (showMultiTrack) break;
-          if (selectedSegment) {
+          if (selectedSegmentRef.current) {
             e.preventDefault();
-            seekTo(selectedSegment.start);
+            seekTo(selectedSegmentRef.current.start);
           }
           break;
         case 'BracketRight':
           if (showMultiTrack) break;
-          if (selectedSegment) {
+          if (selectedSegmentRef.current) {
             e.preventDefault();
-            seekTo(selectedSegment.end);
+            seekTo(selectedSegmentRef.current.end);
           }
           break;
       }
@@ -1999,7 +2015,7 @@ export default function VideoEditor({
         hold.key = null;
       }
     };
-  }, [showMultiTrack, togglePlay, skipTime, seekTo, toggleMute, trimmedStart, trimmedEnd, segments, selectedSegmentId, selectedSegment, currentTime, onSegmentsChange]);
+  }, [showMultiTrack, togglePlay, seekTo, toggleMute, trimmedStart, trimmedEnd, onSegmentsChange]);
 
   // ── J-K-L shuttle speed effect ──────────────────────
   useEffect(() => {
