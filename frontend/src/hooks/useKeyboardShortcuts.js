@@ -55,22 +55,30 @@ export default function useKeyboardShortcuts({
           const allIds = useTimelineStore.getState().items.map(i => i.id);
           useTimelineStore.getState().setSelectedItemIds(allIds);
           return;
-        case 'KeyG':
+        case 'KeyG': {
           e.preventDefault();
+          const state = useTimelineStore.getState();
+          const selIds = state.selectedItemIds;
           if (e.shiftKey) {
             // Ctrl+Shift+G: Ungroup selected items
-            const ungroupIds = useTimelineStore.getState().selectedItemIds;
-            if (ungroupIds.length > 0) {
-              useTimelineStore.getState().ungroupItems(ungroupIds);
+            if (selIds.length > 0) {
+              state.ungroupItems(selIds);
             }
           } else {
-            // Ctrl+G: Group selected items
-            const groupIds = useTimelineStore.getState().selectedItemIds;
-            if (groupIds.length >= 2) {
-              useTimelineStore.getState().groupItems(groupIds);
+            // Ctrl+G: Toggle — ungroup if all selected share the same group, otherwise group
+            if (selIds.length >= 2) {
+              const selItems = selIds.map(id => state.items.find(i => i.id === id)).filter(Boolean);
+              const firstGroupId = selItems[0]?.groupId;
+              const allSameGroup = firstGroupId && selItems.every(i => i.groupId === firstGroupId);
+              if (allSameGroup) {
+                state.ungroupItems(selIds);
+              } else {
+                state.groupItems(selIds);
+              }
             }
           }
           return;
+        }
       }
     }
 
