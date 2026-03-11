@@ -507,28 +507,36 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     const rect = canvas.getBoundingClientRect();
     const y = clientY - rect.top - RULER_HEIGHT;
     const idx = Math.floor(y / (TRACK_HEIGHT + TRACK_GAP));
-    return tracks[idx] || null;
-  }, [tracks]);
+    // Read latest tracks from store to avoid stale closures
+    const currentTracks = useTimelineStore.getState().tracks;
+    return currentTracks[idx] || null;
+  }, []);
 
   const hitTestItem = useCallback((clientX, clientY) => {
-    const time = getTimeFromX(clientX);
-    const track = getTrackFromY(clientY);
-    if (!track) return null;
+    // Read latest items and scrollX directly from the store to avoid stale closures
+    const currentItems = useTimelineStore.getState().items;
+    const currentScrollX = useTimelineStore.getState().scrollX;
+    const currentPps = ppsRef.current;
 
     const canvas = canvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
     const px = clientX - rect.left;
+    const x = px - LABEL_WIDTH + currentScrollX;
+    const time = Math.max(0, x / currentPps);
+
+    const track = getTrackFromY(clientY);
+    if (!track) return null;
 
     const selectedId = useTimelineStore.getState().selectedItemId;
     let bestHit = null;
 
-    for (const item of items) {
+    for (const item of currentItems) {
       if (item.trackId !== track.id) continue;
       if (time < item.start || time > item.end) continue;
 
-      const x1 = LABEL_WIDTH + item.start * pps - scrollX;
-      const x2 = LABEL_WIDTH + item.end * pps - scrollX;
+      const x1 = LABEL_WIDTH + item.start * currentPps - currentScrollX;
+      const x2 = LABEL_WIDTH + item.end * currentPps - currentScrollX;
 
       let edge = 'body';
       if (Math.abs(px - x1) < HANDLE_HIT_AREA) edge = 'left';
@@ -543,7 +551,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       if (!bestHit) bestHit = hit;
     }
     return bestHit;
-  }, [items, pps, scrollX, getTimeFromX, getTrackFromY]);
+  }, [getTrackFromY]);
 
   // ── Pointer events ─────────────────────────────────────────────────────────
   const onPointerDown = useCallback((e) => {
@@ -590,7 +598,8 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     // Playhead grab: check if click is near the playhead line or handle.
     // Only grab the playhead directly from the ruler area (triangle handle).
     // Clicks on items near the playhead should select the item, not grab the playhead.
-    const playheadPixelX = rect.left + LABEL_WIDTH + playheadRef.current * ppsRef.current - scrollX;
+    const currentScrollX = useTimelineStore.getState().scrollX;
+    const playheadPixelX = rect.left + LABEL_WIDTH + playheadRef.current * ppsRef.current - currentScrollX;
     const mouseY = e.clientY - rect.top;
     const distToPlayhead = Math.abs(e.clientX - playheadPixelX);
     const isInRuler = mouseY <= RULER_HEIGHT + 8;
