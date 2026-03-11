@@ -302,7 +302,8 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     }
 
     // ── Playhead ──
-    const phX = contentLeft + playhead * pps - sx;
+    // Read from ref for smooth rAF-driven updates (avoids stale closure)
+    const phX = contentLeft + playheadRef.current * pps - sx;
     if (phX >= contentLeft && phX <= canvasW) {
       // Playhead line with subtle glow
       ctx.save();

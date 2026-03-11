@@ -455,6 +455,12 @@ export default function VideoEditor({
   // ── State ──────────────────────────────────────────
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(clipStart);
+
+  // Sync local playing state → timeline store so the Timeline canvas
+  // can run its requestAnimationFrame redraw loop during playback.
+  useEffect(() => {
+    useTimelineStore.getState().setIsPlaying(playing);
+  }, [playing]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showTimecodeRemaining, setShowTimecodeRemaining] = useState(false);
   const [editingTimecode, setEditingTimecode] = useState(false);
@@ -1187,7 +1193,9 @@ export default function VideoEditor({
   const syncTime = useCallback((t) => {
     setCurrentTime(t);
     onTimeUpdate?.(t);
-    useTimelineStore.getState().setPlayhead(t - clipStart);
+    // Clamp to non-negative: before the video seeks to clipStart,
+    // t can be 0 while clipStart > 0, producing a negative playhead.
+    useTimelineStore.getState().setPlayhead(Math.max(0, t - clipStart));
   }, [onTimeUpdate, clipStart]);
 
   // Track which segment is active for volume override — store id + a hash
