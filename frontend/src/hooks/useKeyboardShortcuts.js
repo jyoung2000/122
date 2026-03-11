@@ -55,6 +55,22 @@ export default function useKeyboardShortcuts({
           const allIds = useTimelineStore.getState().items.map(i => i.id);
           useTimelineStore.getState().setSelectedItemIds(allIds);
           return;
+        case 'KeyG':
+          e.preventDefault();
+          if (e.shiftKey) {
+            // Ctrl+Shift+G: Ungroup selected items
+            const ungroupIds = useTimelineStore.getState().selectedItemIds;
+            if (ungroupIds.length > 0) {
+              useTimelineStore.getState().ungroupItems(ungroupIds);
+            }
+          } else {
+            // Ctrl+G: Group selected items
+            const groupIds = useTimelineStore.getState().selectedItemIds;
+            if (groupIds.length >= 2) {
+              useTimelineStore.getState().groupItems(groupIds);
+            }
+          }
+          return;
       }
     }
 

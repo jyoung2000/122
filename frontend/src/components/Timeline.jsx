@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useCallback, useMemo, useState } from 'react';
-import useTimelineStore, { getMaxItemDuration } from '../stores/timelineStore';
+import useTimelineStore, { getMaxItemDuration, hashGroupId } from '../stores/timelineStore';
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const TRACK_HEIGHT = 64;
@@ -91,12 +91,15 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   const scrollX = useTimelineStore((s) => s.scrollX);
   const snapEnabled = useTimelineStore((s) => s.snapEnabled);
   const selectedItemId = useTimelineStore((s) => s.selectedItemId);
+  const selectedItemIds = useTimelineStore((s) => s.selectedItemIds);
   const activeTool = useTimelineStore((s) => s.activeTool);
   const isPlaying = useTimelineStore((s) => s.isPlaying);
   const setPlayhead = useTimelineStore((s) => s.setPlayhead);
   const setZoom = useTimelineStore((s) => s.setZoom);
   const setScrollX = useTimelineStore((s) => s.setScrollX);
   const setSelectedItemId = useTimelineStore((s) => s.setSelectedItemId);
+  const setSelectedItemIds = useTimelineStore((s) => s.setSelectedItemIds);
+  const toggleSelectedItem = useTimelineStore((s) => s.toggleSelectedItem);
   const updateItem = useTimelineStore((s) => s.updateItem);
   const addItem = useTimelineStore((s) => s.addItem);
   const splitItem = useTimelineStore((s) => s.splitItem);
@@ -108,6 +111,8 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
   const toggleTrackLock = useTimelineStore((s) => s.toggleTrackLock);
   const reorderTracks = useTimelineStore((s) => s.reorderTracks);
   const resetSubtitleTimings = useTimelineStore((s) => s.resetSubtitleTimings);
+  const groupItems = useTimelineStore((s) => s.groupItems);
+  const ungroupItems = useTimelineStore((s) => s.ungroupItems);
   const hasOriginalSubtitles = useTimelineStore((s) => (s._originalSubtitles || []).length > 0);
   const segments = useTimelineStore((s) => s.segments);
 
@@ -240,22 +245,41 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
 
       const color = TRACK_COLORS[item.type] || TRACK_COLORS.video;
       const isSelected = item.id === selectedItemId;
+      const isMultiSelected = selectedItemIds.includes(item.id);
 
       // Clip body
-      ctx.fillStyle = isSelected ? color + 'DD' : color + '77';
+      ctx.fillStyle = (isSelected || isMultiSelected) ? color + 'DD' : color + '77';
       const rr = 4;
+      const clipX = Math.max(x1, contentLeft);
+      const clipW = Math.min(w, canvasW - clipX);
       ctx.beginPath();
-      ctx.roundRect(Math.max(x1, contentLeft), y + 2, Math.min(w, canvasW - Math.max(x1, contentLeft)), TRACK_HEIGHT - 4, rr);
+      ctx.roundRect(clipX, y + 2, clipW, TRACK_HEIGHT - 4, rr);
       ctx.fill();
 
-      // Selected border
+      // Selected border (solid white for primary, dashed cyan for multi-select)
       if (isSelected) {
         ctx.strokeStyle = '#FFFFFF';
         ctx.lineWidth = 2;
         ctx.beginPath();
-        ctx.roundRect(Math.max(x1, contentLeft), y + 2, Math.min(w, canvasW - Math.max(x1, contentLeft)), TRACK_HEIGHT - 4, rr);
+        ctx.roundRect(clipX, y + 2, clipW, TRACK_HEIGHT - 4, rr);
         ctx.stroke();
         ctx.lineWidth = 1;
+      } else if (isMultiSelected) {
+        ctx.strokeStyle = '#00D4FF';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.roundRect(clipX, y + 2, clipW, TRACK_HEIGHT - 4, rr);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.lineWidth = 1;
+      }
+
+      // Group indicator: colored bottom bar
+      if (item.groupId && clipW > 8) {
+        const hue = hashGroupId(item.groupId) % 360;
+        ctx.fillStyle = `hsl(${hue}, 70%, 50%)`;
+        ctx.fillRect(clipX + 2, y + TRACK_HEIGHT - 6, clipW - 4, 4);
       }
 
       // Transition indicator
@@ -443,7 +467,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         ctx.lineWidth = 1;
       }
     }
-  }, [tracks, items, playhead, duration, zoom, scrollX, selectedItemId, hoverTime, pps, compact, activeTool, segments]);
+  }, [tracks, items, playhead, duration, zoom, scrollX, selectedItemId, selectedItemIds, hoverTime, pps, compact, activeTool, segments]);
 
   // Continuous redraw during playback
   useEffect(() => {
@@ -571,8 +595,34 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
 
     const hit = hitTestItem(e.clientX, e.clientY);
     if (hit) {
-      setSelectedItemId(hit.item.id);
-      onItemSelect?.(hit.item);
+      // Ctrl/Cmd+Click: toggle multi-select (no drag)
+      if (e.ctrlKey || e.metaKey) {
+        toggleSelectedItem(hit.item.id);
+        onItemSelect?.(hit.item);
+        return;
+      }
+
+      // Alt+Click: select only this item (override group)
+      if (e.altKey) {
+        setSelectedItemId(hit.item.id);
+        onItemSelect?.(hit.item);
+        // Continue to drag logic below
+      } else if (hit.item.groupId) {
+        // Group-aware selection: select all items with same groupId
+        const groupMembers = items.filter(it => it.groupId === hit.item.groupId).map(it => it.id);
+        setSelectedItemIds(groupMembers);
+        // Set primary to clicked item
+        useTimelineStore.setState({ selectedItemId: hit.item.id });
+        onItemSelect?.(hit.item);
+      } else if (!selectedItemIds.includes(hit.item.id)) {
+        // Plain click on non-group, non-selected item: single select
+        setSelectedItemId(hit.item.id);
+        onItemSelect?.(hit.item);
+      } else {
+        // Clicked an already-selected item: keep current selection, set as primary
+        useTimelineStore.setState({ selectedItemId: hit.item.id });
+        onItemSelect?.(hit.item);
+      }
 
       // Check if item is on a locked track — allow selection but block drag/trim
       const itemTrack = tracks.find((t) => t.id === hit.item.trackId);
@@ -593,12 +643,23 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
           startX: e.clientX,
         });
       } else {
+        // Multi-item drag: build snapshots for all selected items
+        const currentSelectedIds = useTimelineStore.getState().selectedItemIds;
+        const dragIds = currentSelectedIds.includes(hit.item.id)
+          ? currentSelectedIds
+          : [hit.item.id];
+        const snapshots = dragIds.map(id => {
+          const it = items.find(i => i.id === id);
+          return it ? { id, origStart: it.start, origEnd: it.end, origTrackId: it.trackId } : null;
+        }).filter(Boolean);
+
         // Pause undo history during drag so intermediate frames don't flood it
         useTimelineStore.temporal.getState().pause();
         setIsDragging(true);
         setDragInfo({
           type: 'move',
           itemId: hit.item.id,
+          snapshots,
           origStart: hit.item.start,
           origEnd: hit.item.end,
           origTrackId: hit.item.trackId,
@@ -616,7 +677,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       setIsDragging(true);
       setDragInfo({ type: 'scrub', startX: e.clientX });
     }
-  }, [hitTestItem, getTimeFromX, setPlayhead, setSelectedItemId, onSeek, activeTool, splitItem, spaceHeld, scrollX, onItemSelect, tracks, items]);
+  }, [hitTestItem, getTimeFromX, setPlayhead, setSelectedItemId, setSelectedItemIds, toggleSelectedItem, onSeek, activeTool, splitItem, spaceHeld, scrollX, onItemSelect, tracks, items, selectedItemIds]);
 
   useEffect(() => {
     if (!isDragging || !dragInfo) return;
@@ -676,10 +737,12 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         }
       } else if (dragInfo.type === 'move') {
         const dx = (e.clientX - dragInfo.startX) / pps;
-        let newStart = Math.max(0, dragInfo.origStart + dx);
-        const dur = dragInfo.origEnd - dragInfo.origStart;
+        const snapshots = dragInfo.snapshots || [{ id: dragInfo.itemId, origStart: dragInfo.origStart, origEnd: dragInfo.origEnd, origTrackId: dragInfo.origTrackId }];
+        const primarySnap = snapshots[0];
+        let newStart = Math.max(0, primarySnap.origStart + dx);
+        const dur = primarySnap.origEnd - primarySnap.origStart;
 
-        // Snap (both edges of the moving item)
+        // Snap (both edges of the primary moving item)
         const setSnapLine = useTimelineStore.getState().setSnapLine;
         if (snapEnabled) {
           const snapStart = findSnapTarget(newStart, items, dragInfo.itemId, playhead, duration, pps);
@@ -698,10 +761,13 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
           setSnapLine(null);
         }
 
+        // Compute actual delta from snapped primary position
+        const actualDelta = newStart - primarySnap.origStart;
+
+        // Track change (only for single-item drag on the primary item)
         const track = getTrackFromY(e.clientY);
-        let trackId = dragInfo.origTrackId;
-        if (track) {
-          // Enforce track type constraints and lock: items can only move to compatible, unlocked tracks
+        let primaryTrackId = dragInfo.origTrackId;
+        if (track && snapshots.length === 1) {
           const draggedItem = items.find((i) => i.id === dragInfo.itemId);
           const itemType = draggedItem?.type;
           const trackType = track.type;
@@ -710,9 +776,16 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
             (itemType === 'audio' && trackType === 'audio') ||
             ((itemType === 'text' || itemType === 'shape' || itemType === 'image' || itemType === 'overlay') && trackType === 'overlay') ||
             (itemType === 'subtitle' && trackType === 'subtitle');
-          if (compatible && !track.locked) trackId = track.id;
+          if (compatible && !track.locked) primaryTrackId = track.id;
         }
-        updateItem(dragInfo.itemId, { start: newStart, end: newStart + dur, trackId });
+
+        // Apply to all items in the drag group
+        for (const snap of snapshots) {
+          const itemNewStart = Math.max(0, snap.origStart + actualDelta);
+          const itemDur = snap.origEnd - snap.origStart;
+          const itemTrackId = snap.id === dragInfo.itemId ? primaryTrackId : snap.origTrackId;
+          updateItem(snap.id, { start: itemNewStart, end: itemNewStart + itemDur, trackId: itemTrackId });
+        }
       }
     };
 
@@ -843,9 +916,19 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       case 'duplicate':
         if (item) useTimelineStore.getState().duplicateItem(item.id);
         break;
+      case 'group': {
+        const ids = useTimelineStore.getState().selectedItemIds;
+        if (ids.length >= 2) groupItems(ids);
+        break;
+      }
+      case 'ungroup': {
+        const ids = useTimelineStore.getState().selectedItemIds;
+        if (ids.length > 0) ungroupItems(ids);
+        break;
+      }
     }
     setContextMenu(null);
-  }, [contextMenu, splitItem, removeItem, tracks]);
+  }, [contextMenu, splitItem, removeItem, tracks, groupItems, ungroupItems]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -1140,6 +1223,12 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
               <button onClick={() => handleContextAction('split')}>Split at cursor</button>
               <button onClick={() => handleContextAction('delete')}>Delete</button>
               <button onClick={() => handleContextAction('duplicate')}>Duplicate</button>
+              {selectedItemIds.length >= 2 && (
+                <button onClick={() => handleContextAction('group')}>Group Selected</button>
+              )}
+              {contextMenu.item.groupId && (
+                <button onClick={() => handleContextAction('ungroup')}>Ungroup</button>
+              )}
             </>
           ) : (
             <div style={{ padding: '4px 8px', fontSize: 10, color: 'var(--ve-text-muted)' }}>

@@ -69,6 +69,101 @@ function computeTimelineDuration(items) {
   return Math.max(...items.map(it => it.end || 0));
 }
 
+// ── Overlap prevention helpers ───────────────────────────────────────────────
+
+/**
+ * Get items on the same track, excluding specific IDs, sorted by start time.
+ */
+function getTrackSiblings(items, trackId, excludeIds) {
+  const exclude = new Set(excludeIds);
+  return items
+    .filter(it => it.trackId === trackId && !exclude.has(it.id))
+    .sort((a, b) => a.start - b.start);
+}
+
+/**
+ * Clamp a move so the item doesn't overlap siblings on the same track.
+ * Returns the clamped start time.
+ */
+function clampMoveToTrack(duration, newStart, siblings) {
+  if (siblings.length === 0) return Math.max(0, newStart);
+
+  // Build gaps: [0, first.start], [sib.end, nextSib.start], [last.end, Infinity]
+  const gaps = [];
+  gaps.push({ start: 0, end: siblings[0].start });
+  for (let i = 0; i < siblings.length - 1; i++) {
+    gaps.push({ start: siblings[i].end, end: siblings[i + 1].start });
+  }
+  gaps.push({ start: siblings[siblings.length - 1].end, end: Infinity });
+
+  // Filter to gaps the item can actually fit in
+  const fittingGaps = gaps.filter(g => (g.end - g.start) >= duration - 0.001);
+
+  if (fittingGaps.length === 0) {
+    // No gap large enough — find the gap the item would land in and clamp to boundary
+    let bestGap = gaps[0];
+    let bestDist = Infinity;
+    for (const g of gaps) {
+      const mid = g.end === Infinity ? g.start : (g.start + g.end) / 2;
+      const dist = Math.abs(newStart + duration / 2 - mid);
+      if (dist < bestDist) { bestDist = dist; bestGap = g; }
+    }
+    return Math.max(bestGap.start, Math.min(newStart, bestGap.end - duration));
+  }
+
+  // Find the fitting gap closest to the desired newStart
+  let bestGap = fittingGaps[0];
+  let bestDist = Infinity;
+  for (const g of fittingGaps) {
+    const clampedInGap = Math.max(g.start, Math.min(newStart, g.end - duration));
+    const dist = Math.abs(clampedInGap - newStart);
+    if (dist < bestDist) { bestDist = dist; bestGap = g; }
+  }
+
+  return Math.max(bestGap.start, Math.min(newStart, bestGap.end - duration));
+}
+
+/**
+ * Clamp a left-edge trim so it doesn't overlap the previous sibling's end.
+ */
+function clampTrimLeft(newStart, siblings, itemEnd) {
+  // Find the closest sibling that ends before our current end
+  let maxStart = 0;
+  for (const sib of siblings) {
+    if (sib.end <= itemEnd && sib.end > maxStart) {
+      maxStart = sib.end;
+    }
+  }
+  return Math.max(newStart, maxStart);
+}
+
+/**
+ * Clamp a right-edge trim so it doesn't overlap the next sibling's start.
+ */
+function clampTrimRight(newEnd, siblings, itemStart) {
+  // Find the closest sibling that starts after our current start
+  let minEnd = Infinity;
+  for (const sib of siblings) {
+    if (sib.start >= itemStart && sib.start < minEnd) {
+      minEnd = sib.start;
+    }
+  }
+  return Math.min(newEnd, minEnd);
+}
+
+// ── Group ID helpers ────────────────────────────────────────────────────────
+let _groupIdCounter = 1;
+const nextGroupId = () => `g${_groupIdCounter++}`;
+
+function hashGroupId(groupId) {
+  let hash = 0;
+  for (let i = 0; i < groupId.length; i++) {
+    hash = ((hash << 5) - hash) + groupId.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
 let _itemIdCounter = 1;
 const nextItemId = () => `item-${_itemIdCounter++}`;
 const nextMediaId = () => `media-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -148,6 +243,16 @@ const useTimelineStore = create(
       setSnapLine: (line) => set({ snapLine: line }),
       setSelectedItemId: (id) => set({ selectedItemId: id, selectedItemIds: id ? [id] : [] }),
       setSelectedItemIds: (ids) => set({ selectedItemIds: ids, selectedItemId: ids[0] || null }),
+      toggleSelectedItem: (itemId) => set((state) => {
+        const idx = state.selectedItemIds.indexOf(itemId);
+        if (idx >= 0) {
+          state.selectedItemIds.splice(idx, 1);
+          state.selectedItemId = state.selectedItemIds[0] || null;
+        } else {
+          state.selectedItemIds.push(itemId);
+          state.selectedItemId = itemId;
+        }
+      }),
       setActiveTool: (tool) => set({ activeTool: tool }),
       setActivePanel: (panel) => set({ activePanel: panel }),
 
@@ -259,7 +364,16 @@ const useTimelineStore = create(
           shapeStyle: item.shapeStyle || null,
           subjectX: item.subjectX ?? 50,
           clipSettings: item.clipSettings || null,
+          groupId: item.groupId || null,
         };
+        // Overlap prevention: clamp new item to a non-overlapping position
+        const siblings = getTrackSiblings(get().items, trackId, [id]);
+        if (siblings.length > 0) {
+          const dur = newItem.end - newItem.start;
+          const clampedStart = clampMoveToTrack(dur, newItem.start, siblings);
+          newItem.start = clampedStart;
+          newItem.end = clampedStart + dur;
+        }
         set((state) => {
           state.items.push(newItem);
           state.duration = Math.max(state.duration, newItem.end);
@@ -298,6 +412,26 @@ const useTimelineStore = create(
           }
         }
         Object.assign(item, updates);
+        // Overlap prevention: clamp start/end if they changed
+        if (updates.start !== undefined || updates.end !== undefined || updates.trackId !== undefined) {
+          const targetTrackId = item.trackId;
+          const siblings = getTrackSiblings(state.items, targetTrackId, [item.id]);
+          if (siblings.length > 0) {
+            const dur = item.end - item.start;
+            if (updates.start !== undefined && updates.end !== undefined) {
+              // Move: clamp both
+              const clamped = clampMoveToTrack(dur, item.start, siblings);
+              item.start = clamped;
+              item.end = clamped + dur;
+            } else if (updates.start !== undefined && updates.end === undefined) {
+              // Left trim
+              item.start = clampTrimLeft(item.start, siblings, item.end);
+            } else if (updates.end !== undefined && updates.start === undefined) {
+              // Right trim
+              item.end = clampTrimRight(item.end, siblings, item.start);
+            }
+          }
+        }
         // Clamp end so video/audio items never exceed source media duration
         const maxDur = getMaxItemDuration(item, state.mediaLibrary);
         if (maxDur < Infinity) {
@@ -414,15 +548,40 @@ const useTimelineStore = create(
 
       // Batch move items (for multi-select drag)
       moveItems: (itemIds, deltaTime, targetTrackId) => set((state) => {
+        const idSet = new Set(itemIds);
         for (const id of itemIds) {
           const item = state.items.find(i => i.id === id);
           if (!item) continue;
           const dur = item.end - item.start;
-          item.start = Math.max(0, item.start + deltaTime);
-          item.end = item.start + dur;
+          let newStart = Math.max(0, item.start + deltaTime);
           if (targetTrackId) item.trackId = targetTrackId;
+          // Overlap prevention: exclude all items being moved together
+          const siblings = getTrackSiblings(state.items, item.trackId, [...idSet]);
+          if (siblings.length > 0) {
+            newStart = clampMoveToTrack(dur, newStart, siblings);
+          }
+          item.start = newStart;
+          item.end = newStart + dur;
         }
         state.duration = computeTimelineDuration(state.items);
+      }),
+
+      // Group operations
+      groupItems: (itemIds) => set((state) => {
+        if (!itemIds || itemIds.length < 2) return;
+        const gid = nextGroupId();
+        for (const id of itemIds) {
+          const item = state.items.find(i => i.id === id);
+          if (item) item.groupId = gid;
+        }
+      }),
+
+      ungroupItems: (itemIds) => set((state) => {
+        if (!itemIds || itemIds.length === 0) return;
+        for (const id of itemIds) {
+          const item = state.items.find(i => i.id === id);
+          if (item) item.groupId = null;
+        }
       }),
 
       // Media library
@@ -701,4 +860,5 @@ const useTimelineStore = create(
   )
 );
 
+export { hashGroupId };
 export default useTimelineStore;
