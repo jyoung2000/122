@@ -520,6 +520,9 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     const rect = canvas.getBoundingClientRect();
     const px = clientX - rect.left;
 
+    const selectedId = useTimelineStore.getState().selectedItemId;
+    let bestHit = null;
+
     for (const item of items) {
       if (item.trackId !== track.id) continue;
       if (time < item.start || time > item.end) continue;
@@ -527,11 +530,19 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       const x1 = LABEL_WIDTH + item.start * pps - scrollX;
       const x2 = LABEL_WIDTH + item.end * pps - scrollX;
 
-      if (Math.abs(px - x1) < HANDLE_HIT_AREA) return { item, edge: 'left' };
-      if (Math.abs(px - x2) < HANDLE_HIT_AREA) return { item, edge: 'right' };
-      return { item, edge: 'body' };
+      let edge = 'body';
+      if (Math.abs(px - x1) < HANDLE_HIT_AREA) edge = 'left';
+      else if (Math.abs(px - x2) < HANDLE_HIT_AREA) edge = 'right';
+
+      const hit = { item, edge };
+
+      // Prefer the currently selected item when multiple items match
+      // (e.g. adjacent items sharing a boundary time)
+      if (item.id === selectedId) return hit;
+
+      if (!bestHit) bestHit = hit;
     }
-    return null;
+    return bestHit;
   }, [items, pps, scrollX, getTimeFromX, getTrackFromY]);
 
   // ── Pointer events ─────────────────────────────────────────────────────────
@@ -621,8 +632,10 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         setSelectedItemId(hit.item.id);
         onItemSelect?.(hit.item);
       } else {
-        // Clicked an already-selected item: keep current selection, set as primary
-        useTimelineStore.setState({ selectedItemId: hit.item.id });
+        // Clicked an already-selected item without modifier: reduce selection to
+        // just this item. This prevents stale multi-selections from causing
+        // unintended multi-item drags.
+        setSelectedItemId(hit.item.id);
         onItemSelect?.(hit.item);
       }
 
