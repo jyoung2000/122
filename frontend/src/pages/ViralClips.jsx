@@ -597,6 +597,46 @@ export default function ViralClips() {
 
   useEffect(() => { fetchJobs(); }, [fetchJobs]);
 
+  // ── Server-first subtitle settings persistence ──
+  // Load settings from the most recently updated job that has subtitle_settings
+  const settingsLoadedFromServer = useRef(false);
+  const skipNextServerSave = useRef(false);
+  useEffect(() => {
+    if (!jobs || jobs.length === 0) return;
+    // Find the most recently updated job with subtitle_settings
+    const withSettings = jobs
+      .filter((j) => j.subtitle_settings && Object.keys(j.subtitle_settings).length > 0)
+      .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+    if (withSettings.length > 0 && !settingsLoadedFromServer.current) {
+      const serverSettings = sanitizeSubtitleSettings(withSettings[0].subtitle_settings);
+      skipNextServerSave.current = true;
+      setSettings((prev) => ({ ...prev, ...serverSettings }));
+      settingsLoadedFromServer.current = true;
+    }
+  }, [jobs]);
+
+  // Debounced save settings to all loaded jobs (server is source of truth)
+  const saveSettingsTimerRef = useRef(null);
+  useEffect(() => {
+    if (skipNextServerSave.current) {
+      skipNextServerSave.current = false;
+      return;
+    }
+    if (!jobs || jobs.length === 0) return;
+    if (saveSettingsTimerRef.current) clearTimeout(saveSettingsTimerRef.current);
+    saveSettingsTimerRef.current = setTimeout(() => {
+      // Save to all loaded jobs so settings are consistent everywhere
+      jobs.forEach((j) => {
+        fetch(`/api/jobs/${j.job_id}/subtitle-settings`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(settings),
+        }).catch(() => {});
+      });
+    }, 800);
+    return () => { if (saveSettingsTimerRef.current) clearTimeout(saveSettingsTimerRef.current); };
+  }, [settings, jobs]);
+
   // --- Per-clip override helpers ---
   // Key must be unique per clip — include start_time as a guard against
   // duplicate IDs from AI providers (which would cause React to drop cards).
