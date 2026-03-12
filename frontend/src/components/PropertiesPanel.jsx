@@ -203,7 +203,49 @@ function SubtitleProperties({ item, update, settings, onSettingsChange, customFo
         </div>
         <SliderRow label="Max W" value={s.subtitleMaxWidth ?? 90} min={20} max={100} step={1} unit="%" onChange={(v) => set('subtitleMaxWidth', v)} />
         <SliderRow label="Offset" value={s.subtitleOffsetV ?? 4} min={0} max={50} step={1} unit="%" onChange={(v) => set('subtitleOffsetV', v)} />
-        <NumField label="Max Words" value={s.subtitleMaxWords || 0} min={0} max={30} step={1} onChange={(v) => set('subtitleMaxWords', v)} />
+      </div>
+
+      {/* Max Words Per Subtitle */}
+      <div className="ve-properties__section">
+        <label className="ve-properties__label">Max Words Per Subtitle</label>
+        <div className="ve-properties__slider-row">
+          <span className="ve-properties__field-label">Enabled</span>
+          <button
+            className={`ve-properties__speed-pill${(s.subtitleMaxWords || 0) > 0 ? ' ve-properties__speed-pill--active' : ''}`}
+            onClick={() => set('subtitleMaxWords', (s.subtitleMaxWords || 0) > 0 ? 0 : 4)}
+          >
+            {(s.subtitleMaxWords || 0) > 0 ? 'On' : 'Off'}
+          </button>
+        </div>
+        {(s.subtitleMaxWords || 0) > 0 && (
+          <SliderRow label="Words" value={s.subtitleMaxWords} min={1} max={30} step={1} onChange={(v) => set('subtitleMaxWords', v)} />
+        )}
+      </div>
+
+      {/* Active Word Highlight */}
+      <div className="ve-properties__section">
+        <label className="ve-properties__label">Active Word Highlight</label>
+        <div className="ve-properties__slider-row">
+          <span className="ve-properties__field-label">Enabled</span>
+          <button
+            className={`ve-properties__speed-pill${s.activeWordEnabled ? ' ve-properties__speed-pill--active' : ''}`}
+            onClick={() => set('activeWordEnabled', !s.activeWordEnabled)}
+          >
+            {s.activeWordEnabled ? 'On' : 'Off'}
+          </button>
+        </div>
+        {s.activeWordEnabled && (
+          <>
+            <div className="ve-properties__row">
+              <ColorField label="Word Color" value={s.activeWordColor || '#FFD700'} onChange={(v) => set('activeWordColor', v)} />
+              <ColorField label="Stroke" value={s.activeWordOutlineColor || '#000000'} onChange={(v) => set('activeWordOutlineColor', v)} />
+            </div>
+            <div className="ve-properties__row">
+              <ColorField label="BG Color" value={s.activeWordBgColor || '#000000'} onChange={(v) => set('activeWordBgColor', v)} />
+              <NumField label="BG Opacity" value={s.activeWordBgOpacity ?? 0} min={0} max={100} onChange={(v) => set('activeWordBgOpacity', v)} />
+            </div>
+          </>
+        )}
       </div>
 
       {/* Outline */}
