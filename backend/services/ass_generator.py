@@ -34,27 +34,33 @@ def _resolve_font_path(font_name: str, bold: bool = False) -> str | None:
     return None
 
 
-def _measure_text(text: str, font_path: str, size_px: int) -> tuple[float, float, float] | None:
+def _measure_text(text: str, font_path: str, size_px: int) -> tuple[float, float, float, float, float] | None:
     """Measure text dimensions using Pillow.
 
-    Returns (advance_width, font_ascent, font_descent) or None.
-    Uses getlength() for advance width which matches how text layout engines
-    (including libass/freetype) position successive characters.
-    Uses font.getmetrics() for ascent/descent to match libass's font-level
-    line height (not the tight bbox of the specific rendered text).
+    Returns (advance_width, font_ascent, font_descent, visual_top, visual_height)
+    or None.
+
+    - advance_width: how far the cursor moves (for text positioning/centering)
+    - font_ascent/descent: font-level metrics (for Y positioning to match libass)
+    - visual_top: top of visible ink relative to baseline (from getbbox)
+    - visual_height: height of visible ink (tight bbox, for drawing backgrounds)
     """
     try:
         from PIL import ImageFont
         font = ImageFont.truetype(font_path, size_px)
-        # getlength() returns the advance width — how far the cursor moves
-        # after rendering the text.  This matches libass/freetype positioning
-        # better than getbbox() which returns the tight visual bounding box.
         advance_width = font.getlength(text)
-        # Use font-level metrics for line height — these come from the font's
-        # OS/2 table (typo ascender/descender) which is what libass uses,
-        # rather than the tight per-glyph bbox which varies per text content.
         font_ascent, font_descent = font.getmetrics()
-        return (advance_width, font_ascent, font_descent)
+        # getbbox() returns the tight visual bounding box of rendered glyphs.
+        # This is much tighter than getmetrics() which includes space for
+        # accents and diacritics that may not be present in the actual text.
+        bbox = font.getbbox(text)
+        if bbox:
+            visual_top = bbox[1]       # top of ink relative to origin
+            visual_height = bbox[3] - bbox[1]  # tight visual height
+        else:
+            visual_top = 0
+            visual_height = font_ascent + font_descent
+        return (advance_width, font_ascent, font_descent, visual_top, visual_height)
     except Exception:
         return None
 
@@ -517,8 +523,8 @@ def generate_ass(
                            "falling back to sharp background box", font)
             _bg_split = False
         else:
-            _bg_draw_pad_h = max(4, round(7 * font_scale))
-            _bg_draw_pad_v = max(2, round(2 * font_scale))
+            _bg_draw_pad_h = max(3, round(5 * font_scale))
+            _bg_draw_pad_v = max(1, round(1 * font_scale))
             _bg_draw_radius = max(1, round(background_radius * font_scale))
 
     # Compute outline/background style settings (same for all speakers)
@@ -631,8 +637,8 @@ def generate_ass(
                            "falling back to sharp active word box", font)
             _aw_bg_split = False
         else:
-            _aw_draw_pad_h = max(2, round(3 * font_scale))
-            _aw_draw_pad_v = max(1, round(2 * font_scale))
+            _aw_draw_pad_h = max(2, round(2 * font_scale))
+            _aw_draw_pad_v = max(1, round(1 * font_scale))
             _aw_draw_radius = max(1, round(active_word_bg_radius * font_scale))
 
     if active_word_enabled and active_word_bg_opacity > 0:
@@ -1076,7 +1082,11 @@ def generate_ass(
                 word_w = through_m[0] - before_m[0]
             else:
                 word_w = word_m[0]
+            # Use font-level line height for Y positioning (matches libass layout)
             line_h = full_m[1] + full_m[2]  # font ascent + descent
+            # Use visual bbox height for the drawing rectangle (tighter fit)
+            vis_h = word_m[4]             # visual_height from getbbox
+            vis_top = word_m[3]           # visual_top offset from baseline
 
             # Horizontal: center-aligned text
             line_left_x = (video_width - full_w) / 2
@@ -1092,11 +1102,13 @@ def generate_ass(
             else:
                 continue
 
-            # Drawing rect with padding
+            # Drawing rect: use visual height for tighter vertical fit
+            # vis_top is the offset from the font origin to the top of
+            # visible ink, so the ink starts at text_top_y + vis_top.
             draw_x = round(word_left_x - _aw_draw_pad_h)
-            draw_y = round(text_top_y - _aw_draw_pad_v)
+            draw_y = round(text_top_y + vis_top - _aw_draw_pad_v)
             draw_w = round(word_w + 2 * _aw_draw_pad_h)
-            draw_h = round(line_h + 2 * _aw_draw_pad_v)
+            draw_h = round(vis_h + 2 * _aw_draw_pad_v)
 
             drawing = _ass_rounded_rect(draw_w, draw_h, _aw_draw_radius)
             event_text = (
@@ -1142,8 +1154,8 @@ def generate_ass(
             m = _measure_text(plain, _bg_font_path, size_px)
             if not m:
                 continue
-            text_w, text_asc, text_desc = m
-            line_h = text_asc + text_desc
+            text_w, text_asc, text_desc, vis_top, vis_h = m
+            line_h = text_asc + text_desc  # for Y positioning (matches libass)
 
             # Horizontal: center-aligned text (alignment=2 is bottom-center)
             line_left_x = (video_width - text_w) / 2
@@ -1158,10 +1170,11 @@ def generate_ass(
             else:
                 continue
 
+            # Use visual height for tighter background fit
             draw_x = round(line_left_x - _bg_draw_pad_h)
-            draw_y = round(text_top_y - _bg_draw_pad_v)
+            draw_y = round(text_top_y + vis_top - _bg_draw_pad_v)
             draw_w = round(text_w + 2 * _bg_draw_pad_h)
-            draw_h = round(line_h + 2 * _bg_draw_pad_v)
+            draw_h = round(vis_h + 2 * _bg_draw_pad_v)
 
             drawing = _ass_rounded_rect(draw_w, draw_h, _bg_draw_radius)
             event_text = (
