@@ -506,7 +506,6 @@ function SubtitleSettingsEditor({ values, onChange, speakerList, customFonts, co
                   <div style={{ flex: 1, minWidth: 100 }}>
                     <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 4 }}>
                       Radius: <span style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>{values.activeWordBgRadius ?? 4}px</span>
-                      <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 }}>(preview only)</span>
                     </div>
                     <input type="range" min="0" max="20" step="1"
                       value={values.activeWordBgRadius ?? 4}
