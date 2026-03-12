@@ -39,53 +39,75 @@ export default function ToolBar({ compact = false }) {
     setActiveTool(toolId);
 
     // For text/shape, auto-create an item at the playhead
-    if (toolId === 'text') {
-      const newId = addItem({
-        trackId: 'v2',
-        type: 'text',
-        start: playhead,
-        end: Math.min(playhead + 5, duration || playhead + 5),
-        textContent: 'New Text',
-        textStyle: {
-          fontSize: 48,
-          fontFamily: 'DM Sans',
-          fontWeight: 700,
-          color: '#FFFFFF',
-          textAlign: 'center',
-          outlineWidth: 2,
-          outlineColor: '#000000',
-          bgColor: null,
-          bgOpacity: 0,
-          bgPadding: 8,
-          bgRadius: 4,
-          shadowBlur: 0,
-          shadowColor: 'rgba(0,0,0,0.5)',
-          shadowOffsetX: 0,
-          shadowOffsetY: 0,
-          animation: 'none',
-        },
-        position: { x: 50, y: 50 },
-        size: { w: 60, h: 15 },
-      });
-      setSelectedItemId(newId);
-      setActiveTool('select');
-    } else if (toolId === 'shape') {
-      const newId = addItem({
-        trackId: 'v2',
-        type: 'shape',
-        start: playhead,
-        end: Math.min(playhead + 5, duration || playhead + 5),
-        shapeType: 'rectangle',
-        shapeStyle: {
-          fillColor: '#FF3B30',
-          strokeColor: '#FFFFFF',
-          strokeWidth: 2,
-          cornerRadius: 8,
-        },
-        position: { x: 30, y: 30 },
-        size: { w: 40, h: 30 },
-      });
-      setSelectedItemId(newId);
+    if (toolId === 'text' || toolId === 'shape') {
+      // Determine target overlay track dynamically
+      const state = useTimelineStore.getState();
+      let targetTrackId = null;
+
+      // 1. If selected item is on an overlay track, use that track
+      if (state.selectedItemId) {
+        const selectedItem = state.items.find(i => i.id === state.selectedItemId);
+        if (selectedItem) {
+          const selectedTrack = state.tracks.find(t => t.id === selectedItem.trackId);
+          if (selectedTrack?.type === 'overlay' && !selectedTrack.locked) {
+            targetTrackId = selectedTrack.id;
+          }
+        }
+      }
+
+      // 2. Fallback: first unlocked overlay track
+      if (!targetTrackId) {
+        const overlayTrack = state.tracks.find(t => t.type === 'overlay' && !t.locked);
+        targetTrackId = overlayTrack?.id || 'v2';
+      }
+
+      if (toolId === 'text') {
+        const newId = addItem({
+          trackId: targetTrackId,
+          type: 'text',
+          start: playhead,
+          end: Math.min(playhead + 5, duration || playhead + 5),
+          textContent: 'New Text',
+          textStyle: {
+            fontSize: 48,
+            fontFamily: 'DM Sans',
+            fontWeight: 700,
+            color: '#FFFFFF',
+            textAlign: 'center',
+            outlineWidth: 2,
+            outlineColor: '#000000',
+            bgColor: null,
+            bgOpacity: 0,
+            bgPadding: 8,
+            bgRadius: 4,
+            shadowBlur: 0,
+            shadowColor: 'rgba(0,0,0,0.5)',
+            shadowOffsetX: 0,
+            shadowOffsetY: 0,
+            animation: 'none',
+          },
+          position: { x: 50, y: 50 },
+          size: { w: 60, h: 15 },
+        });
+        setSelectedItemId(newId);
+      } else {
+        const newId = addItem({
+          trackId: targetTrackId,
+          type: 'shape',
+          start: playhead,
+          end: Math.min(playhead + 5, duration || playhead + 5),
+          shapeType: 'rectangle',
+          shapeStyle: {
+            fillColor: '#FF3B30',
+            strokeColor: '#FFFFFF',
+            strokeWidth: 2,
+            cornerRadius: 8,
+          },
+          position: { x: 30, y: 30 },
+          size: { w: 40, h: 30 },
+        });
+        setSelectedItemId(newId);
+      }
       setActiveTool('select');
     }
   };

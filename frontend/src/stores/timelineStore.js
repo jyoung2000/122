@@ -352,59 +352,60 @@ const useTimelineStore = create(
       // Item operations
       addItem: (item) => {
         const id = item.id || nextItemId();
-        // Auto-route to the correct track based on item type
-        let trackId = item.trackId || 'v1';
         const itemType = item.type || 'video';
-        const state = get();
-        const track = state.tracks.find((t) => t.id === trackId);
-        if (track) {
-          if (track.locked || !isTrackCompatible(itemType, track.type)) {
-            const correctTrack = findCompatibleTrack(state.tracks, itemType);
-            if (correctTrack && !correctTrack.locked) trackId = correctTrack.id;
-            else if (correctTrack?.locked) return null; // All compatible tracks are locked
-          }
-        }
-        const newItem = {
-          id,
-          trackId,
-          type: itemType,
-          mediaRef: item.mediaRef || null,
-          start: item.start || 0,
-          end: item.end || 0,
-          trimStart: item.trimStart || 0,
-          trimEnd: item.trimEnd || null,
-          volume: item.volume ?? 1.0,
-          speed: item.speed ?? 1.0,
-          opacity: item.opacity ?? 1.0,
-          position: item.position || { x: 50, y: 50 },
-          size: item.size || (itemType === 'image' || itemType === 'overlay' ? { w: 30, h: 30 } : { w: 100, h: 100 }),
-          transform: item.transform || { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 },
-          effects: item.effects || { brightness: 0, contrast: 0, saturation: 0, blur: 0, hueRotate: 0, sepia: 0 },
-          fadeIn: item.fadeIn || 0,
-          fadeOut: item.fadeOut || 0,
-          transition: item.transition || null,
-          subtitleText: item.subtitleText || null,
-          subtitleStyle: item.subtitleStyle || null,
-          speaker: item.speaker || null,
-          words: item.words || null,
-          transcriptIndex: item.transcriptIndex ?? null,
-          textContent: item.textContent || null,
-          textStyle: item.textStyle || null,
-          shapeType: item.shapeType || null,
-          shapeStyle: item.shapeStyle || null,
-          subjectX: item.subjectX ?? 50,
-          clipSettings: item.clipSettings || null,
-          groupId: item.groupId || null,
-        };
-        // Overlap prevention: clamp new item to a non-overlapping position
-        const siblings = getTrackSiblings(get().items, trackId, [id]);
-        if (siblings.length > 0) {
-          const dur = newItem.end - newItem.start;
-          const clampedStart = clampMoveToTrack(dur, newItem.start, siblings);
-          newItem.start = clampedStart;
-          newItem.end = clampedStart + dur;
-        }
+
         set((state) => {
+          // Auto-route to the correct track based on item type
+          let trackId = item.trackId || 'v1';
+          const track = state.tracks.find((t) => t.id === trackId);
+          if (track) {
+            if (track.locked || !isTrackCompatible(itemType, track.type)) {
+              const correctTrack = findCompatibleTrack(state.tracks, itemType);
+              if (correctTrack && !correctTrack.locked) trackId = correctTrack.id;
+              else if (correctTrack?.locked) return; // All compatible tracks are locked
+            }
+          }
+          const newItem = {
+            id,
+            trackId,
+            type: itemType,
+            mediaRef: item.mediaRef || null,
+            start: item.start || 0,
+            end: item.end || 0,
+            trimStart: item.trimStart || 0,
+            trimEnd: item.trimEnd || null,
+            volume: item.volume ?? 1.0,
+            speed: item.speed ?? 1.0,
+            opacity: item.opacity ?? 1.0,
+            position: item.position || { x: 50, y: 50 },
+            size: item.size || (itemType === 'image' || itemType === 'overlay' ? { w: 30, h: 30 } : { w: 100, h: 100 }),
+            transform: item.transform || { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 },
+            effects: item.effects || { brightness: 0, contrast: 0, saturation: 0, blur: 0, hueRotate: 0, sepia: 0 },
+            fadeIn: item.fadeIn || 0,
+            fadeOut: item.fadeOut || 0,
+            transition: item.transition || null,
+            subtitleText: item.subtitleText || null,
+            subtitleStyle: item.subtitleStyle || null,
+            speaker: item.speaker || null,
+            words: item.words || null,
+            transcriptIndex: item.transcriptIndex ?? null,
+            textContent: item.textContent || null,
+            textStyle: item.textStyle || null,
+            shapeType: item.shapeType || null,
+            shapeStyle: item.shapeStyle || null,
+            subjectX: item.subjectX ?? 50,
+            clipSettings: item.clipSettings || null,
+            groupId: item.groupId || null,
+          };
+          // Overlap prevention: clamp inside the Immer draft so concurrent
+          // addItem calls each see the latest state
+          const siblings = getTrackSiblings(state.items, trackId, [id]);
+          if (siblings.length > 0) {
+            const dur = newItem.end - newItem.start;
+            const clampedStart = clampMoveToTrack(dur, newItem.start, siblings);
+            newItem.start = clampedStart;
+            newItem.end = clampedStart + dur;
+          }
           state.items.push(newItem);
           resolveAllOverlaps(state.items);
           state.duration = Math.max(state.duration, newItem.end);

@@ -509,13 +509,13 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     const idx = Math.floor(y / (TRACK_HEIGHT + TRACK_GAP));
     // Read latest tracks from store to avoid stale closures
     const currentTracks = useTimelineStore.getState().tracks;
+    if (idx < 0 || idx >= currentTracks.length) return null;
     return currentTracks[idx] || null;
   }, []);
 
   const hitTestItem = useCallback((clientX, clientY) => {
-    // Read latest items and scrollX directly from the store to avoid stale closures
-    const currentItems = useTimelineStore.getState().items;
-    const currentScrollX = useTimelineStore.getState().scrollX;
+    // Read ALL values from getState() to avoid stale closures
+    const { items: currentItems, scrollX: currentScrollX, selectedItemId: selectedId, tracks: currentTracks } = useTimelineStore.getState();
     const currentPps = ppsRef.current;
 
     const canvas = canvasRef.current;
@@ -525,12 +525,15 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
     const x = px - LABEL_WIDTH + currentScrollX;
     const time = Math.max(0, x / currentPps);
 
-    const track = getTrackFromY(clientY);
+    // Inline track-from-Y to use currentTracks from getState()
+    const mouseY = clientY - rect.top;
+    const trackIdx = Math.floor((mouseY - RULER_HEIGHT) / (TRACK_HEIGHT + TRACK_GAP));
+    if (trackIdx < 0 || trackIdx >= currentTracks.length) return null;
+    const track = currentTracks[trackIdx];
     if (!track) return null;
 
-    const selectedId = useTimelineStore.getState().selectedItemId;
-    let bestHit = null;
-
+    // Collect ALL matching items, then pick the best one
+    const matches = [];
     for (const item of currentItems) {
       if (item.trackId !== track.id) continue;
       if (time < item.start || time > item.end) continue;
@@ -542,16 +545,24 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       if (Math.abs(px - x1) < HANDLE_HIT_AREA) edge = 'left';
       else if (Math.abs(px - x2) < HANDLE_HIT_AREA) edge = 'right';
 
-      const hit = { item, edge };
-
-      // Prefer the currently selected item when multiple items match
-      // (e.g. adjacent items sharing a boundary time)
-      if (item.id === selectedId) return hit;
-
-      if (!bestHit) bestHit = hit;
+      matches.push({ item, edge, x1, x2 });
     }
-    return bestHit;
-  }, [getTrackFromY]);
+
+    if (matches.length === 0) return null;
+
+    // Priority 1: currently selected item (for boundary clicks between adjacent items)
+    const selected = matches.find(m => m.item.id === selectedId);
+    if (selected) return selected;
+
+    // Priority 2: narrowest (most specific) clip at the click point, then newest (last in array)
+    matches.sort((a, b) => {
+      const widthDiff = (a.x2 - a.x1) - (b.x2 - b.x1);
+      if (Math.abs(widthDiff) > 0.5) return widthDiff;
+      // Same width: prefer the one later in the items array (newest)
+      return currentItems.indexOf(b.item) - currentItems.indexOf(a.item);
+    });
+    return matches[0];
+  }, []);
 
   // ── Pointer events ─────────────────────────────────────────────────────────
   const onPointerDown = useCallback((e) => {
@@ -588,7 +599,8 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       const time = getTimeFromX(e.clientX);
       const hit = hitTestItem(e.clientX, e.clientY);
       if (hit?.item) {
-        const itemTrack = tracks.find((t) => t.id === hit.item.trackId);
+        const currentTracks = useTimelineStore.getState().tracks;
+        const itemTrack = currentTracks.find((t) => t.id === hit.item.trackId);
         if (itemTrack?.locked) return; // Cannot split items on locked tracks
         splitItem(hit.item.id, time);
       }
@@ -624,7 +636,8 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
 
       // Alt+Click: select all group members (group-aware selection)
       if (e.altKey && hit.item.groupId) {
-        const groupMembers = items.filter(it => it.groupId === hit.item.groupId).map(it => it.id);
+        const currentItems = useTimelineStore.getState().items;
+        const groupMembers = currentItems.filter(it => it.groupId === hit.item.groupId).map(it => it.id);
         setSelectedItemIds(groupMembers);
         useTimelineStore.setState({ selectedItemId: hit.item.id });
         onItemSelect?.(hit.item);
@@ -636,7 +649,8 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
       }
 
       // Check if item is on a locked track — allow selection but block drag/trim
-      const itemTrack = tracks.find((t) => t.id === hit.item.trackId);
+      const { tracks: latestTracks, items: latestItems } = useTimelineStore.getState();
+      const itemTrack = latestTracks.find((t) => t.id === hit.item.trackId);
       if (itemTrack?.locked) {
         // Selection allowed, but no drag/trim
       } else if (hit.edge === 'left' || hit.edge === 'right') {
@@ -660,7 +674,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
           ? currentSelectedIds
           : [hit.item.id];
         const snapshots = dragIds.map(id => {
-          const it = items.find(i => i.id === id);
+          const it = latestItems.find(i => i.id === id);
           return it ? { id, origStart: it.start, origEnd: it.end, origTrackId: it.trackId } : null;
         }).filter(Boolean);
 
@@ -696,7 +710,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         setDragInfo({ type: 'scrub', startX: e.clientX });
       }
     }
-  }, [hitTestItem, getTimeFromX, setPlayhead, setSelectedItemId, setSelectedItemIds, toggleSelectedItem, onSeek, activeTool, splitItem, spaceHeld, scrollX, onItemSelect, tracks, items, selectedItemIds]);
+  }, [hitTestItem, getTimeFromX, setPlayhead, setSelectedItemId, setSelectedItemIds, toggleSelectedItem, onSeek, activeTool, splitItem, spaceHeld, scrollX, onItemSelect]);
 
   useEffect(() => {
     if (!isDragging || !dragInfo) return;
@@ -787,7 +801,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
         const track = getTrackFromY(e.clientY);
         let primaryTrackId = dragInfo.origTrackId;
         if (track && snapshots.length === 1) {
-          const draggedItem = items.find((i) => i.id === dragInfo.itemId);
+          const draggedItem = useTimelineStore.getState().items.find((i) => i.id === dragInfo.itemId);
           const itemType = draggedItem?.type;
           const trackType = track.type;
           const compatible =
@@ -1131,7 +1145,9 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
                       onBlur={(e) => {
                         const val = e.target.value.trim();
                         if (val && val !== track.name) updateTrack(track.id, { name: val });
-                        setRenamingTrackId(null);
+                        // Defer input removal so pointer events resolve their target
+                        // before the DOM mutates (input → span swap)
+                        requestAnimationFrame(() => setRenamingTrackId(null));
                       }}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') { e.target.blur(); }
@@ -1140,6 +1156,7 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
                       }}
                       onClick={(e) => e.stopPropagation()}
                       onMouseDown={(e) => e.stopPropagation()}
+                      onPointerDown={(e) => e.stopPropagation()}
                       style={{
                         fontSize: 10, fontWeight: 500, width: '100%',
                         background: 'var(--ve-surface, #222)', color: 'var(--ve-text, #ccc)',
