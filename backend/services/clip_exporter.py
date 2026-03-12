@@ -5145,13 +5145,18 @@ async def export_clip(
                         ao_start = max(0, ao.get("start_time", 0) - start)
                         ao_end = ao.get("end_time", 0) - start
                         ao_vol = ao.get("volume", 1.0)
+                        ao_speed = ao.get("speed", 1.0)
                         ao_fade_in = ao.get("fade_in", 0)
                         ao_fade_out = ao.get("fade_out", 0)
                         ao_idx = _ao_base_idx + len(_ao_labels)
                         _audio_overlay_input_args += ["-i", ao_src]
-                        # Build per-overlay audio filter: trim, delay, volume, fade
+                        # Build per-overlay audio filter: speed, trim, delay, volume, fade
                         ao_chain = f"[{ao_idx}:a]"
                         ao_filters = []
+                        if ao_speed and abs(ao_speed - 1.0) > 0.001:
+                            atempo = _atempo_chain(ao_speed)
+                            if atempo:
+                                ao_filters.append(atempo)
                         if ao_vol != 1.0:
                             ao_filters.append(f"volume={ao_vol:.3f}")
                         if ao_fade_in > 0:

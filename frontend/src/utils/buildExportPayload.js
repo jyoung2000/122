@@ -146,6 +146,7 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
       start_time: (it.start || 0) + clipStart,
       end_time: (it.end || 0) + clipStart,
       volume: it.volume ?? 1,
+      speed: it.speed ?? 1,
       fade_in: it.fadeIn || 0,
       fade_out: it.fadeOut || 0,
     });

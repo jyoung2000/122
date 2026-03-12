@@ -250,6 +250,7 @@ export default function VideoEditor({
   const storeSelectedItemId = useTimelineStore((s) => s.selectedItemId);
   const updateTimelineItem = useTimelineStore((s) => s.updateItem);
   const timelineTracks = useTimelineStore((s) => s.tracks);
+  const timelineMediaLibrary = useTimelineStore((s) => s.mediaLibrary);
   const { recovered } = useTimelinePersistence(jobId, clipId);
   const encoding = useEncodingManager();
   const isEncoding = useMemo(() => {
@@ -462,6 +463,7 @@ export default function VideoEditor({
   const animFrameRef = useRef(null);
   const thumbnailCanvasRef = useRef(null);
   const thumbnailsRef = useRef([]);
+  const audioOverlayRefs = useRef({}); // { [itemId]: HTMLAudioElement }
 
   // ── State ──────────────────────────────────────────
   const [playing, setPlaying] = useState(false);
@@ -1429,6 +1431,117 @@ export default function VideoEditor({
       onSpeedChange?.(speed);
     }
   }, [speed, onSpeedChange, segments, selectedSegmentId, activeSegmentId]);
+
+  // ── Audio overlay preview playback ──────────────────
+  // Manage HTMLAudioElement instances for audio/music overlay tracks
+  // so volume and speed changes are audible in the preview player.
+  const audioOverlayItems = useMemo(() => {
+    return timelineStoreItems.filter(it => it.type === 'audio' && it.trackId !== 'a1');
+  }, [timelineStoreItems]);
+
+  // Create/destroy Audio elements when overlay items change
+  useEffect(() => {
+    const current = audioOverlayRefs.current;
+    const activeIds = new Set(audioOverlayItems.map(it => it.id));
+
+    // Remove stale audio elements
+    for (const id of Object.keys(current)) {
+      if (!activeIds.has(id)) {
+        current[id].pause();
+        current[id].src = '';
+        delete current[id];
+      }
+    }
+
+    // Create new audio elements
+    for (const item of audioOverlayItems) {
+      if (current[item.id]) continue;
+      let url = item.src || '';
+      if (!url && item.mediaRef) {
+        const media = timelineMediaLibrary.find(m => m.id === item.mediaRef);
+        url = media?.url || '';
+      }
+      if (!url || url.startsWith('blob:')) continue;
+      const audio = new Audio(url);
+      audio.preload = 'auto';
+      audio.volume = Math.min(1, Math.max(0, item.volume ?? 1));
+      audio.playbackRate = item.speed ?? 1;
+      current[item.id] = audio;
+    }
+
+    return () => {
+      // Cleanup all on unmount
+      for (const id of Object.keys(audioOverlayRefs.current)) {
+        audioOverlayRefs.current[id].pause();
+        audioOverlayRefs.current[id].src = '';
+      }
+      audioOverlayRefs.current = {};
+    };
+  }, [audioOverlayItems.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync volume and speed when properties change
+  useEffect(() => {
+    const current = audioOverlayRefs.current;
+    for (const item of audioOverlayItems) {
+      const audio = current[item.id];
+      if (!audio) continue;
+      const vol = Math.min(1, Math.max(0, item.volume ?? 1));
+      if (Math.abs(audio.volume - vol) > 0.001) audio.volume = vol;
+      const spd = item.speed ?? 1;
+      if (Math.abs(audio.playbackRate - spd) > 0.001) audio.playbackRate = spd;
+    }
+  }, [audioOverlayItems]);
+
+  // Sync audio overlay play/pause/seek with main video
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    const current = audioOverlayRefs.current;
+
+    const syncAudioOverlays = () => {
+      const absTime = video.currentTime;
+      const relTime = absTime - clipStart;
+      for (const item of audioOverlayItems) {
+        const audio = current[item.id];
+        if (!audio) continue;
+        const itemStart = item.start || 0;
+        const itemEnd = item.end || 0;
+        const inRange = relTime >= itemStart && relTime < itemEnd;
+        if (inRange && !video.paused) {
+          const audioTime = relTime - itemStart + (item.trimStart || 0);
+          if (Math.abs(audio.currentTime - audioTime) > 0.3) {
+            audio.currentTime = audioTime;
+          }
+          if (audio.paused) audio.play().catch(() => {});
+        } else {
+          if (!audio.paused) audio.pause();
+        }
+      }
+    };
+
+    const onPlay = () => syncAudioOverlays();
+    const onPause = () => {
+      for (const item of audioOverlayItems) {
+        const audio = current[item.id];
+        if (audio && !audio.paused) audio.pause();
+      }
+    };
+    const onSeeked = () => syncAudioOverlays();
+
+    video.addEventListener('play', onPlay);
+    video.addEventListener('pause', onPause);
+    video.addEventListener('seeked', onSeeked);
+
+    // Also sync during playback via timeupdate
+    video.addEventListener('timeupdate', syncAudioOverlays);
+
+    return () => {
+      video.removeEventListener('play', onPlay);
+      video.removeEventListener('pause', onPause);
+      video.removeEventListener('seeked', onSeeked);
+      video.removeEventListener('timeupdate', syncAudioOverlays);
+    };
+  }, [audioOverlayItems, clipStart]);
 
   // ── Trim change callback ───────────────────────────
   useEffect(() => {
