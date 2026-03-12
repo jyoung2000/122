@@ -354,6 +354,7 @@ async def export_clip_endpoint(
                 image_overlays=[i.model_dump() for i in req.image_overlays] if req.image_overlays else None,
                 shape_overlays=[s.model_dump() for s in req.shape_overlays] if req.shape_overlays else None,
                 audio_overlays=[a.model_dump() for a in req.audio_overlays] if req.audio_overlays else None,
+                overlay_compositing_order=req.overlay_compositing_order if req.overlay_compositing_order else None,
             )
 
             elapsed = int(time.monotonic() - export_start)

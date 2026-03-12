@@ -33,6 +33,7 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
   const textItems = timelineItems.filter(it => it.type === 'text')
     .sort((a, b) => getTrackOrder(a) - getTrackOrder(b));
   const textOverlays = textItems.map(it => ({
+    _item_id: it.id,
     text: it.textContent || '',
     x: it.position?.x ?? 50,
     y: it.position?.y ?? 50,
@@ -75,6 +76,7 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
       continue;
     }
     imageOverlays.push({
+      _item_id: it.id,
       src,
       x: it.position?.x ?? 50,
       y: it.position?.y ?? 50,
@@ -92,6 +94,7 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
   const shapeItems = timelineItems.filter(it => it.type === 'shape')
     .sort((a, b) => getTrackOrder(a) - getTrackOrder(b));
   const shapeOverlays = shapeItems.map(it => ({
+    _item_id: it.id,
     shape_type: it.shapeType || 'rectangle',
     x: it.position?.x ?? 50,
     y: it.position?.y ?? 50,
@@ -141,7 +144,26 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
     });
   }
 
-  return { textOverlays, imageOverlays, shapeOverlays, audioOverlays, warnings };
+  // Build a global compositing order that interleaves ALL visual overlay types
+  // by their track position. The backend uses this to determine the correct
+  // render order in the FFmpeg filter chain.
+  const allVisualItems = timelineItems.filter(it =>
+    it.type === 'text' || it.type === 'shape' || it.type === 'image' || it.type === 'overlay'
+  );
+  const compositingOrder = allVisualItems
+    .map(it => {
+      const trackIdx = tracks ? tracks.findIndex(t => t.id === it.trackId) : -1;
+      return {
+        type: it.type === 'overlay' ? 'image' : it.type,
+        id: it.id,
+        track_index: trackIdx,
+        // Lower compositing_priority = renders first (below); higher = renders later (on top)
+        compositing_priority: trackIdx >= 0 ? tracks.length - trackIdx : 0,
+      };
+    })
+    .sort((a, b) => a.compositing_priority - b.compositing_priority);
+
+  return { textOverlays, imageOverlays, shapeOverlays, audioOverlays, warnings, compositingOrder };
 }
 
 /**

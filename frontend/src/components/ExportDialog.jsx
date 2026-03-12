@@ -140,6 +140,9 @@ export default function ExportDialog({
       if (overlays.imageOverlays.length > 0) exportPayload.image_overlays = overlays.imageOverlays;
       if (overlays.shapeOverlays.length > 0) exportPayload.shape_overlays = overlays.shapeOverlays;
       if (overlays.audioOverlays.length > 0) exportPayload.audio_overlays = overlays.audioOverlays;
+      if (overlays.compositingOrder?.length > 0) {
+        exportPayload.overlay_compositing_order = overlays.compositingOrder;
+      }
 
       if (overlays.warnings.length > 0) {
         for (const w of overlays.warnings) console.warn(`[Export] ${w}`);

@@ -3742,6 +3742,243 @@ def _build_image_overlay_data(
     return extra_args, ";".join(fc_parts), len(valid_overlays), warnings
 
 
+def _build_single_drawtext(overlay: dict, clip_start: float) -> str | None:
+    """Build a single drawtext filter string for one text overlay item.
+
+    Returns the drawtext filter string (without stream labels) or None if skipped.
+    """
+    text = overlay.get("text", "")
+    for ch in ('\\', "'", ':', '%', '{', '}', ';', '[', ']'):
+        text = text.replace(ch, f'\\{ch}')
+    if not text:
+        return None
+
+    x_pct = overlay.get("x", 50) / 100.0
+    y_pct = overlay.get("y", 50) / 100.0
+    font_size = overlay.get("font_size", 48)
+    font_color = overlay.get("font_color", "#FFFFFF")
+    font_family = overlay.get("font_family", "sans-serif")
+    opacity = overlay.get("opacity", 1.0)
+    start_t = overlay.get("start_time", 0) - clip_start
+    end_t = overlay.get("end_time", 0) - clip_start
+    if end_t <= 0:
+        return None
+    font_weight = overlay.get("font_weight", 400)
+    if isinstance(font_weight, str):
+        font_weight = 700 if font_weight.lower() == "bold" else 400
+    font_path = _resolve_font_path(font_family, font_weight=font_weight)
+    if not os.path.isfile(font_path):
+        font_path = _DEFAULT_FONT
+        if not os.path.isfile(font_path):
+            return None
+
+    outline_width = overlay.get("outline_width", 0)
+    outline_color = overlay.get("outline_color", "#000000")
+    fade_in = overlay.get("fade_in", 0)
+    fade_out = overlay.get("fade_out", 0)
+
+    safe_start = max(0, start_t)
+    has_fade = (fade_in > 0 or fade_out > 0) and end_t > start_t
+    if has_fade:
+        alpha_parts = [f"{opacity:.2f}"]
+        if fade_in > 0:
+            alpha_parts.append(f"if(lt(t-{safe_start:.3f},{fade_in:.3f}),(t-{safe_start:.3f})/{fade_in:.3f},1)")
+        if fade_out > 0:
+            fo_start = end_t - fade_out
+            alpha_parts.append(f"if(gt(t,{fo_start:.3f}),({end_t:.3f}-t)/{fade_out:.3f},1)")
+        alpha_expr = "*".join(alpha_parts)
+    else:
+        alpha_expr = f"{opacity:.2f}"
+
+    animation = overlay.get("animation", "")
+    y_expr = f"h*{y_pct:.4f}-th/2"
+    fontsize_expr = str(font_size)
+
+    if animation == "slide-up" and end_t > start_t:
+        anim_dur = 0.5
+        y_expr = (
+            f"h*{y_pct:.4f}-th/2"
+            f"+if(lt(t-{safe_start:.3f},{anim_dur})"
+            f",(1-(t-{safe_start:.3f})/{anim_dur})*30,0)"
+        )
+    elif animation == "pop" and end_t > start_t:
+        anim_dur = 0.3
+        fontsize_expr = (
+            f"if(lt(t-{safe_start:.3f},{anim_dur})"
+            f",{font_size}*(0.5+0.5*(t-{safe_start:.3f})/{anim_dur})"
+            f",{font_size})"
+        )
+
+    text_align = overlay.get("text_align", "center")
+    if text_align == "left":
+        x_expr = f"w*{x_pct:.4f}"
+    elif text_align == "right":
+        x_expr = f"w*{x_pct:.4f}-tw"
+    else:
+        x_expr = f"w*{x_pct:.4f}-tw/2"
+
+    dt = (
+        f"drawtext=text='{text}'"
+        f":x={x_expr}"
+        f":y={y_expr}"
+        f":fontsize='{fontsize_expr}'"
+        f":fontcolor={font_color}"
+        f":fontfile={font_path}"
+        f":alpha='{alpha_expr}'"
+    )
+    if outline_width > 0:
+        dt += f":borderw={outline_width}:bordercolor={outline_color}"
+
+    shadow_x = overlay.get("shadow_offset_x", 0)
+    shadow_y = overlay.get("shadow_offset_y", 0)
+    shadow_color = overlay.get("shadow_color", "")
+    if shadow_x or shadow_y or shadow_color:
+        hex_shadow = "#000000"
+        if shadow_color.startswith("rgba("):
+            parts_c = shadow_color.replace("rgba(", "").replace(")", "").split(",")
+            if len(parts_c) >= 3:
+                try:
+                    hex_shadow = "#{:02x}{:02x}{:02x}".format(
+                        int(parts_c[0].strip()), int(parts_c[1].strip()), int(parts_c[2].strip())
+                    )
+                except ValueError:
+                    pass
+        elif shadow_color.startswith("#"):
+            hex_shadow = shadow_color
+        dt += f":shadowcolor={hex_shadow}:shadowx={int(shadow_x)}:shadowy={int(shadow_y)}"
+
+    bg_color = overlay.get("background_color")
+    bg_opacity_pct = overlay.get("bg_opacity", 0)
+    bg_padding = overlay.get("bg_padding", 8)
+    if bg_color and bg_opacity_pct > 0:
+        bg_alpha = bg_opacity_pct / 100.0
+        dt += f":box=1:boxcolor={bg_color}@{bg_alpha:.2f}:boxborderw={bg_padding}"
+    elif bg_color:
+        dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw={bg_padding}"
+
+    if end_t > start_t:
+        dt += f":enable='between(t,{safe_start:.3f},{end_t:.3f})'"
+
+    return dt
+
+
+def _build_unified_overlay_chain(
+    compositing_order: list,
+    text_overlays: list,
+    image_overlays: list,
+    clip_start: float,
+    base_input_idx: int,
+    video_out_w: int,
+    video_out_h: int,
+    job_id: str,
+) -> tuple[list[str], str, list[str]]:
+    """Build a single FFmpeg filter chain that interleaves text and image overlays
+    in the correct compositing order based on track position.
+
+    Returns: (extra_input_args, filter_chain_suffix, warnings)
+
+    The filter_chain_suffix expects the base video stream to be labeled ``[vbase]``
+    and produces a final label ``[vcomp]``.
+    """
+    # Build lookup maps: _item_id → overlay data
+    text_by_id = {}
+    for t in text_overlays:
+        iid = t.get("_item_id")
+        if iid:
+            text_by_id[iid] = t
+
+    image_by_id = {}
+    for im in image_overlays:
+        iid = im.get("_item_id")
+        if iid:
+            image_by_id[iid] = im
+
+    extra_args: list[str] = []
+    fc_parts: list[str] = []
+    warnings: list[str] = []
+    current_label = "[vbase]"
+    step = 0
+
+    sorted_order = sorted(compositing_order, key=lambda e: e.get("compositing_priority", 0))
+
+    for entry in sorted_order:
+        item_type = entry.get("type")
+        item_id = entry.get("id")
+
+        if item_type == "text" and item_id in text_by_id:
+            overlay = text_by_id[item_id]
+            dt_filter = _build_single_drawtext(overlay, clip_start)
+            if dt_filter:
+                out_label = f"[vcmp{step}]"
+                fc_parts.append(f"{current_label}{dt_filter}{out_label}")
+                current_label = out_label
+                step += 1
+
+        elif item_type in ("image", "shape") and item_id in image_by_id:
+            overlay = image_by_id[item_id]
+            src = overlay.get("src", "")
+            img_path = _resolve_media_path(src, job_id)
+            if not img_path:
+                warnings.append(f"Image/shape overlay '{item_id}': source not found — skipped")
+                continue
+
+            input_idx = base_input_idx + len(extra_args) // 2
+            extra_args += ["-i", img_path]
+
+            x_pct = overlay.get("x", 50) / 100.0
+            y_pct = overlay.get("y", 50) / 100.0
+            w_pct = overlay.get("width", 30) / 100.0
+            h_pct = overlay.get("height", 30) / 100.0
+            opacity = overlay.get("opacity", 1.0)
+            start_t = overlay.get("start_time", 0) - clip_start
+            end_t = overlay.get("end_time", 0) - clip_start
+            fade_in = overlay.get("fade_in", 0)
+            fade_out = overlay.get("fade_out", 0)
+
+            scaled_w = max(2, int(video_out_w * w_pct) // 2 * 2)
+            scaled_h = max(2, int(video_out_h * h_pct) // 2 * 2)
+            img_scale = (
+                f"[{input_idx}:v]"
+                f"scale={scaled_w}:{scaled_h},"
+                f"format=rgba"
+            )
+            if opacity < 1.0:
+                img_scale += f",colorchannelmixer=aa={opacity:.3f}"
+            safe_start = max(0, start_t)
+            if fade_in > 0:
+                img_scale += f",fade=t=in:st={safe_start:.3f}:d={fade_in:.3f}:alpha=1"
+            if fade_out > 0 and end_t > start_t:
+                fo_start = end_t - fade_out
+                img_scale += f",fade=t=out:st={max(0, fo_start):.3f}:d={fade_out:.3f}:alpha=1"
+            img_scale += f"[uimg{step}]"
+
+            x_expr = f"main_w*{x_pct:.4f}-overlay_w/2"
+            y_expr = f"main_h*{y_pct:.4f}-overlay_h/2"
+
+            out_label = f"[vcmp{step}]"
+            overlay_filter = f"{current_label}[uimg{step}]overlay={x_expr}:{y_expr}"
+            if end_t > start_t:
+                overlay_filter += f":enable='between(t,{max(0, start_t):.3f},{end_t:.3f})'"
+            overlay_filter += out_label
+
+            fc_parts.append(img_scale)
+            fc_parts.append(overlay_filter)
+            current_label = out_label
+            step += 1
+
+    if step == 0:
+        return [], "", warnings
+
+    # Rename final label to [vcomp]
+    fc_parts[-1] = fc_parts[-1].rsplit(current_label, 1)[0] + "[vcomp]"
+    logger.info(
+        "Unified compositing chain: %d steps, %d image inputs",
+        step, len(extra_args) // 2,
+    )
+
+    return extra_args, ";".join(fc_parts), warnings
+
+
 async def export_clip(
     job_id: str,
     video_path: str,
@@ -3769,6 +4006,7 @@ async def export_clip(
     image_overlays: list | None = None,
     shape_overlays: list | None = None,
     audio_overlays: list | None = None,
+    overlay_compositing_order: list | None = None,
 ) -> str:
     """Export a clip from video using FFmpeg.
 
@@ -3878,6 +4116,7 @@ async def export_clip(
                 _shape_temp_files.append(png_path)
                 # Convert shape to image overlay format for the image pipeline
                 image_overlays.append({
+                    "_item_id": shape.get("_item_id"),
                     "src": png_path,
                     "x": shape.get("x", 50),
                     "y": shape.get("y", 50),
@@ -4323,9 +4562,12 @@ async def export_clip(
             # For per-segment speed paths, text overlays must be applied AFTER
             # the concat (not per-segment) because the per-segment PTS
             # manipulation makes drawtext enable='between(t,...)' timing wrong.
+            # When overlay_compositing_order is provided, text overlays are also
+            # deferred so they can be interleaved with images in the unified chain.
             _overlay_warnings: list[str] = list(_shape_warnings)
             _text_vf_for_post_concat = ""
-            if has_text_overlays and text_overlays:
+            _use_unified_compositing = bool(overlay_compositing_order) and (has_text_overlays or has_image_overlays)
+            if has_text_overlays and text_overlays and not _use_unified_compositing:
                 text_vf, _tw = _build_text_overlay_filters(text_overlays, clip_start=start)
                 _overlay_warnings.extend(_tw)
                 if text_vf:
@@ -4472,46 +4714,63 @@ async def export_clip(
                     fc_lines.append(f"{concat_inputs}concat=n={n}:v=1:a=0[finalv]")
                     map_args = ["-map", "[finalv]"]
 
-                # --- Image overlay filters (applied after concat) ---
-                if has_image_overlays and image_overlays:
-                    # Image inputs come after all segment video inputs
-                    _img_base_idx = n  # n segment inputs → indices 0..n-1
-                    _vid_out_w, _vid_out_h = _compute_video_out_dims(
-                        video_width, video_height, aspect_ratio, export_quality,
-                    )
-                    img_extra_args, img_overlay_fc, img_overlay_count, _iw = _build_image_overlay_data(
-                        image_overlays, job_id, clip_start=start, base_input_idx=_img_base_idx,
-                        video_out_w=_vid_out_w, video_out_h=_vid_out_h,
-                    )
-                    _overlay_warnings.extend(_iw)
-                    if img_overlay_count > 0:
-                        input_args += img_extra_args
-                        # Rename [finalv] to [vbase] for overlay chain input
-                        # Replace the last fc_line's [finalv] with [vbase]
-                        fc_lines[-1] = fc_lines[-1].replace("[finalv]", "[vbase]", 1)
-                        # Append image overlay filters; produces [vimg]
-                        fc_lines.append(img_overlay_fc)
-                        # Update map to use [vimg] instead of [finalv]
-                        map_args = [m.replace("[finalv]", "[vimg]") for m in map_args]
-                        logger.info(
-                            "Image overlays for clip %s (per-seg): %d images applied after concat",
-                            clip_id, img_overlay_count,
-                        )
+                # --- Overlay filters (applied after concat) ---
+                # When overlay_compositing_order is provided, use unified chain
+                # that interleaves text and image overlays in correct track order.
+                # Otherwise fall back to the legacy separate pipeline.
+                _vid_out_w, _vid_out_h = _compute_video_out_dims(
+                    video_width, video_height, aspect_ratio, export_quality,
+                )
+                _img_base_idx = n  # n segment inputs → indices 0..n-1
 
-                # Apply deferred text overlays after concat (and after image overlays)
-                if _text_vf_for_post_concat:
-                    # Determine the current video output label
-                    # It's either [vimg] (if image overlays were applied) or [finalv]
-                    if any("[vimg]" in m for m in map_args):
-                        # Rename [vimg] to [vtxt_in], apply text, produce [vtxt_out]
-                        fc_lines[-1] = fc_lines[-1].replace("[vimg]", "[vtxt_in]", 1)
-                        fc_lines.append(f"[vtxt_in]{_text_vf_for_post_concat}[vtxt_out]")
-                        map_args = [m.replace("[vimg]", "[vtxt_out]") for m in map_args]
-                    else:
-                        # Rename [finalv] to [vtxt_in], apply text, produce [finalv]
-                        fc_lines[-1] = fc_lines[-1].replace("[finalv]", "[vtxt_in]", 1)
-                        fc_lines.append(f"[vtxt_in]{_text_vf_for_post_concat}[finalv]")
-                    logger.info("Text overlays applied post-concat for clip %s", clip_id)
+                if overlay_compositing_order and (has_text_overlays or has_image_overlays):
+                    u_extra, u_fc, u_warns = _build_unified_overlay_chain(
+                        compositing_order=overlay_compositing_order,
+                        text_overlays=text_overlays or [],
+                        image_overlays=image_overlays or [],
+                        clip_start=start,
+                        base_input_idx=_img_base_idx,
+                        video_out_w=_vid_out_w,
+                        video_out_h=_vid_out_h,
+                        job_id=job_id,
+                    )
+                    _overlay_warnings.extend(u_warns)
+                    if u_fc:
+                        input_args += u_extra
+                        fc_lines[-1] = fc_lines[-1].replace("[finalv]", "[vbase]", 1)
+                        fc_lines.append(u_fc)
+                        map_args = [m.replace("[finalv]", "[vcomp]") for m in map_args]
+                        logger.info(
+                            "Unified compositing chain for clip %s (per-seg): applied after concat",
+                            clip_id,
+                        )
+                else:
+                    # Legacy separate pipeline: images first, then text
+                    if has_image_overlays and image_overlays:
+                        img_extra_args, img_overlay_fc, img_overlay_count, _iw = _build_image_overlay_data(
+                            image_overlays, job_id, clip_start=start, base_input_idx=_img_base_idx,
+                            video_out_w=_vid_out_w, video_out_h=_vid_out_h,
+                        )
+                        _overlay_warnings.extend(_iw)
+                        if img_overlay_count > 0:
+                            input_args += img_extra_args
+                            fc_lines[-1] = fc_lines[-1].replace("[finalv]", "[vbase]", 1)
+                            fc_lines.append(img_overlay_fc)
+                            map_args = [m.replace("[finalv]", "[vimg]") for m in map_args]
+                            logger.info(
+                                "Image overlays for clip %s (per-seg): %d images applied after concat",
+                                clip_id, img_overlay_count,
+                            )
+
+                    if _text_vf_for_post_concat:
+                        if any("[vimg]" in m for m in map_args):
+                            fc_lines[-1] = fc_lines[-1].replace("[vimg]", "[vtxt_in]", 1)
+                            fc_lines.append(f"[vtxt_in]{_text_vf_for_post_concat}[vtxt_out]")
+                            map_args = [m.replace("[vimg]", "[vtxt_out]") for m in map_args]
+                        else:
+                            fc_lines[-1] = fc_lines[-1].replace("[finalv]", "[vtxt_in]", 1)
+                            fc_lines.append(f"[vtxt_in]{_text_vf_for_post_concat}[finalv]")
+                        logger.info("Text overlays applied post-concat for clip %s", clip_id)
 
                 full_fc = ";".join(fc_lines)
                 logger.info(
@@ -4568,22 +4827,49 @@ async def export_clip(
                     af_parts.append(f"volume='{expr}':eval=frame")
                 af = ",".join(af_parts) if af_parts else None
 
-                # --- Image overlay integration for global path ---
-                _use_complex_for_images = False
-                _img_input_args: list[str] = []
-                if has_image_overlays and image_overlays:
-                    # In global path, input 0 = video, image inputs start at 1
-                    _vid_out_w, _vid_out_h = _compute_video_out_dims(
-                        video_width, video_height, aspect_ratio, export_quality,
+                # --- Overlay integration for global path ---
+                _use_complex_for_overlays = False
+                _overlay_input_args: list[str] = []
+                _overlay_fc = ""
+                _overlay_out_label = "[vimg]"  # default for legacy path
+                _vid_out_w, _vid_out_h = _compute_video_out_dims(
+                    video_width, video_height, aspect_ratio, export_quality,
+                )
+
+                if _use_unified_compositing:
+                    # Unified compositing: interleave text + images in track order
+                    u_extra, u_fc, u_warns = _build_unified_overlay_chain(
+                        compositing_order=overlay_compositing_order,
+                        text_overlays=text_overlays or [],
+                        image_overlays=image_overlays or [],
+                        clip_start=start,
+                        base_input_idx=1,
+                        video_out_w=_vid_out_w,
+                        video_out_h=_vid_out_h,
+                        job_id=job_id,
                     )
+                    _overlay_warnings.extend(u_warns)
+                    if u_fc:
+                        _use_complex_for_overlays = True
+                        _overlay_input_args = u_extra
+                        _overlay_fc = u_fc
+                        _overlay_out_label = "[vcomp]"
+                        logger.info(
+                            "Unified compositing chain for clip %s (global): applied",
+                            clip_id,
+                        )
+                elif has_image_overlays and image_overlays:
+                    # Legacy: separate image overlay chain
                     img_extra_args, img_overlay_fc, img_overlay_count, _iw = _build_image_overlay_data(
                         image_overlays, job_id, clip_start=start, base_input_idx=1,
                         video_out_w=_vid_out_w, video_out_h=_vid_out_h,
                     )
                     _overlay_warnings.extend(_iw)
                     if img_overlay_count > 0:
-                        _use_complex_for_images = True
-                        _img_input_args = img_extra_args
+                        _use_complex_for_overlays = True
+                        _overlay_input_args = img_extra_args
+                        _overlay_fc = img_overlay_fc
+                        _overlay_out_label = "[vimg]"
                         logger.info(
                             "Image overlays for clip %s (global): %d images",
                             clip_id, img_overlay_count,
@@ -4607,16 +4893,16 @@ async def export_clip(
                     "-t", str(end - start),      # INPUT -t: raw source duration
                     "-i", video_path,
                 ]
-                # Add image overlay inputs after the main video input
-                if _img_input_args:
-                    cmd += _img_input_args
+                # Add overlay inputs after the main video input
+                if _overlay_input_args:
+                    cmd += _overlay_input_args
 
                 # Audio overlay inputs (background music, SFX)
                 _audio_overlay_input_args: list[str] = []
                 _audio_overlay_fc_parts: list[str] = []
                 if has_audio_overlays and audio_overlays:
                     # Determine next input index after video (0) and image overlays
-                    _ao_base_idx = 1 + (len(_img_input_args) // 2 if _img_input_args else 0)
+                    _ao_base_idx = 1 + (len(_overlay_input_args) // 2 if _overlay_input_args else 0)
                     _ao_labels: list[str] = []
                     for ao_i, ao in enumerate(audio_overlays):
                         ao_src_raw = ao.get("src", "")
@@ -4667,15 +4953,15 @@ async def export_clip(
                             clip_id, len(_ao_labels),
                         )
 
-                if _use_complex_for_images:
-                    # Build complex filter: [0:v]<existing_vf>[vbase]; <img_overlay_chain>
+                if _use_complex_for_overlays:
+                    # Build complex filter: [0:v]<existing_vf>[vbase]; <overlay_chain>
                     base_chain = f"[0:v]{vf}[vbase]" if vf else "[0:v]null[vbase]"
-                    full_fc = f"{base_chain};{img_overlay_fc}"
+                    full_fc = f"{base_chain};{_overlay_fc}"
                     if _audio_overlay_fc_parts:
                         full_fc += ";" + ";".join(_audio_overlay_fc_parts)
-                        cmd += ["-filter_complex", full_fc, "-map", "[vimg]", "-map", "[aout]"]
+                        cmd += ["-filter_complex", full_fc, "-map", _overlay_out_label, "-map", "[aout]"]
                     else:
-                        cmd += ["-filter_complex", full_fc, "-map", "[vimg]", "-map", "0:a?"]
+                        cmd += ["-filter_complex", full_fc, "-map", _overlay_out_label, "-map", "0:a?"]
                 elif _audio_overlay_fc_parts:
                     # No image overlays but have audio overlays — need filter_complex for audio mixing
                     fc_parts_list = []

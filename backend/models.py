@@ -251,6 +251,7 @@ class ExportRequest(BaseModel):
     image_overlays: list[ImageOverlay] = []
     shape_overlays: list[ShapeOverlay] = []
     audio_overlays: list[AudioOverlay] = []  # Additional audio items (music, SFX)
+    overlay_compositing_order: list[dict] = []  # Global render order for cross-type compositing
 
 
 class FullVideoExportRequest(BaseModel):

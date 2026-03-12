@@ -7,6 +7,8 @@
  * preview is exactly what appears in the exported MP4.
  */
 
+import { TRACK_COMPOSITING_PRIORITY } from '../stores/timelineStore';
+
 // ── Builtin font URL map (mirrors SubtitleOverlay / ClipSettingsPanel) ────
 const BUILTIN_FONT_FILES = {
   'DM Sans': '/api/fonts/builtin/DMSans.ttf',
@@ -393,10 +395,16 @@ export default class RenderEngine {
       if (currentTime >= clip.start && currentTime < clip.end) {
         const track = tracks.find(t => t.id === clip.trackId);
         if (track && (this._exportMode || track.visible !== false) && !track.muted) {
-          // Compositing order = inverse of track position in array.
-          // Index 0 (top of timeline UI) gets the highest order (renders last = on top).
+          // Two-level compositing key:
+          // 1. Primary: TRACK_COMPOSITING_PRIORITY[track.type] ensures type hierarchy
+          //    (video < overlay < subtitle) is always respected.
+          // 2. Secondary: track array position (for ordering within same type,
+          //    e.g., overlay A above overlay B). Divided by 1000 so it never
+          //    exceeds the gap between type priorities.
           const trackIdx = tracks.findIndex(t => t.id === track.id);
-          const order = trackIdx >= 0 ? tracks.length - trackIdx : 0;
+          const typePriority = TRACK_COMPOSITING_PRIORITY[track.type] ?? 0;
+          const positionPriority = trackIdx >= 0 ? (tracks.length - trackIdx) / 1000 : 0;
+          const order = typePriority + positionPriority;
           visibleClips.push({ clip, track, order });
         }
       }
