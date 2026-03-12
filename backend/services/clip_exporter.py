@@ -2870,12 +2870,14 @@ def _build_filter_chain(
     needs_quality_scale = (effective_h != target_h)
 
     if not aspect_ratio and not ass_path and not needs_quality_scale and not precrop_filter and not video_effects:
-        return None, False
+        return None, False, ""
 
     out_w, out_h = effective_w, effective_h
     sub = _subtitle_filter(ass_path, force_style=subtitle_force_style) if ass_path else ""
 
-    # Simple linear chain: setsar → precrop → crop → scale → subtitles
+    # Simple linear chain: setsar → precrop → crop → scale
+    # Subtitles are returned separately so they can be applied AFTER overlay
+    # compositing (shapes, images, text) — ensuring subtitles render on top.
     # Start with setsar=1 to normalize non-square pixels (SAR != 1:1).
     # Many source videos have non-square SAR which causes FFmpeg's crop
     # and scale filters to produce slightly wrong dimensions, resulting
@@ -3130,17 +3132,18 @@ def _build_filter_chain(
             pos_x, pos_y, vid_w, vid_h, vid_rot, vid_fade_in, vid_fade_out,
         )
 
-    if sub:
-        filters.append(sub)
+    # NOTE: subtitle filter (sub) is NOT appended here — it is returned
+    # separately so the caller can apply it AFTER overlay compositing,
+    # ensuring subtitles render on top of shapes/images/text overlays.
 
-    # VA-API needs frames uploaded to GPU after CPU-side subtitle filter
+    # VA-API needs frames uploaded to GPU after CPU-side filters
     if app_settings.GPU_ACCELERATION_ENABLED:
         gpu = detect_gpu_capabilities()
         if gpu["encoder"] == "h264_vaapi" and filters:
             filters.append("format=nv12")
             filters.append("hwupload")
 
-    return (",".join(filters) if filters else None, False)
+    return (",".join(filters) if filters else None, False, sub)
 
 
 # ── Font family → file path mapping for drawtext ─────────────────────
@@ -4654,7 +4657,7 @@ async def export_clip(
                         )
 
             # Build filter chain and re-encode
-            vf, is_complex = _build_filter_chain(
+            vf, is_complex, _subtitle_vf = _build_filter_chain(
                 aspect_ratio, video_width, video_height, ass_path,
                 subject_x=subject_x,
                 subject_keyframes=keyframes,
@@ -4782,14 +4785,22 @@ async def export_clip(
                     # 1. trim to exact segment duration (safety for -ss buffer)
                     # 2. normalize PTS to 0 then shift to clip-relative time
                     #    so subtitle burn-in and dynamic crop keyframes align
-                    # 3. apply visual filters (crop, subtitles, scale)
-                    # 4. normalize PTS back to 0
-                    # 5. apply speed scaling if needed
+                    # 3. apply visual filters (crop, scale, effects)
+                    # 4. apply subtitles (needs PTS-aligned timing before speed change)
+                    # 5. normalize PTS back to 0
+                    # 6. apply speed scaling if needed
                     chain = f"[{i}:v]trim=duration={seg_dur:.3f},setpts=PTS-STARTPTS"
                     if pts_offset > 0.001:
                         chain += f"+{pts_offset:.3f}/TB"
                     if vf:
                         chain += f",{vf}"
+                    # In the per-segment path, subtitles must be burned in here
+                    # (before speed scaling) because the ASS timestamps are in
+                    # the original time domain.  Overlays are applied post-concat
+                    # and will render ON TOP of these subtitles.  For the common
+                    # non-per-segment path, subtitles are applied after overlays.
+                    if _subtitle_vf:
+                        chain += f",{_subtitle_vf}"
                     chain += ",setpts=PTS-STARTPTS"
                     if abs(tl["speed"] - 1.0) > 0.001:
                         chain += f",setpts={pts_factor:.6f}*PTS"
@@ -5095,32 +5106,54 @@ async def export_clip(
                     # Build complex filter: [0:v]<existing_vf>[vbase]; <overlay_chain>
                     base_chain = f"[0:v]{vf}[vbase]" if vf else "[0:v]null[vbase]"
                     full_fc = f"{base_chain};{_overlay_fc}"
+                    final_video_label = _overlay_out_label
+
+                    # Burn subtitles AFTER overlay compositing so they render
+                    # on top of shapes/images/text — matching the track stacking
+                    # order where the subtitle track sits above overlay tracks.
+                    if _subtitle_vf:
+                        sub_in = final_video_label
+                        sub_out = "[vsub]"
+                        full_fc += f";{sub_in}{_subtitle_vf}{sub_out}"
+                        final_video_label = sub_out
+                        logger.info("Subtitle filter applied AFTER overlay compositing for clip %s", clip_id)
+
                     if _audio_overlay_fc_parts:
                         full_fc += ";" + ";".join(_audio_overlay_fc_parts)
-                        cmd += ["-filter_complex", full_fc, "-map", _overlay_out_label, "-map", "[aout]"]
+                        cmd += ["-filter_complex", full_fc, "-map", final_video_label, "-map", "[aout]"]
                     else:
-                        cmd += ["-filter_complex", full_fc, "-map", _overlay_out_label, "-map", "0:a?"]
+                        cmd += ["-filter_complex", full_fc, "-map", final_video_label, "-map", "0:a?"]
                 elif _audio_overlay_fc_parts:
                     # No image overlays but have audio overlays — need filter_complex for audio mixing
+                    # Append subtitle filter to the VF chain (no overlays to go on top of)
+                    _vf_with_sub = f"{vf},{_subtitle_vf}" if vf and _subtitle_vf else (vf or _subtitle_vf or "")
                     fc_parts_list = []
-                    if vf:
+                    if _vf_with_sub:
                         if is_complex:
-                            fc_parts_list.append(vf)
+                            fc_parts_list.append(_vf_with_sub)
                         else:
-                            fc_parts_list.append(f"[0:v]{vf}[vout]")
+                            fc_parts_list.append(f"[0:v]{_vf_with_sub}[vout]")
                     fc_parts_list.extend(_audio_overlay_fc_parts)
                     full_fc = ";".join(fc_parts_list)
                     cmd += ["-filter_complex", full_fc]
-                    if vf:
+                    if _vf_with_sub:
                         cmd += ["-map", "[vout]" if not is_complex else "[out]"]
                     else:
                         cmd += ["-map", "0:v"]
                     cmd += ["-map", "[aout]"]
-                elif vf:
-                    if is_complex:
-                        cmd += ["-filter_complex", vf, "-map", "[out]", "-map", "0:a?"]
-                    else:
-                        cmd += ["-vf", vf]
+                else:
+                    # No overlays — append subtitle filter to VF chain directly
+                    _vf_with_sub = f"{vf},{_subtitle_vf}" if vf and _subtitle_vf else (vf or _subtitle_vf or "")
+                    if _vf_with_sub:
+                        if is_complex:
+                            cmd += ["-filter_complex", _vf_with_sub, "-map", "[out]", "-map", "0:a?"]
+                        else:
+                            cmd += ["-vf", _vf_with_sub]
+                    elif vf:
+                        if is_complex:
+                            cmd += ["-filter_complex", vf, "-map", "[out]", "-map", "0:a?"]
+                        else:
+                            cmd += ["-vf", vf]
                 if af:
                     cmd += ["-af", af]
                 # When active word highlighting is enabled, ensure at least

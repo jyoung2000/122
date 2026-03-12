@@ -2206,8 +2206,6 @@ export default function VideoEditor({
           })()}
         />
 
-        {subtitleOverlay}
-
         {/* Multi-track timeline overlay: text, shapes, images */}
         {showMultiTrack && (
           <TimelineOverlay
@@ -2215,6 +2213,11 @@ export default function VideoEditor({
             clipStart={clipStart}
           />
         )}
+
+        {/* Subtitle overlay renders AFTER timeline overlays so subtitles
+            (which default to the topmost track) appear on top of shapes,
+            images, and text overlays — matching the track stacking order. */}
+        {subtitleOverlay}
 
         {/* Interactive overlay: click-to-select, drag, resize, rotate on preview */}
         {showMultiTrack && (

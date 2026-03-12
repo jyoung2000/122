@@ -7,7 +7,8 @@
  * preview is exactly what appears in the exported MP4.
  */
 
-import { TRACK_COMPOSITING_PRIORITY } from '../stores/timelineStore';
+// Track position in the timeline UI is the single source of truth for
+// compositing order — no type-based priority needed.
 
 // ── Builtin font URL map (mirrors SubtitleOverlay / ClipSettingsPanel) ────
 const BUILTIN_FONT_FILES = {
@@ -384,9 +385,11 @@ export default class RenderEngine {
       }
     }
 
-    // Collect visible clips at currentTime, sorted by track order (bottom-to-top)
-    // Subtitle items are rendered last (on top) via the canvas engine, using the
-    // same timeline store items that SubtitleOverlay uses (single source of truth).
+    // Collect visible clips at currentTime, sorted by track position (bottom-to-top).
+    // Track position in the timeline UI is the single source of truth for z-ordering:
+    // tracks at the TOP of the UI (lower array index) render ON TOP in the preview
+    // and export. This matches the mental model: what you see stacked higher in
+    // the timeline appears in front.
     //
     // In export mode, track.visible is ignored — all tracks are included in the
     // exported video. Track visibility is a preview-only feature (like solo/mute
@@ -396,16 +399,10 @@ export default class RenderEngine {
       if (currentTime >= clip.start && currentTime < clip.end) {
         const track = tracks.find(t => t.id === clip.trackId);
         if (track && (this._exportMode || track.visible !== false) && !track.muted) {
-          // Two-level compositing key:
-          // 1. Primary: TRACK_COMPOSITING_PRIORITY[track.type] ensures type hierarchy
-          //    (video < overlay < subtitle) is always respected.
-          // 2. Secondary: track array position (for ordering within same type,
-          //    e.g., overlay A above overlay B). Divided by 1000 so it never
-          //    exceeds the gap between type priorities.
           const trackIdx = tracks.findIndex(t => t.id === track.id);
-          const typePriority = TRACK_COMPOSITING_PRIORITY[track.type] ?? 0;
-          const positionPriority = trackIdx >= 0 ? (tracks.length - trackIdx) / 1000 : 0;
-          const order = typePriority + positionPriority;
+          // Higher value = rendered later = appears on top.
+          // Lower array index (top of UI) → higher order value.
+          const order = trackIdx >= 0 ? tracks.length - trackIdx : 0;
           visibleClips.push({ clip, track, order });
         }
       }
