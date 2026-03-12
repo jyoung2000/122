@@ -201,7 +201,10 @@ export function EncodingProvider({ children }) {
             const ext = (msg.download_url.split('.').pop() || 'mp4').split('?')[0];
             const downloadName = `[${qualityTag}] ${safeName}.${ext}`;
             fetch(msg.download_url)
-              .then((res) => res.blob())
+              .then((res) => {
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return res.blob();
+              })
               .then((blob) => {
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
@@ -210,13 +213,17 @@ export function EncodingProvider({ children }) {
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);
-                URL.revokeObjectURL(url);
+                setTimeout(() => URL.revokeObjectURL(url), 5000);
+                pushLog('info', `Auto-download started: ${downloadName}`);
               })
-              .catch(() => {
+              .catch((err) => {
+                console.warn('[EncodingManager] Blob download failed, using direct link:', err);
+                pushLog('warning', `Blob download failed (${err.message}), trying direct link...`);
                 // Fallback: direct link click if blob fetch fails
                 const a = document.createElement('a');
                 a.href = msg.download_url;
                 a.download = downloadName;
+                a.target = '_blank';
                 document.body.appendChild(a);
                 a.click();
                 document.body.removeChild(a);

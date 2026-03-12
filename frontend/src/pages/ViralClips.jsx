@@ -843,6 +843,9 @@ export default function ViralClips() {
     if (overlays.imageOverlays.length > 0) body.image_overlays = overlays.imageOverlays;
     if (overlays.shapeOverlays.length > 0) body.shape_overlays = overlays.shapeOverlays;
     if (overlays.audioOverlays.length > 0) body.audio_overlays = overlays.audioOverlays;
+    if (overlays.compositingOrder?.length > 0) {
+      body.overlay_compositing_order = overlays.compositingOrder;
+    }
     if (overlays.warnings.length > 0) {
       for (const w of overlays.warnings) console.warn(`[Export] ${w}`);
     }
