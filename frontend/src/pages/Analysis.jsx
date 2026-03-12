@@ -254,7 +254,7 @@ export default function Analysis() {
     subtitlesEnabled: false,
     subtitleFont: 'DM Sans',
     subtitleSize: 30,
-    subtitleFontWeight: 'bold',
+    subtitleFontWeight: 700,
     subtitleFontColor: '#FFFFFF',
     subtitlePosition: 'bottom',
     speakerColors: {},
@@ -1530,10 +1530,13 @@ export default function Analysis() {
           <div style={inlineFieldStyle}>
             <label style={inlineLabelStyle}>Weight</label>
             <div style={{ display: 'flex', gap: 2 }}>
-              {['normal', 'bold'].map(w => (
-                <button key={w} onClick={() => updateCS('subtitleFontWeight', w)}
-                  style={{ ...inlineChipStyle((clipSettings.subtitleFontWeight || 'bold') === w), fontWeight: w === 'bold' ? 700 : 400, textTransform: 'capitalize' }}>{w}</button>
-              ))}
+              {[{ v: 400, l: 'Regular' }, { v: 700, l: 'Bold' }].map(w => {
+                const cur = typeof clipSettings.subtitleFontWeight === 'number' ? clipSettings.subtitleFontWeight : (clipSettings.subtitleFontWeight === 'bold' ? 700 : 400);
+                return (
+                  <button key={w.v} onClick={() => updateCS('subtitleFontWeight', w.v)}
+                    style={{ ...inlineChipStyle(cur === w.v), fontWeight: w.v }}>{w.l}</button>
+                );
+              })}
             </div>
           </div>
           <div style={inlineFieldStyle}>

@@ -21,6 +21,7 @@ from backend.services.ass_generator import (
     POSITION_ALIGNMENT as ASS_POSITION_ALIGNMENT,
     REF_W as ASS_REF_W,
     REF_H as ASS_REF_H,
+    _normalize_font_weight,
     MIN_TEXT_AREA_W,
     MIN_TEXT_AREA_H,
     _hex_to_ass_color,
@@ -1115,7 +1116,7 @@ def _validate_ass_settings(
     # Must match generate_ass() — no compensation factor, just base * scale.
     # Use round() to match frontend Math.round() and generate_ass().
     expected_font_size = max(16, round(base_size_px * font_scale))
-    expected_bold = ASS_FONT_WEIGHT_MAP.get(font_weight, 0)
+    _, expected_bold = _normalize_font_weight(font_weight)
     expected_alignment = 2  # Always bottom-center for absolute vertical positioning
     scaled_outline_width = max(0, round(outline_width * font_scale)) if outline_width > 0 else 0
 

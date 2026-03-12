@@ -13,7 +13,7 @@ const DEFAULT_SETTINGS = {
   subtitlesEnabled: false,
   subtitleFont: 'DM Sans',
   subtitleSize: 30,
-  subtitleFontWeight: 'bold',
+  subtitleFontWeight: 700,
   subtitleFontColor: '#FFFFFF',
   subtitlePosition: 'bottom',
   speakerColors: {},
@@ -111,10 +111,46 @@ const SIZES = [
   { value: 40, label: 'L' },
 ];
 
-const FONT_WEIGHTS = [
-  { value: 'normal', label: 'Normal' },
-  { value: 'bold', label: 'Bold' },
+// Available font weights per font family
+const ALL_FONT_WEIGHTS = [
+  { value: 100, label: 'Thin' },
+  { value: 200, label: 'ExtraLight' },
+  { value: 300, label: 'Light' },
+  { value: 400, label: 'Regular' },
+  { value: 500, label: 'Medium' },
+  { value: 600, label: 'SemiBold' },
+  { value: 700, label: 'Bold' },
+  { value: 800, label: 'ExtraBold' },
+  { value: 900, label: 'Black' },
 ];
+const VARIABLE_FONTS = new Set([
+  'DM Sans', 'Montserrat', 'Open Sans', 'Roboto', 'Inter', 'Nunito',
+  'Oswald', 'Playfair Display', 'Lato',
+]);
+const STATIC_FONT_WEIGHTS = {
+  'Poppins': [400, 700],
+  'Bebas Neue': [400],
+  'Liberation Sans': [400, 700],
+  'Liberation Serif': [400, 700],
+  'Liberation Mono': [400, 700],
+  'DejaVu Sans': [400, 700],
+  'DejaVu Serif': [400, 700],
+  'DejaVu Sans Mono': [400, 700],
+  'FreeSans': [400, 700],
+};
+function getWeightOptionsForFont(fontFamily) {
+  if (VARIABLE_FONTS.has(fontFamily)) return ALL_FONT_WEIGHTS;
+  const weights = STATIC_FONT_WEIGHTS[fontFamily];
+  if (weights) return ALL_FONT_WEIGHTS.filter(w => weights.includes(w.value));
+  return ALL_FONT_WEIGHTS.filter(w => [400, 700].includes(w.value));
+}
+// Convert legacy string weights to numeric
+function normalizeWeight(w) {
+  if (typeof w === 'number') return w;
+  if (w === 'bold') return 700;
+  if (w === 'black') return 900;
+  return 400; // 'normal' and any other string
+}
 
 const POSITIONS = [
   { value: 'top', label: 'Top' },
@@ -684,7 +720,17 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                         <select
                           value={settings.subtitleFont}
-                          onChange={(e) => update('subtitleFont', e.target.value)}
+                          onChange={(e) => {
+                            const newFont = e.target.value;
+                            update('subtitleFont', newFont);
+                            // Snap weight to closest available if current weight isn't supported
+                            const curWeight = normalizeWeight(settings.subtitleFontWeight);
+                            const available = getWeightOptionsForFont(newFont).map(w => w.value);
+                            if (!available.includes(curWeight)) {
+                              const closest = available.reduce((a, b) => Math.abs(b - curWeight) < Math.abs(a - curWeight) ? b : a);
+                              update('subtitleFontWeight', closest);
+                            }
+                          }}
                           style={{ flex: 1, padding: '6px 8px', borderRadius: 'var(--radius-sm)', fontSize: 12 }}
                         >
                           {BUILTIN_FONTS.map((f) => (
@@ -783,11 +829,11 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                     <div>
                       <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>Weight</div>
                       <div style={radioGroupStyle}>
-                        {FONT_WEIGHTS.map((w) => (
+                        {getWeightOptionsForFont(settings.subtitleFont).map((w) => (
                           <button
                             key={w.value}
                             onClick={() => update('subtitleFontWeight', w.value)}
-                            style={radioBtnStyle(settings.subtitleFontWeight === w.value)}
+                            style={radioBtnStyle(normalizeWeight(settings.subtitleFontWeight) === w.value)}
                           >
                             {w.label}
                           </button>
@@ -1432,7 +1478,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                         <div style={{
                           fontFamily: `"${settings.subtitleFont}", sans-serif`,
                           fontSize: fontSizePx,
-                          fontWeight: settings.subtitleFontWeight === 'bold' ? 700 : 400,
+                          fontWeight: normalizeWeight(settings.subtitleFontWeight),
                           color: (settings.useSpeakerColors ?? true) ? sampleColor1 : (settings.subtitleFontColor || '#FFFFFF'),
                           lineHeight: 1.4,
                           wordWrap: 'break-word',
@@ -1456,7 +1502,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                           <div style={{
                             fontFamily: `"${settings.subtitleFont}", sans-serif`,
                             fontSize: fontSizePx,
-                            fontWeight: settings.subtitleFontWeight === 'bold' ? 700 : 400,
+                            fontWeight: normalizeWeight(settings.subtitleFontWeight),
                             color: (settings.useSpeakerColors ?? true) ? sampleColor2 : (settings.subtitleFontColor || '#FFFFFF'),
                             lineHeight: 1.4,
                             marginTop: 2,

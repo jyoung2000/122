@@ -114,7 +114,7 @@ class ClipSEO(BaseModel):
 class SubtitleSettings(BaseModel):
     font: str = "DM Sans"
     size: Union[str, int, float] = "medium"  # "small" | "medium" | "large" | numeric px (12-72)
-    font_weight: str = "bold"  # "normal" | "bold"
+    font_weight: Union[str, int] = "bold"  # "normal"|"bold" or numeric 100-900
     font_color: str = "#FFFFFF"  # default subtitle text color (hex)
     position: str = "bottom"  # "top" | "center" | "bottom"
     speaker_colors: dict[str, str] = {}  # {"Speaker 1": "#00D9FF"}

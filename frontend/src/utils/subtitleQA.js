@@ -108,10 +108,14 @@ export function validateSubtitleSettings(settings) {
     errors.push(`subtitleSize "${size}" is not a valid preset (small/medium/large)`);
   }
 
-  // Font weight
-  const weight = s.subtitleFontWeight || 'normal';
-  if (!['normal', 'bold', 'black'].includes(weight)) {
-    warnings.push(`subtitleFontWeight "${weight}" should be normal/bold/black`);
+  // Font weight — accepts numeric (100-900) or string ("normal", "bold", "black")
+  const weight = s.subtitleFontWeight;
+  if (typeof weight === 'number') {
+    if (weight < 100 || weight > 900) {
+      warnings.push(`subtitleFontWeight ${weight} should be 100-900`);
+    }
+  } else if (weight && !['normal', 'bold', 'black'].includes(weight)) {
+    warnings.push(`subtitleFontWeight "${weight}" should be normal/bold/black or 100-900`);
   }
 
   // Position

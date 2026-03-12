@@ -695,7 +695,7 @@ export default function ClipPreview({
     const bgEnabled = subtitleSettings?.subtitleBgEnabled || false;
     const bgColor = subtitleSettings?.subtitleBgColor || '#000000';
     const bgOpacity = subtitleSettings?.subtitleBgOpacity ?? 75;
-    const fontWeight = subtitleSettings?.subtitleFontWeight === 'bold' ? 700 : 400;
+    const fontWeight = typeof subtitleSettings?.subtitleFontWeight === 'number' ? subtitleSettings.subtitleFontWeight : subtitleSettings?.subtitleFontWeight === 'bold' ? 700 : 400;
     const rawFont = subtitleSettings?.subtitleFont || 'DM Sans';
     // Wrap in quotes for multi-word names and add generic fallback so the
     // browser never falls back to the inherited UI font stack when the

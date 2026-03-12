@@ -96,6 +96,23 @@ FONT_WEIGHT_MAP = {
     "bold": -1,  # ASS v4+ uses -1 for bold (1 is interpreted as weight=1, ultra-thin)
 }
 
+
+def _normalize_font_weight(weight) -> tuple[int, bool]:
+    """Normalize font weight to (numeric_weight, is_bold_for_ass).
+
+    Accepts string ("normal", "bold") or numeric (100-900) weights.
+    Returns (numeric_weight, ass_bold) where ass_bold is -1 or 0.
+    """
+    if isinstance(weight, (int, float)):
+        w = int(weight)
+        return w, -1 if w >= 600 else 0
+    w_str = str(weight).lower().strip()
+    if w_str == "bold":
+        return 700, -1
+    if w_str == "black":
+        return 900, -1
+    return 400, 0
+
 # ASS alignment: 2=bottom-center, 5=middle-center, 8=top-center
 POSITION_ALIGNMENT = {
     "bottom": 2,
@@ -276,7 +293,7 @@ def generate_ass(
     end_time: float,
     font: str = "DM Sans",
     font_size: str | int | float = "medium",
-    font_weight: str = "bold",
+    font_weight: str | int = "bold",
     font_color: str = "#FFFFFF",
     position: str = "bottom",
     speaker_colors: dict[str, str] | None = None,
@@ -322,7 +339,7 @@ def generate_ass(
     else:
         size_px = FONT_SIZE_MAP.get(font_size, 30)
     # alignment is set below after margin_v computation (absolute vertical positioning)
-    bold_flag = FONT_WEIGHT_MAP.get(font_weight, 0)
+    _numeric_weight, bold_flag = _normalize_font_weight(font_weight)
 
     # Clamp user-configurable values
     max_width_pct = max(20, min(100, max_width_pct))
@@ -494,7 +511,7 @@ def generate_ass(
     _bg_draw_pad_v = 0
     _bg_draw_radius = 0
     if _bg_split:
-        _bg_font_path = _resolve_font_path(font, bold=(font_weight == "bold"))
+        _bg_font_path = _resolve_font_path(font, bold=(bold_flag == -1))
         if not _bg_font_path:
             logger.warning("Cannot resolve font path for '%s' — "
                            "falling back to sharp background box", font)
@@ -608,7 +625,7 @@ def generate_ass(
     _aw_draw_pad_v = 0
     _aw_draw_radius = 0
     if _aw_bg_split:
-        _aw_font_path = _resolve_font_path(font, bold=(font_weight == "bold"))
+        _aw_font_path = _resolve_font_path(font, bold=(bold_flag == -1))
         if not _aw_font_path:
             logger.warning("Cannot resolve font path for '%s' — "
                            "falling back to sharp active word box", font)

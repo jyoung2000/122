@@ -341,7 +341,8 @@ export default class RenderEngine {
       if (clip.type === 'subtitle') {
         const subS = settings?.subtitle || settings || {};
         const fn = subS.subtitleFont || 'DM Sans';
-        const fw = subS.subtitleFontWeight === 'bold' ? 700 :
+        const fw = typeof subS.subtitleFontWeight === 'number' ? subS.subtitleFontWeight :
+                   subS.subtitleFontWeight === 'bold' ? 700 :
                    subS.subtitleFontWeight === 'black' ? 900 : 400;
         const key = `${fn}|${fw}`;
         if (!needed.has(key)) {
@@ -746,7 +747,7 @@ export default class RenderEngine {
     const basePx = typeof sizeLabel === 'number' ? sizeLabel : (FONT_SIZE_MAP[sizeLabel] || 30);
     const fontScale = Math.min(width, height) / Math.min(REF_W, REF_H);
     const fontSize = Math.max(16, Math.round(basePx * fontScale));
-    const fontWeight = subSettings.subtitleFontWeight === 'bold' ? 700 : subSettings.subtitleFontWeight === 'black' ? 900 : 400;
+    const fontWeight = typeof subSettings.subtitleFontWeight === 'number' ? subSettings.subtitleFontWeight : subSettings.subtitleFontWeight === 'bold' ? 700 : subSettings.subtitleFontWeight === 'black' ? 900 : 400;
     const settingsPosition = subSettings.subtitlePosition || 'bottom';
     const maxWidthPct = subSettings.subtitleMaxWidth ?? 90;
     const offsetVPct = subSettings.subtitleOffsetV ?? 4;

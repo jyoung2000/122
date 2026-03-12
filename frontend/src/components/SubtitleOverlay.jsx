@@ -511,7 +511,7 @@ export default function SubtitleOverlay({
   const bgEnabled = settings.subtitleBgEnabled || false;
   const bgColor = settings.subtitleBgColor || '#000000';
   const bgOpacity = settings.subtitleBgOpacity ?? 75;
-  const fontWeight = settings.subtitleFontWeight === 'bold' ? 700 : settings.subtitleFontWeight === 'black' ? 900 : 400;
+  const fontWeight = typeof settings.subtitleFontWeight === 'number' ? settings.subtitleFontWeight : settings.subtitleFontWeight === 'bold' ? 700 : settings.subtitleFontWeight === 'black' ? 900 : 400;
   const rawFont = settings.subtitleFont || 'DM Sans';
   const fontFamily = `"${rawFont}", sans-serif`;
   const showLabels = settings.showSpeakerLabels ?? false;
@@ -677,6 +677,7 @@ export default function SubtitleOverlay({
               ...(bgEnabled ? {
                 background: hexToRgba(bgColor, bgOpacity / 100),
                 padding: `${Math.max(1, Math.max(Math.floor(4 * backendFontScale), 2) * subtitleScale)}px`,
+                borderRadius: `${(settings.subtitleBgRadius || 0) * subtitleScale}px`,
               } : {}),
               ...(isSubtitleSelected ? {
                 outline: '2px solid #0A84FF',

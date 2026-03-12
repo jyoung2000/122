@@ -222,7 +222,7 @@ export function mapSubtitleSettings(cs) {
   return {
     font: cs.subtitleFont || 'DM Sans',
     size: cs.subtitleSize ?? 30,
-    font_weight: cs.subtitleFontWeight || 'bold',
+    font_weight: typeof cs.subtitleFontWeight === 'number' ? cs.subtitleFontWeight : (cs.subtitleFontWeight || 'bold'),
     font_color: cs.subtitleFontColor || '#FFFFFF',
     position: cs.subtitlePosition || 'bottom',
     speaker_colors: cs.speakerColors || {},

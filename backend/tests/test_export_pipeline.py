@@ -2538,8 +2538,8 @@ def test_viralclips_defaults_match_model():
     check("ViralClips uses subtitleFont || 'DM Sans'",
           "subtitleFont || 'DM Sans'" in viral_src or "subtitleFont ||'DM Sans'" in viral_src
           or "'DM Sans'" in viral_src)
-    check("ViralClips uses subtitleFontWeight || 'bold'",
-          "'bold'" in viral_src)
+    check("ViralClips uses subtitleFontWeight with 700 (Bold)",
+          "700" in viral_src or "'bold'" in viral_src)
     check("ViralClips sends active_word_bg_opacity",
           "active_word_bg_opacity" in viral_src)
     check("ViralClips sends active_word_bg_color",

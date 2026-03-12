@@ -174,12 +174,12 @@ export function sanitizeSubtitleSettings(ss) {
   const s = { ...ss };
   // All string fields that may be rendered in JSX
   const stringFields = [
-    'subtitleFont', 'subtitleFontColor', 'subtitleFontWeight',
+    'subtitleFont', 'subtitleFontColor',
     'subtitleOutlineColor', 'subtitlePosition', 'activeWordColor',
     'activeWordOutlineColor', 'activeWordBgColor', 'subtitleBgColor',
     'aspectRatio', 'exportQuality',
     // snake_case variants from backend
-    'font', 'font_color', 'font_weight', 'outline_color', 'position',
+    'font', 'font_color', 'outline_color', 'position',
     'active_word_color', 'active_word_outline_color', 'active_word_bg_color',
     'background_color',
   ];

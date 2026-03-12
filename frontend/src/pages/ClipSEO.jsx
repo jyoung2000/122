@@ -186,7 +186,7 @@ export default function ClipSEO() {
     subtitlesEnabled: false,
     subtitleFont: 'DM Sans',
     subtitleSize: 30,
-    subtitleFontWeight: 'bold',
+    subtitleFontWeight: 700,
     subtitleFontColor: '#FFFFFF',
     subtitlePosition: 'bottom',
     speakerColors: {},
@@ -319,7 +319,7 @@ export default function ClipSEO() {
     subtitlesEnabled = false,
     subtitleFont = 'DM Sans',
     subtitleSize = 30,
-    subtitleFontWeight = 'bold',
+    subtitleFontWeight = 700,
     subtitleFontColor = '#FFFFFF',
     subtitlePosition = 'bottom',
     useSpeakerColors = true,
@@ -1114,14 +1114,14 @@ export default function ClipSEO() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
                   <label style={{ fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Weight</label>
                   <div style={{ display: 'flex', gap: 2 }}>
-                    {['normal', 'bold', 'black'].map(w => (
-                      <button key={w} onClick={() => setClipSettings(prev => ({ ...prev, subtitleFontWeight: w }))}
+                    {[{ v: 400, l: 'Regular' }, { v: 700, l: 'Bold' }, { v: 900, l: 'Black' }].map(w => (
+                      <button key={w.v} onClick={() => setClipSettings(prev => ({ ...prev, subtitleFontWeight: w.v }))}
                         style={{
-                          padding: '4px 8px', fontSize: 10, fontWeight: w === 'bold' ? 700 : w === 'black' ? 900 : 400,
-                          background: subtitleFontWeight === w ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
-                          color: subtitleFontWeight === w ? '#fff' : 'var(--text-secondary)',
-                          border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer', textTransform: 'capitalize',
-                        }}>{w}</button>
+                          padding: '4px 8px', fontSize: 10, fontWeight: w.v,
+                          background: (typeof subtitleFontWeight === 'number' ? subtitleFontWeight : (subtitleFontWeight === 'bold' ? 700 : subtitleFontWeight === 'black' ? 900 : 400)) === w.v ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+                          color: (typeof subtitleFontWeight === 'number' ? subtitleFontWeight : (subtitleFontWeight === 'bold' ? 700 : subtitleFontWeight === 'black' ? 900 : 400)) === w.v ? '#fff' : 'var(--text-secondary)',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer',
+                        }}>{w.l}</button>
                     ))}
                   </div>
                 </div>

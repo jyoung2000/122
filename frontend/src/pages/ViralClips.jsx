@@ -76,8 +76,8 @@ const SETTINGS_KEY = 'clipai_clip_settings';
 const OVERRIDES_KEY = 'clipai_viral_clip_overrides';
 
 const FONT_WEIGHTS = [
-  { value: 'normal', label: 'Normal' },
-  { value: 'bold', label: 'Bold' },
+  { value: 400, label: 'Regular' },
+  { value: 700, label: 'Bold' },
 ];
 
 const DEFAULT_SETTINGS = {
@@ -85,7 +85,7 @@ const DEFAULT_SETTINGS = {
   subtitlesEnabled: false,
   subtitleFont: 'DM Sans',
   subtitleSize: 30,
-  subtitleFontWeight: 'bold',
+  subtitleFontWeight: 700,
   subtitleFontColor: '#FFFFFF',
   subtitlePosition: 'bottom',
   useSpeakerColors: true,
@@ -262,7 +262,7 @@ function SubtitleSettingsEditor({ values, onChange, speakerList, customFonts, co
             <div style={labelStyle}>Weight</div>
             <div style={{ display: 'flex', gap: 4 }}>
               {FONT_WEIGHTS.map((w) => (
-                <button key={w.value} onClick={() => set('subtitleFontWeight', w.value)} style={radioStyle(values.subtitleFontWeight === w.value)}>
+                <button key={w.value} onClick={() => set('subtitleFontWeight', w.value)} style={radioStyle((typeof values.subtitleFontWeight === 'number' ? values.subtitleFontWeight : (values.subtitleFontWeight === 'bold' ? 700 : 400)) === w.value)}>
                   {w.label}
                 </button>
               ))}

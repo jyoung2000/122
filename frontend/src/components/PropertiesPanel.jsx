@@ -13,6 +13,44 @@ const FONT_OPTIONS = [
   'Nunito', 'Lato', 'Oswald', 'Playfair Display', 'Bebas Neue',
   'Liberation Sans', 'DejaVu Sans',
 ];
+
+// Available font weights per font family.  Variable fonts support a full range;
+// static fonts only have the weights for which a file exists on the system.
+const ALL_WEIGHT_OPTIONS = [
+  { value: 100, label: 'Thin' },
+  { value: 200, label: 'ExtraLight' },
+  { value: 300, label: 'Light' },
+  { value: 400, label: 'Regular' },
+  { value: 500, label: 'Medium' },
+  { value: 600, label: 'SemiBold' },
+  { value: 700, label: 'Bold' },
+  { value: 800, label: 'ExtraBold' },
+  { value: 900, label: 'Black' },
+];
+// Fonts that ship as variable fonts (support full 100-900 range)
+const VARIABLE_FONTS = new Set([
+  'DM Sans', 'Montserrat', 'Open Sans', 'Roboto', 'Inter', 'Nunito',
+  'Oswald', 'Playfair Display', 'Lato',
+]);
+// Fonts that only have regular (400) and bold (700) static files
+const STATIC_FONT_WEIGHTS = {
+  'Poppins': [400, 700],
+  'Bebas Neue': [400],
+  'Liberation Sans': [400, 700],
+  'Liberation Serif': [400, 700],
+  'Liberation Mono': [400, 700],
+  'DejaVu Sans': [400, 700],
+  'DejaVu Serif': [400, 700],
+  'DejaVu Sans Mono': [400, 700],
+  'FreeSans': [400, 700],
+};
+function getWeightOptionsForFont(fontFamily) {
+  if (VARIABLE_FONTS.has(fontFamily)) return ALL_WEIGHT_OPTIONS;
+  const weights = STATIC_FONT_WEIGHTS[fontFamily];
+  if (weights) return ALL_WEIGHT_OPTIONS.filter(w => weights.includes(w.value));
+  // Custom/unknown fonts: show common weights (browser will synthesize)
+  return ALL_WEIGHT_OPTIONS.filter(w => [400, 700].includes(w.value));
+}
 const TEXT_ANIMATIONS = [
   { id: 'none', label: 'None' },
   { id: 'fade-in', label: 'Fade In' },
@@ -143,7 +181,16 @@ function SubtitleProperties({ item, update, settings, onSettingsChange, customFo
             <span className="ve-properties__field-label">Family</span>
             <select
               value={s.subtitleFont || 'DM Sans'}
-              onChange={(e) => set('subtitleFont', e.target.value)}
+              onChange={(e) => {
+                const newFont = e.target.value;
+                set('subtitleFont', newFont);
+                const curWeight = typeof s.subtitleFontWeight === 'number' ? s.subtitleFontWeight : (s.subtitleFontWeight === 'bold' ? 700 : 400);
+                const available = getWeightOptionsForFont(newFont).map(w => w.value);
+                if (!available.includes(curWeight)) {
+                  const closest = available.reduce((a, b) => Math.abs(b - curWeight) < Math.abs(a - curWeight) ? b : a);
+                  set('subtitleFontWeight', closest);
+                }
+              }}
               className="ve-properties__select"
             >
               {FONT_OPTIONS.map(f => <option key={f} value={f}>{f}</option>)}
@@ -159,13 +206,13 @@ function SubtitleProperties({ item, update, settings, onSettingsChange, customFo
           <div className="ve-properties__field">
             <span className="ve-properties__field-label">Weight</span>
             <select
-              value={s.subtitleFontWeight || 'normal'}
-              onChange={(e) => set('subtitleFontWeight', e.target.value)}
+              value={typeof s.subtitleFontWeight === 'number' ? s.subtitleFontWeight : (s.subtitleFontWeight === 'bold' ? 700 : s.subtitleFontWeight === 'black' ? 900 : 400)}
+              onChange={(e) => set('subtitleFontWeight', parseInt(e.target.value))}
               className="ve-properties__select"
             >
-              <option value="normal">Normal</option>
-              <option value="bold">Bold</option>
-              <option value="black">Black</option>
+              {getWeightOptionsForFont(s.subtitleFont || 'DM Sans').map(w => (
+                <option key={w.value} value={w.value}>{w.label}</option>
+              ))}
             </select>
           </div>
         </div>
@@ -789,7 +836,17 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
                 <span className="ve-properties__field-label">Family</span>
                 <select
                   value={item.textStyle?.fontFamily || 'DM Sans'}
-                  onChange={(e) => updateNested('textStyle', 'fontFamily', e.target.value)}
+                  onChange={(e) => {
+                    const newFont = e.target.value;
+                    updateNested('textStyle', 'fontFamily', newFont);
+                    // Snap weight to closest available if current weight isn't supported
+                    const curWeight = item.textStyle?.fontWeight || 700;
+                    const available = getWeightOptionsForFont(newFont).map(w => w.value);
+                    if (!available.includes(curWeight)) {
+                      const closest = available.reduce((a, b) => Math.abs(b - curWeight) < Math.abs(a - curWeight) ? b : a);
+                      updateNested('textStyle', 'fontWeight', closest);
+                    }
+                  }}
                   className="ve-properties__select"
                 >
                   {FONT_OPTIONS.map(f => <option key={f} value={f}>{f}</option>)}
@@ -809,11 +866,9 @@ export default function PropertiesPanel({ compact = false, settings = null, onSe
                   onChange={(e) => updateNested('textStyle', 'fontWeight', parseInt(e.target.value))}
                   className="ve-properties__select"
                 >
-                  <option value={300}>Light</option>
-                  <option value={400}>Regular</option>
-                  <option value={600}>Semi</option>
-                  <option value={700}>Bold</option>
-                  <option value={900}>Black</option>
+                  {getWeightOptionsForFont(item.textStyle?.fontFamily || 'DM Sans').map(w => (
+                    <option key={w.value} value={w.value}>{w.label}</option>
+                  ))}
                 </select>
               </div>
             </div>
