@@ -35,15 +35,26 @@ def _resolve_font_path(font_name: str, bold: bool = False) -> str | None:
 
 
 def _measure_text(text: str, font_path: str, size_px: int) -> tuple[float, float, float] | None:
-    """Measure text dimensions using Pillow. Returns (width, ascent, descent) or None."""
+    """Measure text dimensions using Pillow.
+
+    Returns (advance_width, font_ascent, font_descent) or None.
+    Uses getlength() for advance width which matches how text layout engines
+    (including libass/freetype) position successive characters.
+    Uses font.getmetrics() for ascent/descent to match libass's font-level
+    line height (not the tight bbox of the specific rendered text).
+    """
     try:
         from PIL import ImageFont
         font = ImageFont.truetype(font_path, size_px)
-        bbox = font.getbbox(text)  # (left, top, right, bottom)
-        width = bbox[2] - bbox[0]
-        ascent = -bbox[1]  # top is typically negative
-        descent = bbox[3]
-        return (width, ascent, descent)
+        # getlength() returns the advance width — how far the cursor moves
+        # after rendering the text.  This matches libass/freetype positioning
+        # better than getbbox() which returns the tight visual bounding box.
+        advance_width = font.getlength(text)
+        # Use font-level metrics for line height — these come from the font's
+        # OS/2 table (typo ascender/descender) which is what libass uses,
+        # rather than the tight per-glyph bbox which varies per text content.
+        font_ascent, font_descent = font.getmetrics()
+        return (advance_width, font_ascent, font_descent)
     except Exception:
         return None
 
@@ -474,8 +485,27 @@ def generate_ass(
         "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
     ]
 
+    # Rounded-corner background: when background_radius > 0, use ASS drawing
+    # commands (\p1) to render a rounded rectangle BELOW the text instead of
+    # BorderStyle=3 (which only renders sharp rectangles).
+    _bg_split = bool(background_enabled and background_radius > 0)
+    _bg_font_path = None
+    _bg_draw_pad_h = 0
+    _bg_draw_pad_v = 0
+    _bg_draw_radius = 0
+    if _bg_split:
+        _bg_font_path = _resolve_font_path(font, bold=(font_weight == "bold"))
+        if not _bg_font_path:
+            logger.warning("Cannot resolve font path for '%s' — "
+                           "falling back to sharp background box", font)
+            _bg_split = False
+        else:
+            _bg_draw_pad_h = max(6, round(10 * font_scale))
+            _bg_draw_pad_v = max(3, round(4 * font_scale))
+            _bg_draw_radius = max(1, round(background_radius * font_scale))
+
     # Compute outline/background style settings (same for all speakers)
-    if background_enabled:
+    if background_enabled and not _bg_split:
         # BorderStyle=3: OutlineColour = box color, BackColour = shadow behind box.
         # With Shadow=0, BackColour should be invisible but some libass builds
         # still composite it at offset (0,0), doubling the box opacity.
@@ -484,6 +514,14 @@ def generate_ass(
         back_color_ass = "&HFF000000&"  # fully transparent — no shadow needed
         border_style = 3
         ol_width = max(int(4 * font_scale), 2)  # minimum padding for the box
+        shadow_depth = 0
+    elif _bg_split:
+        # Background via drawing commands: base style has no box.
+        # OutlineColour = transparent, BackColour = transparent.
+        style_outline_color = "&HFF000000&"  # fully transparent
+        back_color_ass = "&HFF000000&"  # fully transparent
+        border_style = 1
+        ol_width = 0
         shadow_depth = 0
     else:
         style_outline_color = _hex_to_ass_color_with_alpha(outline_color, outline_opacity)
@@ -599,11 +637,22 @@ def generate_ass(
             "0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1"
         )
 
+    # BGDRAW style for rounded-rect background drawing events.
+    # Same approach as AWDRAW: font_size=64 → 1:1 pixel mapping, alignment=7.
+    if _bg_split:
+        lines.append(
+            "Style: BGDRAW,Arial,64,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,"
+            "0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1"
+        )
+
     lines.append("")
     lines.append("[Events]")
     lines.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
 
-    # Pre-compute active word ASS colors
+    # Pre-compute active word ASS colors (defaults for when active word is off)
+    aw_bg = None
+    aw_bg_color = None
+    aw_bg_alpha = None
     if active_word_enabled:
         aw_color = _hex_to_ass_color(active_word_color)
         # Use the same outline color+alpha as the style so the active word
@@ -669,6 +718,7 @@ def generate_ass(
     # For standard mode: single-layer events on Layer 0 as before.
     pending_word_events: list[tuple[float, float, str, str]] = []
     pending_box_events: list[tuple[float, float, str, str]] = []
+    pending_bg_draw_events: list[tuple[float, float, str, str]] = []  # BGDRAW events
     pending_draw_info: list[tuple[float, float, str, str, str]] = []  # (start, end, full_line, before_text, word)
     base_text_events: list[tuple[float, float, str, str]] = []
 
@@ -994,14 +1044,22 @@ def generate_ass(
             if not full_m:
                 continue
             before_m = _measure_text(before_text, _aw_font_path, size_px) if before_text else None
+            # Measure the word in context: advance of (before+word) minus
+            # advance of (before).  This accounts for kerning between the
+            # space before the word and the word's first character.
+            through_m = _measure_text(before_text + word_text, _aw_font_path, size_px) if before_text else None
             word_m = _measure_text(word_text, _aw_font_path, size_px)
             if not word_m:
                 continue
 
             full_w = full_m[0]
             before_w = before_m[0] if before_m else 0
-            word_w = word_m[0]
-            line_h = full_m[1] + full_m[2]  # ascent + descent
+            # Use contextual width when available (accounts for kerning)
+            if through_m and before_m:
+                word_w = through_m[0] - before_m[0]
+            else:
+                word_w = word_m[0]
+            line_h = full_m[1] + full_m[2]  # font ascent + descent
 
             # Horizontal: center-aligned text
             line_left_x = (video_width - full_w) / 2
@@ -1049,6 +1107,59 @@ def generate_ass(
             text_text = "{\\bord0" + text[1:]
             new_word_events.append((start, end, text_style, text_text))
         pending_word_events[:] = new_word_events
+
+    # ── Generate rounded-rect background drawing events (BGDRAW) ──
+    # When _bg_split is active, each base text event gets a corresponding
+    # BGDRAW event with a rounded rectangle behind the text.
+    if _bg_split and _bg_font_path and base_text_events:
+        import re as _re
+        _bg_color = _hex_to_ass_color(background_color)
+        _bg_alpha_byte = 255 - max(0, min(255, int(background_opacity / 100 * 255)))
+        _bg_alpha = f"&H{_bg_alpha_byte:02X}&"
+
+        for ev_start, ev_end, ev_style, ev_text in base_text_events:
+            # Strip ASS override tags to get plain text for measurement
+            plain = _re.sub(r"\{[^}]*\}", "", ev_text)
+            if not plain.strip():
+                continue
+            m = _measure_text(plain, _bg_font_path, size_px)
+            if not m:
+                continue
+            text_w, text_asc, text_desc = m
+            line_h = text_asc + text_desc
+
+            # Horizontal: center-aligned text (alignment=2 is bottom-center)
+            line_left_x = (video_width - text_w) / 2
+
+            # Vertical: depends on alignment (2=bottom, 5=center, 8=top)
+            if alignment == 2:
+                text_top_y = video_height - margin_v - line_h
+            elif alignment == 5:
+                text_top_y = (video_height - line_h) / 2
+            elif alignment == 8:
+                text_top_y = margin_v
+            else:
+                continue
+
+            draw_x = round(line_left_x - _bg_draw_pad_h)
+            draw_y = round(text_top_y - _bg_draw_pad_v)
+            draw_w = round(text_w + 2 * _bg_draw_pad_h)
+            draw_h = round(line_h + 2 * _bg_draw_pad_v)
+
+            drawing = _ass_rounded_rect(draw_w, draw_h, _bg_draw_radius)
+            event_text = (
+                f"{{\\an7\\pos({draw_x},{draw_y})"
+                f"\\p1\\c{_bg_color}\\1a{_bg_alpha}"
+                f"\\bord0\\shad0}}{drawing}"
+            )
+            pending_bg_draw_events.append((ev_start, ev_end, "BGDRAW", event_text))
+
+        logger.info(
+            "BGDRAW: generated %d rounded-rect drawing events "
+            "(radius=%dpx, pad=%dx%d, font=%s)",
+            len(pending_bg_draw_events), _bg_draw_radius,
+            _bg_draw_pad_h, _bg_draw_pad_v, _bg_font_path,
+        )
 
     # ═══════════════════════════════════════════════════════════════════
     # FINAL OVERLAP ELIMINATION — unified pass at centisecond precision
@@ -1101,16 +1212,24 @@ def generate_ass(
 
     # Collect all events as (layer, start, end, style, text) tuples.
     # Layer ordering (lower = renders first / behind):
-    #   Layer 0: base text events (border layer, uniform color)
-    #   Layer 1: outline overlay events (when bg + outline both enabled)
-    #   Layer N: drawing events (when _aw_bg_split, rounded-rect backgrounds)
-    #   Layer N+1: active word color events (topmost, sharp text)
+    #   Layer 0: BGDRAW events (when _bg_split, rounded-rect background)
+    #   Layer N: base text events (border layer, uniform color)
+    #   Layer N+1: outline overlay events (when bg + outline both enabled)
+    #   Layer N+2: AWDRAW events (when _aw_bg_split, active word backgrounds)
+    #   Layer N+3: active word color events (topmost, sharp text)
     all_events: list[tuple[int, float, float, str, str]] = []
+    next_layer = 0
+    if pending_bg_draw_events:
+        for ev in pending_bg_draw_events:
+            all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
+        next_layer += 1
     for ev in base_text_events:
-        all_events.append((0, ev[0], ev[1], ev[2], ev[3]))
+        all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
+    next_layer += 1
     for ev in outline_overlay_events:
-        all_events.append((1, ev[0], ev[1], ev[2], ev[3]))
-    next_layer = 2 if bg_has_outline else 1
+        all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
+    if outline_overlay_events:
+        next_layer += 1
     if pending_box_events:
         for ev in pending_box_events:
             all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
@@ -1167,15 +1286,17 @@ def generate_ass(
 
     logger.info(
         "ASS generated: font=%s size=%s(%dpx) weight=%s color=%s pos=%s "
-        "bg=%s outline=%dpx speakers=%d segments=%d active_word=%s "
-        "aw_bg_opacity=%d aw_bg_radius=%d aw_bg_split=%s blur=%d "
-        "box_events=%d word_events=%d max_words=%d res=%dx%d",
+        "bg=%s(%s) bg_radius=%d bg_split=%s outline=%dpx speakers=%d segments=%d active_word=%s "
+        "aw_bg_opacity=%d aw_bg_radius=%d aw_bg_split=%s "
+        "bg_draw_events=%d box_events=%d word_events=%d max_words=%d res=%dx%d",
         font, font_size, size_px, font_weight, font_color, position,
-        f"yes({background_color}@{background_opacity}%)" if background_enabled else "no",
+        "yes" if background_enabled else "no",
+        f"{background_color}@{background_opacity}%" if background_enabled else "n/a",
+        background_radius, _bg_split,
         ol_width, len(speakers_seen), len(clip_segments),
         "yes" if active_word_enabled else "no",
-        active_word_bg_opacity, active_word_bg_radius, _aw_bg_split, _aw_blur_val,
-        len(pending_box_events), len(pending_word_events),
+        active_word_bg_opacity, active_word_bg_radius, _aw_bg_split,
+        len(pending_bg_draw_events), len(pending_box_events), len(pending_word_events),
         max_words, video_width, video_height,
     )
 

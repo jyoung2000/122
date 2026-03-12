@@ -1127,11 +1127,20 @@ def _validate_ass_settings(
     expected_margin_v = int(video_height * offset_v_pct / 100)
 
     # Expected outline/background style values
-    if background_enabled:
+    background_radius = settings.get("background_radius", 0)
+    _bg_split = bool(background_enabled and background_radius > 0)
+    if background_enabled and not _bg_split:
         expected_border_style = 3
         expected_outline_colour = _hex_to_ass_color_with_alpha(background_color, background_opacity)
         expected_back_colour = "&HFF000000&"  # fully transparent — matches ass_generator fix
         expected_ol_width = max(int(4 * font_scale), 2)
+        expected_shadow = 0
+    elif _bg_split:
+        # Background via drawing commands: base style has no box.
+        expected_border_style = 1
+        expected_outline_colour = "&HFF000000&"  # fully transparent
+        expected_back_colour = "&HFF000000&"  # fully transparent
+        expected_ol_width = 0
         expected_shadow = 0
     else:
         expected_border_style = 1
@@ -1153,7 +1162,7 @@ def _validate_ass_settings(
     # Auxiliary styles (_AWBG, _AW, _OL, AWDRAW) intentionally differ from
     # the base speaker style (different BorderStyle, Outline, Shadow, etc.)
     # and should not be validated against base style expectations.
-    _AUX_SUFFIXES = ("_AWBG", "_AW", "_OL", "AWDRAW")
+    _AUX_SUFFIXES = ("_AWBG", "_AW", "_OL", "AWDRAW", "BGDRAW")
     for style in styles:
         style_name = style["Name"]
         if any(style_name.endswith(s) or style_name == s for s in _AUX_SUFFIXES):
