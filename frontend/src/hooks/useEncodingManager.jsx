@@ -97,10 +97,14 @@ export function EncodingProvider({ children }) {
     // the backend broadcasts immediately after starting the export task.
     _openWs(jobId, clipId, clipTitle);
 
+    console.log('[EncodingManager] Export payload keys:', Object.keys(exportBody || {}));
+    console.log('[EncodingManager] Export payload:', JSON.stringify(exportBody, null, 2)?.slice(0, 2000));
     fetch(apiEndpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(exportBody),
+      body: JSON.stringify(exportBody, (_, v) =>
+        typeof v === 'number' && !Number.isFinite(v) ? null : v
+      ),
     })
       .then(async (res) => {
         if (!res.ok) {
