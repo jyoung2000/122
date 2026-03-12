@@ -1281,7 +1281,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                           </div>
                           <div>
                             <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>
-                              Radius <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>(not supported in export)</span>
+                              Radius
                             </div>
                             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                               <input
