@@ -5,6 +5,8 @@ import subprocess
 import threading
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -54,6 +56,16 @@ class CrossOriginIsolationMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(CrossOriginIsolationMiddleware)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError):
+    """Log full Pydantic validation errors so 422s are diagnosable."""
+    logger.error(
+        "422 Validation Error on %s %s: %s",
+        request.method, request.url.path, exc.errors(),
+    )
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 
 @app.on_event("startup")

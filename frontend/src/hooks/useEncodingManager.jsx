@@ -102,8 +102,15 @@ export function EncodingProvider({ children }) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(exportBody),
     })
-      .then((res) => {
-        if (!res.ok) throw new Error(`Export request failed: ${res.status}`);
+      .then(async (res) => {
+        if (!res.ok) {
+          let detail = '';
+          try {
+            const body = await res.json();
+            detail = JSON.stringify(body.detail || body);
+          } catch (_) { /* ignore parse errors */ }
+          throw new Error(`Export request failed: ${res.status}${detail ? ` — ${detail}` : ''}`);
+        }
       })
       .catch((err) => {
         activeExportsRef.current.delete(exportId);
