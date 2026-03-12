@@ -371,8 +371,9 @@ export default function SubtitleOverlay({
 
   // Click-to-select: select the subtitle timeline item.
   // Guard: don't steal selection from overlay items (text/image/shape) that are
-  // visible at the same time — those sit at a higher z-index and the user likely
-  // intended to click them. Also guard if a non-subtitle is already selected.
+  // visible at the same time — clicking near the bottom of the frame likely
+  // intends to hit the subtitle, but elsewhere the user may want the overlay item.
+  // Also guard if a non-subtitle is already selected.
   const hasVisibleOverlayItems = useMemo(() => {
     const absTime = currentTime;
     return timelineItems.some((it) => {
@@ -634,7 +635,7 @@ export default function SubtitleOverlay({
   const editingText = resolvedSubtitleText;
 
   return (
-    <div ref={containerRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 5 }}>
+    <div ref={containerRef} style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 7 }}>
       {/* Constrain subtitles to the actual video content area (handles letterboxing) */}
       <div style={{
         position: 'absolute',
