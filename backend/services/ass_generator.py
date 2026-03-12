@@ -550,64 +550,23 @@ def generate_ass(
                 f"{bold_flag},0,0,0,100,100,0,0,1,0,0,{alignment},{margin_h},{margin_h},{margin_v},1"
             )
 
-    # When active word background is enabled, choose between:
-    #   A) Rounded corners (radius > 0): ASS drawing mode for rounded rect PNGs
-    #   B) Rectangular (radius == 0): ASS BorderStyle=3 box (existing approach)
+    # Active word background uses BorderStyle=3 (ASS native box) which
+    # guarantees pixel-perfect alignment because the same engine (libass)
+    # renders both the text and the box.  Drawing mode (\p1 with Pillow-
+    # measured coordinates) is intentionally disabled because Pillow and
+    # libass use different font metrics, causing the background to be
+    # visibly offset from the active word in the exported video.
     _aw_bg_box_padding = max(1, round(2 * font_scale))
-    _aw_bg_use_drawing = False  # True = use ASS drawing mode for rounded backgrounds
-    _aw_font_path = None
-    _aw_font_metrics = None  # (ascent, descent) for the loaded font
 
     if active_word_enabled and active_word_bg_opacity > 0:
-        scaled_radius = max(0, round(active_word_bg_radius * font_scale))
-        if scaled_radius > 0:
-            # Try to load font for text measurement (needed for drawing positioning)
-            _aw_font_path = _resolve_font_path(font, bold=(bold_flag == -1))
-            if _aw_font_path:
-                try:
-                    from PIL import ImageFont
-                    _pil_font = ImageFont.truetype(_aw_font_path, size_px)
-                    _test_bbox = _pil_font.getbbox("Mj")
-                    _aw_font_metrics = (-_test_bbox[1], _test_bbox[3])  # (ascent, descent)
-                    _aw_bg_use_drawing = True
-                    logger.info("Active word bg: using drawing mode (radius=%d, font=%s)",
-                                scaled_radius, _aw_font_path)
-                except Exception as e:
-                    logger.warning("Active word bg: font measurement failed (%s), "
-                                   "falling back to rectangular box", e)
-
-        if _aw_bg_use_drawing:
-            # Drawing mode: create a _AW style for text-only overlay (no box),
-            # and a _AWDRAW style for the rounded rectangle shapes.
-            for sp in speakers_seen:
-                color_hex = speaker_color_map[sp]
-                ass_color = _hex_to_ass_color(color_hex)
-                sn = _sanitize_style_name(sp)
-                # _AW style for text color overlay (no border, no box)
-                if not (background_enabled and active_word_enabled):
-                    # Only add _AW if not already added by the background+aw block above
-                    lines.append(
-                        f"Style: {sn}_AW,{font},{size_px},{ass_color},&H000000FF&,&HFF000000&,&HFF000000&,"
-                        f"{bold_flag},0,0,0,100,100,0,0,1,0,0,{alignment},{margin_h},{margin_h},{margin_v},1"
-                    )
-            # _AWDRAW style: used for drawing events (an7 = top-left alignment for \pos)
-            _aw_bg_ass_color = _hex_to_ass_color(active_word_bg_color)
-            _aw_bg_alpha_byte = 255 - max(0, min(255, int(active_word_bg_opacity / 100 * 255)))
-            _aw_bg_primary = f"&H{_aw_bg_alpha_byte:02X}" + _aw_bg_ass_color[4:]  # &HAA BBGGRR&
+        for sp in speakers_seen:
+            color_hex = speaker_color_map[sp]
+            ass_color = _hex_to_ass_color(color_hex)
+            sn = _sanitize_style_name(sp)
             lines.append(
-                f"Style: AWDRAW,{font},{size_px},{_aw_bg_primary},&HFF000000&,&HFF000000&,&HFF000000&,"
-                f"0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1"
+                f"Style: {sn}_AWBG,{font},{size_px},{ass_color},&H000000FF&,&HFF000000&,&HFF000000&,"
+                f"{bold_flag},0,0,0,100,100,0,0,3,{_aw_bg_box_padding},0,{alignment},{margin_h},{margin_h},{margin_v},1"
             )
-        else:
-            # Rectangular fallback: BorderStyle=3 box
-            for sp in speakers_seen:
-                color_hex = speaker_color_map[sp]
-                ass_color = _hex_to_ass_color(color_hex)
-                sn = _sanitize_style_name(sp)
-                lines.append(
-                    f"Style: {sn}_AWBG,{font},{size_px},{ass_color},&H000000FF&,&HFF000000&,&HFF000000&,"
-                    f"{bold_flag},0,0,0,100,100,0,0,3,{_aw_bg_box_padding},0,{alignment},{margin_h},{margin_h},{margin_v},1"
-                )
 
     lines.append("")
     lines.append("[Events]")
@@ -632,15 +591,6 @@ def generate_ass(
             alpha_byte = 255 - max(0, min(255, int(active_word_bg_opacity / 100 * 255)))
             aw_bg_alpha = f"&H{alpha_byte:02X}&"
 
-    # When using drawing mode for rounded backgrounds, don't embed
-    # \3c/\3a box tags in the text events — the _AW style is BorderStyle=1
-    # where these tags are meaningless and could cause artifacts.
-    # The background is handled by separate drawing events instead.
-    # For tag generation: suppress \3c/\3a in drawing mode
-    if _aw_bg_use_drawing:
-        aw_bg_color = None
-        aw_bg_alpha = None
-
     # Explicit border override tags for every Dialogue event.
     # Even though the Style already sets Outline, some libass builds and
     # FFmpeg versions lose the outline through style caching / fallback.
@@ -662,23 +612,17 @@ def generate_ass(
         # \3a&HFF& = transparent outline, \4a&HFF& = transparent back color.
         aw_nobord_tag = "\\bord0\\shad0\\3a&HFF&\\4a&HFF&"
 
-    # When active word background is enabled with drawing mode, Layer 1 uses
-    # the _AW style (text-only, no box) and drawing events handle the background.
-    # When using rectangular fallback, Layer 1 uses _AWBG (BorderStyle=3).
-    if aw_bg and not _aw_bg_use_drawing:
-        # Rectangular: \shad0 = no shadow, \3a&HFF& = transparent box by default
+    # When active word background is enabled, Layer 1 uses _AWBG
+    # (BorderStyle=3) where \3a controls box visibility per word.
+    if aw_bg:
+        # \shad0 = no shadow, \3a&HFF& = transparent box by default
         aw_nobord_tag = "\\shad0\\3a&HFF&"
-    elif aw_bg and _aw_bg_use_drawing:
-        # Drawing mode: Layer 1 is text-only (no box), same as _AW style
-        aw_nobord_tag = "\\bord0\\shad0\\3a&HFF&"
 
     # Style suffix for Layer 1 events:
-    #   _AW:   drawing mode or background mode (text fill only, no box)
-    #   _AWBG: rectangular fallback (BorderStyle=3 per-word box)
+    #   _AWBG: active word background (BorderStyle=3 per-word box)
+    #   _AW:   background mode (text fill only, no box)
     #   "":    outline mode without aw_bg (same base style)
-    if aw_bg and _aw_bg_use_drawing:
-        aw_style_suffix = "_AW"
-    elif aw_bg:
+    if aw_bg:
         aw_style_suffix = "_AWBG"
     elif background_enabled and active_word_enabled:
         aw_style_suffix = "_AW"
@@ -693,57 +637,7 @@ def generate_ass(
     #
     # For standard mode: single-layer events on Layer 0 as before.
     pending_word_events: list[tuple[float, float, str, str]] = []
-    # Drawing events for rounded rectangle backgrounds (when _aw_bg_use_drawing)
-    pending_draw_events: list[tuple[float, float, str, str]] = []
     base_text_events: list[tuple[float, float, str, str]] = []
-
-    def _make_draw_event(words_list, word_idx, prefix_text, w_start, w_end):
-        """Generate a drawing event for a rounded rect behind the active word.
-
-        Measures the word position using Pillow, then creates an ASS drawing
-        event with \pos and \p1 for a rounded rectangle at that location.
-        Returns a (start, end, style, text) tuple or None if measurement fails.
-        """
-        if not _aw_bg_use_drawing or not _aw_font_path or not _aw_font_metrics:
-            return None
-        try:
-            from PIL import ImageFont
-            pil_font = ImageFont.truetype(_aw_font_path, size_px)
-
-            # Measure the full line and prefix text
-            full_text = prefix_text + " ".join(words_list)
-            before_text = prefix_text + (" ".join(words_list[:word_idx]) + " " if word_idx > 0 else "")
-            word_text = words_list[word_idx]
-
-            full_w = pil_font.getlength(full_text)
-            before_w = pil_font.getlength(before_text) if before_text else 0
-            word_w = pil_font.getlength(word_text)
-
-            ascent, descent = _aw_font_metrics
-            line_h = ascent + descent
-            pad = _aw_bg_box_padding
-
-            # Compute screen position based on alignment=2 (bottom-center)
-            line_center_x = video_width / 2
-            line_left_x = line_center_x - full_w / 2
-
-            # Word bounding box with padding
-            box_x = int(line_left_x + before_w - pad)
-            box_y = int(video_height - margin_v - line_h - pad)
-            box_w = int(word_w + pad * 2)
-            box_h = int(line_h + pad * 2)
-
-            if box_w < 2 or box_h < 2:
-                return None
-
-            radius = min(scaled_radius, min(box_w, box_h) // 2)
-            draw_cmds = _ass_rounded_rect(box_w, box_h, radius)
-            # \an7 = top-left origin, \pos = absolute position, \p1 = drawing mode
-            event_text = f"{{\\an7\\pos({box_x},{box_y})\\p1\\bord0\\shad0}}{draw_cmds}"
-            return (w_start, w_end, "AWDRAW", event_text)
-        except Exception as e:
-            logger.debug("Draw event failed: %s", e)
-            return None
 
     for seg in clip_segments:
         clip_start, clip_end, text, speaker = seg[0], seg[1], seg[2], seg[3]
@@ -793,11 +687,6 @@ def generate_ass(
                         aw_tags += f"\\3c{aw_bg_color}\\3a{aw_bg_alpha}"
                     event_text = f"{nobord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
                     pending_word_events.append((clip_start, clip_end, style_name + aw_style_suffix, event_text))
-                    # Drawing event for rounded background
-                    if _aw_bg_use_drawing:
-                        draw_ev = _make_draw_event(words, 0, prefix, clip_start, clip_end)
-                        if draw_ev:
-                            pending_draw_events.append(draw_ev)
                 else:
                     # Layer 0: border layer with uniform color
                     bord_prefix = f"{{{bord_tag}}}" if bord_tag else ""
@@ -810,11 +699,6 @@ def generate_ass(
                         aw_tags += f"\\3c{aw_bg_color}\\3a{aw_bg_alpha}"
                     event_text = f"{nobord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
                     pending_word_events.append((clip_start, clip_end, style_name + aw_style_suffix, event_text))
-                    # Drawing event for rounded background
-                    if _aw_bg_use_drawing:
-                        draw_ev = _make_draw_event(words, 0, prefix, clip_start, clip_end)
-                        if draw_ev:
-                            pending_draw_events.append(draw_ev)
             elif seg_word_ts and len(seg_word_ts) > 0 and len(words) > 0 and _align_word_timestamps(seg_word_ts, words, clip_start, clip_end) is not None:
                 # Real per-word timestamps from Whisper (possibly aligned
                 # after minor user edits to subtitle text).
@@ -887,11 +771,6 @@ def generate_ass(
                         parts.append(f"{reset_tag} {after}")
                     color_event_text = nobord_prefix + prefix + "".join(parts)
                     pending_word_events.append((w_start, w_end, style_name + aw_style_suffix, color_event_text))
-                    # Drawing event for rounded background
-                    if _aw_bg_use_drawing:
-                        draw_ev = _make_draw_event(words, word_idx, prefix, w_start, w_end)
-                        if draw_ev:
-                            pending_draw_events.append(draw_ev)
             else:
                 # Fallback: character-proportional estimation with natural
                 # speech rhythm.  Uses punctuation-aware, speaker-rate-scaled
@@ -1007,11 +886,6 @@ def generate_ass(
                         parts.append(f"{reset_tag} {after}")
                     color_event_text = nobord_prefix + prefix + "".join(parts)
                     pending_word_events.append((shifted_start, word_end, style_name + aw_style_suffix, color_event_text))
-                    # Drawing event for rounded background
-                    if _aw_bg_use_drawing:
-                        draw_ev = _make_draw_event(words, word_idx, prefix, shifted_start, word_end)
-                        if draw_ev:
-                            pending_draw_events.append(draw_ev)
                     current_time = word_end
         else:
             # Standard: single event with plain text + explicit outline override
@@ -1109,21 +983,15 @@ def generate_ass(
 
     # Collect all events as (layer, start, end, style, text) tuples.
     # Layer ordering (lower = renders first / behind):
-    #   When drawing mode is active, shift all layers up by 1 to make room
-    #   for drawing events at Layer 0 (below text).
-    _layer_offset = 1 if pending_draw_events else 0
-    # Layer 0: drawing events (rounded rect backgrounds)
-    # Layer 0+offset: base text events (border layer, uniform color)
-    # Layer 1+offset: outline overlay events
-    # Layer 1+offset or 2+offset: active word color events
+    #   Layer 0: base text events (border layer, uniform color)
+    #   Layer 1: outline overlay events (when bg + outline both enabled)
+    #   Layer 1 or 2: active word color events (topmost)
     all_events: list[tuple[int, float, float, str, str]] = []
-    for ev in pending_draw_events:
-        all_events.append((0, ev[0], ev[1], ev[2], ev[3]))
     for ev in base_text_events:
-        all_events.append((0 + _layer_offset, ev[0], ev[1], ev[2], ev[3]))
+        all_events.append((0, ev[0], ev[1], ev[2], ev[3]))
     for ev in outline_overlay_events:
-        all_events.append((1 + _layer_offset, ev[0], ev[1], ev[2], ev[3]))
-    aw_layer = (2 if bg_has_outline else 1) + _layer_offset
+        all_events.append((1, ev[0], ev[1], ev[2], ev[3]))
+    aw_layer = 2 if bg_has_outline else 1
     for ev in pending_word_events:
         all_events.append((aw_layer, ev[0], ev[1], ev[2], ev[3]))
 
