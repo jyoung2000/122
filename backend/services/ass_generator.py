@@ -388,16 +388,15 @@ def generate_ass(
             speakers_seen.append(sp)
 
     speaker_color_map = {}
-    # If user explicitly set a font color (non-default white), it takes priority
-    # so the color picker actually works without requiring useSpeakerColors toggle.
-    font_color_explicit = font_color and font_color.lower() != "#ffffff"
+    # When speaker colors are enabled, they override the font color picker.
     for i, sp in enumerate(speakers_seen):
-        if font_color_explicit or not use_speaker_colors:
-            speaker_color_map[sp] = font_color or "#FFFFFF"
-        elif sp in speaker_colors:
-            speaker_color_map[sp] = speaker_colors[sp]
+        if use_speaker_colors:
+            if sp in speaker_colors:
+                speaker_color_map[sp] = speaker_colors[sp]
+            else:
+                speaker_color_map[sp] = DEFAULT_SPEAKER_PALETTE[i % len(DEFAULT_SPEAKER_PALETTE)]
         else:
-            speaker_color_map[sp] = DEFAULT_SPEAKER_PALETTE[i % len(DEFAULT_SPEAKER_PALETTE)]
+            speaker_color_map[sp] = font_color or "#FFFFFF"
 
     # Build ASS header
     lines = [

@@ -176,18 +176,17 @@ function splitSegmentsByMaxWords(segments, maxWords) {
 }
 
 function getSpeakerColor(speaker, speakersOrdered, settings) {
-  // If user explicitly set a font color (non-default), it takes priority
-  // so the color picker actually works without requiring useSpeakerColors toggle.
   const fontColor = settings?.subtitleFontColor;
-  if (fontColor && fontColor.toLowerCase() !== '#ffffff') {
-    return fontColor;
-  }
   const useSpeaker = settings?.useSpeakerColors ?? true;
-  if (!useSpeaker) return fontColor || '#FFFFFF';
-  const speakerColors = settings?.speakerColors || {};
-  if (speakerColors[speaker]) return speakerColors[speaker];
-  const idx = speakersOrdered.indexOf(speaker);
-  return DEFAULT_SPEAKER_PALETTE[(idx >= 0 ? idx : 0) % DEFAULT_SPEAKER_PALETTE.length];
+  // When speaker colors are enabled, they override the font color picker
+  if (useSpeaker) {
+    const speakerColors = settings?.speakerColors || {};
+    if (speakerColors[speaker]) return speakerColors[speaker];
+    const idx = speakersOrdered.indexOf(speaker);
+    return DEFAULT_SPEAKER_PALETTE[(idx >= 0 ? idx : 0) % DEFAULT_SPEAKER_PALETTE.length];
+  }
+  // Speaker colors off — use explicit font color or default white
+  return fontColor || '#FFFFFF';
 }
 
 function hexToRgba(hex, opacity) {
