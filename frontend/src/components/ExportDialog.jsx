@@ -125,6 +125,26 @@ export default function ExportDialog({
         }));
       }
 
+      // Send user-edited subtitle timing from the timeline store so the
+      // export uses the actual item durations (which may have been resized).
+      const subtitleItemsForExport = timelineItems
+        .filter(it => it.type === 'subtitle')
+        .sort((a, b) => a.start - b.start)
+        .map(it => ({
+          start: it.start + startTime,
+          end: it.end + startTime,
+          text: it.subtitleText || '',
+          speaker: it.speaker || '',
+          words: it.words ? it.words.map(w => ({
+            start: (w.start || 0) + startTime,
+            end: (w.end || 0) + startTime,
+            word: w.text || w.word || '',
+          })) : null,
+        }));
+      if (subtitleItemsForExport.length > 0) {
+        exportPayload.edited_subtitle_segments = subtitleItemsForExport;
+      }
+
       // Video effects + transform from multi-track editor
       const videoEffects = buildVideoEffectsPayload(timelineItems);
       if (videoEffects) exportPayload.video_effects = videoEffects;

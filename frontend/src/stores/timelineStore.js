@@ -788,7 +788,6 @@ const useTimelineStore = create(
               const relEnd = clampedEnd - clipStart;
               const adjStart = Math.max(relStart, lastSubEnd);
               if (adjStart >= relEnd) return; // Skip degenerate segments
-              lastSubEnd = relEnd;
               // Preserve word-level timestamps for accurate active word highlighting
               let segWords = null;
               if (seg.words && Array.isArray(seg.words)) {
@@ -800,13 +799,22 @@ const useTimelineStore = create(
                     end: w.end - clipStart,
                   }));
               }
+              // Extend segment end to cover last word if word timestamps exceed it
+              let effectiveEnd = relEnd;
+              if (segWords && segWords.length > 0) {
+                const lastWordEnd = Math.max(...segWords.map(w => w.end));
+                if (lastWordEnd > effectiveEnd) {
+                  effectiveEnd = Math.min(lastWordEnd + 0.05, duration);
+                }
+              }
+              lastSubEnd = effectiveEnd;
               items.push({
                 id: nextItemId(),
                 trackId: 't1',
                 type: 'subtitle',
                 mediaRef: null,
                 start: adjStart,
-                end: relEnd,
+                end: effectiveEnd,
                 trimStart: 0,
                 trimEnd: null,
                 volume: 1.0,

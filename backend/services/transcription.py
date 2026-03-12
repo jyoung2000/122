@@ -547,9 +547,16 @@ def _transcribe_sync(
                 for w in segment.words
                 if w.word.strip()
             ]
+        # Extend segment end to cover last word if Whisper's word timestamps
+        # exceed the segment boundary (common floating-point/overlap issue).
+        seg_end = segment.end
+        if word_list:
+            last_word_end = max(w["end"] for w in word_list)
+            if last_word_end > seg_end:
+                seg_end = last_word_end + 0.05
         seg_dict = {
             "start": segment.start,
-            "end": segment.end,
+            "end": seg_end,
             "text": text,
             "words": word_list,
         }

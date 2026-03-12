@@ -255,6 +255,7 @@ class ExportRequest(BaseModel):
     shape_overlays: list[ShapeOverlay] = []
     audio_overlays: list[AudioOverlay] = []  # Additional audio items (music, SFX)
     overlay_compositing_order: list[dict] = []  # Global render order for cross-type compositing
+    edited_subtitle_segments: Optional[list[TranscriptSegment]] = None  # User-edited subtitle timing from timeline
 
 
 class FullVideoExportRequest(BaseModel):
@@ -274,6 +275,7 @@ class FullVideoExportRequest(BaseModel):
     text_overlays: list[TextOverlay] = []
     image_overlays: list[ImageOverlay] = []
     shape_overlays: list[ShapeOverlay] = []
+    edited_subtitle_segments: Optional[list[TranscriptSegment]] = None  # User-edited subtitle timing from timeline
 
 
 class UpdateClipTitleRequest(BaseModel):

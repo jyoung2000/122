@@ -135,19 +135,38 @@ function splitSegmentsByMaxWords(segments, maxWords) {
     if (words.length <= maxWords) { result.push(seg); continue; }
     const totalWords = words.length;
     const duration = seg.end - seg.start;
+    const hasWordTs = seg.words && Array.isArray(seg.words) && seg.words.length === totalWords;
     let ct = seg.start;
     for (let i = 0; i < totalWords; i += maxWords) {
       const chunkWords = words.slice(i, i + maxWords);
-      const chunkDuration = duration * (chunkWords.length / totalWords);
-      let chunkEnd = ct + chunkDuration;
-      if (i + maxWords >= totalWords) chunkEnd = seg.end;
-      if (chunkEnd - ct >= 0.1) {
-        // Slice word timestamps instead of discarding them (matches backend logic)
-        let chunkWordTs = null;
+      let chunkEnd;
+      let chunkWordTs = null;
+
+      if (hasWordTs) {
+        // Use actual word timestamps for accurate chunk boundaries
+        chunkWordTs = seg.words.slice(i, i + maxWords);
+        if (chunkWordTs.length > 0) {
+          const lastWordInChunk = chunkWordTs[chunkWordTs.length - 1];
+          chunkEnd = (lastWordInChunk.end || lastWordInChunk.endTime) + 0.02;
+        } else {
+          chunkWordTs = null;
+          chunkEnd = ct + duration * (chunkWords.length / totalWords);
+        }
+      } else {
+        // Fallback: proportional splitting
+        chunkEnd = ct + duration * (chunkWords.length / totalWords);
         if (seg.words && Array.isArray(seg.words)) {
           chunkWordTs = seg.words.slice(i, i + maxWords);
           if (!chunkWordTs.length) chunkWordTs = null;
         }
+      }
+
+      // Last chunk always ends at segment end
+      if (i + maxWords >= totalWords) chunkEnd = seg.end;
+      // Never exceed segment end
+      chunkEnd = Math.min(chunkEnd, seg.end);
+
+      if (chunkEnd - ct >= 0.1) {
         result.push({ ...seg, start: ct, end: chunkEnd, subtitleText: chunkWords.join(' '), text: chunkWords.join(' '), speaker: seg.speaker, words: chunkWordTs });
       }
       ct = chunkEnd;
@@ -308,23 +327,35 @@ export default function SubtitleOverlay({
 
   // Find current subtitle based on currentTime (clip-relative)
   const relTime = currentTime - clipStart;
+  const activeWordEnabled = settings.activeWordEnabled || false;
   const currentSubtitle = useMemo(() => {
     if (!subtitlesEnabled || clipSegments.length === 0) return null;
-    // Direct hit
-    const direct = clipSegments.find((seg) => seg.start <= relTime && relTime < seg.end);
+
+    // Compute effective end for a segment — when active word highlighting is on,
+    // extend past seg.end if the last word's timestamp exceeds it.
+    const effectiveEnd = (seg) => {
+      if (!activeWordEnabled || !seg.words || seg.words.length === 0) return seg.end;
+      const lastWord = seg.words[seg.words.length - 1];
+      const lastWordEnd = lastWord.end || lastWord.endTime || seg.end;
+      return Math.max(seg.end, lastWordEnd + 0.05);
+    };
+
+    // Direct hit (using effective end so last word doesn't get cut off)
+    const direct = clipSegments.find((seg) => seg.start <= relTime && relTime < effectiveEnd(seg));
     if (direct) return direct;
-    // Gap bridging: if we're in a small gap (< 0.5s) between segments,
-    // show the previous segment's text to prevent flashing
+
+    // Gap bridging: hold previous segment during small gaps to prevent flashing
     const MAX_GAP_FILL = 0.5;
     for (let i = 0; i < clipSegments.length - 1; i++) {
       const seg = clipSegments[i];
       const nextSeg = clipSegments[i + 1];
-      if (relTime >= seg.end && relTime < nextSeg.start && (nextSeg.start - seg.end) < MAX_GAP_FILL) {
+      const segEnd = effectiveEnd(seg);
+      if (relTime >= segEnd && relTime < nextSeg.start && (nextSeg.start - segEnd) < MAX_GAP_FILL) {
         return seg;
       }
     }
     return null;
-  }, [subtitlesEnabled, clipSegments, relTime]);
+  }, [subtitlesEnabled, clipSegments, relTime, activeWordEnabled]);
 
   // Find the original timeline item for the current subtitle (for selection)
   const currentTimelineItem = useMemo(() => {
@@ -393,7 +424,6 @@ export default function SubtitleOverlay({
   }, []);
 
   // Active word tracking
-  const activeWordEnabled = settings.activeWordEnabled || false;
   useEffect(() => {
     if (!activeWordEnabled || !currentSubtitle) {
       setCurrentWordIdx(-1);

@@ -155,26 +155,39 @@ def split_segments_by_max_words(
 
         total_words = len(words)
         duration = end - start
+        has_word_ts = seg_words and len(seg_words) == total_words
         current_time = start
 
         for i in range(0, total_words, max_words):
             chunk_words = words[i : i + max_words]
             chunk_count = len(chunk_words)
-            chunk_duration = duration * (chunk_count / total_words)
-            chunk_end = current_time + chunk_duration
+            chunk_word_ts = None
 
-            # Ensure the last chunk ends exactly at the segment end
-            if i + max_words >= total_words:
-                chunk_end = end
-
-            # Skip chunks that would be too short (< 0.1s)
-            if chunk_end - current_time >= 0.1:
-                # Slice word timestamps for this chunk
-                chunk_word_ts = None
+            if has_word_ts:
+                # Use actual word timestamps for accurate chunk boundaries
+                chunk_word_ts = seg_words[i : i + max_words]
+                if chunk_word_ts:
+                    last_word_end = chunk_word_ts[-1][1]  # end timestamp
+                    chunk_end = last_word_end + 0.02  # 20ms padding
+                else:
+                    chunk_word_ts = None
+                    chunk_end = current_time + duration * (chunk_count / total_words)
+            else:
+                # Fallback: proportional splitting
+                chunk_end = current_time + duration * (chunk_count / total_words)
                 if seg_words:
                     chunk_word_ts = seg_words[i : i + max_words]
                     if not chunk_word_ts:
                         chunk_word_ts = None
+
+            # Ensure the last chunk ends exactly at the segment end
+            if i + max_words >= total_words:
+                chunk_end = end
+            # Never exceed segment end
+            chunk_end = min(chunk_end, end)
+
+            # Skip chunks that would be too short (< 0.1s)
+            if chunk_end - current_time >= 0.1:
                 result.append((
                     current_time,
                     chunk_end,
@@ -309,6 +322,11 @@ def generate_ass(
             ]
             if not seg_words:
                 seg_words = None
+        # Extend segment end to cover last word if word timestamps exceed it
+        if seg_words:
+            last_word_end = max(w[1] for w in seg_words)
+            if last_word_end > clip_end:
+                clip_end = min(last_word_end + 0.05, end_time - start_time)
         clip_segments.append((clip_start, clip_end, seg.text.strip(), seg.speaker, seg_words))
 
     # Apply max_words splitting.
@@ -586,16 +604,26 @@ def generate_ass(
                 # continuous background box.  Per-word Layer 0 events are
                 # only needed for outline mode (BorderStyle=1) where each
                 # per-word event carries its own \bord tags.
+                # Compute extended end to cover last word's full duration
+                last_w = seg_word_ts[-1] if seg_word_ts else None
+                extended_seg_end = clip_end
+                if last_w:
+                    natural_last = last_w[1] - 0.05  # anticipation-adjusted
+                    extended_seg_end = min(max(clip_end, natural_last + 0.3), clip_end + 0.5)
                 if background_enabled:
-                    base_text_events.append((clip_start, clip_end, style_name, f"{prefix}{safe_text}"))
+                    base_text_events.append((clip_start, extended_seg_end, style_name, f"{prefix}{safe_text}"))
 
                 for word_idx in range(len(words)):
                     w_start, w_end, _ = seg_word_ts[word_idx]
                     w_start = max(w_start - _WORD_ANTICIPATION_S, clip_start)
                     w_end = max(w_end - _WORD_ANTICIPATION_S, w_start + 0.01)
-                    w_end = min(w_end, clip_end)
                     if word_idx == len(words) - 1:
-                        w_end = min(w_end + 0.3, clip_end)
+                        # Last word: use natural end + 0.3s grace, allow up to
+                        # 0.5s past clip_end so highlighting isn't cut short
+                        natural_end = seg_word_ts[word_idx][1] - _WORD_ANTICIPATION_S
+                        w_end = min(max(w_end, natural_end) + 0.3, clip_end + 0.5)
+                    else:
+                        w_end = min(w_end, clip_end)
                     if w_end - w_start < 0.01:
                         continue
 
