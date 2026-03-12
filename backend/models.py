@@ -168,6 +168,7 @@ class VideoEffects(BaseModel):
 
 class TextOverlay(BaseModel):
     """Text overlay for FFmpeg drawtext filter."""
+    item_id: str = ""          # timeline item ID for compositing order lookup
     text: str = ""
     x: float = 50              # position % (0-100)
     y: float = 50              # position % (0-100)
@@ -188,6 +189,7 @@ class TextOverlay(BaseModel):
 
 class ImageOverlay(BaseModel):
     """Image overlay for FFmpeg overlay filter."""
+    item_id: str = ""          # timeline item ID for compositing order lookup
     src: str = ""              # path or URL to image
     x: float = 50              # position % (0-100)
     y: float = 50              # position % (0-100)
@@ -202,6 +204,7 @@ class ImageOverlay(BaseModel):
 
 class ShapeOverlay(BaseModel):
     """Shape overlay rendered as a temporary PNG and composited via FFmpeg overlay."""
+    item_id: str = ""          # timeline item ID for compositing order lookup
     shape_type: str = "rectangle"  # rectangle | circle | ellipse | line | arrow
     x: float = 50              # center position % (0-100)
     y: float = 50              # center position % (0-100)

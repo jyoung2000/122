@@ -33,7 +33,7 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
   const textItems = timelineItems.filter(it => it.type === 'text')
     .sort((a, b) => getTrackOrder(a) - getTrackOrder(b));
   const textOverlays = textItems.map(it => ({
-    _item_id: it.id,
+    item_id: it.id,
     text: it.textContent || '',
     x: it.position?.x ?? 50,
     y: it.position?.y ?? 50,
@@ -76,7 +76,7 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
       continue;
     }
     imageOverlays.push({
-      _item_id: it.id,
+      item_id: it.id,
       src,
       x: it.position?.x ?? 50,
       y: it.position?.y ?? 50,
@@ -94,7 +94,7 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
   const shapeItems = timelineItems.filter(it => it.type === 'shape')
     .sort((a, b) => getTrackOrder(a) - getTrackOrder(b));
   const shapeOverlays = shapeItems.map(it => ({
-    _item_id: it.id,
+    item_id: it.id,
     shape_type: it.shapeType || 'rectangle',
     x: it.position?.x ?? 50,
     y: it.position?.y ?? 50,

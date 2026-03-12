@@ -3518,6 +3518,7 @@ async def _render_shape_to_png(shape: dict, video_width: int, video_height: int,
     fill_color = shape.get("fill_color", "#FF3B30")
     stroke_color = shape.get("stroke_color", "#FFFFFF")
     stroke_width = shape.get("stroke_width", 2)
+    corner_radius = shape.get("corner_radius", 0)
 
     # Compute pixel dimensions (even numbers for FFmpeg compatibility)
     px_w = max(4, int(video_width * w_pct) // 2 * 2)
@@ -3528,6 +3529,46 @@ async def _render_shape_to_png(shape: dict, video_width: int, video_height: int,
     hex_stroke = stroke_color.lstrip('#')[:6]
 
     try:
+        # Rounded rectangles: use PIL since FFmpeg drawbox doesn't support border-radius
+        if shape_type == "rectangle" and corner_radius > 0:
+            try:
+                from PIL import Image, ImageDraw
+                # Scale corner_radius from CSS pixels to actual pixels
+                # corner_radius is in CSS-like units relative to the element size
+                radius = int(corner_radius * min(px_w, px_h) / 100) if corner_radius > 1 else corner_radius
+                # If corner_radius looks like an absolute pixel value (> 1), use as-is
+                # scaled to the output resolution
+                if corner_radius > 1:
+                    radius = int(corner_radius * (px_w / (video_width * w_pct)) if video_width * w_pct > 0 else corner_radius)
+                radius = max(0, min(radius, min(px_w, px_h) // 2))
+
+                img = Image.new("RGBA", (px_w, px_h), (0, 0, 0, 0))
+                draw = ImageDraw.Draw(img)
+                fill_rgb = tuple(int(hex_fill[i:i+2], 16) for i in (0, 2, 4)) + (255,)
+                if stroke_width > 0:
+                    stroke_rgb = tuple(int(hex_stroke[i:i+2], 16) for i in (0, 2, 4)) + (255,)
+                    draw.rounded_rectangle(
+                        [0, 0, px_w - 1, px_h - 1],
+                        radius=radius,
+                        fill=fill_rgb,
+                        outline=stroke_rgb,
+                        width=stroke_width,
+                    )
+                else:
+                    draw.rounded_rectangle(
+                        [0, 0, px_w - 1, px_h - 1],
+                        radius=radius,
+                        fill=fill_rgb,
+                    )
+                img.save(png_path, "PNG")
+                if os.path.isfile(png_path) and os.path.getsize(png_path) > 0:
+                    logger.info("Rendered rounded rect shape %d to %s (%dx%d, radius=%d)", idx, png_path, px_w, px_h, radius)
+                    return png_path
+                return None
+            except Exception as e:
+                logger.warning("PIL rounded rect failed for shape %d, falling back to FFmpeg: %s", idx, e)
+                # Fall through to FFmpeg drawbox (no rounded corners)
+
         # Use FFmpeg lavfi to generate shape PNGs directly (no SVG dependency)
         if shape_type in ("circle", "ellipse"):
             # Draw filled ellipse: create colored canvas, then mask with drawbox for border
@@ -3873,16 +3914,16 @@ def _build_unified_overlay_chain(
     The filter_chain_suffix expects the base video stream to be labeled ``[vbase]``
     and produces a final label ``[vcomp]``.
     """
-    # Build lookup maps: _item_id → overlay data
+    # Build lookup maps: item_id → overlay data
     text_by_id = {}
     for t in text_overlays:
-        iid = t.get("_item_id")
+        iid = t.get("item_id")
         if iid:
             text_by_id[iid] = t
 
     image_by_id = {}
     for im in image_overlays:
-        iid = im.get("_item_id")
+        iid = im.get("item_id")
         if iid:
             image_by_id[iid] = im
 
@@ -4109,7 +4150,7 @@ async def export_clip(
                 _shape_temp_files.append(png_path)
                 # Convert shape to image overlay format for the image pipeline
                 image_overlays.append({
-                    "_item_id": shape.get("_item_id"),
+                    "item_id": shape.get("item_id"),
                     "src": png_path,
                     "x": shape.get("x", 50),
                     "y": shape.get("y", 50),
