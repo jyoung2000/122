@@ -556,24 +556,29 @@ def generate_ass(
     _aw_bg_box_padding = max(1, round(2 * font_scale))
 
     # Rounded corners: ASS BorderStyle=3 only renders sharp rectangles.
-    # To approximate rounded corners we split the AWBG events into two
-    # layers: a BLURRED box layer (text invisible, box visible with
-    # \blur to soften edges) and a SHARP text layer (_AW style, text
-    # visible, no box).  The blur softens the box edges to look rounded
-    # while the text stays crisp on the layer above.
+    # For rounded corners we use ASS drawing commands (\p1) to render a
+    # rounded rectangle on a layer BELOW the text.  This requires Pillow
+    # font measurements to position the drawing at the word's location.
+    # If the font can't be resolved, we fall back to sharp BorderStyle=3.
     _aw_bg_split = bool(
         active_word_enabled
         and active_word_bg_opacity > 0
         and active_word_bg_radius > 0
     )
-    _aw_blur_val = 0
-    _aw_box_inject = ""
+    _aw_font_path = None
+    _aw_draw_pad_h = 0
+    _aw_draw_pad_v = 0
+    _aw_draw_radius = 0
     if _aw_bg_split:
-        _aw_blur_val = max(1, round(active_word_bg_radius * font_scale * 0.5))
-        _aw_bg_blur_pad = _aw_bg_box_padding + max(1, _aw_blur_val)
-        _aw_box_inject = (
-            f"\\1a&HFF&\\blur{_aw_blur_val}\\bord{_aw_bg_blur_pad}"
-        )
+        _aw_font_path = _resolve_font_path(font, bold=(font_weight == "bold"))
+        if not _aw_font_path:
+            logger.warning("Cannot resolve font path for '%s' — "
+                           "falling back to sharp active word box", font)
+            _aw_bg_split = False
+        else:
+            _aw_draw_pad_h = max(4, round(5 * font_scale))
+            _aw_draw_pad_v = max(2, round(3 * font_scale))
+            _aw_draw_radius = max(1, round(active_word_bg_radius * font_scale))
 
     if active_word_enabled and active_word_bg_opacity > 0:
         for sp in speakers_seen:
@@ -584,6 +589,15 @@ def generate_ass(
                 f"Style: {sn}_AWBG,{font},{size_px},{ass_color},&H000000FF&,&HFF000000&,&HFF000000&,"
                 f"{bold_flag},0,0,0,100,100,0,0,3,{_aw_bg_box_padding},0,{alignment},{margin_h},{margin_h},{margin_v},1"
             )
+
+    # AWDRAW style for rounded-rect drawing events.
+    # font_size=64 makes \p1 drawing coordinates = 1 pixel (64/64=1).
+    # Alignment 7 (top-left) so \pos(x,y) sets the top-left corner.
+    if _aw_bg_split:
+        lines.append(
+            "Style: AWDRAW,Arial,64,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,"
+            "0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1"
+        )
 
     lines.append("")
     lines.append("[Events]")
@@ -655,6 +669,7 @@ def generate_ass(
     # For standard mode: single-layer events on Layer 0 as before.
     pending_word_events: list[tuple[float, float, str, str]] = []
     pending_box_events: list[tuple[float, float, str, str]] = []
+    pending_draw_info: list[tuple[float, float, str, str, str]] = []  # (start, end, full_line, before_text, word)
     base_text_events: list[tuple[float, float, str, str]] = []
 
     for seg in clip_segments:
@@ -717,6 +732,10 @@ def generate_ass(
                         aw_tags += f"\\3c{aw_bg_color}\\3a{aw_bg_alpha}"
                     event_text = f"{nobord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
                     pending_word_events.append((clip_start, clip_end, style_name + aw_style_suffix, event_text))
+                # Collect draw info for rounded-rect background
+                if _aw_bg_split:
+                    full_line = prefix + safe_text
+                    pending_draw_info.append((clip_start, clip_end, full_line, prefix, safe_text))
             elif seg_word_ts and len(seg_word_ts) > 0 and len(words) > 0 and _align_word_timestamps(seg_word_ts, words, clip_start, clip_end) is not None:
                 # Real per-word timestamps from Whisper (possibly aligned
                 # after minor user edits to subtitle text).
@@ -789,6 +808,11 @@ def generate_ass(
                         parts.append(f"{reset_tag} {after}")
                     color_event_text = nobord_prefix + prefix + "".join(parts)
                     pending_word_events.append((w_start, w_end, style_name + aw_style_suffix, color_event_text))
+                    # Collect draw info for rounded-rect background
+                    if _aw_bg_split:
+                        full_line = prefix + " ".join(words)
+                        before_text = prefix + (before + " " if before else "")
+                        pending_draw_info.append((w_start, w_end, full_line, before_text, active))
             else:
                 # Fallback: character-proportional estimation with natural
                 # speech rhythm.  Uses punctuation-aware, speaker-rate-scaled
@@ -904,6 +928,11 @@ def generate_ass(
                         parts.append(f"{reset_tag} {after}")
                     color_event_text = nobord_prefix + prefix + "".join(parts)
                     pending_word_events.append((shifted_start, word_end, style_name + aw_style_suffix, color_event_text))
+                    # Collect draw info for rounded-rect background
+                    if _aw_bg_split:
+                        full_line = prefix + " ".join(words)
+                        before_text = prefix + (before + " " if before else "")
+                        pending_draw_info.append((shifted_start, word_end, full_line, before_text, active))
                     current_time = word_end
         else:
             # Standard: single event with plain text + explicit outline override
@@ -950,18 +979,66 @@ def generate_ass(
                 pending_word_events[i] = (ev_start, next_start, ev_style, ev_text)
             # Long gaps (> 0.5s): let subtitle disappear during pauses
 
-    # ── Split AWBG events into blurred-box + sharp-text layers ──
-    # When rounded corners are requested (_aw_bg_split), duplicate the
-    # gap-filled word events into two sets:
-    #   pending_box_events  — AWBG style, invisible text, blurred box
-    #   pending_word_events — _AW style, visible text, no box
-    if _aw_bg_split and pending_word_events:
-        for ev in pending_word_events:
-            start, end, style, text = ev
-            # Inject \1a&HFF& (hide text) + \blur + \bord into first tag block
-            box_text = "{" + _aw_box_inject + text[1:]
-            pending_box_events.append((start, end, style, box_text))
-        # Transform word events: _AWBG → _AW style, add \bord0 for safety
+    # ── Generate rounded-rect drawing events + text-only word events ──
+    # When rounded corners are requested (_aw_bg_split), create drawing
+    # events (AWDRAW style) from pending_draw_info and transform word
+    # events from _AWBG → _AW style (text only, no box).
+    if _aw_bg_split and pending_draw_info and _aw_font_path:
+        # Pre-compute drawing fill color/alpha
+        _draw_color = _hex_to_ass_color(active_word_bg_color)
+        _alpha_byte = 255 - max(0, min(255, int(active_word_bg_opacity / 100 * 255)))
+        _draw_alpha = f"&H{_alpha_byte:02X}&"
+
+        for d_start, d_end, full_line, before_text, word_text in pending_draw_info:
+            full_m = _measure_text(full_line, _aw_font_path, size_px)
+            if not full_m:
+                continue
+            before_m = _measure_text(before_text, _aw_font_path, size_px) if before_text else None
+            word_m = _measure_text(word_text, _aw_font_path, size_px)
+            if not word_m:
+                continue
+
+            full_w = full_m[0]
+            before_w = before_m[0] if before_m else 0
+            word_w = word_m[0]
+            line_h = full_m[1] + full_m[2]  # ascent + descent
+
+            # Horizontal: center-aligned text
+            line_left_x = (video_width - full_w) / 2
+            word_left_x = line_left_x + before_w
+
+            # Vertical: depends on alignment (2=bottom, 5=center, 8=top)
+            if alignment == 2:
+                text_top_y = video_height - margin_v - line_h
+            elif alignment == 5:
+                text_top_y = (video_height - line_h) / 2
+            elif alignment == 8:
+                text_top_y = margin_v
+            else:
+                continue
+
+            # Drawing rect with padding
+            draw_x = round(word_left_x - _aw_draw_pad_h)
+            draw_y = round(text_top_y - _aw_draw_pad_v)
+            draw_w = round(word_w + 2 * _aw_draw_pad_h)
+            draw_h = round(line_h + 2 * _aw_draw_pad_v)
+
+            drawing = _ass_rounded_rect(draw_w, draw_h, _aw_draw_radius)
+            event_text = (
+                f"{{\\an7\\pos({draw_x},{draw_y})"
+                f"\\p1\\c{_draw_color}\\1a{_draw_alpha}"
+                f"\\bord0\\shad0}}{drawing}"
+            )
+            pending_box_events.append((d_start, d_end, "AWDRAW", event_text))
+
+        logger.info(
+            "AWDRAW: generated %d rounded-rect drawing events "
+            "(radius=%dpx, pad=%dx%d, font=%s)",
+            len(pending_box_events), _aw_draw_radius,
+            _aw_draw_pad_h, _aw_draw_pad_v, _aw_font_path,
+        )
+
+        # Transform word events: _AWBG → _AW style (text only, no box)
         new_word_events = []
         for ev in pending_word_events:
             start, end, style, text = ev
@@ -1026,7 +1103,7 @@ def generate_ass(
     # Layer ordering (lower = renders first / behind):
     #   Layer 0: base text events (border layer, uniform color)
     #   Layer 1: outline overlay events (when bg + outline both enabled)
-    #   Layer N: blurred box events (when _aw_bg_split, hidden text + blurred box)
+    #   Layer N: drawing events (when _aw_bg_split, rounded-rect backgrounds)
     #   Layer N+1: active word color events (topmost, sharp text)
     all_events: list[tuple[int, float, float, str, str]] = []
     for ev in base_text_events:
@@ -1091,11 +1168,14 @@ def generate_ass(
     logger.info(
         "ASS generated: font=%s size=%s(%dpx) weight=%s color=%s pos=%s "
         "bg=%s outline=%dpx speakers=%d segments=%d active_word=%s "
-        "max_words=%d res=%dx%d",
+        "aw_bg_opacity=%d aw_bg_radius=%d aw_bg_split=%s blur=%d "
+        "box_events=%d word_events=%d max_words=%d res=%dx%d",
         font, font_size, size_px, font_weight, font_color, position,
         f"yes({background_color}@{background_opacity}%)" if background_enabled else "no",
         ol_width, len(speakers_seen), len(clip_segments),
         "yes" if active_word_enabled else "no",
+        active_word_bg_opacity, active_word_bg_radius, _aw_bg_split, _aw_blur_val,
+        len(pending_box_events), len(pending_word_events),
         max_words, video_width, video_height,
     )
 
