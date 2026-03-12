@@ -68,6 +68,11 @@ export default function Settings() {
   const [transSaved, setTransSaved] = useState({ beam_size: 1, vad_filter: true, frame_sample_rate: 10 });
   const [transSaving, setTransSaving] = useState(false);
 
+  // FFmpeg encoding settings
+  const [ffmpegThreads, setFfmpegThreads] = useState(4);
+  const [ffmpegThreadsSaved, setFfmpegThreadsSaved] = useState(4);
+  const [ffmpegThreadsSaving, setFfmpegThreadsSaving] = useState(false);
+
   // Prompt customization state
   const [prompts, setPrompts] = useState({ frame_analysis: '', viral_clip_detection: '', subject_tracking: '', summary: '', seo: '' });
   const [promptDefaults, setPromptDefaults] = useState({ frame_analysis: '', viral_clip_detection: '', subject_tracking: '', summary: '', seo: '' });
@@ -218,6 +223,18 @@ export default function Settings() {
         const s = { beam_size: data.beam_size ?? 1, vad_filter: data.vad_filter ?? true, frame_sample_rate: data.frame_sample_rate ?? 10 };
         setTransSettings(s);
         setTransSaved(s);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Load FFmpeg encoding settings
+  useEffect(() => {
+    fetch('/api/encoding/settings')
+      .then((r) => r.json())
+      .then((data) => {
+        const t = data.threads ?? 4;
+        setFfmpegThreads(t);
+        setFfmpegThreadsSaved(t);
       })
       .catch(() => {});
   }, []);
@@ -519,6 +536,24 @@ export default function Settings() {
       }
     } catch { showToast('Failed to save transcription settings', 'error'); }
     finally { setTransSaving(false); }
+  };
+
+  const handleSaveFfmpegThreads = async (val) => {
+    setFfmpegThreadsSaving(true);
+    try {
+      const res = await fetch('/api/encoding/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ threads: val }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setFfmpegThreads(data.threads);
+        setFfmpegThreadsSaved(data.threads);
+        showToast(`FFmpeg threads set to ${data.threads === 0 ? 'auto' : data.threads}`, 'success');
+      }
+    } catch { showToast('Failed to save FFmpeg thread setting', 'error'); }
+    finally { setFfmpegThreadsSaving(false); }
   };
 
   // Prompt handlers
@@ -2454,6 +2489,56 @@ export default function Settings() {
                   )}
                 </div>
               )}
+            </div>
+
+            {/* ── FFmpeg Threads ── */}
+            <div style={{ marginBottom: 32 }}>
+              <h3 style={{ fontSize: 14, marginBottom: 4, color: 'var(--text-secondary)' }}>FFmpeg Threads</h3>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.5 }}>
+                Controls how many CPU threads FFmpeg uses during video export.
+                Lower values use less memory (safer for containers), higher values export faster.
+              </p>
+
+              <div style={{
+                padding: '12px 16px', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>Thread Count</span>
+                  <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
+                    {ffmpegThreads === 0 ? 'Auto (all cores)' : ffmpegThreads}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>0</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="16"
+                    step="1"
+                    value={ffmpegThreads}
+                    onChange={(e) => setFfmpegThreads(parseInt(e.target.value))}
+                    style={{ flex: 1, accentColor: 'var(--accent-cyan)' }}
+                  />
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>16</span>
+                </div>
+                <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'block', marginTop: 4 }}>
+                  0 = auto (uses all cores — may cause out-of-memory in containers). Recommended: 2–4 for Docker.
+                </span>
+                {ffmpegThreads !== ffmpegThreadsSaved && (
+                  <button
+                    onClick={() => handleSaveFfmpegThreads(ffmpegThreads)}
+                    disabled={ffmpegThreadsSaving}
+                    style={{
+                      marginTop: 8, padding: '4px 14px', background: 'var(--accent-cyan)',
+                      color: 'var(--bg-base)', border: 'none', borderRadius: 'var(--radius-sm)',
+                      fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                    }}
+                  >
+                    {ffmpegThreadsSaving ? 'Saving...' : 'Save'}
+                  </button>
+                )}
+              </div>
             </div>
 
             <h3 style={{ fontSize: 14, marginBottom: 16, color: 'var(--text-secondary)' }}>Model Override</h3>
