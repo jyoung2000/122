@@ -884,7 +884,7 @@ def generate_ass(
                         parts.append(f"{base_tag}{before} ")
                     parts.append(f"{aw_tag}{active}")
                     if after:
-                        parts.append(f" {reset_tag}{after}")
+                        parts.append(f"{reset_tag} {after}")
                     color_event_text = nobord_prefix + prefix + "".join(parts)
                     pending_word_events.append((w_start, w_end, style_name + aw_style_suffix, color_event_text))
                     # Drawing event for rounded background
@@ -1004,7 +1004,7 @@ def generate_ass(
                         parts.append(f"{base_tag}{before} ")
                     parts.append(f"{aw_tag}{active}")
                     if after:
-                        parts.append(f" {reset_tag}{after}")
+                        parts.append(f"{reset_tag} {after}")
                     color_event_text = nobord_prefix + prefix + "".join(parts)
                     pending_word_events.append((shifted_start, word_end, style_name + aw_style_suffix, color_event_text))
                     # Drawing event for rounded background
