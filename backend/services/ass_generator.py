@@ -490,6 +490,23 @@ def generate_ass(
                 f"{bold_flag},0,0,0,100,100,0,0,1,0,0,{alignment},{margin_h},{margin_h},{margin_v},1"
             )
 
+    # When active word background is enabled, create a _AWBG style with
+    # BorderStyle=3 for per-word box rendering.  In BorderStyle=3 the
+    # \3c/\3a override tags control the box fill color and alpha per-word,
+    # so we can show a colored box behind ONLY the active word by setting
+    # \3a&HFF& (transparent) on non-active words.
+    # This style defaults to a transparent box (OutlineColour alpha=FF).
+    _aw_bg_box_padding = 5  # px padding around active word box
+    if active_word_enabled and active_word_bg_opacity > 0:
+        for sp in speakers_seen:
+            color_hex = speaker_color_map[sp]
+            ass_color = _hex_to_ass_color(color_hex)
+            sn = _sanitize_style_name(sp)
+            lines.append(
+                f"Style: {sn}_AWBG,{font},{size_px},{ass_color},&H000000FF&,&HFF000000&,&HFF000000&,"
+                f"{bold_flag},0,0,0,100,100,0,0,3,{_aw_bg_box_padding},0,{alignment},{margin_h},{margin_h},{margin_v},1"
+            )
+
     lines.append("")
     lines.append("[Events]")
     lines.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
@@ -502,10 +519,16 @@ def generate_ass(
         # on the highlighted word).
         aw_outline = style_outline_color
         aw_bg = None
+        aw_bg_color = None  # ASS color for \3c (box fill in BorderStyle=3)
+        aw_bg_alpha = None  # ASS alpha for \3a (box opacity in BorderStyle=3)
         if active_word_bg_opacity > 0:
             aw_bg = _hex_to_ass_color_with_alpha(
                 active_word_bg_color, active_word_bg_opacity
             )
+            # Separate color (&H00BBGGRR&) and alpha (&HAA&) for \3c and \3a tags
+            aw_bg_color = _hex_to_ass_color(active_word_bg_color)
+            alpha_byte = 255 - max(0, min(255, int(active_word_bg_opacity / 100 * 255)))
+            aw_bg_alpha = f"&H{alpha_byte:02X}&"
 
     # Explicit border override tags for every Dialogue event.
     # Even though the Style already sets Outline, some libass builds and
@@ -528,9 +551,24 @@ def generate_ass(
         # \3a&HFF& = transparent outline, \4a&HFF& = transparent back color.
         aw_nobord_tag = "\\bord0\\shad0\\3a&HFF&\\4a&HFF&"
 
-    # Style suffix for Layer 1 events: "_AW" in background mode uses the
-    # box-free overlay style; "" in outline mode uses the same base style.
-    aw_style_suffix = "_AW" if background_enabled and active_word_enabled else ""
+    # When active word background is enabled, Layer 1 uses the _AWBG style
+    # (BorderStyle=3) where \3c/\3a control the per-word box.  The nobord
+    # prefix sets the box transparent by default; individual word overrides
+    # make it visible on the active word only.
+    if aw_bg:
+        # \shad0 = no shadow, \3a&HFF& = transparent box by default
+        aw_nobord_tag = "\\shad0\\3a&HFF&"
+
+    # Style suffix for Layer 1 events:
+    #   _AWBG: when active word background is enabled (BorderStyle=3 per-word box)
+    #   _AW:   background mode without aw_bg (BorderStyle=1, text fill only)
+    #   "":    outline mode without aw_bg (same base style)
+    if aw_bg:
+        aw_style_suffix = "_AWBG"
+    elif background_enabled and active_word_enabled:
+        aw_style_suffix = "_AW"
+    else:
+        aw_style_suffix = ""
 
     # Add dialogue events
     # Two-layer architecture for active-word mode:
@@ -586,8 +624,8 @@ def generate_ass(
                     base_text_events.append((clip_start, clip_end, style_name, f"{prefix}{safe_text}"))
                     nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
                     aw_tags = f"\\c{aw_color}"
-                    if aw_bg:
-                        aw_tags += f"\\4c{aw_bg}"
+                    if aw_bg_color:
+                        aw_tags += f"\\3c{aw_bg_color}\\3a{aw_bg_alpha}"
                     event_text = f"{nobord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
                     pending_word_events.append((clip_start, clip_end, style_name + aw_style_suffix, event_text))
                 else:
@@ -598,10 +636,10 @@ def generate_ass(
                     # Layer 1: color layer with \bord0 (no duplicate borders)
                     nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
                     aw_tags = f"\\c{aw_color}"
-                    if aw_bg:
-                        aw_tags += f"\\4c{aw_bg}"
+                    if aw_bg_color:
+                        aw_tags += f"\\3c{aw_bg_color}\\3a{aw_bg_alpha}"
                     event_text = f"{nobord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
-                    pending_word_events.append((clip_start, clip_end, style_name, event_text))
+                    pending_word_events.append((clip_start, clip_end, style_name + aw_style_suffix, event_text))
             elif seg_word_ts and len(seg_word_ts) > 0 and len(words) > 0 and _align_word_timestamps(seg_word_ts, words, clip_start, clip_end) is not None:
                 # Real per-word timestamps from Whisper (possibly aligned
                 # after minor user edits to subtitle text).
@@ -651,13 +689,21 @@ def generate_ass(
                     active = words[word_idx]
                     after = " ".join(words[word_idx + 1:])
                     nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
-                    base_tag = "{" + f"\\c{base_color}" + "}"
+                    # base_tag: non-active word color + transparent box
+                    if aw_bg_color:
+                        base_tag = "{" + f"\\c{base_color}\\3a&HFF&" + "}"
+                    else:
+                        base_tag = "{" + f"\\c{base_color}" + "}"
+                    # aw_tag: active word color + visible box
                     aw_extra = f"\\c{aw_color}"
-                    if aw_bg:
-                        aw_extra += f"\\4c{aw_bg}"
+                    if aw_bg_color:
+                        aw_extra += f"\\3c{aw_bg_color}\\3a{aw_bg_alpha}"
                     aw_tag = "{" + aw_extra + "}"
-                    # Reset tag to clear active word background on non-active words
-                    reset_tag = base_tag if not aw_bg else "{" + f"\\c{base_color}\\4a&HFF&" + "}"
+                    # reset_tag: after the active word, hide the box again
+                    if aw_bg_color:
+                        reset_tag = "{" + f"\\c{base_color}\\3a&HFF&" + "}"
+                    else:
+                        reset_tag = base_tag
                     parts = []
                     if before:
                         parts.append(f"{base_tag}{before} ")
@@ -758,12 +804,21 @@ def generate_ass(
                     active = words[word_idx]
                     after = " ".join(words[word_idx + 1:])
                     nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
-                    base_tag = "{" + f"\\c{base_color}" + "}"
+                    # base_tag: non-active word color + transparent box
+                    if aw_bg_color:
+                        base_tag = "{" + f"\\c{base_color}\\3a&HFF&" + "}"
+                    else:
+                        base_tag = "{" + f"\\c{base_color}" + "}"
+                    # aw_tag: active word color + visible box
                     aw_extra = f"\\c{aw_color}"
-                    if aw_bg:
-                        aw_extra += f"\\4c{aw_bg}"
+                    if aw_bg_color:
+                        aw_extra += f"\\3c{aw_bg_color}\\3a{aw_bg_alpha}"
                     aw_tag = "{" + aw_extra + "}"
-                    reset_tag = base_tag if not aw_bg else "{" + f"\\c{base_color}\\4a&HFF&" + "}"
+                    # reset_tag: after the active word, hide the box again
+                    if aw_bg_color:
+                        reset_tag = "{" + f"\\c{base_color}\\3a&HFF&" + "}"
+                    else:
+                        reset_tag = base_tag
                     parts = []
                     if before:
                         parts.append(f"{base_tag}{before} ")
