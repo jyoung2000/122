@@ -135,6 +135,7 @@ class SubtitleSettings(BaseModel):
     active_word_outline_color: str = "#000000"  # outline/stroke color of the active word
     active_word_bg_color: str = "#000000"  # background color behind the active word
     active_word_bg_opacity: int = 0  # 0-100, background opacity (0 = no background)
+    active_word_bg_radius: int = 4  # 0-20, border radius of the active word background box
 
 
 class SegmentSettings(BaseModel):

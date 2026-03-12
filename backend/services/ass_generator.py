@@ -231,6 +231,7 @@ def generate_ass(
     active_word_outline_color: str = "#000000",
     active_word_bg_color: str = "#000000",
     active_word_bg_opacity: int = 0,
+    active_word_bg_radius: int = 4,
 ) -> str:
     """Generate an ASS subtitle string from transcript segments within a time range.
 
@@ -496,7 +497,9 @@ def generate_ass(
     # so we can show a colored box behind ONLY the active word by setting
     # \3a&HFF& (transparent) on non-active words.
     # This style defaults to a transparent box (OutlineColour alpha=FF).
-    _aw_bg_box_padding = 5  # px padding around active word box
+    # Tighter padding: scale with font size so the box hugs the word.
+    # At reference size (30px @ 1080p, font_scale≈1), this gives ~2px padding.
+    _aw_bg_box_padding = max(1, round(2 * font_scale))
     if active_word_enabled and active_word_bg_opacity > 0:
         for sp in speakers_seen:
             color_hex = speaker_color_map[sp]

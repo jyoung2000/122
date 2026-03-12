@@ -53,7 +53,7 @@ const SUBTITLE_SETTINGS_FIELDS = [
   'subtitleBgEnabled', 'subtitleBgColor', 'subtitleBgOpacity',
   'useSpeakerColors', 'showSpeakerLabels',
   'activeWordEnabled', 'activeWordColor', 'activeWordOutlineColor',
-  'activeWordBgColor', 'activeWordBgOpacity',
+  'activeWordBgColor', 'activeWordBgOpacity', 'activeWordBgRadius',
 ];
 
 /**

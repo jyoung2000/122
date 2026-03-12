@@ -33,6 +33,7 @@ const DEFAULT_SETTINGS = {
   activeWordOutlineColor: '#000000',
   activeWordBgColor: '#000000',
   activeWordBgOpacity: 0,
+  activeWordBgRadius: 4,
   useSpeakerColors: true,
   exportQuality: '1080p',
   playbackVolume: 100,
@@ -1122,6 +1123,23 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                                     type="number"
                                     value={settings.activeWordBgOpacity}
                                     onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v)) update('activeWordBgOpacity', v); }}
+                                    style={numInputStyle}
+                                  />
+                                </div>
+                              </div>
+                              <div>
+                                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>Radius <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>(preview only)</span></div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                  <input
+                                    type="range" min="0" max="20" step="1"
+                                    value={Math.min(20, Math.max(0, settings.activeWordBgRadius ?? 4))}
+                                    onChange={(e) => update('activeWordBgRadius', parseInt(e.target.value))}
+                                    style={{ flex: 1, accentColor: 'var(--accent-cyan)' }}
+                                  />
+                                  <input
+                                    type="number"
+                                    value={settings.activeWordBgRadius ?? 4}
+                                    onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v)) update('activeWordBgRadius', v); }}
                                     style={numInputStyle}
                                   />
                                 </div>

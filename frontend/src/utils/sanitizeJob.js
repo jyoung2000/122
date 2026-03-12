@@ -190,12 +190,12 @@ export function sanitizeSubtitleSettings(ss) {
   const numFields = [
     'subtitleSize', 'subtitleBgOpacity', 'subtitleBgRadius',
     'subtitleOutlineOpacity', 'subtitleOutlineWidth', 'subtitleMaxWidth',
-    'subtitleOffsetV', 'subtitleMaxWords', 'activeWordBgOpacity',
+    'subtitleOffsetV', 'subtitleMaxWords', 'activeWordBgOpacity', 'activeWordBgRadius',
     'playbackVolume', 'playbackSpeed',
     // snake_case variants
     'size', 'background_opacity', 'background_radius',
     'outline_opacity', 'outline_width', 'max_width', 'offset_v',
-    'max_words', 'active_word_bg_opacity',
+    'max_words', 'active_word_bg_opacity', 'active_word_bg_radius',
   ];
   for (const f of numFields) {
     if (s[f] != null && typeof s[f] === 'object') s[f] = Number(s[f]) || 0;

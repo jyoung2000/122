@@ -616,7 +616,8 @@ export default function SubtitleOverlay({
             } : {}),
             ...(awBgOpacity > 0 ? {
               backgroundColor: hexToRgba(awBgColor, awBgOpacity / 100),
-              padding: `0 ${Math.max(1, 2 * subtitleScale)}px`,
+              padding: `${Math.max(1, 1 * subtitleScale)}px ${Math.max(1, 2 * subtitleScale)}px`,
+              borderRadius: `${(settings.activeWordBgRadius ?? 4) * subtitleScale}px`,
             } : {}),
           } : {};
           return (

@@ -4422,6 +4422,7 @@ async def export_clip(
                 active_word_outline_color=settings.get("active_word_outline_color", "#000000"),
                 active_word_bg_color=settings.get("active_word_bg_color", "#000000"),
                 active_word_bg_opacity=settings.get("active_word_bg_opacity", 0),
+                active_word_bg_radius=settings.get("active_word_bg_radius", 4),
             )
 
             if ass_content:

@@ -206,6 +206,7 @@ export default function ClipSEO() {
     activeWordOutlineColor: '#000000',
     activeWordBgColor: '#000000',
     activeWordBgOpacity: 0,
+    activeWordBgRadius: 4,
     useSpeakerColors: true,
     playbackVolume: 100,
     playbackSpeed: 1.0,
@@ -339,6 +340,7 @@ export default function ClipSEO() {
     activeWordOutlineColor = '#000000',
     activeWordBgColor = '#000000',
     activeWordBgOpacity = 0,
+    activeWordBgRadius = 4,
     playbackVolume = 100,
     playbackSpeed = 1.0,
   } = clipSettings;

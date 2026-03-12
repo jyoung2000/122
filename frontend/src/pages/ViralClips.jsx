@@ -106,6 +106,7 @@ const DEFAULT_SETTINGS = {
   activeWordOutlineColor: '#000000',
   activeWordBgColor: '#000000',
   activeWordBgOpacity: 0,
+  activeWordBgRadius: 4,
   exportQuality: '1080p',
   playbackVolume: 100,
   playbackSpeed: 1.0,
@@ -500,6 +501,16 @@ function SubtitleSettingsEditor({ values, onChange, speakerList, customFonts, co
                     <input type="range" min="0" max="100" step="5"
                       value={values.activeWordBgOpacity ?? 0}
                       onChange={(e) => set('activeWordBgOpacity', parseInt(e.target.value))}
+                      style={{ width: '100%', accentColor: 'var(--accent-cyan)' }} />
+                  </div>
+                  <div style={{ flex: 1, minWidth: 100 }}>
+                    <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 4 }}>
+                      Radius: <span style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>{values.activeWordBgRadius ?? 4}px</span>
+                      <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 }}>(preview only)</span>
+                    </div>
+                    <input type="range" min="0" max="20" step="1"
+                      value={values.activeWordBgRadius ?? 4}
+                      onChange={(e) => set('activeWordBgRadius', parseInt(e.target.value))}
                       style={{ width: '100%', accentColor: 'var(--accent-cyan)' }} />
                   </div>
                 </div>

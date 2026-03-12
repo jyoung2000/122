@@ -243,5 +243,6 @@ export function mapSubtitleSettings(cs) {
     active_word_outline_color: cs.activeWordOutlineColor || '#000000',
     active_word_bg_color: cs.activeWordBgColor || '#000000',
     active_word_bg_opacity: cs.activeWordBgOpacity ?? 0,
+    active_word_bg_radius: cs.activeWordBgRadius ?? 4,
   };
 }
