@@ -3927,6 +3927,13 @@ def _build_unified_overlay_chain(
         if iid:
             image_by_id[iid] = im
 
+    logger.info(
+        "Unified chain: %d compositing entries, text_by_id=%s, image_by_id=%s",
+        len(compositing_order),
+        list(text_by_id.keys())[:8],
+        list(image_by_id.keys())[:8],
+    )
+
     extra_args: list[str] = []
     fc_parts: list[str] = []
     warnings: list[str] = []
@@ -3939,16 +3946,28 @@ def _build_unified_overlay_chain(
         item_type = entry.get("type")
         item_id = entry.get("id")
 
-        if item_type == "text" and item_id in text_by_id:
+        if item_type == "text":
+            if item_id not in text_by_id:
+                logger.warning("Unified chain: text '%s' NOT in text_by_id — SKIPPED", item_id)
+                warnings.append(f"text '{item_id}' not found")
+                continue
             overlay = text_by_id[item_id]
             dt_filter = _build_single_drawtext(overlay, clip_start)
             if dt_filter:
                 out_label = f"[vcmp{step}]"
                 fc_parts.append(f"{current_label}{dt_filter}{out_label}")
                 current_label = out_label
+                logger.info("Unified chain step %d: text '%s' composited", step, str(item_id)[:12])
                 step += 1
 
-        elif item_type in ("image", "shape") and item_id in image_by_id:
+        elif item_type in ("image", "shape"):
+            if item_id not in image_by_id:
+                logger.warning(
+                    "Unified chain: %s '%s' NOT in image_by_id — SKIPPED (keys: %s)",
+                    item_type, item_id, list(image_by_id.keys())[:8],
+                )
+                warnings.append(f"{item_type} '{item_id}' not found")
+                continue
             overlay = image_by_id[item_id]
             src = overlay.get("src", "")
             img_path = _resolve_media_path(src, job_id)
@@ -3998,7 +4017,16 @@ def _build_unified_overlay_chain(
             fc_parts.append(img_scale)
             fc_parts.append(overlay_filter)
             current_label = out_label
+            logger.info("Unified chain step %d: %s '%s' composited", step, item_type, str(item_id)[:12])
             step += 1
+
+        else:
+            logger.warning("Unified chain: unknown type '%s' for '%s'", item_type, item_id)
+
+    logger.info(
+        "Unified chain result: %d/%d items processed, %d skipped",
+        step, len(sorted_order), len(sorted_order) - step,
+    )
 
     if step == 0:
         return [], "", warnings
@@ -4168,6 +4196,26 @@ async def export_clip(
                 _shape_warnings.append(f"Shape {si+1} ({shape.get('shape_type', 'unknown')}): failed to render — skipped")
         # Recompute has_image_overlays after merging shapes
         has_image_overlays = bool(image_overlays) and len(image_overlays) > 0
+
+    # ── CRITICAL: Re-sort image_overlays to match compositing order ──
+    # Shape overlays were appended to the END of image_overlays above,
+    # which always puts them on top regardless of track position or
+    # creation order.  Re-sort so the array order matches the frontend's
+    # overlay_compositing_order.  This fixes the legacy path AND serves
+    # as a safety net if the unified path falls through.
+    if image_overlays and overlay_compositing_order:
+        _comp_order_ids = [e.get("id") for e in overlay_compositing_order]
+        def _comp_sort_key(overlay_dict):
+            iid = overlay_dict.get("item_id", "")
+            try:
+                return _comp_order_ids.index(iid)
+            except ValueError:
+                return 999999  # items not in compositing order go last
+        image_overlays.sort(key=_comp_sort_key)
+        logger.info(
+            "Re-sorted image_overlays by compositing order: %s",
+            [im.get("item_id", "?")[:20] for im in image_overlays],
+        )
 
     needs_filters = bool(aspect_ratio) or subtitles_enabled or needs_quality_scale or has_speed or has_volume or has_segments or has_seg_speed or has_video_effects or has_text_overlays or has_image_overlays or has_audio_overlays
 
@@ -4757,6 +4805,7 @@ async def export_clip(
                 )
                 _img_base_idx = n  # n segment inputs → indices 0..n-1
 
+                _per_seg_unified_applied = False
                 if overlay_compositing_order and (has_text_overlays or has_image_overlays):
                     u_extra, u_fc, u_warns = _build_unified_overlay_chain(
                         compositing_order=overlay_compositing_order,
@@ -4770,16 +4819,28 @@ async def export_clip(
                     )
                     _overlay_warnings.extend(u_warns)
                     if u_fc:
+                        _per_seg_unified_applied = True
                         input_args += u_extra
                         fc_lines[-1] = fc_lines[-1].replace("[finalv]", "[vbase]", 1)
                         fc_lines.append(u_fc)
                         map_args = [m.replace("[finalv]", "[vcomp]") for m in map_args]
                         logger.info(
-                            "Unified compositing chain for clip %s (per-seg): applied after concat",
-                            clip_id,
+                            "Unified compositing chain for clip %s (per-seg): applied after concat (%d steps)",
+                            clip_id, u_fc.count(";") + 1,
                         )
-                else:
-                    # Legacy separate pipeline: images first, then text
+                    else:
+                        logger.warning(
+                            "Unified compositing chain for clip %s (per-seg): EMPTY result — "
+                            "falling back to legacy pipeline. "
+                            "compositing_order=%d entries, image_overlays=%d, text_overlays=%d",
+                            clip_id,
+                            len(overlay_compositing_order),
+                            len(image_overlays or []),
+                            len(text_overlays or []),
+                        )
+
+                # Legacy fallback (also runs when unified was never enabled or produced empty)
+                if not _per_seg_unified_applied:
                     if has_image_overlays and image_overlays:
                         img_extra_args, img_overlay_fc, img_overlay_count, _iw = _build_image_overlay_data(
                             image_overlays, job_id, clip_start=start, base_input_idx=_img_base_idx,
@@ -4792,8 +4853,9 @@ async def export_clip(
                             fc_lines.append(img_overlay_fc)
                             map_args = [m.replace("[finalv]", "[vimg]") for m in map_args]
                             logger.info(
-                                "Image overlays for clip %s (per-seg): %d images applied after concat",
+                                "Legacy image overlays for clip %s (per-seg): %d images, order=[%s]",
                                 clip_id, img_overlay_count,
+                                ", ".join(im.get("item_id", "?")[:12] for im in image_overlays),
                             )
 
                     if _text_vf_for_post_concat:
@@ -4889,11 +4951,24 @@ async def export_clip(
                         _overlay_fc = u_fc
                         _overlay_out_label = "[vcomp]"
                         logger.info(
-                            "Unified compositing chain for clip %s (global): applied",
-                            clip_id,
+                            "Unified compositing chain for clip %s (global): applied (%d steps)",
+                            clip_id, u_fc.count(";") + 1,
                         )
-                elif has_image_overlays and image_overlays:
-                    # Legacy: separate image overlay chain
+                    else:
+                        logger.warning(
+                            "Unified compositing chain for clip %s: EMPTY result — "
+                            "falling back to legacy pipeline. "
+                            "compositing_order=%d entries, image_overlays=%d, text_overlays=%d",
+                            clip_id,
+                            len(overlay_compositing_order),
+                            len(image_overlays or []),
+                            len(text_overlays or []),
+                        )
+                        # Allow fallback to legacy path below
+                        _use_unified_compositing = False
+
+                # Legacy fallback (also runs when unified was never enabled)
+                if not _use_complex_for_overlays and has_image_overlays and image_overlays:
                     img_extra_args, img_overlay_fc, img_overlay_count, _iw = _build_image_overlay_data(
                         image_overlays, job_id, clip_start=start, base_input_idx=1,
                         video_out_w=_vid_out_w, video_out_h=_vid_out_h,
@@ -4905,8 +4980,9 @@ async def export_clip(
                         _overlay_fc = img_overlay_fc
                         _overlay_out_label = "[vimg]"
                         logger.info(
-                            "Image overlays for clip %s (global): %d images",
+                            "Legacy image overlay chain for clip %s (global): %d overlays, order=[%s]",
                             clip_id, img_overlay_count,
+                            ", ".join(im.get("item_id", "?")[:12] for im in image_overlays),
                         )
 
                 # -t must be an OUTPUT option to correctly cap the output

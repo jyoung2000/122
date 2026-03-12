@@ -142,6 +142,21 @@ export default function ExportDialog({
       if (overlays.audioOverlays.length > 0) exportPayload.audio_overlays = overlays.audioOverlays;
       if (overlays.compositingOrder?.length > 0) {
         exportPayload.overlay_compositing_order = overlays.compositingOrder;
+        console.log('[ExportDialog] Compositing order:',
+          overlays.compositingOrder.map(e =>
+            `${e.type}(${String(e.id).slice(-8)}) prio=${e.compositing_priority}`
+          ).join(' → ')
+        );
+      }
+      if (exportPayload.image_overlays?.length) {
+        console.log('[ExportDialog] image_overlays order:',
+          exportPayload.image_overlays.map(i => `img(${String(i.item_id).slice(-8)})`).join(' → ')
+        );
+      }
+      if (exportPayload.shape_overlays?.length) {
+        console.log('[ExportDialog] shape_overlays order:',
+          exportPayload.shape_overlays.map(s => `${s.shape_type}(${String(s.item_id).slice(-8)})`).join(' → ')
+        );
       }
 
       if (overlays.warnings.length > 0) {
