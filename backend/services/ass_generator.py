@@ -585,12 +585,22 @@ def generate_ass(
                     # Background mode: Layer 0 = box, Layer 1 = colored text
                     base_text_events.append((clip_start, clip_end, style_name, f"{prefix}{safe_text}"))
                     nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
-                    event_text = f"{nobord_prefix}{prefix}{{\\c{aw_color}}}{safe_text}"
+                    aw_tags = f"\\c{aw_color}"
+                    if aw_bg:
+                        aw_tags += f"\\4c{aw_bg}"
+                    event_text = f"{nobord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
                     pending_word_events.append((clip_start, clip_end, style_name + aw_style_suffix, event_text))
                 else:
+                    # Layer 0: border layer with uniform color
                     bord_prefix = f"{{{bord_tag}}}" if bord_tag else ""
+                    border_event_text = f"{bord_prefix}{prefix}{safe_text}"
+                    base_text_events.append((clip_start, clip_end, style_name, border_event_text))
+                    # Layer 1: color layer with \bord0 (no duplicate borders)
+                    nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
                     aw_tags = f"\\c{aw_color}"
-                    event_text = f"{bord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
+                    if aw_bg:
+                        aw_tags += f"\\4c{aw_bg}"
+                    event_text = f"{nobord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
                     pending_word_events.append((clip_start, clip_end, style_name, event_text))
             elif seg_word_ts and len(seg_word_ts) > 0 and len(words) > 0 and _align_word_timestamps(seg_word_ts, words, clip_start, clip_end) is not None:
                 # Real per-word timestamps from Whisper (possibly aligned
@@ -642,13 +652,18 @@ def generate_ass(
                     after = " ".join(words[word_idx + 1:])
                     nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
                     base_tag = "{" + f"\\c{base_color}" + "}"
-                    aw_tag = "{" + f"\\c{aw_color}" + "}"
+                    aw_extra = f"\\c{aw_color}"
+                    if aw_bg:
+                        aw_extra += f"\\4c{aw_bg}"
+                    aw_tag = "{" + aw_extra + "}"
+                    # Reset tag to clear active word background on non-active words
+                    reset_tag = base_tag if not aw_bg else "{" + f"\\c{base_color}\\4a&HFF&" + "}"
                     parts = []
                     if before:
                         parts.append(f"{base_tag}{before} ")
                     parts.append(f"{aw_tag}{active}")
                     if after:
-                        parts.append(f" {base_tag}{after}")
+                        parts.append(f" {reset_tag}{after}")
                     color_event_text = nobord_prefix + prefix + "".join(parts)
                     pending_word_events.append((w_start, w_end, style_name + aw_style_suffix, color_event_text))
             else:
@@ -744,13 +759,17 @@ def generate_ass(
                     after = " ".join(words[word_idx + 1:])
                     nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
                     base_tag = "{" + f"\\c{base_color}" + "}"
-                    aw_tag = "{" + f"\\c{aw_color}" + "}"
+                    aw_extra = f"\\c{aw_color}"
+                    if aw_bg:
+                        aw_extra += f"\\4c{aw_bg}"
+                    aw_tag = "{" + aw_extra + "}"
+                    reset_tag = base_tag if not aw_bg else "{" + f"\\c{base_color}\\4a&HFF&" + "}"
                     parts = []
                     if before:
                         parts.append(f"{base_tag}{before} ")
                     parts.append(f"{aw_tag}{active}")
                     if after:
-                        parts.append(f" {base_tag}{after}")
+                        parts.append(f" {reset_tag}{after}")
                     color_event_text = nobord_prefix + prefix + "".join(parts)
                     pending_word_events.append((shifted_start, word_end, style_name + aw_style_suffix, color_event_text))
                     current_time = word_end
