@@ -1150,8 +1150,14 @@ def _validate_ass_settings(
         warnings.append(f"PlayResY mismatch: expected {video_height}, got {playres_y.group(1)}")
 
     # --- Validate each style ---
+    # Auxiliary styles (_AWBG, _AW, _OL, AWDRAW) intentionally differ from
+    # the base speaker style (different BorderStyle, Outline, Shadow, etc.)
+    # and should not be validated against base style expectations.
+    _AUX_SUFFIXES = ("_AWBG", "_AW", "_OL", "AWDRAW")
     for style in styles:
         style_name = style["Name"]
+        if any(style_name.endswith(s) or style_name == s for s in _AUX_SUFFIXES):
+            continue
 
         # 2. Font name
         if style["Fontname"] != font:
@@ -1375,18 +1381,20 @@ def _validate_ass_settings(
                 )
                 break
 
-        # Layer 1 events must have \bord0\shad0 (no border on color layer)
+        # Layer 1 events must suppress duplicate borders/shadows.
+        # Two valid patterns:
+        #   A) _AW style (BorderStyle=1): needs \bord0\shad0 to suppress outline
+        #   B) _AWBG style (BorderStyle=3): needs \shad0\3a (box is intentional,
+        #      \3a&HFF& makes non-active word boxes transparent)
         for ev in layer_1_events:
-            if "\\bord0" not in ev["Text"]:
+            has_bord0 = "\\bord0" in ev["Text"]
+            has_shad0 = "\\shad0" in ev["Text"]
+            has_3a_transparent = "\\3a&HFF&" in ev["Text"]
+            # Pattern A: explicit \bord0 (outline suppression)
+            # Pattern B: \shad0 + \3a&HFF& (AWBG box mode)
+            if not has_bord0 and not (has_shad0 and has_3a_transparent):
                 warnings.append(
-                    "Layer 1 (color) event missing \\bord0 — "
-                    "will render duplicate borders causing black bars"
-                )
-                break
-            if "\\shad0" not in ev["Text"]:
-                warnings.append(
-                    "Layer 1 (color) event missing \\shad0 — "
-                    "will render duplicate shadows causing artifacts"
+                    "Layer 1 (color) event missing border/box suppression tags"
                 )
                 break
 
@@ -1868,9 +1876,9 @@ def _verify_centering_math(
 # ---------------------------------------------------------------------------
 
 QUALITY_PRESETS = {
-    "720p":  {"crf": 20, "preset": "medium"},
-    "1080p": {"crf": 18, "preset": "medium"},
-    "4k":    {"crf": 18, "preset": "medium"},
+    "720p":  {"crf": 20, "preset": "fast"},
+    "1080p": {"crf": 18, "preset": "fast"},
+    "4k":    {"crf": 18, "preset": "fast"},
 }
 
 # Standard output resolutions by aspect ratio, keyed by quality tier

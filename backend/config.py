@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # FFmpeg encoding settings
     FFMPEG_PRESET: str = "fast"       # ultrafast|superfast|veryfast|faster|fast|medium|slow
     FFMPEG_CRF: int = 23             # 0-51, lower=better quality, 23=default
-    FFMPEG_THREADS: int = 0          # 0=auto (all cores), 1-N=explicit
+    FFMPEG_THREADS: int = 4          # Limit threads to control memory usage (0=auto risks OOM)
     FFMPEG_FASTSTART: bool = True    # -movflags +faststart for web streaming
 
     # GPU Hardware Acceleration — user toggle persisted to user_settings.json
