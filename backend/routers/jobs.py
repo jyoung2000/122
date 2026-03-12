@@ -200,6 +200,36 @@ async def rename_speakers(job_id: str, req: SpeakerRenameRequest):
 
 # --- Transcript editing ---
 
+class BulkUpdateSpeakerRequest(BaseModel):
+    segment_indices: list[int]
+    speaker: str
+
+
+@router.put("/jobs/{job_id}/transcript/bulk-update-speaker")
+async def bulk_update_speaker(job_id: str, req: BulkUpdateSpeakerRequest):
+    """Update the speaker for multiple transcript segments at once."""
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.transcript:
+        raise HTTPException(status_code=404, detail="No transcript")
+
+    updated = []
+    for idx in req.segment_indices:
+        if idx < 0 or idx >= len(job.transcript):
+            continue
+        seg = job.transcript[idx]
+        if isinstance(seg, dict):
+            seg = TranscriptSegment(**seg)
+        seg = seg.model_copy(update={"speaker": req.speaker})
+        job.transcript[idx] = seg
+        updated.append(idx)
+
+    if updated:
+        await database.save_job(job)
+    return {"job_id": job_id, "updated_indices": updated, "speaker": req.speaker}
+
+
 class UpdateTranscriptSegmentRequest(BaseModel):
     text: str | None = None
     speaker: str | None = None
