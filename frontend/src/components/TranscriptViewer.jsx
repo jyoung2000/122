@@ -566,6 +566,23 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
         >
           Copy All
         </button>
+        {jobId && speakers.length > 0 && (
+          <button
+            onClick={selectedIndices.size > 0 && selectedIndices.size === filtered.reduce((s, seg) => { s.add(transcript.indexOf(seg)); return s; }, new Set()).size ? clearSelection : selectAllFiltered}
+            style={{
+              padding: '8px 12px',
+              background: selectedIndices.size > 0 ? 'var(--accent-cyan-dim, rgba(0,217,255,0.08))' : 'var(--bg-elevated)',
+              color: selectedIndices.size > 0 ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+              border: selectedIndices.size > 0 ? '1px solid var(--accent-cyan)' : '1px solid var(--border)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 12,
+              cursor: 'pointer',
+              fontWeight: selectedIndices.size > 0 ? 600 : 400,
+            }}
+          >
+            {selectedIndices.size > 0 ? `${selectedIndices.size} Selected` : 'Select All'}
+          </button>
+        )}
       </div>
 
       {/* Editable hint */}
