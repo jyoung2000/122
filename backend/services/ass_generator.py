@@ -537,7 +537,7 @@ def generate_ass(
     # renders ONLY the colored text fill with zero box/border/shadow.
     # BorderStyle is a STYLE-LEVEL setting that CANNOT be overridden by
     # inline tags, so a separate style is the only robust solution.
-    if background_enabled and active_word_enabled:
+    if active_word_enabled:
         for sp in speakers_seen:
             color_hex = speaker_color_map[sp]
             ass_color = _hex_to_ass_color(color_hex)
@@ -552,11 +552,28 @@ def generate_ass(
 
     # Active word background uses BorderStyle=3 (ASS native box) which
     # guarantees pixel-perfect alignment because the same engine (libass)
-    # renders both the text and the box.  Drawing mode (\p1 with Pillow-
-    # measured coordinates) is intentionally disabled because Pillow and
-    # libass use different font metrics, causing the background to be
-    # visibly offset from the active word in the exported video.
+    # renders both the text and the box.
     _aw_bg_box_padding = max(1, round(2 * font_scale))
+
+    # Rounded corners: ASS BorderStyle=3 only renders sharp rectangles.
+    # To approximate rounded corners we split the AWBG events into two
+    # layers: a BLURRED box layer (text invisible, box visible with
+    # \blur to soften edges) and a SHARP text layer (_AW style, text
+    # visible, no box).  The blur softens the box edges to look rounded
+    # while the text stays crisp on the layer above.
+    _aw_bg_split = bool(
+        active_word_enabled
+        and active_word_bg_opacity > 0
+        and active_word_bg_radius > 0
+    )
+    _aw_blur_val = 0
+    _aw_box_inject = ""
+    if _aw_bg_split:
+        _aw_blur_val = max(1, round(active_word_bg_radius * font_scale * 0.5))
+        _aw_bg_blur_pad = _aw_bg_box_padding + max(1, _aw_blur_val)
+        _aw_box_inject = (
+            f"\\1a&HFF&\\blur{_aw_blur_val}\\bord{_aw_bg_blur_pad}"
+        )
 
     if active_word_enabled and active_word_bg_opacity > 0:
         for sp in speakers_seen:
@@ -637,6 +654,7 @@ def generate_ass(
     #
     # For standard mode: single-layer events on Layer 0 as before.
     pending_word_events: list[tuple[float, float, str, str]] = []
+    pending_box_events: list[tuple[float, float, str, str]] = []
     base_text_events: list[tuple[float, float, str, str]] = []
 
     for seg in clip_segments:
@@ -932,6 +950,29 @@ def generate_ass(
                 pending_word_events[i] = (ev_start, next_start, ev_style, ev_text)
             # Long gaps (> 0.5s): let subtitle disappear during pauses
 
+    # ── Split AWBG events into blurred-box + sharp-text layers ──
+    # When rounded corners are requested (_aw_bg_split), duplicate the
+    # gap-filled word events into two sets:
+    #   pending_box_events  — AWBG style, invisible text, blurred box
+    #   pending_word_events — _AW style, visible text, no box
+    if _aw_bg_split and pending_word_events:
+        for ev in pending_word_events:
+            start, end, style, text = ev
+            # Inject \1a&HFF& (hide text) + \blur + \bord into first tag block
+            box_text = "{" + _aw_box_inject + text[1:]
+            pending_box_events.append((start, end, style, box_text))
+        # Transform word events: _AWBG → _AW style, add \bord0 for safety
+        new_word_events = []
+        for ev in pending_word_events:
+            start, end, style, text = ev
+            if style.endswith("_AWBG"):
+                text_style = style[:-len("_AWBG")] + "_AW"
+            else:
+                text_style = style
+            text_text = "{\\bord0" + text[1:]
+            new_word_events.append((start, end, text_style, text_text))
+        pending_word_events[:] = new_word_events
+
     # ═══════════════════════════════════════════════════════════════════
     # FINAL OVERLAP ELIMINATION — unified pass at centisecond precision
     # ═══════════════════════════════════════════════════════════════════
@@ -985,15 +1026,20 @@ def generate_ass(
     # Layer ordering (lower = renders first / behind):
     #   Layer 0: base text events (border layer, uniform color)
     #   Layer 1: outline overlay events (when bg + outline both enabled)
-    #   Layer 1 or 2: active word color events (topmost)
+    #   Layer N: blurred box events (when _aw_bg_split, hidden text + blurred box)
+    #   Layer N+1: active word color events (topmost, sharp text)
     all_events: list[tuple[int, float, float, str, str]] = []
     for ev in base_text_events:
         all_events.append((0, ev[0], ev[1], ev[2], ev[3]))
     for ev in outline_overlay_events:
         all_events.append((1, ev[0], ev[1], ev[2], ev[3]))
-    aw_layer = 2 if bg_has_outline else 1
+    next_layer = 2 if bg_has_outline else 1
+    if pending_box_events:
+        for ev in pending_box_events:
+            all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
+        next_layer += 1
     for ev in pending_word_events:
-        all_events.append((aw_layer, ev[0], ev[1], ev[2], ev[3]))
+        all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
 
     # Process each layer independently.
     _max_layer = max((e[0] for e in all_events), default=0)

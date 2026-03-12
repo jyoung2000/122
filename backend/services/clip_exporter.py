@@ -1400,9 +1400,13 @@ def _validate_ass_settings(
 
         # CRITICAL: detect events with \bord>0 AND multiple \c overrides
         # (the exact anti-pattern that causes black bars)
+        # Skip box-only events (\1a&HFF& = invisible text) — border
+        # segmentation is irrelevant when no text is visible.
         if active_word_enabled:
             bad_events = 0
             for ev in events:
+                if "\\1a&HFF&" in ev["Text"]:
+                    continue  # box-only layer, text invisible
                 has_border = "\\bord" in ev["Text"] and "\\bord0" not in ev["Text"]
                 color_changes = ev["Text"].count("\\c&H")
                 if has_border and color_changes > 1:
