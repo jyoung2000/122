@@ -3670,6 +3670,7 @@ def _build_image_overlay_data(
     base_input_idx: int,
     video_out_w: int = 1920,
     video_out_h: int = 1080,
+    overlay_compositing_order: list | None = None,
 ) -> tuple[list[str], str, int, list[str]]:
     """Build FFmpeg input args and overlay filter chain for image overlays.
 
@@ -3687,6 +3688,36 @@ def _build_image_overlay_data(
 
     If no valid images are found, returns ([], "", 0, warnings).
     """
+    # ── DEFENSE-IN-DEPTH: Sort image_overlays to match compositing order ──
+    # This ensures correct Z-order regardless of how items were appended.
+    # Items processed FIRST in the overlay chain render BELOW items processed LATER.
+    if overlay_compositing_order and len(image_overlays) > 1:
+        _order_ids = [e.get("id") for e in overlay_compositing_order]
+        def _z_sort_key(ov):
+            iid = ov.get("item_id", "")
+            try:
+                return _order_ids.index(iid)
+            except ValueError:
+                return 999999
+        image_overlays = sorted(image_overlays, key=_z_sort_key)
+        logger.info(
+            "image_overlay_data: Z-sorted %d overlays → [%s]",
+            len(image_overlays),
+            ", ".join(ov.get("item_id", "?")[:15] for ov in image_overlays),
+        )
+    elif len(image_overlays) > 1:
+        # Fallback: no compositing order available — sort by item_id numeric suffix.
+        # Item IDs like "item-5", "item-6" have incrementing numbers matching creation order.
+        # Earlier-created items (lower number) should render BELOW (processed first).
+        def _id_num(ov):
+            m = re.search(r'(\d+)$', ov.get("item_id", "") or "")
+            return int(m.group(1)) if m else 0
+        image_overlays = sorted(image_overlays, key=_id_num)
+        logger.info(
+            "image_overlay_data: fallback sort by item_id number → [%s]",
+            ", ".join(ov.get("item_id", "?")[:15] for ov in image_overlays),
+        )
+
     extra_args: list[str] = []
     valid_overlays: list[tuple[int, dict]] = []  # (input_idx, overlay_dict)
     warnings: list[str] = []
@@ -4085,6 +4116,10 @@ async def export_clip(
 
     progress_callback: optional async callable(message: str) for status updates.
     """
+    # Version sentinel — proves which code version the container is running.
+    _EXPORT_VERSION = "z-order-fix-v3-2026-03-12"
+    logger.info("=== EXPORT START clip %s — code version: %s ===", clip_id, _EXPORT_VERSION)
+
     async def _notify(msg: str):
         if progress_callback:
             try:
@@ -4213,7 +4248,21 @@ async def export_clip(
                 return 999999  # items not in compositing order go last
         image_overlays.sort(key=_comp_sort_key)
         logger.info(
-            "Re-sorted image_overlays by compositing order: %s",
+            ">>> Z-ORDER FIX ACTIVE <<< Re-sorted %d image_overlays by compositing order: %s",
+            len(image_overlays),
+            [im.get("item_id", "?")[:20] for im in image_overlays],
+        )
+    elif image_overlays and len(image_overlays) > 1 and not overlay_compositing_order:
+        # No compositing order available (exported from ViralClips/Analysis page).
+        # Fall back to sorting by item_id numeric suffix (creation order).
+        # Items with higher numbers were created later and should render on top.
+        def _fallback_sort_key(ov):
+            m = re.search(r'(\d+)$', ov.get("item_id", "") or "")
+            return int(m.group(1)) if m else 0
+        image_overlays.sort(key=_fallback_sort_key)
+        logger.info(
+            ">>> Z-ORDER FALLBACK SORT <<< No compositing order — sorted %d image_overlays by item_id: %s",
+            len(image_overlays),
             [im.get("item_id", "?")[:20] for im in image_overlays],
         )
 
@@ -4845,6 +4894,7 @@ async def export_clip(
                         img_extra_args, img_overlay_fc, img_overlay_count, _iw = _build_image_overlay_data(
                             image_overlays, job_id, clip_start=start, base_input_idx=_img_base_idx,
                             video_out_w=_vid_out_w, video_out_h=_vid_out_h,
+                            overlay_compositing_order=overlay_compositing_order,
                         )
                         _overlay_warnings.extend(_iw)
                         if img_overlay_count > 0:
@@ -4972,6 +5022,7 @@ async def export_clip(
                     img_extra_args, img_overlay_fc, img_overlay_count, _iw = _build_image_overlay_data(
                         image_overlays, job_id, clip_start=start, base_input_idx=1,
                         video_out_w=_vid_out_w, video_out_h=_vid_out_h,
+                        overlay_compositing_order=overlay_compositing_order,
                     )
                     _overlay_warnings.extend(_iw)
                     if img_overlay_count > 0:
@@ -5124,6 +5175,29 @@ async def export_clip(
                 for _ow in _overlay_warnings:
                     await _notify(f"  ⚠ {_ow}")
                     logger.warning("Overlay skip (clip %s): %s", clip_id, _ow)
+
+            # ── Z-ORDER VERIFICATION: Log the exact overlay rendering stack ──
+            # This log line PROVES whether the fix is active in the running container.
+            # If this log is absent, the Docker container has NOT been rebuilt.
+            _z_order_dump = []
+            if image_overlays:
+                for _zi, _zov in enumerate(image_overlays):
+                    _z_order_dump.append(
+                        f"  layer {_zi} ({'BELOW' if _zi < len(image_overlays) - 1 else 'TOP'}): "
+                        f"item_id={_zov.get('item_id', '?')}, "
+                        f"src={os.path.basename(_zov.get('src', '?'))[:30]}"
+                    )
+                logger.info(
+                    "Z-ORDER VERIFICATION for clip %s — %d overlay layers (first=bottom, last=top):\n%s",
+                    clip_id, len(image_overlays), "\n".join(_z_order_dump),
+                )
+            else:
+                logger.info("Z-ORDER VERIFICATION for clip %s — no image overlays", clip_id)
+            # Also log filter_complex if present
+            if "-filter_complex" in cmd:
+                _fc_idx = cmd.index("-filter_complex") + 1
+                if _fc_idx < len(cmd):
+                    logger.info("FILTER_COMPLEX for clip %s:\n%s", clip_id, cmd[_fc_idx].replace(";", ";\n"))
 
             logger.info("FFmpeg export command for clip %s: %s", clip_id, " ".join(cmd))
             logger.info("FFmpeg filter chain for clip %s: %s", clip_id, vf or "(none)")
