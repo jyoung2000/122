@@ -185,6 +185,15 @@ class TextOverlay(BaseModel):
     opacity: float = 1.0
     fade_in: float = 0.0       # seconds
     fade_out: float = 0.0      # seconds
+    animation: str = "none"
+    text_align: str = "center"
+    shadow_blur: float = 0
+    shadow_color: str = "rgba(0,0,0,0.5)"
+    shadow_offset_x: float = 0
+    shadow_offset_y: float = 0
+    bg_opacity: float = 0
+    bg_padding: float = 8
+    bg_radius: float = 4
 
 
 class ImageOverlay(BaseModel):
