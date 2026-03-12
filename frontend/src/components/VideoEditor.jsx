@@ -248,6 +248,12 @@ export default function VideoEditor({
   const timelineTracks = useTimelineStore((s) => s.tracks);
   const { recovered } = useTimelinePersistence(jobId, clipId);
   const encoding = useEncodingManager();
+  const isEncoding = useMemo(() => {
+    if (!jobId || !clipId) return false;
+    const exportId = `${jobId}_${parseInt(clipId)}`;
+    const task = encoding.tasks[exportId];
+    return task?.status === 'encoding';
+  }, [jobId, clipId, encoding.tasks]);
 
   const handleServerExport = useCallback((payload) => {
     if (jobId && clipId) {
@@ -3169,7 +3175,14 @@ export default function VideoEditor({
 
       {/* ── Multi-Track Editor Panels ── */}
       {showMultiTrack && (
-        <div className="ve-multitrack">
+        <div className="ve-multitrack" style={isEncoding ? { position: 'relative' } : undefined}>
+          {isEncoding && (
+            <div className="ve-multitrack__encoding-overlay">
+              <div className="ve-multitrack__encoding-label">
+                Encoding in progress...
+              </div>
+            </div>
+          )}
           {/* ToolBar */}
           <div className="ve-multitrack__toolbar">
             <ToolBar />
