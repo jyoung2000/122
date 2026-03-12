@@ -3511,11 +3511,14 @@ async def _render_shape_to_png(shape: dict, video_width: int, video_height: int,
     px_w = max(4, int(video_width * w_pct) // 2 * 2)
     px_h = max(4, int(video_height * h_pct) // 2 * 2)
 
-    # stroke_width and corner_radius are in video-resolution pixels (same
-    # coordinate system the frontend Canvas API uses at video_width×video_height).
-    # Convert to int for PIL.
-    stroke_width = max(0, int(round(stroke_width_raw)))
-    corner_radius = max(0, int(round(corner_radius_raw)))
+    # stroke_width and corner_radius are authored in CSS pixels at the DOM
+    # preview resolution, which is typically ~50vh tall (~540px on a 1080p
+    # display).  Scale them to the export video resolution so the visual
+    # proportions in the exported video match what the user sees in the editor.
+    SHAPE_PROPERTY_REF_HEIGHT = 540
+    shape_scale = video_height / SHAPE_PROPERTY_REF_HEIGHT
+    stroke_width = max(0, int(round(stroke_width_raw * shape_scale)))
+    corner_radius = max(0, int(round(corner_radius_raw * shape_scale)))
 
     png_path = os.path.join(output_dir, f"_shape_{idx}.png")
     hex_fill = fill_color.lstrip('#')[:6]

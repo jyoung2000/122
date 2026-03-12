@@ -914,6 +914,12 @@ export default class RenderEngine {
     const dw = (size.w / 100) * width;
     const dh = (size.h / 100) * height;
 
+    // Shape properties (strokeWidth, cornerRadius) are authored in CSS pixels
+    // at the DOM preview resolution (~50vh ≈ 540px height on a 1080p display).
+    // Scale them to the current canvas resolution so exports match the preview.
+    const SHAPE_PROP_REF_H = 540;
+    const shapeScale = height / SHAPE_PROP_REF_H;
+
     ctx.save();
     // Translate to center, apply rotation, then draw relative to center
     ctx.translate(cx, cy);
@@ -921,14 +927,14 @@ export default class RenderEngine {
 
     ctx.fillStyle = style.fillColor || '#FF3B30';
     ctx.strokeStyle = style.strokeColor || '#FFFFFF';
-    ctx.lineWidth = style.strokeWidth || 2;
+    ctx.lineWidth = (style.strokeWidth || 2) * shapeScale;
 
     const shapeType = clip.shapeType || 'rectangle';
 
     switch (shapeType) {
       case 'rectangle':
         ctx.beginPath();
-        ctx.roundRect(-dw / 2, -dh / 2, dw, dh, style.cornerRadius || 0);
+        ctx.roundRect(-dw / 2, -dh / 2, dw, dh, (style.cornerRadius || 0) * shapeScale);
         if (style.fillColor) ctx.fill();
         if (style.strokeWidth > 0) ctx.stroke();
         break;
