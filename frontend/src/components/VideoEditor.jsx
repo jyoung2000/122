@@ -600,8 +600,34 @@ export default function VideoEditor({
     setVideoItemFilter(filters.length ? filters.join(' ') : '');
   }, [videoTimelineItem]);
 
+  // ── Sync a1 audio item → global volume/speed ────────
+  // The a1 audio track item controls the same audio stream as the video.
+  // When the user edits volume/speed on the a1 audio item via the Properties
+  // panel, those changes must override the global volume/speed controls.
+  const a1AudioItem = useMemo(() => {
+    return timelineStoreItems.find(it => it.type === 'audio' && it.trackId === 'a1') || null;
+  }, [timelineStoreItems]);
+
+  useEffect(() => {
+    if (!a1AudioItem) return;
+    // a1 audio volume (0-2 scale) → global volume (0-200 scale)
+    if (a1AudioItem.volume != null) {
+      const vol = Math.round(Math.max(0, Math.min(2, a1AudioItem.volume)) * 100);
+      if (Math.abs(vol - volume) > 1) {
+        setVolume(vol);
+        if (vol === 0) setIsMuted(true);
+        else if (isMuted && vol > 0) setIsMuted(false);
+      }
+    }
+    // a1 audio speed → global speed
+    if (a1AudioItem.speed != null && Math.abs(a1AudioItem.speed - speed) > 0.001) {
+      setSpeed(a1AudioItem.speed);
+      if (videoRef.current) videoRef.current.playbackRate = a1AudioItem.speed;
+    }
+  }, [a1AudioItem]);
+
   // Reverse sync: write VideoEditor volume/speed back to the video timeline item
-  // so the PropertiesPanel stays in sync with the playback controls.
+  // AND the a1 audio item so the PropertiesPanel stays in sync with the playback controls.
   useEffect(() => {
     if (!videoTimelineItem) return;
     const itemVol = videoTimelineItem.volume ?? 1;
@@ -609,7 +635,14 @@ export default function VideoEditor({
     if (Math.abs(itemVol - editorVol) > 0.02) {
       updateTimelineItem(videoTimelineItem.id, { volume: editorVol });
     }
-  }, [volume, videoTimelineItem?.id]);
+    // Also sync to a1 audio item
+    if (a1AudioItem && a1AudioItem.id !== videoTimelineItem.id) {
+      const a1Vol = a1AudioItem.volume ?? 1;
+      if (Math.abs(a1Vol - editorVol) > 0.02) {
+        updateTimelineItem(a1AudioItem.id, { volume: editorVol });
+      }
+    }
+  }, [volume, videoTimelineItem?.id, a1AudioItem?.id]);
 
   useEffect(() => {
     if (!videoTimelineItem) return;
@@ -617,7 +650,14 @@ export default function VideoEditor({
     if (Math.abs(itemSpd - speed) > 0.001) {
       updateTimelineItem(videoTimelineItem.id, { speed });
     }
-  }, [speed, videoTimelineItem?.id]);
+    // Also sync to a1 audio item
+    if (a1AudioItem && a1AudioItem.id !== videoTimelineItem.id) {
+      const a1Spd = a1AudioItem.speed ?? 1;
+      if (Math.abs(a1Spd - speed) > 0.001) {
+        updateTimelineItem(a1AudioItem.id, { speed });
+      }
+    }
+  }, [speed, videoTimelineItem?.id, a1AudioItem?.id]);
 
   // Auto-open properties panel when an item is selected (via viewport or timeline)
   useEffect(() => {

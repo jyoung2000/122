@@ -108,10 +108,16 @@ export default function ExportDialog({
         }
       }
 
-      // Pull volume, speed, trim, segments from timeline store
+      // Pull volume, speed, trim, segments from timeline store.
+      // The a1 audio item and video item properties (set via the Properties panel)
+      // take priority over the store's global volume/speed values.
       const storeState = useTimelineStore.getState();
-      if (storeState.volume !== 100) exportPayload.volume = storeState.volume / 100;
-      if (Math.abs(storeState.speed - 1.0) > 0.001) exportPayload.speed = storeState.speed;
+      const videoItem = storeState.items.find(it => it.type === 'video');
+      const a1AudioItem = storeState.items.find(it => it.type === 'audio' && it.trackId === 'a1');
+      const effectiveVol = a1AudioItem?.volume ?? videoItem?.volume ?? (storeState.volume / 100);
+      const effectiveSpeed = a1AudioItem?.speed ?? videoItem?.speed ?? storeState.speed;
+      if (Math.abs(effectiveVol - 1.0) > 0.001) exportPayload.volume = effectiveVol;
+      if (Math.abs(effectiveSpeed - 1.0) > 0.001) exportPayload.speed = effectiveSpeed;
       if (storeState.trimStartOffset > 0) exportPayload.trim_start_offset = storeState.trimStartOffset;
       if (storeState.trimEndOffset > 0) exportPayload.trim_end_offset = storeState.trimEndOffset;
       if (storeState.segments?.length > 0) {
