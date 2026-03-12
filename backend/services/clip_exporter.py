@@ -3782,6 +3782,66 @@ def _build_image_overlay_data(
             f"scale={scaled_w}:{scaled_h},"
             f"format=rgba"
         )
+
+        # Apply image effects (brightness/contrast/saturation/blur/hue/sepia)
+        img_brightness = overlay.get("brightness", 0)
+        if img_brightness != 0:
+            factor = 1 + img_brightness / 100
+            if factor >= 1.0:
+                inv = 1.0 / factor
+                img_scale += (
+                    f",colorlevels=rimin=0:rimax={inv:.4f}"
+                    f":gimin=0:gimax={inv:.4f}"
+                    f":bimin=0:bimax={inv:.4f}"
+                )
+            else:
+                img_scale += (
+                    f",colorlevels=romin=0:romax={factor:.4f}"
+                    f":gomin=0:gomax={factor:.4f}"
+                    f":bomin=0:bomax={factor:.4f}"
+                )
+
+        img_eq_parts = []
+        img_contrast = overlay.get("contrast", 0)
+        if img_contrast != 0:
+            img_eq_parts.append(f"contrast={1 + img_contrast / 100:.4f}")
+        img_saturation = overlay.get("saturation", 0)
+        if img_saturation != 0:
+            img_eq_parts.append(f"saturation={1 + img_saturation / 100:.4f}")
+        if img_eq_parts:
+            img_scale += f",eq={':'.join(img_eq_parts)}"
+
+        img_hue = overlay.get("hue_rotate", 0)
+        if img_hue != 0:
+            img_scale += f",hue=h={img_hue:.1f}"
+
+        img_blur = overlay.get("blur", 0)
+        if img_blur > 0:
+            ffmpeg_blur = max(1, int(img_blur * 1.5))
+            img_scale += f",boxblur={ffmpeg_blur}:{ffmpeg_blur}"
+
+        img_sepia = overlay.get("sepia", 0)
+        if img_sepia > 0:
+            s = img_sepia / 100.0
+            rr = 1 - s + s * 0.393
+            rg = s * 0.769
+            rb = s * 0.189
+            gr = s * 0.349
+            gg = 1 - s + s * 0.686
+            gb = s * 0.168
+            br = s * 0.272
+            bg_ = s * 0.534
+            bb = 1 - s + s * 0.131
+            img_scale += (
+                f",colorchannelmixer={rr:.3f}:{rg:.3f}:{rb:.3f}:0:"
+                f"{gr:.3f}:{gg:.3f}:{gb:.3f}:0:"
+                f"{br:.3f}:{bg_:.3f}:{bb:.3f}:0"
+            )
+
+        # Need format=rgba again after eq filter since eq outputs yuv
+        if img_eq_parts or img_hue != 0:
+            img_scale += ",format=rgba"
+
         if opacity < 1.0:
             img_scale += f",colorchannelmixer=aa={opacity:.3f}"
         # Apply fade in/out on the image alpha channel

@@ -517,8 +517,8 @@ def generate_ass(
                            "falling back to sharp background box", font)
             _bg_split = False
         else:
-            _bg_draw_pad_h = max(6, round(10 * font_scale))
-            _bg_draw_pad_v = max(3, round(4 * font_scale))
+            _bg_draw_pad_h = max(4, round(7 * font_scale))
+            _bg_draw_pad_v = max(2, round(2 * font_scale))
             _bg_draw_radius = max(1, round(background_radius * font_scale))
 
     # Compute outline/background style settings (same for all speakers)
@@ -631,8 +631,8 @@ def generate_ass(
                            "falling back to sharp active word box", font)
             _aw_bg_split = False
         else:
-            _aw_draw_pad_h = max(4, round(5 * font_scale))
-            _aw_draw_pad_v = max(2, round(3 * font_scale))
+            _aw_draw_pad_h = max(2, round(3 * font_scale))
+            _aw_draw_pad_v = max(1, round(2 * font_scale))
             _aw_draw_radius = max(1, round(active_word_bg_radius * font_scale))
 
     if active_word_enabled and active_word_bg_opacity > 0:

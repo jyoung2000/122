@@ -75,6 +75,7 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
       warnings.push(`Image overlay "${it.id || 'unknown'}" skipped — source not uploaded`);
       continue;
     }
+    const fx = it.effects || {};
     imageOverlays.push({
       item_id: it.id,
       src,
@@ -87,6 +88,12 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
       opacity: it.opacity ?? 1,
       fade_in: it.fadeIn || 0,
       fade_out: it.fadeOut || 0,
+      brightness: fx.brightness || 0,
+      contrast: fx.contrast || 0,
+      saturation: fx.saturation || 0,
+      blur: fx.blur || 0,
+      hue_rotate: fx.hueRotate || 0,
+      sepia: fx.sepia || 0,
     });
   }
 
