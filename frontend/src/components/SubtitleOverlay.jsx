@@ -142,7 +142,13 @@ function splitSegmentsByMaxWords(segments, maxWords) {
       let chunkEnd = ct + chunkDuration;
       if (i + maxWords >= totalWords) chunkEnd = seg.end;
       if (chunkEnd - ct >= 0.1) {
-        result.push({ ...seg, start: ct, end: chunkEnd, subtitleText: chunkWords.join(' '), text: chunkWords.join(' '), speaker: seg.speaker, words: null });
+        // Slice word timestamps instead of discarding them (matches backend logic)
+        let chunkWordTs = null;
+        if (seg.words && Array.isArray(seg.words)) {
+          chunkWordTs = seg.words.slice(i, i + maxWords);
+          if (!chunkWordTs.length) chunkWordTs = null;
+        }
+        result.push({ ...seg, start: ct, end: chunkEnd, subtitleText: chunkWords.join(' '), text: chunkWords.join(' '), speaker: seg.speaker, words: chunkWordTs });
       }
       ct = chunkEnd;
     }
@@ -304,7 +310,20 @@ export default function SubtitleOverlay({
   const relTime = currentTime - clipStart;
   const currentSubtitle = useMemo(() => {
     if (!subtitlesEnabled || clipSegments.length === 0) return null;
-    return clipSegments.find((seg) => seg.start <= relTime && relTime < seg.end) || null;
+    // Direct hit
+    const direct = clipSegments.find((seg) => seg.start <= relTime && relTime < seg.end);
+    if (direct) return direct;
+    // Gap bridging: if we're in a small gap (< 0.5s) between segments,
+    // show the previous segment's text to prevent flashing
+    const MAX_GAP_FILL = 0.5;
+    for (let i = 0; i < clipSegments.length - 1; i++) {
+      const seg = clipSegments[i];
+      const nextSeg = clipSegments[i + 1];
+      if (relTime >= seg.end && relTime < nextSeg.start && (nextSeg.start - seg.end) < MAX_GAP_FILL) {
+        return seg;
+      }
+    }
+    return null;
   }, [subtitlesEnabled, clipSegments, relTime]);
 
   // Find the original timeline item for the current subtitle (for selection)

@@ -101,6 +101,36 @@ def _sanitize_style_name(name: str) -> str:
     return name.replace(",", "_").replace("\\", "_").replace("{", "_").replace("}", "_").strip()
 
 
+def _align_word_timestamps(seg_word_ts, words, clip_start, clip_end):
+    """Best-effort alignment of word timestamps to (possibly edited) text.
+
+    Returns a list of (start, end, word) tuples matching `words`, or None
+    if alignment is impossible (e.g., text was completely rewritten).
+    """
+    if len(seg_word_ts) == len(words):
+        return seg_word_ts  # Exact match — use as-is
+
+    # If counts differ by more than 3, too divergent for positional alignment
+    if abs(len(seg_word_ts) - len(words)) > 3:
+        return None
+
+    # More timestamps than words (user deleted words): sample evenly
+    if len(seg_word_ts) > len(words):
+        step = len(seg_word_ts) / len(words)
+        return [seg_word_ts[min(int(i * step), len(seg_word_ts) - 1)] for i in range(len(words))]
+
+    # Fewer timestamps than words (user added words): split longest-duration entries
+    result = list(seg_word_ts)
+    while len(result) < len(words):
+        max_dur_idx = max(range(len(result)), key=lambda i: result[i][1] - result[i][0])
+        ts = result[max_dur_idx]
+        mid = (ts[0] + ts[1]) / 2
+        result[max_dur_idx] = (ts[0], mid, ts[2])
+        result.insert(max_dur_idx + 1, (mid, ts[1], ''))
+
+    return result[:len(words)]
+
+
 def split_segments_by_max_words(
     segments: list[tuple],
     max_words: int,
@@ -545,12 +575,11 @@ def generate_ass(
                     aw_tags = f"\\c{aw_color}"
                     event_text = f"{bord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
                     pending_word_events.append((clip_start, clip_end, style_name, event_text))
-            elif seg_word_ts and len(seg_word_ts) == len(words):
-                # Real per-word timestamps from Whisper.
-                # 0.18s anticipation compensates for video frame quantization:
-                # at 24fps each frame is ~42ms, so highlighting must shift
-                # earlier to land on the correct visual frame.
-                _WORD_ANTICIPATION_S = 0.18
+            elif seg_word_ts and len(seg_word_ts) > 0 and len(words) > 0 and _align_word_timestamps(seg_word_ts, words, clip_start, clip_end) is not None:
+                # Real per-word timestamps from Whisper (possibly aligned
+                # after minor user edits to subtitle text).
+                seg_word_ts = _align_word_timestamps(seg_word_ts, words, clip_start, clip_end)
+                _WORD_ANTICIPATION_S = 0.05
                 base_color = _hex_to_ass_color(speaker_color_map[speaker])
 
                 # Background mode: ONE Layer 0 event per segment = one
@@ -565,10 +594,8 @@ def generate_ass(
                     w_start = max(w_start - _WORD_ANTICIPATION_S, clip_start)
                     w_end = max(w_end - _WORD_ANTICIPATION_S, w_start + 0.01)
                     w_end = min(w_end, clip_end)
-                    if word_idx == 0:
-                        w_start = clip_start
                     if word_idx == len(words) - 1:
-                        w_end = clip_end
+                        w_end = min(w_end + 0.3, clip_end)
                     if w_end - w_start < 0.01:
                         continue
 
@@ -602,7 +629,7 @@ def generate_ass(
                 # speech rhythm.  Uses punctuation-aware, speaker-rate-scaled
                 # timing that matches the frontend getCurrentWordIndex().
                 _BASE_OVERHEAD_S = 0.04
-                _ANTICIPATION_S = 0.18  # slightly ahead of frontend for frame quantization
+                _ANTICIPATION_S = 0.05  # small perceptual lead; no browser audio lag in FFmpeg export
                 _PUNCT_PAUSE = {
                     ",": 0.15, ";": 0.16, ":": 0.12,
                     ".": 0.22, "!": 0.22, "?": 0.24,
@@ -670,7 +697,7 @@ def generate_ass(
                     word_dur = raw_durations[word_idx]
                     word_end = current_time + word_dur
                     if word_idx == len(words) - 1:
-                        word_end = clip_end
+                        word_end = min(current_time + word_dur + 0.3, clip_end)
                     if word_end - current_time < 0.01:
                         current_time = word_end
                         continue
@@ -834,8 +861,22 @@ def generate_ass(
                 # at that centisecond — clamp to eliminate.
                 layer_evs[i] = (layer, s, ns, st, tx)
 
+        # Merge sub-centisecond events into their predecessor instead of
+        # silently dropping them — ensures every word gets highlighted.
+        final_layer_evs = []
+        for ev in layer_evs:
+            layer_num, ev_s, ev_e, ev_st, ev_tx = ev
+            dur_cs = _to_cs(ev_e) - _to_cs(ev_s)
+            if dur_cs >= 1:
+                final_layer_evs.append(ev)
+            elif final_layer_evs:
+                # Merge into previous event: extend its end and use this
+                # event's text (which has the current word highlighted).
+                prev = final_layer_evs[-1]
+                final_layer_evs[-1] = (prev[0], prev[1], ev_e, prev[3], ev_tx)
+
         # Emit events to ASS output
-        for _, ev_s, ev_e, ev_st, ev_tx in layer_evs:
+        for _, ev_s, ev_e, ev_st, ev_tx in final_layer_evs:
             if _to_cs(ev_e) - _to_cs(ev_s) >= 1:  # at least 1 centisecond
                 lines.append(
                     f"Dialogue: {layer},{_format_ass_time(ev_s)},"
