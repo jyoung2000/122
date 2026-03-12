@@ -3517,57 +3517,55 @@ async def _render_shape_to_png(shape: dict, video_width: int, video_height: int,
     h_pct = shape.get("height", 20) / 100.0
     fill_color = shape.get("fill_color", "#FF3B30")
     stroke_color = shape.get("stroke_color", "#FFFFFF")
-    stroke_width = shape.get("stroke_width", 2)
-    corner_radius = shape.get("corner_radius", 0)
+    stroke_width_raw = shape.get("stroke_width", 2)
+    corner_radius_raw = shape.get("corner_radius", 0)
 
     # Compute pixel dimensions (even numbers for FFmpeg compatibility)
     px_w = max(4, int(video_width * w_pct) // 2 * 2)
     px_h = max(4, int(video_height * h_pct) // 2 * 2)
+
+    # stroke_width and corner_radius are in video-resolution pixels (same
+    # coordinate system the frontend Canvas API uses at video_width×video_height).
+    # Convert to int for PIL.
+    stroke_width = max(0, int(round(stroke_width_raw)))
+    corner_radius = max(0, int(round(corner_radius_raw)))
 
     png_path = os.path.join(output_dir, f"_shape_{idx}.png")
     hex_fill = fill_color.lstrip('#')[:6]
     hex_stroke = stroke_color.lstrip('#')[:6]
 
     try:
-        # Rounded rectangles: use PIL since FFmpeg drawbox doesn't support border-radius
-        if shape_type == "rectangle" and corner_radius > 0:
-            try:
-                from PIL import Image, ImageDraw
-                # Scale corner_radius from CSS pixels to actual pixels
-                # corner_radius is in CSS-like units relative to the element size
-                radius = int(corner_radius * min(px_w, px_h) / 100) if corner_radius > 1 else corner_radius
-                # If corner_radius looks like an absolute pixel value (> 1), use as-is
-                # scaled to the output resolution
-                if corner_radius > 1:
-                    radius = int(corner_radius * (px_w / (video_width * w_pct)) if video_width * w_pct > 0 else corner_radius)
-                radius = max(0, min(radius, min(px_w, px_h) // 2))
+        # Rectangles: always use PIL for consistent rounded corners + stroke
+        if shape_type == "rectangle":
+            from PIL import Image, ImageDraw
+            # corner_radius is already in video pixels — clamp to half the
+            # shortest side so Pillow doesn't error out.
+            radius = min(corner_radius, min(px_w, px_h) // 2)
 
-                img = Image.new("RGBA", (px_w, px_h), (0, 0, 0, 0))
-                draw = ImageDraw.Draw(img)
-                fill_rgb = tuple(int(hex_fill[i:i+2], 16) for i in (0, 2, 4)) + (255,)
-                if stroke_width > 0:
-                    stroke_rgb = tuple(int(hex_stroke[i:i+2], 16) for i in (0, 2, 4)) + (255,)
-                    draw.rounded_rectangle(
-                        [0, 0, px_w - 1, px_h - 1],
-                        radius=radius,
-                        fill=fill_rgb,
-                        outline=stroke_rgb,
-                        width=stroke_width,
-                    )
-                else:
-                    draw.rounded_rectangle(
-                        [0, 0, px_w - 1, px_h - 1],
-                        radius=radius,
-                        fill=fill_rgb,
-                    )
-                img.save(png_path, "PNG")
-                if os.path.isfile(png_path) and os.path.getsize(png_path) > 0:
-                    logger.info("Rendered rounded rect shape %d to %s (%dx%d, radius=%d)", idx, png_path, px_w, px_h, radius)
-                    return png_path
-                return None
-            except Exception as e:
-                logger.warning("PIL rounded rect failed for shape %d, falling back to FFmpeg: %s", idx, e)
-                # Fall through to FFmpeg drawbox (no rounded corners)
+            img = Image.new("RGBA", (px_w, px_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            fill_rgb = tuple(int(hex_fill[i:i+2], 16) for i in (0, 2, 4)) + (255,)
+            if stroke_width > 0:
+                stroke_rgb = tuple(int(hex_stroke[i:i+2], 16) for i in (0, 2, 4)) + (255,)
+                draw.rounded_rectangle(
+                    [0, 0, px_w - 1, px_h - 1],
+                    radius=radius,
+                    fill=fill_rgb,
+                    outline=stroke_rgb,
+                    width=stroke_width,
+                )
+            else:
+                draw.rounded_rectangle(
+                    [0, 0, px_w - 1, px_h - 1],
+                    radius=radius,
+                    fill=fill_rgb,
+                )
+            img.save(png_path, "PNG")
+            if os.path.isfile(png_path) and os.path.getsize(png_path) > 0:
+                logger.info("Rendered rect shape %d to %s (%dx%d, radius=%d, stroke=%d)",
+                            idx, png_path, px_w, px_h, radius, stroke_width)
+                return png_path
+            return None
 
         # Use FFmpeg lavfi to generate shape PNGs directly (no SVG dependency)
         if shape_type in ("circle", "ellipse"):
@@ -3601,35 +3599,24 @@ async def _render_shape_to_png(shape: dict, video_width: int, video_height: int,
                 png_path,
             ]
         else:
-            # Rectangle, line, arrow — use simple colored rectangle with optional border
-            # For rectangles: fill + drawbox border
-            if shape_type in ("rectangle", "arrow", "line"):
-                if stroke_width > 0:
-                    vf = (
-                        f"drawbox=x=0:y=0:w={px_w}:h={px_h}:c=0x{hex_stroke}@1:t=fill,"
-                        f"drawbox=x={stroke_width}:y={stroke_width}"
-                        f":w={max(2,px_w-stroke_width*2)}:h={max(2,px_h-stroke_width*2)}"
-                        f":c=0x{hex_fill}@1:t=fill"
-                    )
-                else:
-                    vf = f"drawbox=x=0:y=0:w={px_w}:h={px_h}:c=0x{hex_fill}@1:t=fill"
-                cmd = [
-                    "ffmpeg", "-y", "-f", "lavfi",
-                    "-i", f"color=c=0x{hex_fill}@1:s={px_w}x{px_h}:d=1,format=rgba",
-                    "-vf", vf,
-                    "-frames:v", "1",
-                    "-update", "1",
-                    png_path,
-                ]
+            # Arrow, line, or unknown — simple colored rectangle with optional border
+            if stroke_width > 0:
+                vf = (
+                    f"drawbox=x=0:y=0:w={px_w}:h={px_h}:c=0x{hex_stroke}@1:t=fill,"
+                    f"drawbox=x={stroke_width}:y={stroke_width}"
+                    f":w={max(2,px_w-stroke_width*2)}:h={max(2,px_h-stroke_width*2)}"
+                    f":c=0x{hex_fill}@1:t=fill"
+                )
             else:
-                # Fallback: solid color rectangle
-                cmd = [
-                    "ffmpeg", "-y", "-f", "lavfi",
-                    "-i", f"color=c=0x{hex_fill}@1:s={px_w}x{px_h}:d=1,format=rgba",
-                    "-frames:v", "1",
-                    "-update", "1",
-                    png_path,
-                ]
+                vf = f"drawbox=x=0:y=0:w={px_w}:h={px_h}:c=0x{hex_fill}@1:t=fill"
+            cmd = [
+                "ffmpeg", "-y", "-f", "lavfi",
+                "-i", f"color=c=0x{hex_fill}@1:s={px_w}x{px_h}:d=1,format=rgba",
+                "-vf", vf,
+                "-frames:v", "1",
+                "-update", "1",
+                png_path,
+            ]
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
