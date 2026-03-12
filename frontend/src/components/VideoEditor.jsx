@@ -234,7 +234,11 @@ export default function VideoEditor({
   const { isMobile } = useResponsive();
 
   // ── Multi-track editor state ──────────────────────
-  const [showMultiTrack, setShowMultiTrack] = useState(false);
+  // Default to open on desktop so multi-track edits are immediately visible
+  const [showMultiTrack, setShowMultiTrack] = useState(() => {
+    const w = typeof window !== 'undefined' ? window.innerWidth : 1024;
+    return w >= 1024;
+  });
   const [showMediaLibrary, setShowMediaLibrary] = useState(false);
   const [showProperties, setShowProperties] = useState(false);
   const [showExportDialog, setShowExportDialog] = useState(false);
@@ -538,17 +542,15 @@ export default function VideoEditor({
 
   // Check if the video track is hidden (for preview visibility)
   const videoTrackHidden = useMemo(() => {
-    if (!showMultiTrack) return false;
     const videoTrack = timelineTracks.find((t) => t.type === 'video');
     return videoTrack?.visible === false;
-  }, [showMultiTrack, timelineTracks]);
+  }, [timelineTracks]);
 
   // Check if audio tracks are muted (for preview audio)
   const audioTrackMuted = useMemo(() => {
-    if (!showMultiTrack) return false;
     const audioTracks = timelineTracks.filter((t) => t.type === 'audio');
     return audioTracks.length > 0 && audioTracks.every((t) => t.muted === true);
-  }, [showMultiTrack, timelineTracks]);
+  }, [timelineTracks]);
 
   // Sync video timeline item properties → actual video element
   // Find the video item at the current playhead (not just the first one)
@@ -2206,13 +2208,12 @@ export default function VideoEditor({
           })()}
         />
 
-        {/* Multi-track timeline overlay: text, shapes, images */}
-        {showMultiTrack && (
-          <TimelineOverlay
-            currentTime={currentTime - clipStart}
-            clipStart={clipStart}
-          />
-        )}
+        {/* Multi-track timeline overlay: text, shapes, images — always rendered
+            so edits remain visible even when the multi-track editor panel is closed */}
+        <TimelineOverlay
+          currentTime={currentTime - clipStart}
+          clipStart={clipStart}
+        />
 
         {/* Subtitle overlay renders AFTER timeline overlays so subtitles
             (which default to the topmost track) appear on top of shapes,
