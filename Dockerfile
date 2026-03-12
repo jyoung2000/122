@@ -53,18 +53,6 @@ RUN mkdir -p /usr/share/fonts/truetype/google-fonts && \
     curl -fsSL -o BebasNeue-Regular.ttf "https://github.com/google/fonts/raw/main/ofl/bebasneue/BebasNeue-Regular.ttf" && \
     fc-cache -f -v
 
-# Download static bold variants for fonts that only have variable-weight files
-# (FFmpeg drawtext cannot select weights from variable fonts)
-RUN cd /usr/share/fonts/truetype/google-fonts && \
-    curl -fsSL -o Montserrat-Bold.ttf "https://github.com/google/fonts/raw/main/ofl/montserrat/static/Montserrat-Bold.ttf" && \
-    curl -fsSL -o OpenSans-Bold.ttf "https://github.com/google/fonts/raw/main/ofl/opensans/static/OpenSans-Bold.ttf" && \
-    curl -fsSL -o Roboto-Bold.ttf "https://github.com/google/fonts/raw/main/ofl/roboto/static/Roboto-Bold.ttf" && \
-    curl -fsSL -o Inter-Bold.ttf "https://github.com/google/fonts/raw/main/ofl/inter/static/Inter_18pt-Bold.ttf" && \
-    curl -fsSL -o Nunito-Bold.ttf "https://github.com/google/fonts/raw/main/ofl/nunito/static/Nunito-Bold.ttf" && \
-    curl -fsSL -o Oswald-Bold.ttf "https://github.com/google/fonts/raw/main/ofl/oswald/static/Oswald-Bold.ttf" && \
-    curl -fsSL -o PlayfairDisplay-Bold.ttf "https://github.com/google/fonts/raw/main/ofl/playfairdisplay/static/PlayfairDisplay-Bold.ttf" && \
-    fc-cache -f -v
-
 # Register /data/fonts with fontconfig so libass picks up custom fonts
 RUN mkdir -p /data/fonts && \
     echo '<?xml version="1.0"?>\n<!DOCTYPE fontconfig SYSTEM "fonts.dtd">\n<fontconfig><dir>/data/fonts</dir></fontconfig>' \
