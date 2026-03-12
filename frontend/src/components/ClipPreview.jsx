@@ -856,6 +856,7 @@ export default function ClipPreview({
                   // Backend: max(int(4 * font_scale), 2) — use Math.floor to
                   // match Python int() truncation.
                   padding: `${Math.max(1, Math.max(Math.floor(4 * backendFontScale), 2) * subtitleScale)}px`,
+                  borderRadius: `${(subtitleSettings?.subtitleBgRadius ?? 0) * subtitleScale}px`,
                 }
               : {}),
           }}

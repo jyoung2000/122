@@ -677,6 +677,7 @@ export default function SubtitleOverlay({
               ...(bgEnabled ? {
                 background: hexToRgba(bgColor, bgOpacity / 100),
                 padding: `${Math.max(1, Math.max(Math.floor(4 * backendFontScale), 2) * subtitleScale)}px`,
+                borderRadius: `${(settings.subtitleBgRadius ?? 0) * subtitleScale}px`,
               } : {}),
               ...(isSubtitleSelected ? {
                 outline: '2px solid #0A84FF',
