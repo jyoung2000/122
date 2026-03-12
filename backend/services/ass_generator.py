@@ -74,6 +74,29 @@ def _ass_rounded_rect(w: int, h: int, r: int) -> str:
     )
 
 
+def _ass_rounded_rect_abs(x: int, y: int, w: int, h: int, r: int) -> str:
+    """Generate ASS drawing commands for a rounded rectangle at absolute coords.
+
+    Used for \\clip(1, drawing) tags where coordinates are in PlayRes units.
+    """
+    r = min(r, min(w, h) // 2)
+    if r <= 0:
+        return f"m {x} {y} l {x + w} {y} {x + w} {y + h} {x} {y + h}"
+    k = 0.5523
+    kr = round(r * k)
+    return (
+        f"m {x + r} {y} "
+        f"l {x + w - r} {y} "
+        f"b {x + w - r + kr} {y} {x + w} {y + r - kr} {x + w} {y + r} "
+        f"l {x + w} {y + h - r} "
+        f"b {x + w} {y + h - r + kr} {x + w - r + kr} {y + h} {x + w - r} {y + h} "
+        f"l {x + r} {y + h} "
+        f"b {x + r - kr} {y + h} {x} {y + h - r + kr} {x} {y + h - r} "
+        f"l {x} {y + r} "
+        f"b {x} {y + r - kr} {x + r - kr} {y} {x + r} {y}"
+    )
+
+
 FONT_SIZE_MAP = {
     "small": 22,
     "medium": 30,
@@ -494,24 +517,15 @@ def generate_ass(
                            "falling back to sharp subtitle background box", font)
 
     if background_enabled:
-        if _bg_split:
-            # Rounded corners: base style renders text only (no box).
-            # Drawing events on a lower layer handle the rounded rectangle.
-            style_outline_color = "&HFF000000&"  # transparent — no outline in base style
-            back_color_ass = "&HFF000000&"  # transparent
-            border_style = 1
-            ol_width = 0
-            shadow_depth = 0
-        else:
-            # BorderStyle=3: OutlineColour = box color, BackColour = shadow behind box.
-            # With Shadow=0, BackColour should be invisible but some libass builds
-            # still composite it at offset (0,0), doubling the box opacity.
-            # Fix: keep BackColour fully transparent so only OutlineColour renders.
-            style_outline_color = _hex_to_ass_color_with_alpha(background_color, background_opacity)
-            back_color_ass = "&HFF000000&"  # fully transparent — no shadow needed
-            border_style = 3
-            ol_width = max(int(4 * font_scale), 2)  # minimum padding for the box
-            shadow_depth = 0
+        # BorderStyle=3: OutlineColour = box color, BackColour = shadow behind box.
+        # With Shadow=0, BackColour should be invisible but some libass builds
+        # still composite it at offset (0,0), doubling the box opacity.
+        # Fix: keep BackColour fully transparent so only OutlineColour renders.
+        style_outline_color = _hex_to_ass_color_with_alpha(background_color, background_opacity)
+        back_color_ass = "&HFF000000&"  # fully transparent — no shadow needed
+        border_style = 3
+        ol_width = max(int(4 * font_scale), 2)  # minimum padding for the box
+        shadow_depth = 0
     else:
         style_outline_color = _hex_to_ass_color_with_alpha(outline_color, outline_opacity)
         back_color_ass = "&H80000000&"  # shadow color (semi-transparent black)
@@ -623,15 +637,6 @@ def generate_ass(
     if _aw_bg_split:
         lines.append(
             "Style: AWDRAW,Arial,64,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,"
-            "0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1"
-        )
-
-    # BGDRAW style for subtitle background rounded-rect drawing events.
-    # Same approach as AWDRAW: font_size=64 for 1:1 pixel coordinates,
-    # alignment 7 (top-left) for absolute positioning.
-    if _bg_split:
-        lines.append(
-            "Style: BGDRAW,Arial,64,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,"
             "0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1"
         )
 
@@ -995,32 +1000,32 @@ def generate_ass(
                 # Small gap: extend to fill — keeps text visible between segments
                 base_text_events[i] = (ev_start, next_start, ev_style, ev_text)
 
-    # --- Generate subtitle background rounded-rect drawing events ---
-    # When _bg_split is active, create drawing events for each base text event
-    # that render a rounded rectangle behind the subtitle text.
-    pending_bg_draw_events: list[tuple[float, float, str, str]] = []
+    # --- Apply rounded-corner \clip to subtitle background box ---
+    # When _bg_split is active, add \clip(1, rounded_rect) to each base text
+    # event (and _OL overlay event) to clip the BorderStyle=3 box to a rounded
+    # rectangle shape.  If libass supports \clip with drawing commands, the box
+    # gets rounded corners.  If not, the box renders with sharp corners as a
+    # graceful fallback (BorderStyle=3 still works without the clip).
     if _bg_split and _bg_font_path:
         import re as _re
-        _bg_draw_color = _hex_to_ass_color(background_color)
-        _bg_alpha_byte = 255 - max(0, min(255, int(background_opacity / 100 * 255)))
-        _bg_draw_alpha = f"&H{_bg_alpha_byte:02X}&"
         max_text_width = video_width - 2 * margin_h
+        _bg_clip_count = 0
 
+        new_base_events = []
         for ev_start, ev_end, ev_style, ev_text in base_text_events:
-            # Strip ASS override tags to get plain text for measurement
             plain_text = _re.sub(r'\{[^}]*\}', '', ev_text)
             if not plain_text.strip():
+                new_base_events.append((ev_start, ev_end, ev_style, ev_text))
                 continue
 
             text_m = _measure_text(plain_text, _bg_font_path, size_px)
             if not text_m:
+                new_base_events.append((ev_start, ev_end, ev_style, ev_text))
                 continue
 
             text_w = text_m[0]
-            line_h = text_m[1] + text_m[2]  # ascent + descent
+            line_h = text_m[1] + text_m[2]
 
-            # Handle multi-line wrapping: if measured width exceeds available
-            # space, estimate line count and use max width for the rectangle.
             if max_text_width > 0 and text_w > max_text_width:
                 import math
                 num_lines = max(1, math.ceil(text_w / max_text_width))
@@ -1031,31 +1036,36 @@ def generate_ass(
 
             total_h = round(line_h * num_lines)
 
-            # Rectangle dimensions with padding
-            draw_w = round(rect_w + 2 * _bg_draw_pad_h)
-            draw_h = round(total_h + 2 * _bg_draw_pad_v)
-
-            # Horizontal: center on screen
-            draw_x = round((video_width - draw_w) / 2)
-
-            # Vertical position: alignment is always 2 (bottom-center) in
-            # this generator.  MarginV measures from the bottom edge.
+            # The box (BorderStyle=3) extends ol_width pixels beyond the text.
+            # The clip area should match the box area with rounded corners.
+            # Add a small extra margin (2px) to avoid clipping text at corners.
+            clip_pad = ol_width + 2
+            clip_w = round(rect_w + 2 * clip_pad)
+            clip_h = round(total_h + 2 * clip_pad)
+            clip_x = round((video_width - clip_w) / 2)
+            # alignment=2 (bottom-center): text bottom at video_height - margin_v
             text_top_y = video_height - margin_v - total_h
-            draw_y = round(text_top_y - _bg_draw_pad_v)
+            clip_y = round(text_top_y - clip_pad)
 
-            drawing = _ass_rounded_rect(draw_w, draw_h, _bg_draw_radius)
-            event_text = (
-                f"{{\\an7\\pos({draw_x},{draw_y})"
-                f"\\p1\\c{_bg_draw_color}\\1a{_bg_draw_alpha}"
-                f"\\bord0\\shad0}}{drawing}"
-            )
-            pending_bg_draw_events.append((ev_start, ev_end, "BGDRAW", event_text))
+            clip_drawing = _ass_rounded_rect_abs(clip_x, clip_y, clip_w, clip_h, _bg_draw_radius)
+            clip_tag = f"\\clip(1,{clip_drawing})"
+
+            # Prepend \clip to the event text
+            if ev_text.startswith("{"):
+                # Insert clip tag into existing override block
+                clipped_text = "{" + clip_tag + ev_text[1:]
+            else:
+                clipped_text = "{" + clip_tag + "}" + ev_text
+
+            new_base_events.append((ev_start, ev_end, ev_style, clipped_text))
+            _bg_clip_count += 1
+
+        base_text_events[:] = new_base_events
 
         logger.info(
-            "BGDRAW: generated %d rounded-rect drawing events "
-            "(radius=%dpx, pad=%dx%d, font=%s)",
-            len(pending_bg_draw_events), _bg_draw_radius,
-            _bg_draw_pad_h, _bg_draw_pad_v, _bg_font_path,
+            "BG_CLIP: applied \\clip to %d base text events "
+            "(radius=%dpx, font=%s)",
+            _bg_clip_count, _bg_draw_radius, _bg_font_path,
         )
 
     # --- Per-word color events (active word mode, Layer 1) ---
@@ -1203,30 +1213,22 @@ def generate_ass(
 
     # Collect all events as (layer, start, end, style, text) tuples.
     # Layer ordering (lower = renders first / behind):
-    #   Layer 0: bg drawing events (when _bg_split, rounded-rect subtitle backgrounds)
-    #   Layer N: base text events (border layer, uniform color)
-    #   Layer N+1: outline overlay events (when bg + outline both enabled)
-    #   Layer N+2: aw drawing events (when _aw_bg_split, rounded-rect word backgrounds)
-    #   Layer N+3: active word color events (topmost, sharp text)
+    #   Layer 0: base text events (border layer, uniform color; may have \clip for rounded bg)
+    #   Layer 1: outline overlay events (when bg + outline both enabled)
+    #   Layer N: drawing events (when _aw_bg_split, rounded-rect word backgrounds)
+    #   Layer N+1: active word color events (topmost, sharp text)
     all_events: list[tuple[int, float, float, str, str]] = []
-    current_layer = 0
-    if pending_bg_draw_events:
-        for ev in pending_bg_draw_events:
-            all_events.append((current_layer, ev[0], ev[1], ev[2], ev[3]))
-        current_layer += 1
     for ev in base_text_events:
-        all_events.append((current_layer, ev[0], ev[1], ev[2], ev[3]))
-    if outline_overlay_events:
-        current_layer += 1
-        for ev in outline_overlay_events:
-            all_events.append((current_layer, ev[0], ev[1], ev[2], ev[3]))
-    current_layer += 1
+        all_events.append((0, ev[0], ev[1], ev[2], ev[3]))
+    for ev in outline_overlay_events:
+        all_events.append((1, ev[0], ev[1], ev[2], ev[3]))
+    next_layer = 2 if bg_has_outline else 1
     if pending_box_events:
         for ev in pending_box_events:
-            all_events.append((current_layer, ev[0], ev[1], ev[2], ev[3]))
-        current_layer += 1
+            all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
+        next_layer += 1
     for ev in pending_word_events:
-        all_events.append((current_layer, ev[0], ev[1], ev[2], ev[3]))
+        all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
 
     # Process each layer independently.
     _max_layer = max((e[0] for e in all_events), default=0)
@@ -1277,16 +1279,16 @@ def generate_ass(
 
     logger.info(
         "ASS generated: font=%s size=%s(%dpx) weight=%s color=%s pos=%s "
-        "bg=%s bg_radius=%d bg_split=%s outline=%dpx speakers=%d segments=%d "
+        "bg=%s bg_radius=%d bg_clip=%s outline=%dpx speakers=%d segments=%d "
         "active_word=%s aw_bg_opacity=%d aw_bg_radius=%d aw_bg_split=%s "
-        "bg_draw_events=%d box_events=%d word_events=%d max_words=%d res=%dx%d",
+        "box_events=%d word_events=%d max_words=%d res=%dx%d",
         font, font_size, size_px, font_weight, font_color, position,
         f"yes({background_color}@{background_opacity}%)" if background_enabled else "no",
         background_radius, _bg_split,
         ol_width, len(speakers_seen), len(clip_segments),
         "yes" if active_word_enabled else "no",
         active_word_bg_opacity, active_word_bg_radius, _aw_bg_split,
-        len(pending_bg_draw_events), len(pending_box_events), len(pending_word_events),
+        len(pending_box_events), len(pending_word_events),
         max_words, video_width, video_height,
     )
 
