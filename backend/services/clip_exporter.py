@@ -3201,6 +3201,13 @@ _FONT_BOLD_MAP: dict[str, str] = {
     "Poppins": "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf",
     "Lato": "/usr/share/fonts/truetype/google-fonts/Lato-Bold.ttf",
     "Bebas Neue": "/usr/share/fonts/truetype/google-fonts/BebasNeue-Regular.ttf",
+    "Montserrat": "/usr/share/fonts/truetype/google-fonts/Montserrat-Bold.ttf",
+    "Open Sans": "/usr/share/fonts/truetype/google-fonts/OpenSans-Bold.ttf",
+    "Roboto": "/usr/share/fonts/truetype/google-fonts/Roboto-Bold.ttf",
+    "Inter": "/usr/share/fonts/truetype/google-fonts/Inter-Bold.ttf",
+    "Nunito": "/usr/share/fonts/truetype/google-fonts/Nunito-Bold.ttf",
+    "Oswald": "/usr/share/fonts/truetype/google-fonts/Oswald-Bold.ttf",
+    "Playfair Display": "/usr/share/fonts/truetype/google-fonts/PlayfairDisplay-Bold.ttf",
     "Arial": "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "Helvetica": "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "Times New Roman": "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
@@ -3208,6 +3215,24 @@ _FONT_BOLD_MAP: dict[str, str] = {
 }
 _DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 _CUSTOM_FONTS_DIR = "/data/fonts"
+
+# Cache for fc-query font family name lookups (avoids repeated subprocess calls)
+_fc_query_cache: dict[str, str | None] = {}
+
+
+def _font_family_name_cached(font_path: str) -> str | None:
+    """Extract the internal font family name via fc-query, with caching."""
+    if font_path not in _fc_query_cache:
+        try:
+            result = subprocess.run(
+                ["fc-query", "--format", "%{family}", font_path],
+                capture_output=True, text=True, timeout=5,
+            )
+            name = result.stdout.strip().split(",")[0].strip() if result.returncode == 0 else None
+            _fc_query_cache[font_path] = name if name else None
+        except Exception:
+            _fc_query_cache[font_path] = None
+    return _fc_query_cache[font_path]
 
 
 def _resolve_font_path(font_family: str, font_weight: int = 400) -> str:
@@ -3245,24 +3270,31 @@ def _resolve_font_path(font_family: str, font_weight: int = 400) -> str:
     # Also check job-specific font uploads if job_id context is available
     for fdir in _font_search_dirs:
         if os.path.isdir(fdir):
-            normalized_family = font_family.lower().replace(" ", "")
+            normalized_family = font_family.lower().replace(" ", "").replace("-", "")
             for fname in os.listdir(fdir):
+                fpath = os.path.join(fdir, fname)
+                if not os.path.isfile(fpath):
+                    continue
+                ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+                if ext not in ("ttf", "otf"):
+                    continue
                 base = os.path.splitext(fname)[0]
-                # Match by normalized name (case-insensitive, no spaces)
-                if base.lower().replace(" ", "") == normalized_family:
-                    fpath = os.path.join(fdir, fname)
-                    if os.path.isfile(fpath):
-                        logger.info("Custom font resolved: '%s' → %s", font_family, fpath)
-                        return fpath
-                # Also match bold variants: "FontName-Bold" or "FontNameBold"
+                base_normalized = base.lower().replace(" ", "").replace("-", "")
+                # Strategy 1: filename-based match (fast)
+                if base_normalized == normalized_family:
+                    logger.info("Custom font resolved via filename: '%s' → %s", font_family, fpath)
+                    return fpath
+                # Strategy 2: fc-query family name match (authoritative)
+                actual_family = _font_family_name_cached(fpath)
+                if actual_family and actual_family.lower().replace(" ", "").replace("-", "") == normalized_family:
+                    logger.info("Custom font resolved via fc-query: '%s' → %s", font_family, fpath)
+                    return fpath
+                # Strategy 3: bold variant matching
                 if is_bold and (
-                    base.lower().replace(" ", "") == f"{normalized_family}-bold"
-                    or base.lower().replace(" ", "") == f"{normalized_family}bold"
+                    base_normalized == f"{normalized_family}bold"
                 ):
-                    fpath = os.path.join(fdir, fname)
-                    if os.path.isfile(fpath):
-                        logger.info("Custom bold font resolved: '%s' (weight=%d) → %s", font_family, font_weight, fpath)
-                        return fpath
+                    logger.info("Custom bold font resolved: '%s' (weight=%d) → %s", font_family, font_weight, fpath)
+                    return fpath
     logger.warning(
         "Font '%s' (weight=%d) not found in built-in maps or custom dirs (%s) — "
         "falling back to default: %s",
@@ -3364,10 +3396,19 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
                 f",{font_size})"
             )
 
+        # Text alignment — adjust x expression
+        text_align = overlay.get("text_align", "center")
+        if text_align == "left":
+            x_expr = f"w*{x_pct:.4f}"
+        elif text_align == "right":
+            x_expr = f"w*{x_pct:.4f}-tw"
+        else:
+            x_expr = f"w*{x_pct:.4f}-tw/2"
+
         # Build drawtext with enable expression for timing
         dt = (
             f"drawtext=text='{text}'"
-            f":x=w*{x_pct:.4f}-tw/2"
+            f":x={x_expr}"
             f":y={y_expr}"
             f":fontsize='{fontsize_expr}'"
             f":fontcolor={font_color}"
@@ -3376,9 +3417,37 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
         )
         if outline_width > 0:
             dt += f":borderw={outline_width}:bordercolor={outline_color}"
+
+        # Shadow support (FFmpeg drawtext shadowcolor/shadowx/shadowy)
+        shadow_x = overlay.get("shadow_offset_x", 0)
+        shadow_y = overlay.get("shadow_offset_y", 0)
+        shadow_color = overlay.get("shadow_color", "")
+        if shadow_x or shadow_y or shadow_color:
+            # Parse rgba() or hex shadow color to hex for FFmpeg
+            hex_shadow = "#000000"
+            if shadow_color.startswith("rgba("):
+                parts_c = shadow_color.replace("rgba(", "").replace(")", "").split(",")
+                if len(parts_c) >= 3:
+                    try:
+                        hex_shadow = "#{:02x}{:02x}{:02x}".format(
+                            int(parts_c[0].strip()), int(parts_c[1].strip()), int(parts_c[2].strip())
+                        )
+                    except ValueError:
+                        pass
+            elif shadow_color.startswith("#"):
+                hex_shadow = shadow_color
+            dt += f":shadowcolor={hex_shadow}:shadowx={int(shadow_x)}:shadowy={int(shadow_y)}"
+
+        # Background box with proper opacity and padding
         bg_color = overlay.get("background_color")
-        if bg_color:
-            dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw=5"
+        bg_opacity_pct = overlay.get("bg_opacity", 0)
+        bg_padding = overlay.get("bg_padding", 8)
+        if bg_color and bg_opacity_pct > 0:
+            bg_alpha = bg_opacity_pct / 100.0
+            dt += f":box=1:boxcolor={bg_color}@{bg_alpha:.2f}:boxborderw={bg_padding}"
+        elif bg_color:
+            dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw={bg_padding}"
+
         if end_t > start_t:
             dt += f":enable='between(t,{safe_start:.3f},{end_t:.3f})'"
         parts.append(dt)

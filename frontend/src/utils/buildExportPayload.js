@@ -49,6 +49,15 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
     opacity: it.opacity ?? 1,
     fade_in: it.fadeIn || 0,
     fade_out: it.fadeOut || 0,
+    animation: it.textStyle?.animation || 'none',
+    text_align: it.textStyle?.textAlign || 'center',
+    shadow_blur: it.textStyle?.shadowBlur || 0,
+    shadow_color: it.textStyle?.shadowColor || 'rgba(0,0,0,0.5)',
+    shadow_offset_x: it.textStyle?.shadowOffsetX || 0,
+    shadow_offset_y: it.textStyle?.shadowOffsetY || 0,
+    bg_opacity: it.textStyle?.bgOpacity ?? 0,
+    bg_padding: it.textStyle?.bgPadding ?? 8,
+    bg_radius: it.textStyle?.bgRadius ?? 4,
   }));
 
   // ── Image overlays ──

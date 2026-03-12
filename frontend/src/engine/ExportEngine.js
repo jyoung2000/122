@@ -300,16 +300,25 @@ export default class ExportEngine {
         hardwareAcceleration: 'prefer-hardware',
       });
 
-      // Pre-load fonts for subtitle and all text overlay clips
-      const subSettings = settings?.subtitle || settings || {};
-      const subFont = subSettings.subtitleFont || 'DM Sans';
-      await this.renderEngine.loadFont(subFont);
-      const textFonts = new Set(
-        clips.filter(c => c.type === 'text' && c.textStyle?.fontFamily)
-          .map(c => c.textStyle.fontFamily)
-      );
-      for (const fn of textFonts) {
-        await this.renderEngine.loadFont(fn);
+      // Pre-load all fonts at correct weights before rendering begins
+      await this.renderEngine.ensureFontsLoaded(clips, settings);
+
+      // Verify each font is usable at the weight we need
+      for (const clip of clips) {
+        if (clip.type === 'text') {
+          const fn = clip.textStyle?.fontFamily;
+          const fw = clip.textStyle?.fontWeight || 400;
+          if (fn) {
+            const fontString = `${fw} 48px "${fn}"`;
+            if (!document.fonts.check(fontString)) {
+              console.warn(`[ExportEngine] Font not available for canvas: ${fontString}, retrying...`);
+              try {
+                await this.renderEngine.loadFont(fn, null, fw);
+                await document.fonts.ready;
+              } catch { /* best effort */ }
+            }
+          }
+        }
       }
 
       // Step through time and encode each frame

@@ -23,6 +23,22 @@ const BUILTIN_FONT_FILES = {
   'Liberation Sans': '/api/fonts/builtin/LiberationSans-Regular.ttf',
 };
 
+// Bold-specific font files for static-weight fonts that need separate bold files.
+// Variable-weight fonts (DM Sans, Montserrat, Inter, etc.) don't need entries here
+// because a single file covers all weights when loaded with the correct descriptor.
+const BUILTIN_FONT_BOLD_FILES = {
+  'Poppins': '/api/fonts/builtin/Poppins-Bold.ttf',
+  'Lato': '/api/fonts/builtin/Lato-Bold.ttf',
+  'Liberation Sans': '/api/fonts/builtin/LiberationSans-Bold.ttf',
+};
+
+// Variable-weight fonts — these contain all weights in a single file.
+// Set detected by URL pattern (encoded brackets in Google Fonts URLs).
+const VARIABLE_WEIGHT_FONTS = new Set([
+  'DM Sans', 'Montserrat', 'Open Sans', 'Roboto', 'Inter',
+  'Nunito', 'Oswald', 'Playfair Display',
+]);
+
 const DEFAULT_SPEAKER_PALETTE = [
   '#00D9FF', '#F59E0B', '#10B981', '#A78BFA', '#EF4444', '#EC4899',
 ];
@@ -248,11 +264,25 @@ export default class RenderEngine {
   /**
    * Pre-load a font via FontFace API so canvas text rendering works.
    * Resolves custom fonts from /api/fonts if not in the builtin map.
+   *
+   * @param {string} fontName - Font family name
+   * @param {string} [url] - Optional explicit URL
+   * @param {number} [weight] - Font weight (400, 700, etc.)
    */
-  async loadFont(fontName, url) {
-    if (this._fontCache.has(fontName)) return;
+  async loadFont(fontName, url, weight) {
+    const isBold = weight && weight >= 600;
+    const cacheKey = isBold ? `${fontName}__bold` : fontName;
+    if (this._fontCache.has(cacheKey)) return;
     try {
-      let fontUrl = url || BUILTIN_FONT_FILES[fontName];
+      let fontUrl = url;
+      if (!fontUrl) {
+        // For bold weights, check if a separate bold file exists (static fonts)
+        if (isBold && BUILTIN_FONT_BOLD_FILES[fontName]) {
+          fontUrl = BUILTIN_FONT_BOLD_FILES[fontName];
+        } else {
+          fontUrl = BUILTIN_FONT_FILES[fontName];
+        }
+      }
       // For custom fonts not in the builtin map, look up via /api/fonts
       if (!fontUrl) {
         if (!this._customFontMap) {
@@ -270,13 +300,55 @@ export default class RenderEngine {
         fontUrl = this._customFontMap[fontName];
       }
       if (!fontUrl) return;
-      const face = new FontFace(fontName, `url(${fontUrl})`);
+
+      // Set FontFace weight descriptor for proper canvas font matching
+      const descriptors = {};
+      if (VARIABLE_WEIGHT_FONTS.has(fontName)) {
+        // Variable fonts cover all weights in a single file
+        descriptors.weight = '1 1000';
+      } else if (isBold) {
+        descriptors.weight = 'bold';
+      }
+
+      const face = new FontFace(fontName, `url(${fontUrl})`, descriptors);
       await face.load();
       document.fonts.add(face);
-      this._fontCache.add(fontName);
-    } catch {
-      // Font load failed — canvas will use fallback
+      this._fontCache.add(cacheKey);
+      this._fontCache.add(fontName); // Also cache base name for fire-and-forget lookups
+    } catch (err) {
+      console.warn(`[RenderEngine] Font load failed: ${fontName} (weight=${weight})`, err);
     }
+  }
+
+  /**
+   * Pre-load all fonts needed by a set of clips.
+   * Call before export to ensure all fonts are ready for canvas rendering.
+   */
+  async ensureFontsLoaded(clips, settings) {
+    const needed = new Map(); // key: "family|weight" → {family, weight}
+    for (const clip of clips) {
+      if (clip.type === 'text' && clip.textStyle?.fontFamily) {
+        const fw = clip.textStyle.fontWeight || 400;
+        const key = `${clip.textStyle.fontFamily}|${fw}`;
+        if (!needed.has(key)) {
+          needed.set(key, { family: clip.textStyle.fontFamily, weight: fw });
+        }
+      }
+      if (clip.type === 'subtitle') {
+        const subS = settings?.subtitle || settings || {};
+        const fn = subS.subtitleFont || 'DM Sans';
+        const fw = subS.subtitleFontWeight === 'bold' ? 700 :
+                   subS.subtitleFontWeight === 'black' ? 900 : 400;
+        const key = `${fn}|${fw}`;
+        if (!needed.has(key)) {
+          needed.set(key, { family: fn, weight: fw });
+        }
+      }
+    }
+    for (const { family, weight } of needed.values()) {
+      await this.loadFont(family, null, weight);
+    }
+    await document.fonts.ready;
   }
 
   /**
