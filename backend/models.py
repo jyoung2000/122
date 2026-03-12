@@ -221,8 +221,8 @@ class ShapeOverlay(BaseModel):
     height: float = 20         # size % (0-100)
     fill_color: str = "#FF3B30"
     stroke_color: str = "#FFFFFF"
-    stroke_width: int = 2
-    corner_radius: int = 0     # for rectangles
+    stroke_width: float = 2
+    corner_radius: float = 0   # for rectangles
     start_time: float = 0.0
     end_time: float = 0.0
     rotation: float = 0.0
