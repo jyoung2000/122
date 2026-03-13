@@ -3331,7 +3331,7 @@ def _instantiate_variable_font(font_path: str, weight: int) -> str | None:
 
     try:
         from fontTools.ttLib import TTFont
-        from fontTools.instancer import instantiateVariableFont
+        from fontTools.varLib.instancer import instantiateVariableFont
     except ImportError:
         logger.warning("fonttools not available — cannot instantiate variable font %s at weight %d", font_path, weight)
         _variable_font_cache[cache_key] = None
@@ -3353,7 +3353,7 @@ def _instantiate_variable_font(font_path: str, weight: int) -> str | None:
 
         # Clamp weight to the font's supported range
         wght_axis = axes["wght"]
-        clamped_weight = max(wght_axis.minValue, min(wght_axis.maxValue, weight))
+        clamped_weight = int(max(wght_axis.minValue, min(wght_axis.maxValue, weight)))
 
         os.makedirs(_VARIABLE_FONT_INSTANCE_DIR, exist_ok=True)
         base = os.path.splitext(os.path.basename(font_path))[0]
@@ -3371,7 +3371,7 @@ def _instantiate_variable_font(font_path: str, weight: int) -> str | None:
         _variable_font_cache[cache_key] = out_path
         return out_path
     except Exception as exc:
-        logger.warning("Failed to instantiate variable font %s at weight %d: %s", font_path, weight, exc)
+        logger.error("Failed to instantiate variable font %s at weight %d: %s", font_path, weight, exc, exc_info=True)
         _variable_font_cache[cache_key] = None
         return None
 
@@ -3421,7 +3421,10 @@ def _resolve_font_path(font_family: str, font_weight: int = 400) -> str:
             if font_weight != 400:
                 instance = _instantiate_variable_font(path, font_weight)
                 if instance:
+                    logger.info("Variable font instantiated: '%s' weight=%d → %s", font_family, font_weight, instance)
                     return instance
+                else:
+                    logger.warning("Variable font instantiation failed for '%s' weight=%d, using base file: %s", font_family, font_weight, path)
             return path
     # Case-insensitive fallback
     for name, path in _FONT_FAMILY_MAP.items():
