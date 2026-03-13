@@ -103,11 +103,11 @@ FONT_WEIGHT_MAP = {
 }
 
 
-def _normalize_font_weight(weight) -> tuple[int, bool]:
-    """Normalize font weight to (numeric_weight, is_bold_for_ass).
+def _normalize_font_weight(weight) -> tuple[int, int]:
+    """Normalize font weight to (numeric_weight, ass_bold_flag).
 
     Accepts string ("normal", "bold") or numeric (100-900) weights.
-    Returns (numeric_weight, ass_bold) where ass_bold is -1 or 0.
+    Returns (numeric_weight, ass_bold) where ass_bold is -1 (bold) or 0 (normal).
     """
     if isinstance(weight, (int, float)):
         w = int(weight)

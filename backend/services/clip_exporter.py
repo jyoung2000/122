@@ -3213,6 +3213,20 @@ _FONT_BOLD_MAP: dict[str, str] = {
     "Poppins": "/usr/share/fonts/truetype/google-fonts/Poppins-Bold.ttf",
     "Lato": "/usr/share/fonts/truetype/google-fonts/Lato-Bold.ttf",
     "Bebas Neue": "/usr/share/fonts/truetype/google-fonts/BebasNeue-Regular.ttf",
+    # Variable fonts — the regular .ttf contains all weights, but FFmpeg's
+    # drawtext can't select from variable font axes.  Map to the regular file
+    # as best-effort so _resolve_font_path doesn't skip to fallback.
+    "Montserrat": "/usr/share/fonts/truetype/google-fonts/Montserrat.ttf",
+    "Open Sans": "/usr/share/fonts/truetype/google-fonts/OpenSans.ttf",
+    "Roboto": "/usr/share/fonts/truetype/google-fonts/Roboto.ttf",
+    "Inter": "/usr/share/fonts/truetype/google-fonts/Inter.ttf",
+    "Nunito": "/usr/share/fonts/truetype/google-fonts/Nunito.ttf",
+    "Oswald": "/usr/share/fonts/truetype/google-fonts/Oswald.ttf",
+    "Playfair Display": "/usr/share/fonts/truetype/google-fonts/PlayfairDisplay.ttf",
+    # Common CSS fallbacks
+    "sans-serif": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "serif": "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+    "monospace": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
     "Arial": "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "Helvetica": "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "Times New Roman": "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
