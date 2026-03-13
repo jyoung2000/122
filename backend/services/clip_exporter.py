@@ -3343,7 +3343,7 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
             continue
         x_pct = overlay.get("x", 50) / 100.0
         y_pct = overlay.get("y", 50) / 100.0
-        font_size = overlay.get("font_size", 48)
+        font_size = int(round(overlay.get("font_size", 48)))
         font_color = overlay.get("font_color", "#FFFFFF")
         font_family = overlay.get("font_family", "sans-serif")
         opacity = overlay.get("opacity", 1.0)
@@ -3356,6 +3356,8 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
         font_weight = overlay.get("font_weight", 400)
         if isinstance(font_weight, str):
             font_weight = 700 if font_weight.lower() == "bold" else 400
+        else:
+            font_weight = int(round(font_weight))
         font_path = _resolve_font_path(font_family, font_weight=font_weight)
 
         # Validate font file exists — fallback to default if missing
@@ -3371,7 +3373,7 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
                 warnings.append(f"Text overlay {i+1}: no fonts available — skipped entirely")
                 continue
 
-        outline_width = overlay.get("outline_width", 0)
+        outline_width = int(round(overlay.get("outline_width", 0)))
         outline_color = overlay.get("outline_color", "#000000")
         fade_in = overlay.get("fade_in", 0)
         fade_out = overlay.get("fade_out", 0)
@@ -3905,7 +3907,7 @@ def _build_single_drawtext(overlay: dict, clip_start: float) -> str | None:
 
     x_pct = overlay.get("x", 50) / 100.0
     y_pct = overlay.get("y", 50) / 100.0
-    font_size = overlay.get("font_size", 48)
+    font_size = int(round(overlay.get("font_size", 48)))
     font_color = overlay.get("font_color", "#FFFFFF")
     font_family = overlay.get("font_family", "sans-serif")
     opacity = overlay.get("opacity", 1.0)
@@ -3916,13 +3918,15 @@ def _build_single_drawtext(overlay: dict, clip_start: float) -> str | None:
     font_weight = overlay.get("font_weight", 400)
     if isinstance(font_weight, str):
         font_weight = 700 if font_weight.lower() == "bold" else 400
+    else:
+        font_weight = int(round(font_weight))
     font_path = _resolve_font_path(font_family, font_weight=font_weight)
     if not os.path.isfile(font_path):
         font_path = _DEFAULT_FONT
         if not os.path.isfile(font_path):
             return None
 
-    outline_width = overlay.get("outline_width", 0)
+    outline_width = int(round(overlay.get("outline_width", 0)))
     outline_color = overlay.get("outline_color", "#000000")
     fade_in = overlay.get("fade_in", 0)
     fade_out = overlay.get("fade_out", 0)
