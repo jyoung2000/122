@@ -210,6 +210,13 @@ class ImageOverlay(BaseModel):
     opacity: float = 1.0
     fade_in: float = 0.0       # seconds
     fade_out: float = 0.0      # seconds
+    # Visual effects from multi-track editor properties panel
+    brightness: float = 0.0    # -100 to 100
+    contrast: float = 0.0      # -100 to 100
+    saturation: float = 0.0    # -100 to 100
+    blur: float = 0.0          # 0 to 20 (px)
+    hue_rotate: float = 0.0    # 0 to 360 (degrees)
+    sepia: float = 0.0         # 0 to 100
 
 
 class ShapeOverlay(BaseModel):
