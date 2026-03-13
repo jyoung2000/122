@@ -637,7 +637,7 @@ def generate_ass(
                            "falling back to sharp active word box", font)
             _aw_bg_split = False
         else:
-            _aw_draw_pad_h = max(2, round(2 * font_scale))
+            _aw_draw_pad_h = max(3, round(4 * font_scale))
             _aw_draw_pad_v = max(1, round(1 * font_scale))
             _aw_draw_radius = max(1, round(active_word_bg_radius * font_scale))
 
@@ -1189,6 +1189,79 @@ def generate_ass(
             "(radius=%dpx, pad=%dx%d, font=%s)",
             len(pending_bg_draw_events), _bg_draw_radius,
             _bg_draw_pad_h, _bg_draw_pad_v, _bg_font_path,
+        )
+
+    # ── Force text positions when drawing-based backgrounds are active ──
+    # When BGDRAW or AWDRAW events use Pillow-measured positions for drawing
+    # rectangles, the text events must use the SAME coordinate system.
+    # Without \pos(), libass auto-positions text using its own internal
+    # metrics, which can differ from Pillow's measurements.  This mismatch
+    # causes background boxes and active-word highlights to be misaligned
+    # with the actual rendered text (shifted left/right, too wide, etc.).
+    #
+    # Fix: add \an7\pos(x,y) to all text events so they start at the
+    # Pillow-predicted left edge, matching the drawing event coordinates.
+    # This means both text and backgrounds use the same reference frame,
+    # guaranteeing perfect RELATIVE alignment.
+    _needs_pos_override = (_bg_split or _aw_bg_split) and (_bg_font_path or _aw_font_path)
+    if _needs_pos_override:
+        import re as _re_pos
+        _pos_font_path = _bg_font_path or _aw_font_path
+
+        def _compute_line_pos(plain_text):
+            """Compute top-left position for \\an7\\pos() from plain text."""
+            m = _measure_text(plain_text, _pos_font_path, size_px)
+            if not m:
+                return None
+            text_w = m[0]
+            line_h = m[1] + m[2]
+            lx = round((video_width - text_w) / 2)
+            if alignment == 2:
+                ty = round(video_height - margin_v - line_h)
+            elif alignment == 5:
+                ty = round((video_height - line_h) / 2)
+            elif alignment == 8:
+                ty = round(margin_v)
+            else:
+                return None
+            return (lx, ty)
+
+        def _add_pos_override(ev_text, pos_x, pos_y):
+            """Prepend \\an7\\pos() to an ASS event text string."""
+            pos_tag = f"\\an7\\pos({pos_x},{pos_y})"
+            if ev_text.startswith("{"):
+                return "{" + pos_tag + ev_text[1:]
+            return "{" + pos_tag + "}" + ev_text
+
+        # Post-process base_text_events (Layer 0: border/background layer)
+        new_base = []
+        for ev_start, ev_end, ev_style, ev_text in base_text_events:
+            plain = _re_pos.sub(r"\{[^}]*\}", "", ev_text)
+            if plain.strip():
+                pos = _compute_line_pos(plain)
+                if pos:
+                    ev_text = _add_pos_override(ev_text, pos[0], pos[1])
+            new_base.append((ev_start, ev_end, ev_style, ev_text))
+        base_text_events[:] = new_base
+
+        # Post-process pending_word_events (Layer N: per-word color layer)
+        # Each word event renders the FULL line text with per-word coloring,
+        # so it needs the same line position as the base text event.
+        new_words = []
+        for ev_start, ev_end, ev_style, ev_text in pending_word_events:
+            plain = _re_pos.sub(r"\{[^}]*\}", "", ev_text)
+            if plain.strip():
+                pos = _compute_line_pos(plain)
+                if pos:
+                    ev_text = _add_pos_override(ev_text, pos[0], pos[1])
+            new_words.append((ev_start, ev_end, ev_style, ev_text))
+        pending_word_events[:] = new_words
+
+        logger.info(
+            "Position override: applied \\an7\\pos() to %d base + %d word events "
+            "(font=%s, alignment=%d)",
+            len(base_text_events), len(pending_word_events),
+            _pos_font_path, alignment,
         )
 
     # ═══════════════════════════════════════════════════════════════════
