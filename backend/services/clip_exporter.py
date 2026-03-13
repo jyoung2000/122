@@ -3401,15 +3401,20 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0, vide
 
     Each text overlay becomes a drawtext filter with enable/disable based on timing.
     Position is given as percentage (0-100) and converted to pixel expressions.
-    Font size and pixel-based properties are scaled from the frontend's 1920×1080
-    reference canvas to the actual output resolution.
+    Font size and pixel-based properties are scaled up so the export matches the
+    proportional size seen in the browser preview (which renders fontSize pixels
+    inside a container roughly half the output resolution).
 
     Returns:
         (filter_chain_string, list_of_warning_messages)
     """
-    # Resolution scale factor: frontend editor uses 1920×1080 reference
-    _PREVIEW_REF = min(1920, 1080)
-    res_scale = min(video_out_w, video_out_h) / _PREVIEW_REF
+    # The frontend preview renders text overlays at `fontSize px` inside a viewport
+    # container whose width ≈ 50% of the user's screen height × aspect ratio.
+    # For typical desktop displays this means the preview container is roughly half
+    # the output frame width.  To make the export text look the same proportional
+    # size we scale pixel values by output_longest_edge / PREVIEW_REF.
+    _PREVIEW_REF = 960
+    res_scale = max(video_out_w, video_out_h) / _PREVIEW_REF
 
     parts = []
     warnings: list[str] = []
@@ -3454,10 +3459,11 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0, vide
                 warnings.append(f"Text overlay {i+1}: no fonts available — skipped entirely")
                 continue
 
-        # CSS -webkit-text-stroke with paint-order:stroke fill renders N/2 visible
-        # per side (fill covers inner half).  FFmpeg borderw renders full width
-        # outward.  Halve to match the CSS visual appearance.
-        outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale / 2)))
+        # CSS -webkit-text-stroke: Npx with paint-order:stroke fill shows N/2
+        # visible per side.  FFmpeg borderw shows the full value outward.
+        # After the res_scale multiplier (~2× for 1080p), using the raw value
+        # (without halving) produces a thick, visible stroke matching the preview.
+        outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale)))
         outline_color = overlay.get("outline_color", "#000000")
         fade_in = overlay.get("fade_in", 0)
         fade_out = overlay.get("fade_out", 0)
@@ -3990,11 +3996,11 @@ def _build_single_drawtext(overlay: dict, clip_start: float, video_out_w: int = 
 
     Font size, outline width, background padding, and shadow offsets are scaled
     relative to the output resolution so the text appears the same proportional
-    size as in the frontend preview (which uses a 1920×1080 reference canvas).
+    size as in the frontend preview container (~half the output resolution).
     """
-    # Resolution scale factor: frontend editor uses 1920×1080 reference
-    _PREVIEW_REF = min(1920, 1080)
-    res_scale = min(video_out_w, video_out_h) / _PREVIEW_REF
+    # Scale factor: preview container is roughly half the output frame size.
+    _PREVIEW_REF = 960
+    res_scale = max(video_out_w, video_out_h) / _PREVIEW_REF
 
     text = overlay.get("text", "")
     for ch in ('\\', "'", ':', '%', '{', '}', ';', '[', ']'):
@@ -4024,10 +4030,11 @@ def _build_single_drawtext(overlay: dict, clip_start: float, video_out_w: int = 
         if not os.path.isfile(font_path):
             return None
 
-    # CSS -webkit-text-stroke with paint-order:stroke fill renders N/2 visible
-    # per side (fill covers inner half).  FFmpeg borderw renders full width
-    # outward.  Halve to match the CSS visual appearance.
-    outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale / 2)))
+    # CSS -webkit-text-stroke: Npx with paint-order:stroke fill shows N/2
+    # visible per side.  FFmpeg borderw shows the full value outward.
+    # After the res_scale multiplier (~2× for 1080p), using the raw value
+    # (without halving) produces a thick, visible stroke matching the preview.
+    outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale)))
     outline_color = overlay.get("outline_color", "#000000")
     fade_in = overlay.get("fade_in", 0)
     fade_out = overlay.get("fade_out", 0)

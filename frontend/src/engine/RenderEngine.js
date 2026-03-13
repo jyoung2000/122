@@ -704,13 +704,10 @@ export default class RenderEngine {
       ctx.fill();
     }
 
-    // Text outline/stroke — CSS -webkit-text-stroke with paint-order:stroke fill
-    // renders half the specified width outward.  Canvas strokeText draws lineWidth
-    // centered on the glyph edge, and fillText covers the inner half, so use
-    // outlineWidth directly (not doubled) for parity with the DOM preview.
+    // Text outline/stroke
     if (style.outlineWidth > 0) {
       ctx.strokeStyle = style.outlineColor || '#000000';
-      ctx.lineWidth = style.outlineWidth;
+      ctx.lineWidth = style.outlineWidth * 2;
       ctx.lineJoin = 'round';
       ctx.strokeText(text, drawX, drawY);
     }
