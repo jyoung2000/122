@@ -3364,7 +3364,7 @@ def _instantiate_variable_font(font_path: str, weight: int) -> str | None:
             _variable_font_cache[cache_key] = out_path
             return out_path
 
-        instantiateVariableFont(tt, {"wght": clamped_weight})
+        instantiateVariableFont(tt, {"wght": clamped_weight}, inplace=True)
         tt.save(out_path)
         tt.close()
         logger.info("Instantiated variable font: %s weight=%d → %s", font_path, clamped_weight, out_path)
