@@ -3357,9 +3357,11 @@ def _instantiate_variable_font(font_path: str, weight: int) -> str | None:
 
         os.makedirs(_VARIABLE_FONT_INSTANCE_DIR, exist_ok=True)
         base = os.path.splitext(os.path.basename(font_path))[0]
-        out_path = os.path.join(_VARIABLE_FONT_INSTANCE_DIR, f"{base}-w{clamped_weight}.ttf")
+        # v2 suffix invalidates stale cache from buggy inplace=False code
+        out_path = os.path.join(_VARIABLE_FONT_INSTANCE_DIR, f"{base}-w{clamped_weight}-v2.ttf")
 
         if os.path.isfile(out_path):
+            logger.info("Using cached variable font instance: %s", out_path)
             tt.close()
             _variable_font_cache[cache_key] = out_path
             return out_path
@@ -4113,9 +4115,12 @@ def _build_single_drawtext(overlay: dict, clip_start: float, video_out_w: int = 
         font_weight = 700 if font_weight.lower() == "bold" else 400
     else:
         font_weight = int(round(font_weight))
+    logger.info("_build_single_drawtext: font_family=%r, font_weight=%d, resolving font path...", font_family, font_weight)
     font_path = _resolve_font_path(font_family, font_weight=font_weight)
+    logger.info("_build_single_drawtext: resolved font_path=%s", font_path)
     if not os.path.isfile(font_path):
         font_path = _DEFAULT_FONT_BOLD if font_weight >= 600 and os.path.isfile(_DEFAULT_FONT_BOLD) else _DEFAULT_FONT
+        logger.warning("_build_single_drawtext: font not found, using fallback=%s", font_path)
         if not os.path.isfile(font_path):
             return None
 
@@ -4707,9 +4712,10 @@ async def export_clip(
         if has_text_overlays:
             _overlay_summary.append(f"text={len(text_overlays)}")
             for ti, to in enumerate(text_overlays):
-                logger.info("  Text overlay %d: text=%r, pos=(%.0f%%,%.0f%%), time=%.1f-%.1f, font_size=%s",
+                logger.info("  Text overlay %d: text=%r, pos=(%.0f%%,%.0f%%), time=%.1f-%.1f, font_size=%s, font_weight=%s, font_family=%s",
                     ti, (to.get("text", ""))[:40], to.get("x", 50), to.get("y", 50),
-                    to.get("start_time", 0), to.get("end_time", 0), to.get("font_size", 48))
+                    to.get("start_time", 0), to.get("end_time", 0), to.get("font_size", 48),
+                    to.get("font_weight", 400), to.get("font_family", "sans-serif"))
         if has_image_overlays:
             _overlay_summary.append(f"image={len(image_overlays)}")
             for ii, io_item in enumerate(image_overlays):
