@@ -1088,8 +1088,9 @@ def generate_ass(
             vis_h = word_m[4]             # visual_height from getbbox
             vis_top = word_m[3]           # visual_top offset from baseline
 
-            # Horizontal: center-aligned text
-            line_left_x = (video_width - full_w) / 2
+            # Horizontal: center text within margin-bounded area (accounts for
+            # max_width_pct and content_inset_h).
+            line_left_x = margin_h + (video_width - 2 * margin_h - full_w) / 2
             word_left_x = line_left_x + before_w
 
             # Vertical: depends on alignment (2=bottom, 5=center, 8=top)
@@ -1157,8 +1158,9 @@ def generate_ass(
             text_w, text_asc, text_desc, vis_top, vis_h = m
             line_h = text_asc + text_desc  # for Y positioning (matches libass)
 
-            # Horizontal: center-aligned text (alignment=2 is bottom-center)
-            line_left_x = (video_width - text_w) / 2
+            # Horizontal: center text within margin-bounded area (accounts for
+            # max_width_pct and content_inset_h).
+            line_left_x = margin_h + (video_width - 2 * margin_h - text_w) / 2
 
             # Vertical: depends on alignment (2=bottom, 5=center, 8=top)
             if alignment == 2:
@@ -1215,7 +1217,9 @@ def generate_ass(
                 return None
             text_w = m[0]
             line_h = m[1] + m[2]
-            lx = round((video_width - text_w) / 2)
+            # Center text within the margin-bounded area (accounts for
+            # max_width_pct and content_inset_h).
+            lx = round(margin_h + (video_width - 2 * margin_h - text_w) / 2)
             if alignment == 2:
                 ty = round(video_height - margin_v - line_h)
             elif alignment == 5:
