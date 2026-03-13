@@ -3454,7 +3454,10 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0, vide
                 warnings.append(f"Text overlay {i+1}: no fonts available — skipped entirely")
                 continue
 
-        outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale)))
+        # CSS -webkit-text-stroke with paint-order:stroke fill renders N/2 visible
+        # per side (fill covers inner half).  FFmpeg borderw renders full width
+        # outward.  Halve to match the CSS visual appearance.
+        outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale / 2)))
         outline_color = overlay.get("outline_color", "#000000")
         fade_in = overlay.get("fade_in", 0)
         fade_out = overlay.get("fade_out", 0)
@@ -4021,7 +4024,10 @@ def _build_single_drawtext(overlay: dict, clip_start: float, video_out_w: int = 
         if not os.path.isfile(font_path):
             return None
 
-    outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale)))
+    # CSS -webkit-text-stroke with paint-order:stroke fill renders N/2 visible
+    # per side (fill covers inner half).  FFmpeg borderw renders full width
+    # outward.  Halve to match the CSS visual appearance.
+    outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale / 2)))
     outline_color = overlay.get("outline_color", "#000000")
     fade_in = overlay.get("fade_in", 0)
     fade_out = overlay.get("fade_out", 0)

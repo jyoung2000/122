@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef, useEffect, useState } from 'react';
 import useTimelineStore from '../stores/timelineStore';
 import { hexToRgba } from '../utils/colorUtils';
 
@@ -11,9 +11,36 @@ import { hexToRgba } from '../utils/colorUtils';
  *   clipStart    – absolute start of the clip/full video
  *   playing      – whether the video is currently playing
  */
+
+// Reference canvas resolution — fontSize and other pixel values stored in
+// timeline items are authored at this resolution.
+const REF_W = 1920;
+
 export default function TimelineOverlay({ currentTime = 0, clipStart = 0 }) {
   const items = useTimelineStore((s) => s.items);
   const tracks = useTimelineStore((s) => s.tracks);
+  const containerRef = useRef(null);
+  const [containerW, setContainerW] = useState(0);
+
+  // Track container width so we can scale pixel values (fontSize, outlineWidth, etc.)
+  // from the 1920×1080 reference canvas to the actual preview container size.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setContainerW(entry.contentRect.width);
+      }
+    });
+    ro.observe(el);
+    // Initialize immediately
+    setContainerW(el.getBoundingClientRect().width);
+    return () => ro.disconnect();
+  }, []);
+
+  // Scale factor: maps reference-resolution pixel values to preview-container pixels.
+  // At 1920px container width → scale=1.0; at 960px → scale=0.5; etc.
+  const pxScale = containerW > 0 ? containerW / REF_W : 1;
 
   // currentTime is already relative to clipStart (passed as currentTime - clipStart)
   const absTime = currentTime;
@@ -42,6 +69,7 @@ export default function TimelineOverlay({ currentTime = 0, clipStart = 0 }) {
 
   return (
     <div
+      ref={containerRef}
       style={{
         position: 'absolute',
         inset: 0,
@@ -54,7 +82,7 @@ export default function TimelineOverlay({ currentTime = 0, clipStart = 0 }) {
         const elapsed = absTime - item.start;
         const duration = item.end - item.start;
 
-        if (item.type === 'text') return <TextOverlayItem key={item.id} item={item} elapsed={elapsed} duration={duration} />;
+        if (item.type === 'text') return <TextOverlayItem key={item.id} item={item} elapsed={elapsed} duration={duration} pxScale={pxScale} />;
         if (item.type === 'shape') return <ShapeOverlayItem key={item.id} item={item} elapsed={elapsed} duration={duration} />;
         if (item.type === 'image' || item.type === 'overlay') return <ImageOverlayItem key={item.id} item={item} elapsed={elapsed} duration={duration} />;
         return null;
@@ -64,12 +92,15 @@ export default function TimelineOverlay({ currentTime = 0, clipStart = 0 }) {
 }
 
 
-function TextOverlayItem({ item, elapsed, duration }) {
+function TextOverlayItem({ item, elapsed, duration, pxScale = 1 }) {
   const pos = item.position || { x: 50, y: 50 };
   const size = item.size || { w: 80, h: 20 };
   const style = item.textStyle || {};
   const text = item.textContent || '';
   const rotation = item.transform?.rotation || 0;
+
+  // Scale pixel values from 1920×1080 reference to actual container size
+  const s = pxScale;
 
   // Animation
   let animAlpha = 1;
@@ -80,7 +111,7 @@ function TextOverlayItem({ item, elapsed, duration }) {
   } else if (anim === 'slide-up' && elapsed < 0.5) {
     const t = elapsed / 0.5;
     animAlpha = t;
-    animTransform = `translateY(${(1 - t) * 30}px)`;
+    animTransform = `translateY(${(1 - t) * 30 * s}px)`;
   } else if (anim === 'pop' && elapsed < 0.3) {
     const t = elapsed / 0.3;
     const scale = 0.5 + 0.5 * (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2);
@@ -96,7 +127,7 @@ function TextOverlayItem({ item, elapsed, duration }) {
           ? 0.9 + (t - 0.7) / 0.15 * 0.1
           : 1.0;
     animAlpha = Math.min(1, t * 2);
-    animTransform = `scale(${bounce}) translateY(${(1 - Math.min(1, t * 2)) * -20}px)`;
+    animTransform = `scale(${bounce}) translateY(${(1 - Math.min(1, t * 2)) * -20 * s}px)`;
   }
 
   // Typewriter
@@ -123,14 +154,14 @@ function TextOverlayItem({ item, elapsed, duration }) {
   if (effects.hueRotate) filters.push(`hue-rotate(${effects.hueRotate}deg)`);
   if (effects.sepia) filters.push(`sepia(${effects.sepia / 100})`);
 
-  // Text shadow
+  // Text shadow (scale offsets and blur for container size)
   const shadows = [];
   if (style.shadowBlur > 0 || style.shadowOffsetX || style.shadowOffsetY) {
-    shadows.push(`${style.shadowOffsetX || 0}px ${style.shadowOffsetY || 0}px ${style.shadowBlur || 0}px ${style.shadowColor || 'rgba(0,0,0,0.5)'}`);
+    shadows.push(`${(style.shadowOffsetX || 0) * s}px ${(style.shadowOffsetY || 0) * s}px ${(style.shadowBlur || 0) * s}px ${style.shadowColor || 'rgba(0,0,0,0.5)'}`);
   }
 
-  // Outline via text-stroke + paint-order
-  const outlineW = style.outlineWidth || 0;
+  // Outline via text-stroke + paint-order (scale for container size)
+  const outlineW = (style.outlineWidth || 0) * s;
   const outlineC = style.outlineColor || '#000000';
 
   return (
@@ -160,16 +191,16 @@ function TextOverlayItem({ item, elapsed, duration }) {
         <div
           style={{
             position: 'absolute',
-            inset: `-${style.bgPadding || 8}px`,
+            inset: `-${(style.bgPadding || 8) * s}px`,
             background: hexToRgba(style.bgColor, (style.bgOpacity || 75) / 100),
-            borderRadius: style.bgRadius || 4,
+            borderRadius: (style.bgRadius || 4) * s,
             zIndex: -1,
           }}
         />
       )}
       <span
         style={{
-          fontSize: `clamp(10px, ${(style.fontSize || 48) / 12}vw, ${style.fontSize || 48}px)`,
+          fontSize: `${Math.max(8, (style.fontSize || 48) * s)}px`,
           fontFamily: `"${style.fontFamily || 'DM Sans'}", sans-serif`,
           fontWeight: style.fontWeight || 400,
           color: style.color || '#FFFFFF',
