@@ -92,12 +92,19 @@ export default function useKeyboardShortcuts({
       case 'ArrowLeft':
       case 'ArrowRight': {
         e.preventDefault();
-        if (e.repeat) return; // handled by our own interval
         const dir = e.code === 'ArrowLeft' ? -1 : 1;
         const delta = e.shiftKey ? dir : dir / 30;
-        onSkipTimeRef.current?.(delta);
-        // Start hold-to-repeat interval
+
         const hold = arrowHoldRef.current;
+        if (e.repeat) {
+          // If our interval is still running, let it handle stepping
+          if (hold.interval) return;
+          // Otherwise effect cleanup killed the interval; restart below
+        } else {
+          // First press: immediate single step
+          onSkipTimeRef.current?.(delta);
+        }
+        // Start (or restart) hold-to-repeat interval
         if (hold.interval) clearInterval(hold.interval);
         hold.key = e.code;
         hold.interval = setInterval(() => {

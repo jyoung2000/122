@@ -2005,12 +2005,19 @@ export default function VideoEditor({
         case 'ArrowLeft':
         case 'ArrowRight': {
           e.preventDefault();
-          if (e.repeat) break; // handled by our own interval
           const arrowDir = e.code === 'ArrowLeft' ? -1 : 1;
           const arrowDelta = e.shiftKey ? arrowDir : arrowDir / 30;
-          skipTimeRef.current(arrowDelta);
-          // Start hold-to-repeat interval
+
           const hold = arrowHoldRef.current;
+          if (e.repeat) {
+            // If our interval is still running, let it handle stepping
+            if (hold.interval) break;
+            // Otherwise effect cleanup killed the interval; restart below
+          } else {
+            // First press: immediate single step
+            skipTimeRef.current(arrowDelta);
+          }
+          // Start (or restart) hold-to-repeat interval
           if (hold.interval) clearInterval(hold.interval);
           hold.key = e.code;
           hold.interval = setInterval(() => {
