@@ -1523,6 +1523,80 @@ def _validate_ass_settings(
     return warnings
 
 
+def _validate_text_overlay_parity(
+    text_overlays: list[dict],
+    video_width: int,
+    video_height: int,
+) -> list[str]:
+    """Validate text overlay properties for preview-export parity.
+
+    Checks that text overlay values sent by the frontend will produce
+    reasonable FFmpeg drawtext output matching the preview.
+
+    Returns list of warning strings. Empty = all checks passed.
+    """
+    warnings: list[str] = []
+
+    for i, ov in enumerate(text_overlays):
+        label = f"Text overlay {i+1}"
+        text = ov.get("text", "")
+        if not text:
+            warnings.append(f"{label}: empty text")
+            continue
+
+        # Position validation
+        x = ov.get("x", 50)
+        y = ov.get("y", 50)
+        if not (0 <= x <= 100):
+            warnings.append(f"{label}: x={x}% outside [0,100]")
+        if not (0 <= y <= 100):
+            warnings.append(f"{label}: y={y}% outside [0,100]")
+
+        # Font size validation
+        font_size = ov.get("font_size", 48)
+        min_reasonable = max(8, video_height * 0.01)
+        max_reasonable = video_height * 0.3
+        if font_size < min_reasonable:
+            warnings.append(f"{label}: font_size={font_size}px may be too small for {video_height}p output")
+        if font_size > max_reasonable:
+            warnings.append(f"{label}: font_size={font_size}px may be too large for {video_height}p output")
+
+        # Color validation
+        font_color = ov.get("font_color", "#FFFFFF")
+        if font_color and not font_color.startswith("#"):
+            warnings.append(f"{label}: font_color='{font_color}' not hex format")
+
+        # Outline sanity
+        ol_width = ov.get("outline_width", 0)
+        if ol_width > 0:
+            ol_color = ov.get("outline_color", "")
+            if not ol_color:
+                warnings.append(f"{label}: outline_width={ol_width} but no outline_color")
+
+        # FFmpeg drawtext limitations
+        bg_radius = ov.get("bg_radius", 0)
+        if bg_radius > 0:
+            warnings.append(
+                f"{label}: bg_radius={bg_radius} — FFmpeg drawtext only supports "
+                f"rectangular backgrounds (rounded corners not supported)"
+            )
+
+        shadow_blur = ov.get("shadow_blur", 0)
+        if shadow_blur > 0:
+            warnings.append(
+                f"{label}: shadow_blur={shadow_blur} — FFmpeg drawtext does not "
+                f"support shadow blur (only offset + color)"
+            )
+
+        # Timing validation
+        start_t = ov.get("start_time", 0)
+        end_t = ov.get("end_time", 0)
+        if end_t <= start_t:
+            warnings.append(f"{label}: end_time ({end_t}) <= start_time ({start_t})")
+
+    return warnings
+
+
 def _validate_subject_tracking(
     filter_chain: str | None,
     aspect_ratio: str | None,
@@ -3459,15 +3533,17 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
                 hex_shadow = shadow_color
             dt += f":shadowcolor={hex_shadow}:shadowx={int(shadow_x)}:shadowy={int(shadow_y)}"
 
-        # Background box with proper opacity and padding
+        # NOTE: FFmpeg drawtext box=1 only supports rectangular backgrounds.
+        # Frontend rounded corners (bgRadius) are approximated as sharp rectangles.
+        # Shadow blur (shadowBlur) is also not supported — only offset + color.
         bg_color = overlay.get("background_color")
         bg_opacity_pct = overlay.get("bg_opacity", 0)
         bg_padding = overlay.get("bg_padding", 8)
         if bg_color and bg_opacity_pct > 0:
             bg_alpha = bg_opacity_pct / 100.0
-            dt += f":box=1:boxcolor={bg_color}@{bg_alpha:.2f}:boxborderw={bg_padding}"
+            dt += f":box=1:boxcolor={bg_color}@{bg_alpha:.2f}:boxborderw={int(round(bg_padding))}"
         elif bg_color:
-            dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw={bg_padding}"
+            dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw={int(round(bg_padding))}"
 
         if end_t > start_t:
             dt += f":enable='between(t,{safe_start:.3f},{end_t:.3f})'"
@@ -4001,14 +4077,17 @@ def _build_single_drawtext(overlay: dict, clip_start: float) -> str | None:
             hex_shadow = shadow_color
         dt += f":shadowcolor={hex_shadow}:shadowx={int(shadow_x)}:shadowy={int(shadow_y)}"
 
+    # NOTE: FFmpeg drawtext box=1 only supports rectangular backgrounds.
+    # Frontend rounded corners (bgRadius) are approximated as sharp rectangles.
+    # Shadow blur (shadowBlur) is also not supported — only offset + color.
     bg_color = overlay.get("background_color")
     bg_opacity_pct = overlay.get("bg_opacity", 0)
     bg_padding = overlay.get("bg_padding", 8)
     if bg_color and bg_opacity_pct > 0:
         bg_alpha = bg_opacity_pct / 100.0
-        dt += f":box=1:boxcolor={bg_color}@{bg_alpha:.2f}:boxborderw={bg_padding}"
+        dt += f":box=1:boxcolor={bg_color}@{bg_alpha:.2f}:boxborderw={int(round(bg_padding))}"
     elif bg_color:
-        dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw={bg_padding}"
+        dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw={int(round(bg_padding))}"
 
     if end_t > start_t:
         dt += f":enable='between(t,{safe_start:.3f},{end_t:.3f})'"
@@ -4527,6 +4606,14 @@ async def export_clip(
             logger.info("Overlay QA for clip %s: %s", clip_id, ", ".join(_overlay_summary))
         else:
             logger.info("Overlay QA for clip %s: no overlay items", clip_id)
+
+        # Validate text overlay parity
+        if has_text_overlays:
+            parity_warnings = _validate_text_overlay_parity(
+                text_overlays, video_width, video_height
+            )
+            for pw in parity_warnings:
+                logger.warning("TEXT OVERLAY PARITY: %s", pw)
 
         # Generate ASS subtitle file if subtitles are enabled
         if subtitles_enabled and transcript:

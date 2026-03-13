@@ -15,6 +15,18 @@ from backend.models import TranscriptSegment
 
 logger = logging.getLogger(__name__)
 
+# ── Pillow-to-libass width calibration ──────────────────────────────
+# Pillow's ImageFont.getlength() consistently overestimates text advance
+# width compared to libass/FreeType rendering.  Cross-font testing across
+# DM Sans, Montserrat, Inter, Roboto, Poppins, Open Sans at 20-60px shows
+# Pillow overestimates by 8-15%.  This factor is multiplied into Pillow
+# widths when computing BGDRAW/AWDRAW rectangle positions so that boxes
+# tightly wrap the actual rendered text (matching the CSS preview).
+#
+# If boxes still appear too wide/narrow for a specific font, adjust this.
+# Lower values = tighter boxes, higher = looser.  Valid range: 0.80-1.00.
+_PILLOW_TO_LIBASS_WIDTH_RATIO = 0.92
+
 
 def _resolve_font_path(font_name: str, bold: bool = False) -> str | None:
     """Resolve a font family name to a file path using fc-match."""
@@ -523,8 +535,9 @@ def generate_ass(
                            "falling back to sharp background box", font)
             _bg_split = False
         else:
-            _bg_draw_pad_h = max(3, round(5 * font_scale))
-            _bg_draw_pad_v = max(1, round(1 * font_scale))
+            # Match frontend CSS padding: max(floor(4 * backendFontScale), 2)
+            _bg_draw_pad_h = max(2, round(4 * font_scale))
+            _bg_draw_pad_v = max(1, round(2 * font_scale))
             _bg_draw_radius = max(1, round(background_radius * font_scale))
 
     # Compute outline/background style settings (same for all speakers)
@@ -637,7 +650,8 @@ def generate_ass(
                            "falling back to sharp active word box", font)
             _aw_bg_split = False
         else:
-            _aw_draw_pad_h = max(3, round(4 * font_scale))
+            # Match frontend CSS padding: 2px horizontal, 1px vertical (scaled)
+            _aw_draw_pad_h = max(2, round(2 * font_scale))
             _aw_draw_pad_v = max(1, round(1 * font_scale))
             _aw_draw_radius = max(1, round(active_word_bg_radius * font_scale))
 
@@ -891,7 +905,13 @@ def generate_ass(
                 # speech rhythm.  Uses punctuation-aware, speaker-rate-scaled
                 # timing that matches the frontend getCurrentWordIndex().
                 _BASE_OVERHEAD_S = 0.04
-                _ANTICIPATION_S = 0.05  # small perceptual lead; no browser audio lag in FFmpeg export
+                # Match frontend timing exactly so export word highlights
+                # align with what the user previewed.  The frontend uses
+                # anticipation=0.10 and subtracts audio_buffer=0.12 for a
+                # net -0.02s offset.  Since FFmpeg has no audio buffer lag,
+                # we apply the net offset when shifting word boundaries below.
+                _ANTICIPATION_S = 0.10
+                _AUDIO_BUFFER_S = 0.12
                 _PUNCT_PAUSE = {
                     ",": 0.15, ";": 0.16, ":": 0.12,
                     ".": 0.22, "!": 0.22, "?": 0.24,
@@ -954,7 +974,12 @@ def generate_ass(
                 if background_enabled:
                     base_text_events.append((clip_start, clip_end, style_name, f"{prefix}{safe_text}"))
 
-                current_time = clip_start
+                # Apply net timing offset to match frontend's perception model.
+                # Frontend: elapsed = (t - start) + anticipation*rateScale - 0.12
+                # This shifts word boundaries so the highlight at any given
+                # playback time matches the preview.
+                _net_offset = anticipation - _AUDIO_BUFFER_S
+                current_time = clip_start + _net_offset
                 for word_idx in range(len(words)):
                     word_dur = raw_durations[word_idx]
                     word_end = current_time + word_dur
@@ -1075,13 +1100,13 @@ def generate_ass(
             if not word_m:
                 continue
 
-            full_w = full_m[0]
-            before_w = before_m[0] if before_m else 0
+            full_w = full_m[0] * _PILLOW_TO_LIBASS_WIDTH_RATIO
+            before_w = (before_m[0] if before_m else 0) * _PILLOW_TO_LIBASS_WIDTH_RATIO
             # Use contextual width when available (accounts for kerning)
             if through_m and before_m:
-                word_w = through_m[0] - before_m[0]
+                word_w = (through_m[0] - before_m[0]) * _PILLOW_TO_LIBASS_WIDTH_RATIO
             else:
-                word_w = word_m[0]
+                word_w = word_m[0] * _PILLOW_TO_LIBASS_WIDTH_RATIO
             # Use font-level line height for Y positioning (matches libass layout)
             line_h = full_m[1] + full_m[2]  # font ascent + descent
             # Use visual bbox height for the drawing rectangle (tighter fit)
@@ -1156,6 +1181,8 @@ def generate_ass(
             if not m:
                 continue
             text_w, text_asc, text_desc, vis_top, vis_h = m
+            # Apply Pillow→libass calibration for tight-fitting boxes
+            text_w *= _PILLOW_TO_LIBASS_WIDTH_RATIO
             line_h = text_asc + text_desc  # for Y positioning (matches libass)
 
             # Horizontal: center text within margin-bounded area (accounts for
@@ -1215,7 +1242,7 @@ def generate_ass(
             m = _measure_text(plain_text, _pos_font_path, size_px)
             if not m:
                 return None
-            text_w = m[0]
+            text_w = m[0] * _PILLOW_TO_LIBASS_WIDTH_RATIO
             line_h = m[1] + m[2]
             # Center text within the margin-bounded area (accounts for
             # max_width_pct and content_inset_h).

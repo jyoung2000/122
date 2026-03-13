@@ -863,3 +863,73 @@ export function runSubtitleQA(items, settings, outputDims, syncInfo, exportFPS =
 
   return { valid, errors, warnings, summary, checks, confidence };
 }
+
+/**
+ * Validate subtitle settings for preview-export parity.
+ *
+ * Checks for settings combinations known to produce visual differences
+ * between the CSS/DOM preview and the FFmpeg/ASS export.
+ *
+ * @param {Object} settings - Subtitle settings (clipSettings)
+ * @param {Object} outputDims - { w, h } output dimensions
+ * @returns {{ warnings: string[], info: string[] }}
+ */
+export function validateSubtitleExportParity(settings, outputDims) {
+  const warnings = [];
+  const info = [];
+
+  if (!settings) return { warnings, info };
+
+  const bgEnabled = settings.subtitleBgEnabled || false;
+  const bgRadius = settings.subtitleBgRadius ?? 0;
+  const awEnabled = settings.activeWordEnabled ?? false;
+  const awBgOpacity = settings.activeWordBgOpacity ?? 0;
+  const awBgRadius = settings.activeWordBgRadius ?? 4;
+
+  // BGDRAW path: rounded background uses ASS drawing commands
+  if (bgEnabled && bgRadius > 0) {
+    info.push(
+      'Rounded subtitle background (radius > 0) uses ASS drawing commands in export. ' +
+      'Box sizing is calibrated to match CSS preview but may differ slightly for unusual fonts.'
+    );
+  }
+
+  // AWDRAW path: rounded active word background
+  if (awEnabled && awBgOpacity > 0 && awBgRadius > 0) {
+    info.push(
+      'Active word background with rounded corners uses ASS drawing commands in export. ' +
+      'Highlight width is calibrated to match CSS preview.'
+    );
+  }
+
+  // Font availability check
+  const font = settings.subtitleFont || 'DM Sans';
+  const SUPPORTED_FONTS = [
+    'DM Sans', 'Montserrat', 'Open Sans', 'Roboto', 'Poppins',
+    'Inter', 'Nunito', 'Lato', 'Oswald', 'Playfair Display',
+    'Bebas Neue', 'Liberation Sans',
+  ];
+  if (!SUPPORTED_FONTS.some(f => f.toLowerCase() === font.toLowerCase())) {
+    warnings.push(
+      `Font "${font}" may not be available on the export server. ` +
+      `Supported built-in fonts: ${SUPPORTED_FONTS.join(', ')}`
+    );
+  }
+
+  // Output dimensions sanity
+  if (outputDims) {
+    const fontScale = Math.min(outputDims.w, outputDims.h) / Math.min(REF_W, REF_H);
+    const size = settings.subtitleSize || 'medium';
+    const basePx = typeof size === 'number' ? size : (FONT_SIZE_MAP[size] || 30);
+    const exportFontSize = Math.max(16, Math.round(basePx * fontScale));
+
+    if (exportFontSize < 20) {
+      warnings.push(
+        `Export subtitle font size (${exportFontSize}px) is very small at ${outputDims.w}x${outputDims.h}. ` +
+        `Consider increasing subtitle size.`
+      );
+    }
+  }
+
+  return { warnings, info };
+}
