@@ -3307,6 +3307,7 @@ _FONT_BOLD_MAP: dict[str, str] = {
     "Courier New": "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
 }
 _DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+_DEFAULT_FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 _CUSTOM_FONTS_DIR = "/data/fonts"
 
 # Cache for fc-query font family name lookups (avoids repeated subprocess calls)
@@ -3388,12 +3389,16 @@ def _resolve_font_path(font_family: str, font_weight: int = 400) -> str:
                 ):
                     logger.info("Custom bold font resolved: '%s' (weight=%d) → %s", font_family, font_weight, fpath)
                     return fpath
+    # Use bold fallback when weight is bold and the bold file exists
+    fallback = _DEFAULT_FONT
+    if is_bold and os.path.isfile(_DEFAULT_FONT_BOLD):
+        fallback = _DEFAULT_FONT_BOLD
     logger.warning(
         "Font '%s' (weight=%d) not found in built-in maps or custom dirs (%s) — "
         "falling back to default: %s",
-        font_family, font_weight, _CUSTOM_FONTS_DIR, _DEFAULT_FONT,
+        font_family, font_weight, _CUSTOM_FONTS_DIR, fallback,
     )
-    return _DEFAULT_FONT
+    return fallback
 
 
 def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0, video_out_w: int = 1920, video_out_h: int = 1080) -> tuple[str, list[str]]:
@@ -3453,7 +3458,7 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0, vide
                 font_path, font_family, font_weight, i + 1,
             )
             warnings.append(f"Text overlay {i+1}: font '{font_family}' not found, using default font")
-            font_path = _DEFAULT_FONT
+            font_path = _DEFAULT_FONT_BOLD if font_weight >= 600 and os.path.isfile(_DEFAULT_FONT_BOLD) else _DEFAULT_FONT
             if not os.path.isfile(font_path):
                 logger.error("FALLBACK FONT ALSO MISSING: %s — skipping text overlay %d", font_path, i + 1)
                 warnings.append(f"Text overlay {i+1}: no fonts available — skipped entirely")
@@ -4026,7 +4031,7 @@ def _build_single_drawtext(overlay: dict, clip_start: float, video_out_w: int = 
         font_weight = int(round(font_weight))
     font_path = _resolve_font_path(font_family, font_weight=font_weight)
     if not os.path.isfile(font_path):
-        font_path = _DEFAULT_FONT
+        font_path = _DEFAULT_FONT_BOLD if font_weight >= 600 and os.path.isfile(_DEFAULT_FONT_BOLD) else _DEFAULT_FONT
         if not os.path.isfile(font_path):
             return None
 
