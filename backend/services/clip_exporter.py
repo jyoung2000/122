@@ -3460,10 +3460,10 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0, vide
                 continue
 
         # CSS -webkit-text-stroke: Npx with paint-order:stroke fill shows N/2
-        # visible per side.  FFmpeg borderw shows the full value outward.
-        # After the res_scale multiplier (~2× for 1080p), using the raw value
-        # (without halving) produces a thick, visible stroke matching the preview.
-        outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale)))
+        # visible per side (fill covers inner half).  FFmpeg borderw renders
+        # the full value outward.  So: borderw = outlineWidth/2 * res_scale
+        # to match the visible stroke thickness in the preview.
+        outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale / 2)))
         outline_color = overlay.get("outline_color", "#000000")
         fade_in = overlay.get("fade_in", 0)
         fade_out = overlay.get("fade_out", 0)
@@ -4031,10 +4031,10 @@ def _build_single_drawtext(overlay: dict, clip_start: float, video_out_w: int = 
             return None
 
     # CSS -webkit-text-stroke: Npx with paint-order:stroke fill shows N/2
-    # visible per side.  FFmpeg borderw shows the full value outward.
-    # After the res_scale multiplier (~2× for 1080p), using the raw value
-    # (without halving) produces a thick, visible stroke matching the preview.
-    outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale)))
+    # visible per side (fill covers inner half).  FFmpeg borderw renders
+    # the full value outward.  So: borderw = outlineWidth/2 * res_scale
+    # to match the visible stroke thickness in the preview.
+    outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale / 2)))
     outline_color = overlay.get("outline_color", "#000000")
     fade_in = overlay.get("fade_in", 0)
     fade_out = overlay.get("fade_out", 0)
