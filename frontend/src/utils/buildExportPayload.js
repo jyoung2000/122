@@ -88,6 +88,7 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
       opacity: it.opacity ?? 1,
       fade_in: it.fadeIn || 0,
       fade_out: it.fadeOut || 0,
+      rotation: it.transform?.rotation || 0,
       brightness: fx.brightness || 0,
       contrast: fx.contrast || 0,
       saturation: fx.saturation || 0,

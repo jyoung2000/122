@@ -3842,6 +3842,15 @@ def _build_image_overlay_data(
         if img_eq_parts or img_hue != 0:
             img_scale += ",format=rgba"
 
+        # Rotation: apply after effects, before opacity/fade
+        img_rotation = overlay.get("rotation", 0)
+        if img_rotation != 0:
+            rad = img_rotation * 3.14159265 / 180.0
+            img_scale += (
+                f",rotate={rad:.6f}:fillcolor=none"
+                f":ow=rotw({rad:.6f}):oh=roth({rad:.6f})"
+            )
+
         if opacity < 1.0:
             img_scale += f",colorchannelmixer=aa={opacity:.3f}"
         # Apply fade in/out on the image alpha channel
@@ -4088,6 +4097,75 @@ def _build_unified_overlay_chain(
                 f"scale={scaled_w}:{scaled_h},"
                 f"format=rgba"
             )
+
+            # Apply image effects (brightness/contrast/saturation/blur/hue/sepia)
+            u_brightness = overlay.get("brightness", 0)
+            if u_brightness != 0:
+                factor = 1 + u_brightness / 100
+                if factor >= 1.0:
+                    inv = 1.0 / factor
+                    img_scale += (
+                        f",colorlevels=rimin=0:rimax={inv:.4f}"
+                        f":gimin=0:gimax={inv:.4f}"
+                        f":bimin=0:bimax={inv:.4f}"
+                    )
+                else:
+                    img_scale += (
+                        f",colorlevels=romin=0:romax={factor:.4f}"
+                        f":gomin=0:gomax={factor:.4f}"
+                        f":bomin=0:bomax={factor:.4f}"
+                    )
+
+            u_eq_parts = []
+            u_contrast = overlay.get("contrast", 0)
+            if u_contrast != 0:
+                u_eq_parts.append(f"contrast={1 + u_contrast / 100:.4f}")
+            u_saturation = overlay.get("saturation", 0)
+            if u_saturation != 0:
+                u_eq_parts.append(f"saturation={1 + u_saturation / 100:.4f}")
+            if u_eq_parts:
+                img_scale += f",eq={':'.join(u_eq_parts)}"
+
+            u_hue = overlay.get("hue_rotate", 0)
+            if u_hue != 0:
+                img_scale += f",hue=h={u_hue:.1f}"
+
+            u_blur = overlay.get("blur", 0)
+            if u_blur > 0:
+                ffmpeg_blur = max(1, int(u_blur * 1.5))
+                img_scale += f",boxblur={ffmpeg_blur}:{ffmpeg_blur}"
+
+            u_sepia = overlay.get("sepia", 0)
+            if u_sepia > 0:
+                s = u_sepia / 100.0
+                rr = 1 - s + s * 0.393
+                rg = s * 0.769
+                rb = s * 0.189
+                gr = s * 0.349
+                gg = 1 - s + s * 0.686
+                gb = s * 0.168
+                br = s * 0.272
+                bg_ = s * 0.534
+                bb = 1 - s + s * 0.131
+                img_scale += (
+                    f",colorchannelmixer={rr:.3f}:{rg:.3f}:{rb:.3f}:0:"
+                    f"{gr:.3f}:{gg:.3f}:{gb:.3f}:0:"
+                    f"{br:.3f}:{bg_:.3f}:{bb:.3f}:0"
+                )
+
+            # Re-convert to rgba after eq/hue filters (output yuv)
+            if u_eq_parts or u_hue != 0:
+                img_scale += ",format=rgba"
+
+            # Rotation
+            u_rotation = overlay.get("rotation", 0)
+            if u_rotation != 0:
+                rad = u_rotation * 3.14159265 / 180.0
+                img_scale += (
+                    f",rotate={rad:.6f}:fillcolor=none"
+                    f":ow=rotw({rad:.6f}):oh=roth({rad:.6f})"
+                )
+
             if opacity < 1.0:
                 img_scale += f",colorchannelmixer=aa={opacity:.3f}"
             safe_start = max(0, start_t)

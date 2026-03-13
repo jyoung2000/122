@@ -210,6 +210,7 @@ class ImageOverlay(BaseModel):
     opacity: float = 1.0
     fade_in: float = 0.0       # seconds
     fade_out: float = 0.0      # seconds
+    rotation: float = 0.0      # degrees (-360 to 360)
     # Visual effects from multi-track editor properties panel
     brightness: float = 0.0    # -100 to 100
     contrast: float = 0.0      # -100 to 100
