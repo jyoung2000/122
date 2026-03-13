@@ -3396,15 +3396,21 @@ def _resolve_font_path(font_family: str, font_weight: int = 400) -> str:
     return _DEFAULT_FONT
 
 
-def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> tuple[str, list[str]]:
+def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0, video_out_w: int = 1920, video_out_h: int = 1080) -> tuple[str, list[str]]:
     """Build FFmpeg drawtext filter chain for text overlays.
 
     Each text overlay becomes a drawtext filter with enable/disable based on timing.
     Position is given as percentage (0-100) and converted to pixel expressions.
+    Font size and pixel-based properties are scaled from the frontend's 1920×1080
+    reference canvas to the actual output resolution.
 
     Returns:
         (filter_chain_string, list_of_warning_messages)
     """
+    # Resolution scale factor: frontend editor uses 1920×1080 reference
+    _PREVIEW_REF = min(1920, 1080)
+    res_scale = min(video_out_w, video_out_h) / _PREVIEW_REF
+
     parts = []
     warnings: list[str] = []
     for i, overlay in enumerate(text_overlays):
@@ -3417,7 +3423,8 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
             continue
         x_pct = overlay.get("x", 50) / 100.0
         y_pct = overlay.get("y", 50) / 100.0
-        font_size = int(round(overlay.get("font_size", 48)))
+        # Scale font_size from preview-canvas pixels to output-video pixels
+        font_size = max(8, int(round(overlay.get("font_size", 48) * res_scale)))
         font_color = overlay.get("font_color", "#FFFFFF")
         font_family = overlay.get("font_family", "sans-serif")
         opacity = overlay.get("opacity", 1.0)
@@ -3447,7 +3454,7 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
                 warnings.append(f"Text overlay {i+1}: no fonts available — skipped entirely")
                 continue
 
-        outline_width = int(round(overlay.get("outline_width", 0)))
+        outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale)))
         outline_color = overlay.get("outline_color", "#000000")
         fade_in = overlay.get("fade_in", 0)
         fade_out = overlay.get("fade_out", 0)
@@ -3474,13 +3481,14 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
         y_expr = f"h*{y_pct:.4f}-th/2"
         fontsize_expr = str(font_size)
 
+        slide_offset = int(round(30 * res_scale))
         if animation == "slide-up" and end_t > start_t:
-            # Slide up from 30px below over 0.5s
+            # Slide up from below over 0.5s (offset scaled for output resolution)
             anim_dur = 0.5
             y_expr = (
                 f"h*{y_pct:.4f}-th/2"
                 f"+if(lt(t-{safe_start:.3f},{anim_dur})"
-                f",(1-(t-{safe_start:.3f})/{anim_dur})*30,0)"
+                f",(1-(t-{safe_start:.3f})/{anim_dur})*{slide_offset},0)"
             )
         elif animation == "pop" and end_t > start_t:
             # Scale from 50% to 100% over 0.3s with overshoot
@@ -3514,8 +3522,9 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
             dt += f":borderw={outline_width}:bordercolor={outline_color}"
 
         # Shadow support (FFmpeg drawtext shadowcolor/shadowx/shadowy)
-        shadow_x = overlay.get("shadow_offset_x", 0)
-        shadow_y = overlay.get("shadow_offset_y", 0)
+        # Scale shadow offsets for output resolution
+        shadow_x = int(round(overlay.get("shadow_offset_x", 0) * res_scale))
+        shadow_y = int(round(overlay.get("shadow_offset_y", 0) * res_scale))
         shadow_color = overlay.get("shadow_color", "")
         if shadow_x or shadow_y or shadow_color:
             # Parse rgba() or hex shadow color to hex for FFmpeg
@@ -3531,19 +3540,20 @@ def _build_text_overlay_filters(text_overlays: list, clip_start: float = 0) -> t
                         pass
             elif shadow_color.startswith("#"):
                 hex_shadow = shadow_color
-            dt += f":shadowcolor={hex_shadow}:shadowx={int(shadow_x)}:shadowy={int(shadow_y)}"
+            dt += f":shadowcolor={hex_shadow}:shadowx={shadow_x}:shadowy={shadow_y}"
 
         # NOTE: FFmpeg drawtext box=1 only supports rectangular backgrounds.
         # Frontend rounded corners (bgRadius) are approximated as sharp rectangles.
         # Shadow blur (shadowBlur) is also not supported — only offset + color.
         bg_color = overlay.get("background_color")
         bg_opacity_pct = overlay.get("bg_opacity", 0)
-        bg_padding = overlay.get("bg_padding", 8)
+        # Scale bg_padding for output resolution
+        bg_padding = int(round(overlay.get("bg_padding", 8) * res_scale))
         if bg_color and bg_opacity_pct > 0:
             bg_alpha = bg_opacity_pct / 100.0
-            dt += f":box=1:boxcolor={bg_color}@{bg_alpha:.2f}:boxborderw={int(round(bg_padding))}"
+            dt += f":box=1:boxcolor={bg_color}@{bg_alpha:.2f}:boxborderw={bg_padding}"
         elif bg_color:
-            dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw={int(round(bg_padding))}"
+            dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw={bg_padding}"
 
         if end_t > start_t:
             dt += f":enable='between(t,{safe_start:.3f},{end_t:.3f})'"
@@ -3970,11 +3980,19 @@ def _build_image_overlay_data(
     return extra_args, ";".join(fc_parts), len(valid_overlays), warnings
 
 
-def _build_single_drawtext(overlay: dict, clip_start: float) -> str | None:
+def _build_single_drawtext(overlay: dict, clip_start: float, video_out_w: int = 1920, video_out_h: int = 1080) -> str | None:
     """Build a single drawtext filter string for one text overlay item.
 
     Returns the drawtext filter string (without stream labels) or None if skipped.
+
+    Font size, outline width, background padding, and shadow offsets are scaled
+    relative to the output resolution so the text appears the same proportional
+    size as in the frontend preview (which uses a 1920×1080 reference canvas).
     """
+    # Resolution scale factor: frontend editor uses 1920×1080 reference
+    _PREVIEW_REF = min(1920, 1080)
+    res_scale = min(video_out_w, video_out_h) / _PREVIEW_REF
+
     text = overlay.get("text", "")
     for ch in ('\\', "'", ':', '%', '{', '}', ';', '[', ']'):
         text = text.replace(ch, f'\\{ch}')
@@ -3983,7 +4001,8 @@ def _build_single_drawtext(overlay: dict, clip_start: float) -> str | None:
 
     x_pct = overlay.get("x", 50) / 100.0
     y_pct = overlay.get("y", 50) / 100.0
-    font_size = int(round(overlay.get("font_size", 48)))
+    # Scale font_size from preview-canvas pixels to output-video pixels
+    font_size = max(8, int(round(overlay.get("font_size", 48) * res_scale)))
     font_color = overlay.get("font_color", "#FFFFFF")
     font_family = overlay.get("font_family", "sans-serif")
     opacity = overlay.get("opacity", 1.0)
@@ -4002,7 +4021,7 @@ def _build_single_drawtext(overlay: dict, clip_start: float) -> str | None:
         if not os.path.isfile(font_path):
             return None
 
-    outline_width = int(round(overlay.get("outline_width", 0)))
+    outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale)))
     outline_color = overlay.get("outline_color", "#000000")
     fade_in = overlay.get("fade_in", 0)
     fade_out = overlay.get("fade_out", 0)
@@ -4024,12 +4043,13 @@ def _build_single_drawtext(overlay: dict, clip_start: float) -> str | None:
     y_expr = f"h*{y_pct:.4f}-th/2"
     fontsize_expr = str(font_size)
 
+    slide_offset = int(round(30 * res_scale))
     if animation == "slide-up" and end_t > start_t:
         anim_dur = 0.5
         y_expr = (
             f"h*{y_pct:.4f}-th/2"
             f"+if(lt(t-{safe_start:.3f},{anim_dur})"
-            f",(1-(t-{safe_start:.3f})/{anim_dur})*30,0)"
+            f",(1-(t-{safe_start:.3f})/{anim_dur})*{slide_offset},0)"
         )
     elif animation == "pop" and end_t > start_t:
         anim_dur = 0.3
@@ -4059,8 +4079,9 @@ def _build_single_drawtext(overlay: dict, clip_start: float) -> str | None:
     if outline_width > 0:
         dt += f":borderw={outline_width}:bordercolor={outline_color}"
 
-    shadow_x = overlay.get("shadow_offset_x", 0)
-    shadow_y = overlay.get("shadow_offset_y", 0)
+    # Scale shadow offsets for output resolution
+    shadow_x = int(round(overlay.get("shadow_offset_x", 0) * res_scale))
+    shadow_y = int(round(overlay.get("shadow_offset_y", 0) * res_scale))
     shadow_color = overlay.get("shadow_color", "")
     if shadow_x or shadow_y or shadow_color:
         hex_shadow = "#000000"
@@ -4075,19 +4096,20 @@ def _build_single_drawtext(overlay: dict, clip_start: float) -> str | None:
                     pass
         elif shadow_color.startswith("#"):
             hex_shadow = shadow_color
-        dt += f":shadowcolor={hex_shadow}:shadowx={int(shadow_x)}:shadowy={int(shadow_y)}"
+        dt += f":shadowcolor={hex_shadow}:shadowx={shadow_x}:shadowy={shadow_y}"
 
     # NOTE: FFmpeg drawtext box=1 only supports rectangular backgrounds.
     # Frontend rounded corners (bgRadius) are approximated as sharp rectangles.
     # Shadow blur (shadowBlur) is also not supported — only offset + color.
     bg_color = overlay.get("background_color")
     bg_opacity_pct = overlay.get("bg_opacity", 0)
-    bg_padding = overlay.get("bg_padding", 8)
+    # Scale bg_padding for output resolution
+    bg_padding = int(round(overlay.get("bg_padding", 8) * res_scale))
     if bg_color and bg_opacity_pct > 0:
         bg_alpha = bg_opacity_pct / 100.0
-        dt += f":box=1:boxcolor={bg_color}@{bg_alpha:.2f}:boxborderw={int(round(bg_padding))}"
+        dt += f":box=1:boxcolor={bg_color}@{bg_alpha:.2f}:boxborderw={bg_padding}"
     elif bg_color:
-        dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw={int(round(bg_padding))}"
+        dt += f":box=1:boxcolor={bg_color}@0.5:boxborderw={bg_padding}"
 
     if end_t > start_t:
         dt += f":enable='between(t,{safe_start:.3f},{end_t:.3f})'"
@@ -4151,7 +4173,7 @@ def _build_unified_overlay_chain(
                 warnings.append(f"text '{item_id}' not found")
                 continue
             overlay = text_by_id[item_id]
-            dt_filter = _build_single_drawtext(overlay, clip_start)
+            dt_filter = _build_single_drawtext(overlay, clip_start, video_out_w, video_out_h)
             if dt_filter:
                 out_label = f"[vcmp{step}]"
                 fc_parts.append(f"{current_label}{dt_filter}{out_label}")
@@ -4945,7 +4967,7 @@ async def export_clip(
             _text_vf_for_post_concat = ""
             _use_unified_compositing = bool(overlay_compositing_order) and (has_text_overlays or has_image_overlays)
             if has_text_overlays and text_overlays and not _use_unified_compositing:
-                text_vf, _tw = _build_text_overlay_filters(text_overlays, clip_start=start)
+                text_vf, _tw = _build_text_overlay_filters(text_overlays, clip_start=start, video_out_w=video_width, video_out_h=video_height)
                 _overlay_warnings.extend(_tw)
                 if text_vf:
                     if has_seg_speed:
