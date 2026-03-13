@@ -3309,9 +3309,71 @@ _FONT_BOLD_MAP: dict[str, str] = {
 _DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 _DEFAULT_FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 _CUSTOM_FONTS_DIR = "/data/fonts"
+_VARIABLE_FONT_INSTANCE_DIR = "/tmp/font-instances"
 
 # Cache for fc-query font family name lookups (avoids repeated subprocess calls)
 _fc_query_cache: dict[str, str | None] = {}
+
+# Cache for instantiated variable font paths: (font_path, weight) -> static_ttf_path
+_variable_font_cache: dict[tuple[str, int], str | None] = {}
+
+
+def _instantiate_variable_font(font_path: str, weight: int) -> str | None:
+    """Create a static font instance from a variable font at the given weight.
+
+    Uses fonttools to pin the wght axis to the requested value.
+    Returns the path to the static .ttf, or None on failure.
+    Results are cached so each (font_path, weight) pair is only generated once.
+    """
+    cache_key = (font_path, weight)
+    if cache_key in _variable_font_cache:
+        return _variable_font_cache[cache_key]
+
+    try:
+        from fontTools.ttLib import TTFont
+        from fontTools.instancer import instantiateVariableFont
+    except ImportError:
+        logger.warning("fonttools not available — cannot instantiate variable font %s at weight %d", font_path, weight)
+        _variable_font_cache[cache_key] = None
+        return None
+
+    try:
+        tt = TTFont(font_path)
+        # Check if it actually has a wght axis
+        if "fvar" not in tt:
+            tt.close()
+            _variable_font_cache[cache_key] = None
+            return None
+
+        axes = {a.axisTag: a for a in tt["fvar"].axes}
+        if "wght" not in axes:
+            tt.close()
+            _variable_font_cache[cache_key] = None
+            return None
+
+        # Clamp weight to the font's supported range
+        wght_axis = axes["wght"]
+        clamped_weight = max(wght_axis.minValue, min(wght_axis.maxValue, weight))
+
+        os.makedirs(_VARIABLE_FONT_INSTANCE_DIR, exist_ok=True)
+        base = os.path.splitext(os.path.basename(font_path))[0]
+        out_path = os.path.join(_VARIABLE_FONT_INSTANCE_DIR, f"{base}-w{clamped_weight}.ttf")
+
+        if os.path.isfile(out_path):
+            tt.close()
+            _variable_font_cache[cache_key] = out_path
+            return out_path
+
+        instantiateVariableFont(tt, {"wght": clamped_weight})
+        tt.save(out_path)
+        tt.close()
+        logger.info("Instantiated variable font: %s weight=%d → %s", font_path, clamped_weight, out_path)
+        _variable_font_cache[cache_key] = out_path
+        return out_path
+    except Exception as exc:
+        logger.warning("Failed to instantiate variable font %s at weight %d: %s", font_path, weight, exc)
+        _variable_font_cache[cache_key] = None
+        return None
 
 
 def _font_family_name_cached(font_path: str) -> str | None:
@@ -3334,6 +3396,8 @@ def _resolve_font_path(font_family: str, font_weight: int = 400) -> str:
 
     Checks the built-in mapping first, then custom uploaded fonts dir.
     When font_weight >= 600 (semi-bold/bold), prefer the bold variant.
+    For variable fonts, instantiates a static instance at the requested weight
+    using fonttools so FFmpeg drawtext renders the correct weight.
     """
     is_bold = font_weight >= 600
 
@@ -3353,11 +3417,20 @@ def _resolve_font_path(font_family: str, font_weight: int = 400) -> str:
     if font_family in _FONT_FAMILY_MAP:
         path = _FONT_FAMILY_MAP[font_family]
         if os.path.isfile(path):
+            # For non-default weights, try to instantiate variable font
+            if font_weight != 400:
+                instance = _instantiate_variable_font(path, font_weight)
+                if instance:
+                    return instance
             return path
     # Case-insensitive fallback
     for name, path in _FONT_FAMILY_MAP.items():
         if name.lower() == font_family.lower():
             if os.path.isfile(path):
+                if font_weight != 400:
+                    instance = _instantiate_variable_font(path, font_weight)
+                    if instance:
+                        return instance
                 return path
     # Check custom uploaded fonts in multiple directories
     _font_search_dirs = [_CUSTOM_FONTS_DIR]
@@ -3377,11 +3450,19 @@ def _resolve_font_path(font_family: str, font_weight: int = 400) -> str:
                 # Strategy 1: filename-based match (fast)
                 if base_normalized == normalized_family:
                     logger.info("Custom font resolved via filename: '%s' → %s", font_family, fpath)
+                    if font_weight != 400:
+                        instance = _instantiate_variable_font(fpath, font_weight)
+                        if instance:
+                            return instance
                     return fpath
                 # Strategy 2: fc-query family name match (authoritative)
                 actual_family = _font_family_name_cached(fpath)
                 if actual_family and actual_family.lower().replace(" ", "").replace("-", "") == normalized_family:
                     logger.info("Custom font resolved via fc-query: '%s' → %s", font_family, fpath)
+                    if font_weight != 400:
+                        instance = _instantiate_variable_font(fpath, font_weight)
+                        if instance:
+                            return instance
                     return fpath
                 # Strategy 3: bold variant matching
                 if is_bold and (
