@@ -77,6 +77,31 @@ def _measure_text(text: str, font_path: str, size_px: int) -> tuple[float, float
         return None
 
 
+def _measure_reference_height(font_path: str, size_px: int) -> tuple[float, float] | None:
+    """Measure reference visual metrics using 'Hg' — a string that contains
+    both a tall ascender (H) and a deep descender (g).
+
+    Returns (ref_vis_top, ref_vis_h) or None.
+
+    Using a fixed reference string ensures:
+    - Consistent background height across all subtitle segments
+    - No visual "jumping" between lines with different character sets
+    - Tighter fit than font_ascent + font_descent (which includes
+      space for accents and extreme descenders not present in most text)
+    """
+    try:
+        from PIL import ImageFont
+        font = ImageFont.truetype(font_path, size_px)
+        bbox = font.getbbox("Hg")
+        if bbox:
+            return (bbox[1], bbox[3] - bbox[1])
+        # Fallback: use font metrics
+        asc, desc = font.getmetrics()
+        return (0, asc + desc)
+    except Exception:
+        return None
+
+
 def _ass_rounded_rect(w: int, h: int, r: int) -> str:
     """Generate ASS drawing commands for a rounded rectangle.
 
@@ -528,6 +553,8 @@ def generate_ass(
     _bg_draw_pad_h = 0
     _bg_draw_pad_v = 0
     _bg_draw_radius = 0
+    _bg_ref_vis_top = 0
+    _bg_ref_vis_h = 0
     if _bg_split:
         _bg_font_path = _resolve_font_path(font, bold=(bold_flag == -1))
         if not _bg_font_path:
@@ -535,11 +562,27 @@ def generate_ass(
                            "falling back to sharp background box", font)
             _bg_split = False
         else:
-            # Match frontend CSS: padding = max(1, max(floor(4 * backendFontScale), 2) * subtitleScale)px
-            # Since we're at output resolution (subtitleScale=1), this simplifies to:
-            _bg_draw_pad_h = max(4, round(6 * font_scale))
-            _bg_draw_pad_v = max(2, round(4 * font_scale))
-            _bg_draw_radius = max(1, round(background_radius * font_scale))
+            # Measure reference visual height once for consistent backgrounds
+            ref = _measure_reference_height(_bg_font_path, size_px)
+            if ref:
+                _bg_ref_vis_top, _bg_ref_vis_h = ref
+            else:
+                # Fallback: use font metrics (less tight but still works)
+                fallback_m = _measure_text("Hg", _bg_font_path, size_px)
+                if fallback_m:
+                    _bg_ref_vis_top = fallback_m[3]
+                    _bg_ref_vis_h = fallback_m[4]
+                else:
+                    _bg_split = False
+
+            if _bg_split:
+                # Match frontend CSS padding: max(1, max(floor(4 * backendFontScale), 2) * subtitleScale)px
+                # At output resolution (subtitleScale=1, backendFontScale=font_scale):
+                # padding = max(1, max(floor(4 * font_scale), 2)) — UNIFORM in CSS
+                _css_pad = max(1, max(int(4 * font_scale), 2))
+                _bg_draw_pad_h = _css_pad
+                _bg_draw_pad_v = max(1, round(_css_pad * 0.6))  # Slightly tighter vertical for inline feel
+                _bg_draw_radius = max(1, round(background_radius * font_scale))
 
     # Compute outline/background style settings (same for all speakers)
     if background_enabled and not _bg_split:
@@ -550,7 +593,8 @@ def generate_ass(
         style_outline_color = _hex_to_ass_color_with_alpha(background_color, background_opacity)
         back_color_ass = "&HFF000000&"  # fully transparent — no shadow needed
         border_style = 3
-        ol_width = max(int(4 * font_scale), 2)  # minimum padding for the box
+        # Match frontend CSS uniform padding: max(1, max(floor(4 * fontScale), 2))
+        ol_width = max(2, int(4 * font_scale))  # BorderStyle=3 padding
         shadow_depth = 0
     elif _bg_split:
         # Background via drawing commands: base style has no box.
@@ -631,7 +675,11 @@ def generate_ass(
     # Match frontend CSS: padding = max(1, 2*subtitleScale)px horizontal, max(1, 1*subtitleScale)px vertical
     # BorderStyle=3 Outline is uniform padding, so use the larger (horizontal) value
     # Frontend uses 2px base * subtitleScale; backend equivalent is 2 * font_scale
-    _aw_bg_box_padding = max(2, round(3 * font_scale))
+    # Match frontend CSS: padding 1px vertical / 2px horizontal.
+    # ASS BorderStyle=3 Outline is uniform, so use 2px (closer to the
+    # larger horizontal value — the vertical will be slightly thicker
+    # than CSS but prevents the box from clipping glyph strokes).
+    _aw_bg_box_padding = max(1, round(2 * font_scale))
 
     # Rounded corners: ASS BorderStyle=3 only renders sharp rectangles.
     # For rounded corners we use ASS drawing commands (\p1) to render a
@@ -1058,18 +1106,16 @@ def generate_ass(
             m = _measure_text(plain, _bg_font_path, size_px)
             if not m:
                 continue
-            text_w, text_asc, text_desc, vis_top, vis_h = m
-            # Apply Pillow→libass calibration
-            text_w *= _PILLOW_TO_LIBASS_WIDTH_RATIO
-            line_h = text_asc + text_desc
+            text_w = m[0] * _PILLOW_TO_LIBASS_WIDTH_RATIO
+            text_asc = m[1]
+            text_desc = m[2]
+            line_h = text_asc + text_desc  # Full font cell (for libass Y positioning)
 
-            # Match libass auto-centering: text is centered in the margin-bounded area
+            # Horizontal: center text within margin-bounded area
             text_area_w = video_width - 2 * margin_h
             line_left_x = margin_h + (text_area_w - text_w) / 2
 
-            # Vertical position: libass alignment=2 places text baseline at
-            # (video_height - MarginV), with the line extending upward by line_h.
-            # The text top = video_height - margin_v - line_h
+            # Vertical: compute where libass places the font cell top
             if alignment == 2:
                 text_top_y = video_height - margin_v - line_h
             elif alignment == 5:
@@ -1079,13 +1125,20 @@ def generate_ass(
             else:
                 continue
 
-            # Drawing rect: pad around the text area
-            # Use full line height (ascent + descent) for consistent vertical sizing
-            # rather than visual bbox which varies per-text and causes jumping backgrounds
+            # ── Tight background using reference visual height ──
+            # The reference "Hg" measurement gives us a stable visual height
+            # that includes both ascenders and descenders. This is much tighter
+            # than ascent+descent (which reserves space for accents like Ä).
+            #
+            # Position the background rect centered on the reference visual
+            # midpoint within the font cell:
+            #   ref_center_y = text_top_y + _bg_ref_vis_top + _bg_ref_vis_h / 2
+            #   draw_y = ref_center_y - _bg_ref_vis_h / 2 - pad_v
+            #          = text_top_y + _bg_ref_vis_top - pad_v
             draw_x = round(line_left_x - _bg_draw_pad_h)
-            draw_y = round(text_top_y - _bg_draw_pad_v)
+            draw_y = round(text_top_y + _bg_ref_vis_top - _bg_draw_pad_v)
             draw_w = round(text_w + 2 * _bg_draw_pad_h)
-            draw_h = round(line_h + 2 * _bg_draw_pad_v)
+            draw_h = round(_bg_ref_vis_h + 2 * _bg_draw_pad_v)
 
             drawing = _ass_rounded_rect(draw_w, draw_h, _bg_draw_radius)
             event_text = (
@@ -1097,9 +1150,9 @@ def generate_ass(
 
         logger.info(
             "BGDRAW: generated %d rounded-rect drawing events "
-            "(radius=%dpx, pad=%dx%d, font=%s)",
+            "(radius=%dpx, pad=%dx%d, ref_vis_h=%d, font=%s)",
             len(pending_bg_draw_events), _bg_draw_radius,
-            _bg_draw_pad_h, _bg_draw_pad_v, _bg_font_path,
+            _bg_draw_pad_h, _bg_draw_pad_v, _bg_ref_vis_h, _bg_font_path,
         )
 
     # ═══════════════════════════════════════════════════════════════════
@@ -1227,13 +1280,13 @@ def generate_ass(
 
     logger.info(
         "ASS generated: font=%s size=%s(%dpx) weight=%s color=%s pos=%s "
-        "bg=%s(%s) bg_radius=%d bg_split=%s outline=%dpx speakers=%d segments=%d active_word=%s "
-        "aw_bg_opacity=%d aw_bg_padding=%d "
+        "bg=%s(%s) bg_radius=%d bg_split=%s bg_ref_vis_h=%d outline=%dpx speakers=%d segments=%d "
+        "active_word=%s aw_bg_opacity=%d aw_bg_padding=%d "
         "bg_draw_events=%d word_events=%d max_words=%d res=%dx%d",
         font, font_size, size_px, font_weight, font_color, position,
         "yes" if background_enabled else "no",
         f"{background_color}@{background_opacity}%" if background_enabled else "n/a",
-        background_radius, _bg_split,
+        background_radius, _bg_split, _bg_ref_vis_h if _bg_split else 0,
         ol_width, len(speakers_seen), len(clip_segments),
         "yes" if active_word_enabled else "no",
         active_word_bg_opacity, _aw_bg_box_padding,
