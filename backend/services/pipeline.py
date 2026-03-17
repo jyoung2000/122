@@ -390,6 +390,19 @@ async def _run_analysis_inner(job_id: str):
             progress_callback=_transcribe_progress, audio_duration=audio_duration,
         )
         await database.update_job_status(job_id, transcript=list(result))
+
+        # AI transcript correction (optional, after initial transcription)
+        if settings.AI_TRANSCRIPT_CORRECTION and result:
+            from backend.services.transcript_corrector import correct_transcript
+            await _update_branch_progress("transcription", 95, JobStatus.TRANSCRIBING,
+                "Polishing transcript with AI...")
+            try:
+                result = await correct_transcript(result, orchestrator)
+                await database.update_job_status(job_id, transcript=list(result))
+                logger.info("[%s] AI transcript correction applied", job_id)
+            except Exception as e:
+                logger.warning("[%s] AI transcript correction failed (using raw): %s", job_id, e)
+
         speaker_count = len(set(s.speaker for s in result))
         await _update_branch_progress("transcription", 100, JobStatus.TRANSCRIBING,
             f"Transcribed {len(result)} segments \u2014 {speaker_count} speaker{'s' if speaker_count != 1 else ''} detected")

@@ -1098,6 +1098,8 @@ _WHISPER_MODELS = [
     {"id": "small", "name": "Whisper Small", "provider": "local", "desc": "Good accuracy/speed balance (~244M params, default)", "cost_per_hour": 0, "is_free": True, "quality_score": 3, "quality": "good"},
     {"id": "medium", "name": "Whisper Medium", "provider": "local", "desc": "High accuracy, slower (~769M params)", "cost_per_hour": 0, "is_free": True, "quality_score": 4, "quality": "excellent"},
     {"id": "large-v3", "name": "Whisper Large V3", "provider": "local", "desc": "Best accuracy, needs GPU (~1.5B params)", "cost_per_hour": 0, "is_free": True, "quality_score": 5, "quality": "best"},
+    {"id": "large-v3-turbo", "name": "Whisper Large V3 Turbo", "provider": "local", "desc": "Near large-v3 accuracy, 40% faster (~809M params)", "cost_per_hour": 0, "is_free": True, "quality_score": 5, "quality": "best"},
+    {"id": "distil-large-v3", "name": "Whisper Distil Large V3", "provider": "local", "desc": "Distilled large-v3, 6x faster, English-optimized (~756M params)", "cost_per_hour": 0, "is_free": True, "quality_score": 4, "quality": "excellent"},
 ]
 
 # Known models for direct providers (when user has their API key)

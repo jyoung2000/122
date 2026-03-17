@@ -35,6 +35,10 @@ class GroqProvider(AIProvider):
     def provider_name(self) -> str:
         return "groq"
 
+    async def text_complete(self, prompt: str, max_tokens: int = 4096) -> str:
+        messages = [{"role": "user", "content": prompt}]
+        return await self._call(messages, max_tokens=max_tokens)
+
     async def _call(self, messages: list[dict], max_tokens: int = 4096) -> str:
         t0 = time.monotonic()
         try:

@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from backend import database
 from backend.config import settings
-from backend.models import ExportRequest, FullVideoExportRequest, GenerateClipsRequest, UpdateClipTimesRequest, UpdateClipTitleRequest
+from backend.models import ExportRequest, FullVideoExportRequest, GenerateClipsRequest, TranslateRequest, TranscriptSegment, UpdateClipTimesRequest, UpdateClipTitleRequest
 from backend.services.clip_exporter import export_clip
 from backend.services.pipeline import broadcast_ws
 
@@ -1019,6 +1019,42 @@ async def _cancel_existing_generation(job_id: str):
         logger.info(f"Cancelled previous clip generation for {job_id}")
 
     _clip_cancel_events.pop(job_id, None)
+
+
+@router.post("/jobs/{job_id}/translate-subtitles")
+async def translate_subtitles(job_id: str, req: TranslateRequest):
+    """Translate the transcript for a job into a target language."""
+    from backend.services.translator import translate_segments, SUPPORTED_LANGUAGES
+    from backend.services.ai_orchestrator import AIOrchestrator
+
+    job = await database.load_job(job_id)
+    if not job or not job.transcript:
+        raise HTTPException(404, "Job not found or has no transcript")
+
+    if req.target_language not in SUPPORTED_LANGUAGES:
+        raise HTTPException(400, f"Unsupported language: {req.target_language}")
+
+    orchestrator = AIOrchestrator()
+    segments = [TranscriptSegment(**s) if isinstance(s, dict) else s for s in job.transcript]
+
+    translated = await translate_segments(
+        segments,
+        source_language=req.source_language or job.language or "en",
+        target_language=req.target_language,
+        orchestrator=orchestrator,
+    )
+
+    # Store translated transcript alongside original
+    await database.update_job_status(
+        job_id,
+        **{f"translated_{req.target_language}": [s.model_dump() for s in translated]},
+    )
+
+    return {
+        "status": "ok",
+        "target_language": req.target_language,
+        "segments": len(translated),
+    }
 
 
 @router.get("/jobs/{job_id}/clips")

@@ -29,8 +29,8 @@ class Settings(BaseSettings):
     AI_FALLBACK_CHAIN: str = "openrouter,gemini,groq"
 
     # Analysis settings
-    WHISPER_MODEL: str = "small"
-    WHISPER_BEAM_SIZE: int = 1         # 1=fast/greedy, 5=slow/accurate
+    WHISPER_MODEL: str = "small"  # Auto-upgraded to large-v3-turbo when GPU detected
+    WHISPER_BEAM_SIZE: int = 5    # beam search for better accuracy (was 1/greedy)
     WHISPER_VAD_FILTER: bool = True    # skip silence — major speedup
     FRAME_SAMPLE_RATE: int = 10        # seconds between frames (lower=more detail, slower)
     MAX_CLIP_CANDIDATES: int = 12
@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     GPU_HWDECODE_ENABLED: bool = True        # Use GPU for video decoding (NVDEC/DXVA2/VAAPI/VideoToolbox)
     GPU_HEVC_FOR_4K: bool = True             # Use HEVC encoder for 4K exports when available
     GPU_DEVICE_INDEX: str = ""               # GPU device index for FFmpeg (e.g. "0", "1") — set by client GPU report
+
+    # AI transcript post-correction
+    AI_TRANSCRIPT_CORRECTION: bool = True  # Use LLM to fix proper nouns, punctuation, fillers
+
+    # Speaker diarization (pyannote)
+    DIARIZATION_ENABLED: bool = True  # Use pyannote for real speaker diarization
+    DIARIZATION_MIN_SPEAKERS: int = 1
+    DIARIZATION_MAX_SPEAKERS: int = 10
+    HF_AUTH_TOKEN: str = ""  # HuggingFace token for pyannote model access
 
     @property
     def active_provider_chain(self) -> list[str]:

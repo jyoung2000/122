@@ -58,7 +58,8 @@ self.onmessage = async ({ data }) => {
         return_timestamps: 'word',
         chunk_length_s: 30,
         stride_length_s: 5,
-        language: language || 'en',
+        // Only pass language if explicitly set; undefined = auto-detect
+        ...(language ? { language } : {}),
       });
 
       const elapsed = ((performance.now() - startTime) / 1000).toFixed(1);
@@ -67,7 +68,7 @@ self.onmessage = async ({ data }) => {
         result: {
           text: result.text,
           chunks: result.chunks || [],
-          language: language || 'en',
+          language: language || result.language || 'auto',
         },
         elapsed,
       });

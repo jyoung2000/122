@@ -69,6 +69,9 @@ def analyze_transcript_energy(
         ):
             energy_signals.append("reaction")
 
+        if hasattr(seg, 'confidence') and seg.confidence is not None and seg.confidence < 0.4:
+            energy_signals.append("low_confidence")
+
         if energy_signals:
             energy_moments.append(
                 f"[{seg.start:.0f}s] {seg.speaker}: {', '.join(energy_signals)}"

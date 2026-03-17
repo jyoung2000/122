@@ -324,6 +324,29 @@ class AIOrchestrator:
                 continue
         raise AllProvidersFailedError("All providers failed for viral clip detection")
 
+    async def text_completion(self, prompt: str, max_tokens: int = 4096) -> str:
+        """Generic text completion using the configured provider chain.
+
+        Used by transcript correction, translation, and other text-only tasks.
+        Returns the raw text response from the first successful provider.
+        """
+        for provider in self._get_active_chain():
+            pname = provider.provider_name
+            try:
+                logger.debug("text_completion via %s (%d chars prompt)", pname, len(prompt))
+                t0 = time.monotonic()
+                # Use the provider's underlying client for a simple text completion
+                result = await provider.text_complete(prompt, max_tokens=max_tokens)
+                elapsed = time.monotonic() - t0
+                logger.debug("text_completion via %s completed in %.1fs", pname, elapsed)
+                self._circuit_breaker.record_success(pname)
+                return result
+            except Exception as e:
+                self._circuit_breaker.record_failure(pname)
+                logger.warning("text_completion via %s failed: %s", pname, e)
+                continue
+        raise AllProvidersFailedError("All providers failed for text completion")
+
     async def generate_seo(
         self,
         clip_title: str,

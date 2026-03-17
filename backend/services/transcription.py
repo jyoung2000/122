@@ -248,6 +248,11 @@ def _get_whisper_model():
             if device == "cuda":
                 model_kwargs["device_index"] = device_index
 
+            # Auto-upgrade model when GPU is available and user hasn't explicitly chosen
+            if device == "cuda" and settings.WHISPER_MODEL == "small":
+                settings.WHISPER_MODEL = "large-v3-turbo"
+                logger.info("Auto-upgraded Whisper model to large-v3-turbo (GPU detected)")
+
             logger.info(
                 "Loading Whisper model: %s (device=%s, compute=%s%s)",
                 settings.WHISPER_MODEL, device, compute_type,
@@ -506,10 +511,14 @@ def _transcribe_sync(
     model = _get_whisper_model()
     transcribe_kwargs = {
         "beam_size": settings.WHISPER_BEAM_SIZE,
-        "best_of": 1,  # single pass — skip temperature fallback sampling
+        "best_of": 1,
         "vad_filter": settings.WHISPER_VAD_FILTER,
-        "condition_on_previous_text": False,
+        "condition_on_previous_text": True,  # Enables context across segments
         "word_timestamps": True,
+        "no_speech_threshold": 0.6,          # Filter non-speech segments
+        "log_prob_threshold": -1.0,          # Skip low-confidence segments
+        "compression_ratio_threshold": 2.4,  # Detect hallucination loops
+        "repetition_penalty": 1.1,           # Discourage repetitive output
     }
     if settings.WHISPER_VAD_FILTER:
         # Tune VAD parameters — keep speech with short pauses
@@ -554,11 +563,24 @@ def _transcribe_sync(
             last_word_end = max(w["end"] for w in word_list)
             if last_word_end > seg_end:
                 seg_end = last_word_end + 0.05
+
+        # Convert avg_logprob to a 0-1 confidence score
+        # avg_logprob typically ranges from -2.0 (garbage) to 0.0 (perfect)
+        avg_lp = getattr(segment, 'avg_logprob', -1.0)
+        no_speech = getattr(segment, 'no_speech_prob', 0.0)
+        confidence = max(0.0, min(1.0, 1.0 + avg_lp))  # -1.0 → 0.0, 0.0 → 1.0
+        # Penalize if high no_speech probability
+        if no_speech > 0.3:
+            confidence *= (1.0 - no_speech)
+
         seg_dict = {
             "start": segment.start,
             "end": seg_end,
             "text": text,
             "words": word_list,
+            "confidence": round(confidence, 3),
+            "avg_logprob": round(avg_lp, 4) if avg_lp is not None else None,
+            "no_speech_prob": round(no_speech, 4) if no_speech is not None else None,
         }
         raw_segments.append(seg_dict)
         # Update shared progress state (read by async polling loop).
@@ -577,8 +599,18 @@ def _transcribe_sync(
     if not raw_segments:
         return []
 
-    # Speaker diarization based on conversation turn detection
-    transcript_segments = _assign_speakers(raw_segments)
+    # Filter hallucinations before speaker assignment
+    raw_segments = _filter_hallucinations(raw_segments)
+    if not raw_segments:
+        return []
+
+    # Try pyannote diarization first, fall back to pause-based heuristic
+    speaker_map = _diarize_audio(audio_path)
+    if speaker_map:
+        transcript_segments = _assign_speakers_from_diarization(raw_segments, speaker_map)
+    else:
+        transcript_segments = _assign_speakers(raw_segments)
+
     speaker_set = set(s.speaker for s in transcript_segments)
     logger.info(f"Transcription complete: {len(transcript_segments)} segments, {len(speaker_set)} speakers detected")
     return transcript_segments
@@ -679,6 +711,191 @@ def _assign_speakers(raw_segments: list[dict]) -> list[TranscriptSegment]:
             text=seg["text"],
             speaker=f"Speaker {current_speaker}",
             words=words,
+            confidence=seg.get("confidence"),
+            avg_logprob=seg.get("avg_logprob"),
+            no_speech_prob=seg.get("no_speech_prob"),
+        ))
+
+    return transcript_segments
+
+
+def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
+    """Remove Whisper hallucination segments.
+
+    Detects and filters:
+    - Repeated n-grams (looping text like "Thank you. Thank you. Thank you.")
+    - Abnormally long single segments (>500 chars = likely runaway)
+    - Segments that are exact or near-exact duplicates of the previous segment
+    """
+    if not raw_segments:
+        return raw_segments
+
+    filtered = []
+    prev_text = ""
+
+    for seg in raw_segments:
+        text = seg["text"].strip()
+
+        # Skip empty segments
+        if not text:
+            continue
+
+        # Check 1: Abnormally long segment (Whisper runaway)
+        if len(text) > 500:
+            logger.warning(
+                "Hallucination filter: removed runaway segment at %.1fs (%d chars): %s...",
+                seg["start"], len(text), text[:80],
+            )
+            continue
+
+        # Check 2: Repeated trigrams (e.g., "Thank you. Thank you. Thank you.")
+        words = text.lower().split()
+        if len(words) >= 9:
+            trigrams = [tuple(words[i:i+3]) for i in range(len(words) - 2)]
+            trigram_counts: dict[tuple, int] = {}
+            for tg in trigrams:
+                trigram_counts[tg] = trigram_counts.get(tg, 0) + 1
+            max_repeat = max(trigram_counts.values()) if trigram_counts else 0
+            if max_repeat >= 3 and max_repeat / len(trigrams) > 0.4:
+                logger.warning(
+                    "Hallucination filter: removed looping segment at %.1fs: %s...",
+                    seg["start"], text[:80],
+                )
+                continue
+
+        # Check 3: Near-duplicate of previous segment
+        if prev_text and text:
+            prev_words = set(prev_text.lower().split())
+            curr_words = set(text.lower().split())
+            if prev_words and curr_words:
+                overlap = len(prev_words & curr_words) / max(len(prev_words), len(curr_words))
+                if overlap > 0.8 and len(curr_words) > 3:
+                    logger.warning(
+                        "Hallucination filter: removed duplicate segment at %.1fs: %s...",
+                        seg["start"], text[:60],
+                    )
+                    continue
+
+        filtered.append(seg)
+        prev_text = text
+
+    removed = len(raw_segments) - len(filtered)
+    if removed > 0:
+        logger.info("Hallucination filter: removed %d/%d segments", removed, len(raw_segments))
+    return filtered
+
+
+# ── Speaker Diarization (pyannote) ─────────────────────────────────────
+
+_diarization_pipeline = None
+_diarization_lock = threading.Lock()
+
+
+def _get_diarization_pipeline():
+    """Load pyannote speaker diarization pipeline (lazy init)."""
+    global _diarization_pipeline
+    with _diarization_lock:
+        if _diarization_pipeline is None:
+            try:
+                from pyannote.audio import Pipeline
+                token = settings.HF_AUTH_TOKEN
+                if not token:
+                    logger.warning(
+                        "HF_AUTH_TOKEN not set — pyannote diarization unavailable. "
+                        "Falling back to pause-based speaker detection."
+                    )
+                    return None
+                _diarization_pipeline = Pipeline.from_pretrained(
+                    "pyannote/speaker-diarization-3.1",
+                    use_auth_token=token,
+                )
+                # Move to GPU if available
+                import torch
+                if torch.cuda.is_available():
+                    _diarization_pipeline.to(torch.device("cuda"))
+                    logger.info("pyannote diarization loaded on CUDA")
+                else:
+                    logger.info("pyannote diarization loaded on CPU")
+            except Exception as e:
+                logger.warning("Failed to load pyannote diarization: %s", e)
+                return None
+    return _diarization_pipeline
+
+
+def _diarize_audio(audio_path: str):
+    """Run speaker diarization and return a mapping of (start, end) → speaker_label."""
+    if not settings.DIARIZATION_ENABLED:
+        return None
+
+    pipeline = _get_diarization_pipeline()
+    if pipeline is None:
+        return None
+
+    try:
+        diarization = pipeline(
+            audio_path,
+            min_speakers=settings.DIARIZATION_MIN_SPEAKERS,
+            max_speakers=settings.DIARIZATION_MAX_SPEAKERS,
+        )
+
+        # Build time-to-speaker mapping
+        speaker_map = {}
+        for turn, _, speaker in diarization.itertracks(yield_label=True):
+            speaker_map[(turn.start, turn.end)] = speaker
+
+        logger.info(
+            "Diarization complete: %d turns, %d speakers",
+            len(speaker_map),
+            len(set(speaker_map.values())),
+        )
+        return speaker_map
+
+    except Exception as e:
+        logger.warning("Diarization failed: %s — falling back to pause-based", e)
+        return None
+
+
+def _assign_speakers_from_diarization(
+    raw_segments: list[dict], speaker_map: dict
+) -> list[TranscriptSegment]:
+    """Align Whisper segments with pyannote diarization output."""
+    # Sort diarization turns by start time
+    turns = sorted(speaker_map.items(), key=lambda x: x[0][0])
+
+    # Create a canonical speaker name mapping (SPEAKER_00 → Speaker 1, etc.)
+    unique_speakers = sorted(set(speaker_map.values()))
+    speaker_names = {s: f"Speaker {i+1}" for i, s in enumerate(unique_speakers)}
+
+    transcript_segments = []
+    for seg in raw_segments:
+        seg_start, seg_end = seg["start"], seg["end"]
+
+        # Find the turn with maximum overlap
+        best_speaker = None
+        best_overlap = 0.0
+        for (turn_start, turn_end), speaker in turns:
+            overlap_start = max(seg_start, turn_start)
+            overlap_end = min(seg_end, turn_end)
+            overlap = max(0.0, overlap_end - overlap_start)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_speaker = speaker
+
+        speaker_label = speaker_names.get(best_speaker, "Speaker 1") if best_speaker else "Speaker 1"
+
+        words = None
+        if seg.get("words"):
+            words = [WordTimestamp(**w) for w in seg["words"]]
+
+        transcript_segments.append(TranscriptSegment(
+            start=round(seg["start"], 2),
+            end=round(seg["end"], 2),
+            text=seg["text"],
+            speaker=speaker_label,
+            words=words,
+            confidence=seg.get("confidence"),
+            avg_logprob=seg.get("avg_logprob"),
+            no_speech_prob=seg.get("no_speech_prob"),
         ))
 
     return transcript_segments

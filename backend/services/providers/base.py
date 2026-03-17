@@ -419,6 +419,10 @@ class AIProvider(ABC):
         """Generate SEO-optimized title, description, and tags for a clip."""
         pass
 
+    async def text_complete(self, prompt: str, max_tokens: int = 4096) -> str:
+        """Generic text completion. Override in subclasses for provider-specific impl."""
+        raise NotImplementedError(f"{self.provider_name} does not support text_complete")
+
     @property
     @abstractmethod
     def supports_vision(self) -> bool:

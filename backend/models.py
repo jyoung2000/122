@@ -41,6 +41,9 @@ class TranscriptSegment(BaseModel):
     text: str
     speaker: str  # "Speaker 1", "Speaker 2", etc.
     words: Optional[list[WordTimestamp]] = None  # per-word timestamps from Whisper
+    confidence: Optional[float] = None  # 0.0-1.0, derived from avg_logprob
+    avg_logprob: Optional[float] = None  # Raw Whisper log probability
+    no_speech_prob: Optional[float] = None  # Probability this is not speech
 
 
 class ClipCandidate(BaseModel):
@@ -341,6 +344,11 @@ class SavePresetRequest(BaseModel):
 
 class RenamePresetRequest(BaseModel):
     name: str
+
+
+class TranslateRequest(BaseModel):
+    source_language: str = ""  # Auto-detect from job if empty
+    target_language: str       # ISO 639-1 code
 
 
 # ── Multi-track Timeline Models ─────────────────────────────────────────────
