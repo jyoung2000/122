@@ -1205,7 +1205,10 @@ export default function Analysis() {
     <div style={{
       display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px',
       background: 'var(--bg-panel)', borderTop: '1px solid var(--border)',
-      flexWrap: 'wrap', marginTop: -1,
+      flexWrap: isMobile ? 'nowrap' : 'wrap', marginTop: -1,
+      overflowX: isMobile ? 'auto' : undefined,
+      WebkitOverflowScrolling: isMobile ? 'touch' : undefined,
+      scrollbarWidth: isMobile ? 'none' : undefined,
       opacity: isProcessing ? 0.4 : 1,
       pointerEvents: isProcessing ? 'none' : 'auto',
     }}>
@@ -1357,25 +1360,23 @@ export default function Analysis() {
         </svg>
         {activeSegment ? 'Segment ' : ''}Subs {effectiveSubsEnabled ? 'On' : 'Off'}
       </button>
-      {!isMobile && (
-        <button
-          onClick={() => !isProcessing && setShowInlineSubSettings(v => !v)}
-          disabled={isProcessing}
-          style={{
-            display: 'flex', alignItems: 'center', gap: 3,
-            padding: '5px 8px', fontSize: 10, fontWeight: 500,
-            background: showInlineSubSettings ? 'var(--accent-cyan-dim)' : 'transparent',
-            color: 'var(--text-muted)',
-            border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
-            cursor: isProcessing ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
-            opacity: isProcessing ? 0.4 : 1,
-          }}>
-          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
-          </svg>
-          {showInlineSubSettings ? 'Hide Settings' : 'Subtitle Settings'}
-        </button>
-      )}
+      <button
+        onClick={() => !isProcessing && setShowInlineSubSettings(v => !v)}
+        disabled={isProcessing}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 3,
+          padding: '5px 8px', fontSize: 10, fontWeight: 500,
+          background: showInlineSubSettings ? 'var(--accent-cyan-dim)' : 'transparent',
+          color: 'var(--text-muted)',
+          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+          cursor: isProcessing ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+          opacity: isProcessing ? 0.4 : 1,
+        }}>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+        </svg>
+        {showInlineSubSettings ? 'Hide Settings' : 'Subtitle Settings'}
+      </button>
       {/* Mark Key Scene — adds current playhead position as a keyscene for AI clip generation */}
       <button
         onClick={() => !isProcessing && setShowMarkScene(v => !v)}
@@ -1498,16 +1499,16 @@ export default function Analysis() {
   };
 
   const renderInlineSubPanel = () => {
-    if (!showInlineSubSettings || isMobile) return null;
+    if (!showInlineSubSettings) return null;
     return (
       <div style={{
-        padding: '12px 16px', background: 'var(--bg-panel)',
+        padding: isMobile ? '8px 10px' : '12px 16px', background: 'var(--bg-panel)',
         border: '1px solid var(--border)', borderTop: 'none',
         borderRadius: '0 0 var(--radius-md) var(--radius-md)',
       }}>
         {/* Row 1: Font, Size, Weight, Color */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end', marginBottom: 10 }}>
-          <div style={{ ...inlineFieldStyle, minWidth: 120 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: isMobile ? 8 : 12, alignItems: 'flex-end', marginBottom: 10 }}>
+          <div style={{ ...inlineFieldStyle, minWidth: isMobile ? 90 : 120 }}>
             <label style={inlineLabelStyle}>Font</label>
             <select value={clipSettings.subtitleFont || 'DM Sans'} onChange={e => updateCS('subtitleFont', e.target.value)}
               style={{ padding: '5px 8px', fontSize: 12, borderRadius: 'var(--radius-xs)', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text-primary)' }}>
@@ -1555,8 +1556,8 @@ export default function Analysis() {
         </div>
 
         {/* Row 2: Max Width, Offset, Outline, Max Words */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end', marginBottom: 10 }}>
-          <div style={{ ...inlineFieldStyle, minWidth: 120 }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: isMobile ? 8 : 12, alignItems: 'flex-end', marginBottom: 10 }}>
+          <div style={{ ...inlineFieldStyle, minWidth: isMobile ? 90 : 120 }}>
             <label style={inlineLabelStyle}>Max Width</label>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
               <input type="range" min="20" max="100" step="5" value={Math.min(100, Math.max(20, clipSettings.subtitleMaxWidth))}
@@ -1596,7 +1597,7 @@ export default function Analysis() {
         </div>
 
         {/* Row 3: Background, Active Word, Speaker Labels */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'flex-end' }}>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: isMobile ? 8 : 12, alignItems: 'flex-end' }}>
           <div style={inlineFieldStyle}>
             <label style={inlineLabelStyle}>Background</label>
             <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -1736,7 +1737,7 @@ export default function Analysis() {
             )}
             {/* Inline subtitle settings for clip preview */}
             {renderInlineSubToolbar(null)}
-            {!isMobile && renderPresetBar()}
+            {renderPresetBar()}
             {renderMarkScenePanel()}
             {renderInlineSubPanel()}
           </div>
@@ -1813,7 +1814,7 @@ export default function Analysis() {
                 <div style={{ width: 1, height: 20, background: 'var(--border)', margin: '0 4px' }} />
               </>
             )}
-            {!isMobile && renderPresetBar()}
+            {renderPresetBar()}
             {renderMarkScenePanel()}
             {renderInlineSubPanel()}
           </div>

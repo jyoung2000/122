@@ -2120,6 +2120,18 @@ input.ve-timecode--input {
   .ve-multitrack__toolbar-actions {
     margin-left: 0;
   }
+  /* Timeline: horizontal scroll for narrow screens */
+  .ve-multitrack__timeline {
+    min-height: 120px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  /* Touch-friendly toggle buttons */
+  .ve-multitrack-toggle__btn {
+    min-height: 36px;
+    padding: 6px 10px;
+    font-size: 11px;
+  }
 }
 
 /* ═══════════════════════════════════════════════════════

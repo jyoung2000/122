@@ -237,7 +237,9 @@ export default function VideoEditor({
   // Default to open on desktop so multi-track edits are immediately visible
   const [showMultiTrack, setShowMultiTrack] = useState(() => {
     const w = typeof window !== 'undefined' ? window.innerWidth : 1024;
-    return w >= 1024;
+    // Open by default on tablet+ (≥768px), collapsed on phone (<768px).
+    // Phone users can toggle open via the Multi-Track Editor button.
+    return w >= 768;
   });
   const [showMediaLibrary, setShowMediaLibrary] = useState(false);
   const [showProperties, setShowProperties] = useState(false);
@@ -3297,7 +3299,7 @@ export default function VideoEditor({
       </div>
 
       {/* ── Multi-Track Editor Toggle ── */}
-      {!compact && !isMobile && (
+      {!compact && (
         <div className="ve-multitrack-toggle">
           <button
             className={`ve-multitrack-toggle__btn${showMultiTrack ? ' ve-multitrack-toggle__btn--active' : ''}${isProcessing ? ' ve-multitrack-toggle__btn--disabled' : ''}`}
