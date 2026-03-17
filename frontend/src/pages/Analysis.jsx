@@ -2661,6 +2661,7 @@ export default function Analysis() {
                   onApplySettings={handleApplyClipSettings}
                   onPresetsLoaded={setClipPresets}
                   serverSettings={job.subtitle_settings}
+                  parentSettings={clipSettings}
                 />
 
                 {/* Export Full Video */}

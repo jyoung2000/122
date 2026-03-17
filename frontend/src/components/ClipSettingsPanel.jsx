@@ -193,7 +193,7 @@ function saveSettings(settings) {
   } catch {}
 }
 
-export default function ClipSettingsPanel({ speakers, speakerNames, videoResolution, onSettingsChange, onApplySettings, onPresetsLoaded, serverSettings }) {
+export default function ClipSettingsPanel({ speakers, speakerNames, videoResolution, onSettingsChange, onApplySettings, onPresetsLoaded, serverSettings, parentSettings }) {
   const { isMobile } = useResponsive();
   const [settings, setSettings] = useState(() => {
     // Prefer server-provided settings over localStorage (server is source of truth)
@@ -285,6 +285,18 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
     document.fonts.load(`400 16px "${font}"`).catch(() => {});
     document.fonts.load(`700 16px "${font}"`).catch(() => {});
   }, [settings.subtitleFont]);
+
+  // Sync subtitlesEnabled when toggled externally (e.g. Analysis toolbar button)
+  useEffect(() => {
+    if (parentSettings && parentSettings.subtitlesEnabled !== undefined) {
+      setSettings(prev => {
+        if (prev.subtitlesEnabled !== parentSettings.subtitlesEnabled) {
+          return { ...prev, subtitlesEnabled: parentSettings.subtitlesEnabled };
+        }
+        return prev;
+      });
+    }
+  }, [parentSettings?.subtitlesEnabled]);
 
   const update = (key, value) => {
     setSettings((prev) => ({ ...prev, [key]: value }));
