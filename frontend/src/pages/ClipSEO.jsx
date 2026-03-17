@@ -1379,6 +1379,7 @@ export default function ClipSEO() {
               onSettingsChange={setClipSettings}
               onApplySettings={handleApplySettings}
               serverSettings={job?.subtitle_settings}
+              parentSettings={clipSettings}
             />
           </div>
 
