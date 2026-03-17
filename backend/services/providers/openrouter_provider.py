@@ -564,26 +564,32 @@ class OpenRouterProvider(AIProvider):
     def _condense_transcript(transcript: list[TranscriptSegment], max_chars: int = 12000) -> str:
         """Build a compact transcript representation that fits within max_chars.
 
-        Merges consecutive segments from the same speaker and truncates
-        if the total text exceeds the limit.
+        Merges consecutive segments from the same speaker, averages confidence
+        scores, and marks low-confidence segments with [LOW_CONF] so the LLM
+        can avoid unreliable transcript regions when selecting clips.
         """
         if not transcript:
             return "(no transcript)"
 
         # Merge consecutive segments from the same speaker for compactness
-        merged: list[tuple[float, float, str, str]] = []
+        merged: list[tuple[float, float, str, str, float]] = []
         for seg in transcript:
+            conf = getattr(seg, 'confidence', None) or 1.0
             if merged and merged[-1][3] == seg.speaker:
                 # Extend the previous segment
                 prev = merged[-1]
-                merged[-1] = (prev[0], seg.end, prev[2] + " " + seg.text, seg.speaker)
+                # Average confidence when merging
+                avg_conf = (prev[4] + conf) / 2
+                merged[-1] = (prev[0], seg.end, prev[2] + " " + seg.text, seg.speaker, avg_conf)
             else:
-                merged.append((seg.start, seg.end, seg.text, seg.speaker))
+                merged.append((seg.start, seg.end, seg.text, seg.speaker, conf))
 
         lines = []
         total = 0
-        for start, end, text, speaker in merged:
-            line = f"[{start:.0f}-{end:.0f}] {speaker}: {text}"
+        for start, end, text, speaker, conf in merged:
+            # Mark low-confidence segments so the LLM can avoid them
+            conf_marker = " [LOW_CONF]" if conf < 0.4 else ""
+            line = f"[{start:.0f}-{end:.0f}] {speaker}: {text}{conf_marker}"
             total += len(line) + 1
             if total > max_chars:
                 lines.append(f"[{start:.0f}-{end:.0f}] {speaker}: {text[:100]}...")
@@ -622,7 +628,126 @@ class OpenRouterProvider(AIProvider):
 
         return "\n".join(lines)
 
+    @staticmethod
+    def _deduplicate_clips(clips: list[ClipCandidate], max_overlap: float = 0.5) -> list[ClipCandidate]:
+        """Remove clips that overlap by more than max_overlap fraction of the shorter clip."""
+        if len(clips) <= 1:
+            return clips
+
+        # Sort by viral_score descending so we keep the best clip in each overlap group
+        sorted_clips = sorted(clips, key=lambda c: c.viral_score, reverse=True)
+        kept = []
+
+        for clip in sorted_clips:
+            is_duplicate = False
+            for existing in kept:
+                # Calculate overlap
+                overlap_start = max(clip.start_time, existing.start_time)
+                overlap_end = min(clip.end_time, existing.end_time)
+                overlap_duration = max(0, overlap_end - overlap_start)
+                shorter_duration = min(clip.duration, existing.duration)
+
+                if shorter_duration > 0 and overlap_duration / shorter_duration > max_overlap:
+                    is_duplicate = True
+                    logger.info(
+                        "De-dup: dropping '%s' (%.0f-%.0fs, score=%d) — overlaps %.0f%% with '%s'",
+                        clip.title, clip.start_time, clip.end_time, clip.viral_score,
+                        (overlap_duration / shorter_duration) * 100, existing.title,
+                    )
+                    break
+
+            if not is_duplicate:
+                kept.append(clip)
+
+        if len(kept) < len(clips):
+            logger.info("De-duplication: kept %d of %d clips", len(kept), len(clips))
+        return kept
+
+    async def _windowed_clip_detection(
+        self,
+        transcript: list[TranscriptSegment],
+        scenes: list[SceneDescription],
+        video_duration: float,
+        window_duration: float = 600.0,
+        overlap_duration: float = 120.0,
+        **kwargs,
+    ) -> list[ClipCandidate]:
+        """Split long videos into overlapping windows and run clip detection on each.
+
+        Merges results with de-duplication to cover the entire video.
+        """
+        all_clips = []
+        window_start = 0.0
+        window_idx = 0
+
+        while window_start < video_duration:
+            window_end = min(window_start + window_duration, video_duration)
+
+            # Filter transcript and scenes to this window
+            window_transcript = [
+                seg for seg in transcript
+                if seg.start >= window_start - overlap_duration / 2
+                and seg.end <= window_end + overlap_duration / 2
+            ]
+            window_scenes = [
+                s for s in scenes
+                if s.timestamp >= window_start and s.timestamp <= window_end
+            ]
+
+            logger.info(
+                "Window %d: %.0f-%.0fs (%d segments, %d scenes)",
+                window_idx, window_start, window_end,
+                len(window_transcript), len(window_scenes),
+            )
+
+            try:
+                window_clips = await self._single_pass_clip_detection(
+                    window_transcript, window_scenes, window_end - window_start,
+                    **kwargs,
+                )
+                all_clips.extend(window_clips)
+            except Exception as e:
+                logger.warning("Window %d clip detection failed: %s", window_idx, e)
+
+            window_start += window_duration - overlap_duration
+            window_idx += 1
+
+        # De-duplicate overlapping window results
+        return self._deduplicate_clips(all_clips)
+
     async def detect_viral_clips(
+        self,
+        transcript: list[TranscriptSegment],
+        scenes: list[SceneDescription],
+        video_duration: float,
+        custom_prompt: Optional[str] = None,
+        cancel_check=None,
+        clip_count: Optional[int] = None,
+        min_duration: Optional[float] = None,
+        max_duration: Optional[float] = None,
+        video_summary: Optional[str] = None,
+        existing_clips: Optional[str] = None,
+    ) -> list[ClipCandidate]:
+        # For long videos (>15 min), use windowed detection to cover entire video
+        if video_duration > 900:
+            logger.info("Long video (%.0fs) — using windowed clip detection", video_duration)
+            return await self._windowed_clip_detection(
+                transcript, scenes, video_duration,
+                custom_prompt=custom_prompt, cancel_check=cancel_check,
+                clip_count=clip_count, min_duration=min_duration,
+                max_duration=max_duration, video_summary=video_summary,
+                existing_clips=existing_clips,
+            )
+
+        return await self._single_pass_clip_detection(
+            transcript, scenes, video_duration,
+            custom_prompt=custom_prompt, cancel_check=cancel_check,
+            clip_count=clip_count, min_duration=min_duration,
+            max_duration=max_duration, video_summary=video_summary,
+            existing_clips=existing_clips,
+        )
+
+    async def _single_pass_clip_detection(
         self,
         transcript: list[TranscriptSegment],
         scenes: list[SceneDescription],
@@ -689,6 +814,8 @@ class OpenRouterProvider(AIProvider):
             f"{content_guidance}"
             "STRICT REQUIREMENTS:\n"
             f"- Each clip duration MUST be between {dur_min} and {dur_max} seconds ({dur_min_fmt} to {dur_max_fmt})\n"
+            "- Segments marked [LOW_CONF] have unreliable transcription — avoid clips where "
+            "multiple [LOW_CONF] segments appear, as the actual dialogue may differ significantly\n"
             "- Start at natural speech boundaries — beginning of a sentence, after a pause, at a speaker change\n"
             "- End at natural conclusions — punchlines, resolved thoughts, scene transitions\n"
             "- Must work standalone without context from the full video\n"
@@ -821,7 +948,8 @@ class OpenRouterProvider(AIProvider):
                     )
 
                 if clips:
-                    logger.info(f"Parsed {len(clips)} valid clips from {len(clips_data)} candidates")
+                    clips = self._deduplicate_clips(clips)
+                    logger.info(f"Parsed {len(clips)} valid clips after de-duplication (from {len(clips_data)} candidates)")
                     return clips
 
                 # All clips filtered out — log and retry

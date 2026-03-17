@@ -1074,6 +1074,21 @@ async def list_clips(job_id: str):
     ]
 
 
+@router.get("/jobs/{job_id}/retention")
+async def get_retention_predictions(job_id: str):
+    """Get audience retention predictions for all clips in a job."""
+    from backend.services.retention_predictor import predict_retention_for_clips
+
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.clips:
+        return {"predictions": {}}
+
+    predictions = predict_retention_for_clips(job.clips, job.transcript, job.scenes)
+    return {"predictions": predictions}
+
+
 @router.post("/jobs/{job_id}/seo/{clip_id}")
 async def generate_seo_endpoint(job_id: str, clip_id: int):
     """Generate SEO-optimized title, description, and tags for a clip."""

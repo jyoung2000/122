@@ -145,8 +145,15 @@ async def extract_frames(
     sample_rate: Optional[int] = None,
     cancel_check: Optional[Callable] = None,
     progress_callback: Optional[Callable] = None,
+    max_frames: int = 60,
 ) -> list[FrameData]:
-    """Extract frames from video at given sample rate using FFmpeg."""
+    """Extract frames using scene detection + minimum interval fallback.
+
+    Strategy:
+    1. Scene detection (threshold 0.3) captures visual transitions
+    2. Minimum interval ensures coverage during static scenes
+    3. Maximum frame cap prevents API cost explosion on long videos
+    """
     rate = sample_rate or settings.FRAME_SAMPLE_RATE
     os.makedirs(output_dir, exist_ok=True)
 
@@ -159,19 +166,31 @@ async def extract_frames(
     except Exception:
         pass
 
+    # Hybrid scene detection filter:
+    # - gt(scene,0.3): capture scene changes (transitions, cuts)
+    # - gte(t-prev_selected_t,{rate}): minimum interval fallback for static scenes
+    # - isnan(prev_selected_t): always capture first frame
+    # The OR logic ensures we get scene changes AND regular samples
+    scene_filter = (
+        f"select='gt(scene\\,0.3)+isnan(prev_selected_t)"
+        f"+gte(t-prev_selected_t\\,{rate})',"
+        f"scale='min(1024\\,iw)':'min(576\\,ih)':force_original_aspect_ratio=decrease"
+    )
+
     cmd = [
         "ffmpeg", "-y",
         "-threads", "0",
         *_hw_dec,
         "-i", video_path,
-        "-an",  # skip audio decoding — only extracting video frames
-        "-vf", f"fps=1/{rate},scale='min(1024,iw)':'min(576,ih)':force_original_aspect_ratio=decrease",
+        "-an",
+        "-vf", scene_filter,
+        "-vsync", "vfr",  # Variable frame rate — essential for scene detection
         "-q:v", "12",
+        "-frame_pts", "1",  # Write presentation timestamps for accurate timing
         os.path.join(output_dir, "frame_%06d.jpg"),
     ]
 
-    logger.info("FFmpeg frame extraction command: %s", " ".join(cmd))
-    # Use a custom runner that also monitors output frame count for progress
+    logger.info("FFmpeg scene-aware frame extraction: %s", " ".join(cmd))
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -211,17 +230,51 @@ async def extract_frames(
         logger.error(f"FFmpeg frame extraction failed: {stderr.decode()}")
         raise RuntimeError(f"FFmpeg failed: {stderr.decode()[:500]}")
 
-    # Collect extracted frames
+    # Collect extracted frames with actual timestamps from PTS
     frames = []
     frame_files = sorted(
         f for f in os.listdir(output_dir) if f.startswith("frame_") and f.endswith(".jpg")
     )
+
+    # If we got more frames than max, keep the most evenly spaced subset
+    if len(frame_files) > max_frames:
+        original_count = len(frame_files)
+        step = len(frame_files) / max_frames
+        indices = [int(i * step) for i in range(max_frames)]
+        frame_files = [frame_files[i] for i in indices]
+        logger.info("Capped frames from %d to %d", original_count, max_frames)
+
     for idx, fname in enumerate(frame_files):
         path = os.path.join(output_dir, fname)
-        timestamp = idx * rate
+        # Estimate timestamp: with scene detection + vfr, frame intervals vary.
+        # Use ffprobe to get actual PTS if available, else fall back to index * rate
+        timestamp = idx * rate  # Fallback; will be refined below
         frames.append(FrameData(timestamp=float(timestamp), path=path))
 
-    logger.info("Frame extraction complete: %d frames from %s", len(frames), video_path)
+    # Refine timestamps using ffprobe on extracted frames
+    try:
+        for i, frame in enumerate(frames):
+            probe_cmd = [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "frame=pts_time",
+                "-of", "csv=p=0", frame.path,
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *probe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            if stdout.strip():
+                try:
+                    frame.timestamp = float(stdout.strip())
+                except ValueError:
+                    pass
+    except Exception as e:
+        logger.warning("Could not refine frame timestamps: %s", e)
+
+    logger.info(
+        "Scene-aware extraction complete: %d frames from %s (scene detection + %ds interval)",
+        len(frames), video_path, rate,
+    )
     return frames
 
 

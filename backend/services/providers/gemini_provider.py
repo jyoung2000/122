@@ -21,12 +21,48 @@ _VISION_TIMEOUT = 120   # 2 min for vision calls
 _TEXT_TIMEOUT = 180      # 3 min for text calls
 
 
+def _deduplicate_clips(clips: list[ClipCandidate], max_overlap: float = 0.5) -> list[ClipCandidate]:
+    """Remove clips that overlap by more than max_overlap fraction of the shorter clip."""
+    if len(clips) <= 1:
+        return clips
+
+    sorted_clips = sorted(clips, key=lambda c: c.viral_score, reverse=True)
+    kept = []
+
+    for clip in sorted_clips:
+        is_duplicate = False
+        for existing in kept:
+            overlap_start = max(clip.start_time, existing.start_time)
+            overlap_end = min(clip.end_time, existing.end_time)
+            overlap_duration = max(0, overlap_end - overlap_start)
+            shorter_duration = min(clip.duration, existing.duration)
+
+            if shorter_duration > 0 and overlap_duration / shorter_duration > max_overlap:
+                is_duplicate = True
+                logger.info(
+                    "De-dup: dropping '%s' (%.0f-%.0fs, score=%d) — overlaps %.0f%% with '%s'",
+                    clip.title, clip.start_time, clip.end_time, clip.viral_score,
+                    (overlap_duration / shorter_duration) * 100, existing.title,
+                )
+                break
+
+        if not is_duplicate:
+            kept.append(clip)
+
+    if len(kept) < len(clips):
+        logger.info("De-duplication: kept %d of %d clips", len(kept), len(clips))
+    return kept
+
+
 class GeminiProvider(AIProvider):
 
     def __init__(self):
         genai.configure(api_key=settings.GEMINI_API_KEY)
         self._model = genai.GenerativeModel("gemini-2.0-flash")
+        # Use 2.5 Flash for native video (better multimodal reasoning)
+        self._video_model = genai.GenerativeModel("gemini-2.5-flash")
         self._total_tokens = 0
+        self._native_video_enabled = settings.GEMINI_USE_NATIVE_VIDEO
 
     @property
     def supports_vision(self) -> bool:
@@ -35,6 +71,192 @@ class GeminiProvider(AIProvider):
     @property
     def provider_name(self) -> str:
         return "gemini"
+
+    async def _upload_video_file(self, video_path: str) -> Optional[object]:
+        """Upload a video file via the Gemini File API for native video analysis.
+
+        Returns the uploaded file object, or None if upload fails.
+        """
+        import os
+        file_size_mb = os.path.getsize(video_path) / (1024 * 1024)
+
+        # Gemini File API has a 2GB limit; skip for very large files
+        if file_size_mb > 2000:
+            logger.warning("Video too large for Gemini File API (%.0fMB > 2GB limit)", file_size_mb)
+            return None
+
+        try:
+            logger.info("Uploading video to Gemini File API (%.1fMB)...", file_size_mb)
+            # genai.upload_file is synchronous, run in executor
+            loop = asyncio.get_event_loop()
+            video_file = await loop.run_in_executor(
+                None, lambda: genai.upload_file(video_path)
+            )
+
+            # Wait for file to be processed (polling)
+            import time as _time
+            max_wait = 300  # 5 minutes
+            start = _time.monotonic()
+            while video_file.state.name == "PROCESSING":
+                if _time.monotonic() - start > max_wait:
+                    logger.warning("Gemini file processing timed out after %ds", max_wait)
+                    return None
+                await asyncio.sleep(5)
+                video_file = await loop.run_in_executor(
+                    None, lambda: genai.get_file(video_file.name)
+                )
+
+            if video_file.state.name == "ACTIVE":
+                logger.info("Video uploaded and processed: %s", video_file.name)
+                return video_file
+            else:
+                logger.warning("Gemini file upload failed with state: %s", video_file.state.name)
+                return None
+
+        except Exception as e:
+            logger.warning("Gemini File API upload failed: %s", e)
+            return None
+
+    async def analyze_video_native(
+        self,
+        video_path: str,
+        transcript: list[TranscriptSegment],
+        scenes: list[SceneDescription],
+        video_duration: float,
+        custom_prompt: Optional[str] = None,
+        cancel_check=None,
+        clip_count: Optional[int] = None,
+        min_duration: Optional[float] = None,
+        max_duration: Optional[float] = None,
+        video_summary: Optional[str] = None,
+    ) -> tuple[list[SceneDescription], list[ClipCandidate]]:
+        """Perform native video analysis using Gemini's video understanding.
+
+        Uploads the video file and sends a single multimodal prompt that combines
+        scene description and clip detection in one pass, giving far richer
+        understanding than static frame analysis.
+
+        Returns (scenes, clips) tuple.
+        """
+        video_file = await self._upload_video_file(video_path)
+        if not video_file:
+            raise ProviderError("Failed to upload video for native analysis")
+
+        dur_min = int(min_duration) if min_duration else 30
+        dur_max = int(max_duration) if max_duration else 300
+        num_clips = clip_count or settings.MAX_CLIP_CANDIDATES
+
+        content_guidance = derive_content_guidance(video_summary)
+        energy_text = analyze_transcript_energy(transcript)
+
+        transcript_text = "\n".join(
+            f"[{s.start:.1f}-{s.end:.1f}] {s.speaker}: {s.text}" for s in transcript[:500]
+        )
+        if len(transcript_text) > 30000:
+            transcript_text = transcript_text[:30000] + "\n... (truncated)"
+
+        summary_section = ""
+        if video_summary:
+            summary_section = f"\nVIDEO SUMMARY:\n{video_summary}\n"
+
+        prompt = (
+            "You are analyzing a video file directly. You can see every frame, hear audio cues, "
+            "and understand the full visual narrative. This gives you much richer context than "
+            "static frame samples.\n\n"
+            "Perform TWO tasks in a single response:\n\n"
+            "TASK 1: SCENE ANALYSIS\n"
+            "Identify the most important visual moments in the video. For each, provide:\n"
+            "- timestamp (seconds from start)\n"
+            "- description of what's happening visually\n"
+            "- importance_score (1-10)\n"
+            "- subject_x (0-100, horizontal position of main subject: 0=left, 50=center, 100=right)\n\n"
+            "TASK 2: VIRAL CLIP DETECTION\n"
+            f"{content_guidance}"
+            "STRICT REQUIREMENTS:\n"
+            f"- Each clip duration MUST be between {dur_min} and {dur_max} seconds\n"
+            "- Start at natural speech boundaries\n"
+            "- End at natural conclusions\n"
+            "- Must work standalone without context from the full video\n"
+            "- The main subject/speaker MUST remain in focus for the entire clip\n"
+            "- When visual peaks coincide with strong transcript content, score higher\n\n"
+            f"Video duration: {video_duration:.1f}s\n"
+            f"{summary_section}"
+            f"\nTRANSCRIPT:\n{transcript_text}\n"
+            f"{energy_text}\n\n"
+            f"Return ONLY valid JSON with this structure:\n"
+            '{"scenes": [{"timestamp": 0.0, "description": "...", "importance_score": 7, "subject_x": 50}], '
+            f'"clips": [{{"id": 1, "title": "...", "start_time": 0.0, "end_time": 0.0, '
+            '"duration": 0.0, "viral_score": 80, "viral_score_reasoning": "...", '
+            '"clip_type": "highlight", "platform": "both", "suggested_caption": "...", '
+            f'"hook_text": "...", "why_this_works": "..."}}]}}\n\n'
+            f"Return up to 20 key scenes and up to {num_clips} viral clips."
+        )
+
+        try:
+            content = [video_file, prompt]
+            raw = await self._call(content, max_tokens=16384, timeout=600)
+
+            raw = raw.strip()
+            if raw.startswith("```"):
+                raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
+            data = json.loads(raw)
+
+            # Parse scenes
+            parsed_scenes = []
+            for s in data.get("scenes", []):
+                sx = s.get("subject_x", 50)
+                sx = max(0, min(100, int(sx))) if sx is not None else 50
+                parsed_scenes.append(SceneDescription(
+                    timestamp=float(s.get("timestamp", 0)),
+                    description=str(s.get("description", "")),
+                    importance_score=max(1, min(10, int(s.get("importance_score", 5)))),
+                    thumbnail_path="",  # No thumbnail for native video analysis
+                    subject_x=sx,
+                ))
+
+            # Parse clips
+            parsed_clips = []
+            for c in data.get("clips", []):
+                start = float(c.get("start_time", 0))
+                end = float(c.get("end_time", 0))
+                duration = end - start
+                if duration <= 0:
+                    duration = float(c.get("duration", 0))
+                if duration < (min_duration or 15) or duration > (max_duration or 600):
+                    continue
+                parsed_clips.append(ClipCandidate(
+                    id=int(c.get("id", len(parsed_clips) + 1)),
+                    title=c.get("title", "Untitled"),
+                    start_time=start,
+                    end_time=end,
+                    duration=round(duration, 1),
+                    viral_score=max(1, min(100, int(float(c.get("viral_score", 50))))),
+                    viral_score_reasoning=str(c.get("viral_score_reasoning", "")),
+                    clip_type=str(c.get("clip_type", "highlight")),
+                    platform=str(c.get("platform", "both")),
+                    suggested_caption=str(c.get("suggested_caption", "")),
+                    hook_text=str(c.get("hook_text", "")),
+                    why_this_works=str(c.get("why_this_works", "")),
+                ))
+
+            parsed_clips = _deduplicate_clips(parsed_clips)
+            logger.info(
+                "Gemini native video analysis: %d scenes, %d clips",
+                len(parsed_scenes), len(parsed_clips),
+            )
+            return parsed_scenes, parsed_clips
+
+        except Exception as e:
+            logger.error("Gemini native video analysis failed: %s", e)
+            raise ProviderError(f"Native video analysis failed: {e}")
+        finally:
+            # Clean up uploaded file
+            try:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, lambda: genai.delete_file(video_file.name))
+                logger.info("Cleaned up Gemini uploaded file: %s", video_file.name)
+            except Exception:
+                pass
 
     async def _call(self, content, max_tokens: int = 4096, timeout: int = _TEXT_TIMEOUT) -> str:
         t0 = time.monotonic()
@@ -254,6 +476,8 @@ class GeminiProvider(AIProvider):
             f"{content_guidance}"
             "STRICT REQUIREMENTS:\n"
             f"- Each clip duration MUST be between {dur_min} and {dur_max} seconds\n"
+            "- Segments marked [LOW_CONF] have unreliable transcription — avoid clips where "
+            "multiple [LOW_CONF] segments appear, as the actual dialogue may differ significantly\n"
             "- Start at natural speech boundaries — beginning of a sentence, after a pause, at a speaker change\n"
             "- End at natural conclusions — punchlines, resolved thoughts, scene transitions\n"
             "- Must work standalone without context from the full video\n"
@@ -325,6 +549,8 @@ class GeminiProvider(AIProvider):
                         focus_tier=focus_tier,
                     ))
                 if clips:
+                    clips = _deduplicate_clips(clips)
+                    logger.info(f"Parsed {len(clips)} valid clips after de-duplication")
                     return clips
                 logger.warning(f"Attempt {attempt + 1}: All Gemini clips filtered out")
                 continue

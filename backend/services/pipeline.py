@@ -19,6 +19,8 @@ from backend.services.transcription import transcribe_audio
 from backend.services.ai_orchestrator import AIOrchestrator
 from backend.services.prompts import load_prompts
 from backend.services.providers.base import build_summary_from_transcript, has_real_summary_content
+from backend.services.audio_analyzer import analyze_audio_energy, format_audio_energy_map
+from backend.services.clip_boundary_snapper import snap_all_clips
 
 logger = logging.getLogger(__name__)
 
@@ -578,117 +580,105 @@ async def _run_analysis_inner(job_id: str):
         f"{len(scenes)} scenes via {scenes_provider}",
     )
 
-    # ── Steps 5+6 — Run summary + clip detection CONCURRENTLY ──
-    # Both take (transcript, scenes) as input and are independent LLM calls.
-    # Running them in parallel saves the time of whichever completes first.
+    # ── Steps 5+6 — Summary THEN clip detection (sequential) ──
+    # Summary runs first so clip detection can use content context.
+    # The 5-10s delay is worth the quality improvement.
     cancel_check()
     await _update_progress(
         job_id, JobStatus.GENERATING_SUMMARY, 65,
-        f"Transcription and scene analysis complete — generating summary + detecting clips...{_pipeline_eta(65)}",
+        f"Generating video summary...{_pipeline_eta(65)}",
     )
 
-    _sc_pct = {"summary": 0.0, "clips": 0.0}
+    # Step 5: Summary first
+    _summary_start = _time.monotonic()
+    try:
+        summary, summary_provider = await orchestrator.generate_summary(
+            transcript, scenes, job_id,
+        )
+    except CancelledError:
+        raise
+    except Exception as e:
+        logger.exception("[%s] Summary generation failed, building from transcript", job_id)
+        fb = build_summary_from_transcript(transcript, scenes)
+        summary = VideoSummary(**fb)
+        summary_provider = "none"
 
-    async def _update_sc_progress(branch: str, branch_pct: float, status: str, message: str):
-        _sc_pct[branch] = min(100.0, branch_pct)
-        combined = (_sc_pct["summary"] + _sc_pct["clips"]) / 200
-        pipeline_pct = 65 + int(combined * 30)  # 65% to 95%
-        eta = _pipeline_eta(pipeline_pct)
-        await _update_progress(job_id, status, min(95, pipeline_pct), message + eta)
+    await _update_progress(
+        job_id, JobStatus.GENERATING_SUMMARY, 75,
+        f"Summary generated via {summary_provider} — now detecting viral clips...{_pipeline_eta(75)}",
+    )
 
-    async def _branch_summary():
-        cancel_check()
-        _summary_start = _time.monotonic()
+    # Build summary context string for clip detection
+    summary_text = summary.overview
+    if summary.key_topics:
+        summary_text += f"\nKey topics: {', '.join(summary.key_topics)}"
+    if summary.content_category:
+        summary_text += f"\nCategory: {summary.content_category}"
+    if summary.tone:
+        summary_text += f"\nTone: {summary.tone}"
 
-        async def _summary_heartbeat():
-            await asyncio.sleep(10)
-            while True:
-                elapsed = int(_time.monotonic() - _summary_start)
-                await _update_sc_progress("summary", 50, JobStatus.GENERATING_SUMMARY,
-                    f"Generating summary... ({elapsed}s elapsed)")
-                await asyncio.sleep(8)
+    # Step 5b: Audio energy analysis (runs quickly on already-extracted WAV)
+    audio_energy_text = ""
+    try:
+        audio_moments = await analyze_audio_energy(audio_path)
+        audio_energy_text = format_audio_energy_map(audio_moments)
+        if audio_energy_text:
+            logger.info("[%s] Audio energy analysis: %d spikes detected", job_id, len(audio_moments))
+    except Exception as e:
+        logger.warning("[%s] Audio energy analysis failed (non-critical): %s", job_id, e)
 
-        heartbeat_task = asyncio.create_task(_summary_heartbeat())
-        try:
-            summary, summary_provider = await orchestrator.generate_summary(
-                transcript, scenes, job_id,
-            )
-        except CancelledError:
-            raise
-        except Exception as e:
-            logger.exception("[%s] Summary generation failed, building from transcript", job_id)
-            fb = build_summary_from_transcript(transcript, scenes)
-            summary = VideoSummary(**fb)
-            summary_provider = "none"
-        finally:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
+    # Append audio energy to summary context for clip detection
+    if audio_energy_text:
+        summary_text += audio_energy_text
 
-        await _update_sc_progress("summary", 100, JobStatus.GENERATING_SUMMARY,
-            f"Summary generated via {summary_provider}")
-        return summary, summary_provider
+    # Step 6: Clip detection with summary context
+    cancel_check()
+    _clips_start = _time.monotonic()
 
-    async def _branch_clip_detection():
-        cancel_check()
-        _clips_start = _time.monotonic()
-
-        async def _clips_heartbeat():
-            await asyncio.sleep(10)
-            while True:
-                elapsed = int(_time.monotonic() - _clips_start)
-                await _update_sc_progress("clips", 50, JobStatus.DETECTING_CLIPS,
-                    f"Identifying viral moments... ({elapsed}s elapsed)")
-                await asyncio.sleep(8)
-
-        heartbeat_task = asyncio.create_task(_clips_heartbeat())
-        try:
-            clips, clips_provider = await orchestrator.detect_viral_clips(
-                transcript, scenes, metadata["duration"], job_id,
-            )
-        except CancelledError:
-            raise
-        except Exception as e:
-            logger.exception("[%s] Clip detection failed", job_id)
-            clips = []
-            clips_provider = "none"
-        finally:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
-
-        await _update_sc_progress("clips", 100, JobStatus.DETECTING_CLIPS,
-            f"Found {len(clips)} clip candidates via {clips_provider}")
-        return clips, clips_provider
-
-    logger.info("[%s] Starting concurrent summary + clip detection", job_id)
-    async with _stage_timer(job_id, "summary+clip_detection"):
-        try:
-            (summary, summary_provider), (clips, clips_provider) = await asyncio.wait_for(
-                asyncio.gather(
-                    _branch_summary(),
-                    _branch_clip_detection(),
-                ),
-                timeout=_SUMMARY_CLIP_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                "[%s] Summary+clip detection timed out after %ds", job_id, _SUMMARY_CLIP_TIMEOUT,
-            )
-            # Use transcript-based fallback so the pipeline produces real content
-            fb = build_summary_from_transcript(transcript, scenes)
-            summary = VideoSummary(**fb)
-            summary_provider = "none"
-            clips = []
-            clips_provider = "none"
+    async def _clips_heartbeat():
+        await asyncio.sleep(10)
+        while True:
+            elapsed = int(_time.monotonic() - _clips_start)
             await _update_progress(
-                job_id, JobStatus.DETECTING_CLIPS, 90,
-                f"Summary/clip detection timed out after {_SUMMARY_CLIP_TIMEOUT // 60}min — saving partial results",
+                job_id, JobStatus.DETECTING_CLIPS, min(93, 78 + elapsed // 10),
+                f"Identifying viral moments... ({elapsed}s elapsed){_pipeline_eta(min(93, 78 + elapsed // 10))}",
             )
+            await asyncio.sleep(8)
+
+    heartbeat_task = asyncio.create_task(_clips_heartbeat())
+    try:
+        clips, clips_provider = await asyncio.wait_for(
+            orchestrator.detect_viral_clips(
+                transcript, scenes, metadata["duration"], job_id,
+                video_summary=summary_text,
+            ),
+            timeout=_SUMMARY_CLIP_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.error("[%s] Clip detection timed out", job_id)
+        clips = []
+        clips_provider = "none"
+    except CancelledError:
+        raise
+    except Exception as e:
+        logger.exception("[%s] Clip detection failed", job_id)
+        clips = []
+        clips_provider = "none"
+    finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+
+    await _update_progress(
+        job_id, JobStatus.DETECTING_CLIPS, 95,
+        f"Summary via {summary_provider} + {len(clips)} clips via {clips_provider}",
+    )
+
+    # Snap clip boundaries to word-level timestamps for clean cuts
+    if clips and transcript:
+        clips = snap_all_clips(clips, transcript)
 
     # Save both results
     job = await database.load_job(job_id)
