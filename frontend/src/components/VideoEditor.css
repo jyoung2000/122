@@ -115,6 +115,7 @@
   background: #000;
   cursor: pointer;
   overflow: hidden;
+  touch-action: manipulation;
 }
 
 .ve-viewport--fullscreen {

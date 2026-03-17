@@ -2305,16 +2305,18 @@ export default function VideoEditor({
           width: '100%',
           margin: '0 auto',
         }}
-        onMouseDown={() => { viewportClickRef.current = { downTime: Date.now(), moved: false }; }}
-        onMouseMove={() => { viewportClickRef.current.moved = true; }}
+        onPointerDown={() => { viewportClickRef.current = { downTime: Date.now(), moved: false }; }}
+        onPointerMove={() => { if (viewportClickRef.current.downTime) viewportClickRef.current.moved = true; }}
         onClick={() => {
           if (overlayInteracting) return;
           if (viewportClickRef.current.moved) return;
           if (Date.now() - viewportClickRef.current.downTime > 300) return;
-          // In multi-track mode: clicking the viewport selects the video item
-          // (so the user can drag/resize/rotate it). If the video is already
-          // selected, deselect and toggle play instead.
-          if (showMultiTrack && videoTimelineItem) {
+          // In multi-track mode on desktop: clicking the viewport selects the
+          // video item (so the user can drag/resize/rotate it). If the video is
+          // already selected, deselect and toggle play instead.
+          // On mobile: always toggle play directly — users rely on tapping the
+          // viewport to play/pause, and can select items via the timeline.
+          if (showMultiTrack && videoTimelineItem && !isMobile) {
             if (storeSelectedItemId === videoTimelineItem.id) {
               setSelectedItemId(null);
               togglePlay();
