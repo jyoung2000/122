@@ -416,6 +416,25 @@ async def _run_analysis_inner(job_id: str):
                 _polish_label += " (thinking model — may take 1-2 min)"
             await _update_branch_progress("transcription", 95, JobStatus.TRANSCRIBING,
                 _polish_label)
+
+            # Heartbeat during polishing — prevents the UI from going silent
+            # for minutes while batches are processed by slow models.
+            _polish_start = _time.monotonic()
+
+            async def _polish_heartbeat():
+                await asyncio.sleep(15)
+                while True:
+                    elapsed = int(_time.monotonic() - _polish_start)
+                    m, s = divmod(elapsed, 60)
+                    time_str = f"{m}m {s}s" if m else f"{s}s"
+                    await _update_branch_progress(
+                        "transcription", 95, JobStatus.TRANSCRIBING,
+                        f"Polishing transcript with {_polish_model}... ({time_str} elapsed)",
+                    )
+                    await asyncio.sleep(15)
+
+            _polish_hb = asyncio.create_task(_polish_heartbeat())
+
             try:
                 # Dynamic timeout: scale with transcript length
                 # probe batch (timeout) + ceil(remaining_batches / 3) waves × timeout + buffer
@@ -442,6 +461,12 @@ async def _run_analysis_inner(job_id: str):
                 logger.warning("[%s] AI transcript correction timed out after %ds (using raw)", job_id, _correction_timeout)
             except Exception as e:
                 logger.warning("[%s] AI transcript correction failed (using raw): %s", job_id, e)
+            finally:
+                _polish_hb.cancel()
+                try:
+                    await _polish_hb
+                except asyncio.CancelledError:
+                    pass
 
         speaker_count = len(set(s.speaker for s in result))
         await _update_branch_progress("transcription", 100, JobStatus.TRANSCRIBING,
