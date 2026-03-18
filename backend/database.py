@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import asyncio
+import tempfile
 from typing import Optional
 
 import aiofiles
@@ -37,8 +38,20 @@ async def save_job(job: JobResult) -> None:
         path = _job_path(job.job_id)
         data = job.model_dump(mode="json")
         content = json.dumps(data, indent=2, default=str)
-        async with aiofiles.open(path, "w") as f:
-            await f.write(content)
+        # Atomic write: write to temp file then rename to prevent readers
+        # from seeing a truncated/empty file during concurrent access.
+        fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+        try:
+            async with aiofiles.open(fd, "w", closefd=True) as f:
+                await f.write(content)
+            os.replace(tmp_path, path)
+        except BaseException:
+            # Clean up temp file on any failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 async def load_job(job_id: str) -> Optional[JobResult]:
@@ -46,11 +59,18 @@ async def load_job(job_id: str) -> Optional[JobResult]:
     if not os.path.exists(path):
         return None
     lock = _get_lock(job_id)
-    async with lock:
-        async with aiofiles.open(path, "r") as f:
-            content = await f.read()
-        data = json.loads(content)
-        return JobResult(**data)
+    try:
+        async with lock:
+            async with aiofiles.open(path, "r") as f:
+                content = await f.read()
+            if not content.strip():
+                logger.warning("Empty job.json for %s, treating as not found", job_id)
+                return None
+            data = json.loads(content)
+            return JobResult(**data)
+    except (json.JSONDecodeError, Exception) as e:
+        logger.warning("Failed to load job %s: %s", job_id, e)
+        return None
 
 
 async def list_jobs() -> list[JobResult]:

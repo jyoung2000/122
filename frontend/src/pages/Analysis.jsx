@@ -460,6 +460,7 @@ export default function Analysis() {
       .catch(() => {});
   }, []);
 
+  const fetchJobRetryRef = useRef(0);
   const fetchJob = useCallback(async () => {
     try {
       const controller = new AbortController();
@@ -469,10 +470,19 @@ export default function Analysis() {
       if (res.ok) {
         const data = sanitizeJob(await res.json());
         setJob(data);
+        fetchJobRetryRef.current = 0;
         // Sync generating state from job status (handles page refresh mid-generation)
         if (data.status === 'detecting_clips') {
           setIsGeneratingClips(true);
         }
+      } else if (res.status === 404 && fetchJobRetryRef.current < 10) {
+        // Job may still be initializing (pipeline writes job.json async).
+        // Retry a few times before showing "not found" to avoid flash during
+        // large file uploads where there's a delay between upload complete
+        // and job.json being written.
+        fetchJobRetryRef.current += 1;
+        setTimeout(() => fetchJob(), 2000);
+        return; // Don't clear loading yet
       }
     } catch {
     } finally {
@@ -568,12 +578,18 @@ export default function Analysis() {
             // analysis progress bar to blink in and out.
             const isExportStatus = msg.status === 'exporting' || msg.status === 'generating_seo';
             if (!isExportStatus) {
-              setJob((prev) => prev ? {
-                ...prev,
-                status: msg.status || prev.status,
-                progress: typeof msg.progress === 'number' ? msg.progress : (prev.progress ?? 0),
-                progress_message: typeof msg.message === 'string' ? msg.message : (prev.progress_message || ''),
-              } : prev);
+              setJob((prev) => {
+                if (!prev) return prev;
+                const nextStatus = msg.status || prev.status;
+                const nextProgress = typeof msg.progress === 'number' ? msg.progress : (prev.progress ?? 0);
+                const nextMessage = typeof msg.message === 'string' ? msg.message : (prev.progress_message || '');
+                // Skip update if nothing actually changed — prevents cascading re-renders
+                // during rapid WS messages (large file processing can send many per second)
+                if (prev.status === nextStatus && prev.progress === nextProgress && prev.progress_message === nextMessage) {
+                  return prev;
+                }
+                return { ...prev, status: nextStatus, progress: nextProgress, progress_message: nextMessage };
+              });
             }
             // Track clip generation state from status messages
             if (msg.status === 'detecting_clips') {
@@ -663,17 +679,17 @@ export default function Analysis() {
   // Stuck detection: track when progress_message last changed
   useEffect(() => {
     if (!job || ['complete', 'failed', 'cancelled'].includes(job.status)) {
-      setStuckSeconds(0);
+      setStuckSeconds((prev) => prev === 0 ? prev : 0);
       return;
     }
     const currentMsg = job.progress_message || job.status;
     if (currentMsg !== lastProgressRef.current.message) {
       lastProgressRef.current = { message: currentMsg, time: Date.now() };
-      setStuckSeconds(0);
+      setStuckSeconds((prev) => prev === 0 ? prev : 0);
     }
     const interval = setInterval(() => {
       const elapsed = Math.floor((Date.now() - lastProgressRef.current.time) / 1000);
-      setStuckSeconds(elapsed);
+      setStuckSeconds((prev) => prev === elapsed ? prev : elapsed);
     }, 5000);
     return () => clearInterval(interval);
   }, [job?.progress_message, job?.status]);
@@ -1081,7 +1097,14 @@ export default function Analysis() {
   // a crop aspect ratio, check if AI scene data exists. If not, trigger
   // background analysis so subject tracking can center the crop on the subject.
   const prevAnalysisTrackingRef = useRef({ clipId: null, ar: null });
+  const subjectTrackingPollRef = useRef(null);
   useEffect(() => {
+    // Clean up any previous polling interval
+    if (subjectTrackingPollRef.current) {
+      clearInterval(subjectTrackingPollRef.current);
+      subjectTrackingPollRef.current = null;
+    }
+
     const ar = clipSettings?.aspectRatio;
     const prev = prevAnalysisTrackingRef.current;
     const clipId = clipPreview?.id ?? null;
@@ -1101,19 +1124,22 @@ export default function Analysis() {
       return sx !== 50;
     });
 
+    let cancelled = false;
     if (!hasAiData && jobId) {
       // No AI subject data — trigger background scene analysis
       console.log('[Analysis] Auto-triggering subject tracking for clip', clipId, 'aspect', ar);
       fetch(`/api/jobs/${jobId}/recenter-subject`, { method: 'POST' })
         .then((res) => {
-          if (!res.ok) throw new Error('recenter failed');
+          if (cancelled || !res.ok) throw new Error('recenter failed');
           return res.json();
         })
         .then((data) => {
+          if (cancelled) return;
           if (data.status === 'reanalyzing') {
             showToast('Analyzing subject position...', 'info');
             // Poll for completion
             const poll = setInterval(async () => {
+              if (cancelled) { clearInterval(poll); return; }
               try {
                 const jr = await fetch(`/api/jobs/${jobId}`, { cache: 'no-store' });
                 if (!jr.ok) return;
@@ -1121,23 +1147,33 @@ export default function Analysis() {
                 const sxVals = (jd.scenes || []).map((s) => s.subject_x);
                 if (sxVals.some((v) => v !== 50)) {
                   clearInterval(poll);
+                  subjectTrackingPollRef.current = null;
                   // Refresh job data so scenes are updated
                   await fetchJob();
                   showToast('Subject tracking applied', 'success');
                 }
               } catch { /* ignore polling errors */ }
             }, 3000);
+            subjectTrackingPollRef.current = poll;
             // Timeout after 2 minutes
-            setTimeout(() => clearInterval(poll), 120000);
+            setTimeout(() => { clearInterval(poll); subjectTrackingPollRef.current = null; }, 120000);
           } else {
             // Data already exists — refresh job
             fetchJob();
           }
         })
         .catch((err) => {
-          console.warn('[Analysis] Subject tracking auto-trigger failed:', err);
+          if (!cancelled) console.warn('[Analysis] Subject tracking auto-trigger failed:', err);
         });
     }
+
+    return () => {
+      cancelled = true;
+      if (subjectTrackingPollRef.current) {
+        clearInterval(subjectTrackingPollRef.current);
+        subjectTrackingPollRef.current = null;
+      }
+    };
   }, [clipPreview?.id, clipSettings?.aspectRatio]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Always use ClipPreview when a clip is selected so it responds to
