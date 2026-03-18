@@ -1121,6 +1121,22 @@ def _cost_per_hour(model_data: dict, role: str) -> float:
     return _estimate_cost(model_data, role) * 6  # 6 × 10-min segments
 
 
+def _current_model_selection(ollama_enabled: bool) -> dict:
+    """Return the currently selected model IDs for each task.
+
+    Uses the SELECTED_VISION_MODEL / SELECTED_TEXT_MODEL settings which store
+    the full qualified model ID (e.g. 'ollama/moondream', 'qwen/qwen3.5-35b').
+    Falls back to OPENROUTER_*_MODEL for backwards compatibility.
+    """
+    vision = getattr(settings, 'SELECTED_VISION_MODEL', '') or settings.OPENROUTER_VISION_MODEL
+    text = getattr(settings, 'SELECTED_TEXT_MODEL', '') or settings.OPENROUTER_TEXT_MODEL
+    return {
+        "transcript_model": settings.WHISPER_MODEL,
+        "vision_model": vision,
+        "text_model": text,
+    }
+
+
 @router.get("/providers/models/available")
 async def available_models():
     """Return all available models grouped by task (transcript, vision, text).
@@ -1196,6 +1212,35 @@ async def available_models():
                 vision.append({**entry, **_estimate_speed(mid, "vision", False)})
             text.append({**entry, **_estimate_speed(mid, "text", False)})
 
+    # Add Ollama models if enabled and connected
+    chain = [p.strip() for p in settings.AI_FALLBACK_CHAIN.split(",") if p.strip()]
+    ollama_enabled = "ollama" in chain
+    if ollama_enabled:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{settings.OLLAMA_HOST}/api/tags")
+                resp.raise_for_status()
+                data = resp.json()
+                ollama_models = [m["name"] for m in data.get("models", [])]
+                _OLLAMA_VISION_NAMES = ("moondream", "llava", "bakllava", "minicpm", "llama3.2-vision")
+                for model_name in ollama_models:
+                    has_vision = any(v in model_name.lower() for v in _OLLAMA_VISION_NAMES)
+                    mid = f"ollama/{model_name}"
+                    entry = {
+                        "id": mid, "name": f"Ollama: {model_name}", "provider": "ollama",
+                        "cost_per_hour": 0, "is_free": True, "context_length": 0,
+                        "created": int(time.time()),  # sort to top as "newest"
+                        "desc": "FREE — Local Ollama model",
+                        "quality_score": 2, "quality": "basic",
+                        **_estimate_speed(mid, "text", True),
+                    }
+                    if has_vision:
+                        v_entry = {**entry, **_estimate_speed(mid, "vision", True)}
+                        vision.insert(0, v_entry)
+                    text.insert(0, entry)
+        except Exception:
+            pass  # Ollama unreachable — skip
+
     # Sort: free first, then newer + cheaper towards the top
     # Within free models: newest first.  Within paid: newest first, then cheapest.
     def _sort_key(m):
@@ -1212,11 +1257,7 @@ async def available_models():
         "transcript": transcript,
         "vision": vision[:100],
         "text": text[:100],
-        "current": {
-            "transcript_model": settings.WHISPER_MODEL,
-            "vision_model": settings.OPENROUTER_VISION_MODEL,
-            "text_model": settings.OPENROUTER_TEXT_MODEL,
-        },
+        "current": _current_model_selection(ollama_enabled),
     }
 
 
@@ -1237,28 +1278,52 @@ async def save_models(req: SaveModelsRequest):
             _upsert_env_var(env_path, "WHISPER_MODEL", req.transcript_model)
 
     if req.vision_model:
-        settings.OPENROUTER_VISION_MODEL = req.vision_model
-        settings.OPENROUTER_PRESET = "custom"
+        # Track the full qualified ID for the dropdown
+        settings.SELECTED_VISION_MODEL = req.vision_model
         if env_path:
-            _upsert_env_var(env_path, "OPENROUTER_VISION_MODEL", req.vision_model)
-            _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
+            _upsert_env_var(env_path, "SELECTED_VISION_MODEL", req.vision_model)
+        if req.vision_model.startswith("ollama/"):
+            # Ollama model — update Ollama-specific setting
+            ollama_model = req.vision_model.removeprefix("ollama/")
+            settings.OLLAMA_VISION_MODEL = ollama_model
+            if env_path:
+                _upsert_env_var(env_path, "OLLAMA_VISION_MODEL", ollama_model)
+        else:
+            # Cloud provider model — update OpenRouter setting
+            settings.OPENROUTER_VISION_MODEL = req.vision_model
+            settings.OPENROUTER_PRESET = "custom"
+            if env_path:
+                _upsert_env_var(env_path, "OPENROUTER_VISION_MODEL", req.vision_model)
+                _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
 
     if req.text_model:
-        settings.OPENROUTER_TEXT_MODEL = req.text_model
-        settings.OPENROUTER_SUMMARY_MODEL = req.text_model
-        settings.OPENROUTER_PRESET = "custom"
+        settings.SELECTED_TEXT_MODEL = req.text_model
         if env_path:
-            _upsert_env_var(env_path, "OPENROUTER_TEXT_MODEL", req.text_model)
-            _upsert_env_var(env_path, "OPENROUTER_SUMMARY_MODEL", req.text_model)
-            _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
+            _upsert_env_var(env_path, "SELECTED_TEXT_MODEL", req.text_model)
+        if req.text_model.startswith("ollama/"):
+            ollama_model = req.text_model.removeprefix("ollama/")
+            settings.OLLAMA_TEXT_MODEL = ollama_model
+            if env_path:
+                _upsert_env_var(env_path, "OLLAMA_TEXT_MODEL", ollama_model)
+        else:
+            settings.OPENROUTER_TEXT_MODEL = req.text_model
+            settings.OPENROUTER_SUMMARY_MODEL = req.text_model
+            settings.OPENROUTER_PRESET = "custom"
+            if env_path:
+                _upsert_env_var(env_path, "OPENROUTER_TEXT_MODEL", req.text_model)
+                _upsert_env_var(env_path, "OPENROUTER_SUMMARY_MODEL", req.text_model)
+                _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
 
     _invalidate_status_cache()
     _persist_user_settings()
+    chain = [p.strip() for p in settings.AI_FALLBACK_CHAIN.split(",") if p.strip()]
+    ollama_enabled = "ollama" in chain
+    current = _current_model_selection(ollama_enabled)
     return {
         "status": "saved",
-        "transcript_model": settings.WHISPER_MODEL,
-        "vision_model": settings.OPENROUTER_VISION_MODEL,
-        "text_model": settings.OPENROUTER_TEXT_MODEL,
+        "transcript_model": current["transcript_model"],
+        "vision_model": current["vision_model"],
+        "text_model": current["text_model"],
     }
 
 

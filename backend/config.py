@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     OLLAMA_VISION_MODEL: str = "moondream"
     OLLAMA_TEXT_MODEL: str = "llama3.2:3b"
 
+    # Unified model selection — stores the full qualified model ID from the UI
+    # (e.g. 'ollama/moondream', 'google/gemini-2.5-flash'). Empty = use provider defaults.
+    SELECTED_VISION_MODEL: str = ""
+    SELECTED_TEXT_MODEL: str = ""
+
     # Fallback chain (ollama excluded by default — user can enable it in Settings)
     AI_FALLBACK_CHAIN: str = "openrouter,gemini,groq"
 
