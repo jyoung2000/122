@@ -276,6 +276,29 @@ async def upload_chunk(
     )
 
 
+def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int) -> tuple[int, str]:
+    """Assemble chunk files into a single video file (runs in thread).
+
+    Returns (total_bytes_written, md5_hex_digest).
+    This runs synchronously in a thread to avoid the overhead of 100+
+    async file open/read/close cycles through the aiofiles thread pool.
+    """
+    total_written = 0
+    file_md5 = hashlib.md5()
+    with open(tmp_path, "wb") as out:
+        for i in range(total_chunks):
+            chunk_path = os.path.join(chunk_dir, f"chunk_{i:06d}")
+            with open(chunk_path, "rb") as cf:
+                while True:
+                    block = cf.read(1024 * 1024)  # 1MB blocks for memory efficiency
+                    if not block:
+                        break
+                    out.write(block)
+                    file_md5.update(block)
+                    total_written += len(block)
+    return total_written, file_md5.hexdigest()
+
+
 @router.post("/complete", response_model=CompleteResponse)
 async def complete_upload(
     upload_id: str = Form(...),
@@ -311,27 +334,40 @@ async def complete_upload(
 
     tmp_path = os.path.join(job_dir, "video.tmp")
 
-    # Assemble chunks sequentially
+    # Assemble chunks in a single thread (much faster than per-chunk async I/O)
     try:
-        total_written = 0
-        file_md5 = hashlib.md5()
-        async with aiofiles.open(tmp_path, "wb") as out:
-            for i in range(info["total_chunks"]):
-                chunk_path = os.path.join(info["chunk_dir"], f"chunk_{i:06d}")
-                async with aiofiles.open(chunk_path, "rb") as cf:
-                    chunk_data = await cf.read()
-                    await out.write(chunk_data)
-                    file_md5.update(chunk_data)
-                    total_written += len(chunk_data)
+        total_written, assembled_hash = await asyncio.wait_for(
+            asyncio.to_thread(
+                _assemble_chunks, info["chunk_dir"], tmp_path, info["total_chunks"]
+            ),
+            timeout=600,  # 10 minute timeout for very large files
+        )
+    except asyncio.TimeoutError:
+        info["state"] = "error"
+        info["error"] = "Assembly timed out after 10 minutes"
+        logger.error("Chunked upload %s assembly timed out", upload_id)
+        # Clean up partial file
+        try:
+            os.remove(tmp_path)
+            if not os.listdir(job_dir):
+                os.rmdir(job_dir)
+        except OSError:
+            pass
+        raise HTTPException(504, "File assembly timed out — the file may be too large")
     except OSError as exc:
         info["state"] = "error"
         info["error"] = str(exc)
         if exc.errno == errno.ENOSPC:
             raise HTTPException(507, "Server storage is full during assembly")
-        raise
+        logger.error("Chunked upload %s assembly OS error: %s", upload_id, exc)
+        raise HTTPException(500, detail={"message": f"Assembly failed: {exc}", "qa": {}})
+    except Exception as exc:
+        info["state"] = "error"
+        info["error"] = str(exc)
+        logger.exception("Chunked upload %s assembly unexpected error", upload_id)
+        raise HTTPException(500, detail={"message": f"Assembly failed: {exc}", "qa": {}})
 
     # QA: check assembled file hash
-    assembled_hash = file_md5.hexdigest()
     if file_hash:
         qa["file_hash"] = {
             "pass": assembled_hash == file_hash,

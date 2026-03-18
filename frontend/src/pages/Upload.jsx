@@ -447,16 +447,22 @@ export default function Upload() {
       });
 
       if (!completeResp.ok) {
-        let msg = 'Assembly/validation failed';
+        let msg = `Assembly/validation failed (HTTP ${completeResp.status})`;
         try {
-          const body = await completeResp.json();
-          if (body.detail) {
-            if (typeof body.detail === 'object') {
-              msg = body.detail.message || msg;
-              if (body.detail.qa) setQaReport(body.detail.qa);
-            } else {
-              msg = body.detail;
+          const text = await completeResp.text();
+          try {
+            const body = JSON.parse(text);
+            if (body.detail) {
+              if (typeof body.detail === 'object') {
+                msg = body.detail.message || msg;
+                if (body.detail.qa) setQaReport(body.detail.qa);
+              } else {
+                msg = String(body.detail);
+              }
             }
+          } catch {
+            // Response wasn't JSON — include raw text for debugging
+            if (text && text.length < 500) msg += `: ${text}`;
           }
         } catch {}
         throw new Error(msg);
