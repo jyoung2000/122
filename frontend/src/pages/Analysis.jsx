@@ -569,7 +569,11 @@ export default function Analysis() {
           const msg = JSON.parse(evt.data);
           // Coerce message to string — backend may send objects in some edge cases
           if (msg.message != null && typeof msg.message !== 'string') {
-            msg.message = String(msg.message);
+            msg.message = typeof msg.message === 'object' ? JSON.stringify(msg.message) : String(msg.message);
+          }
+          // Also coerce status
+          if (msg.status != null && typeof msg.status !== 'string') {
+            msg.status = String(msg.status);
           }
           if (msg.type === 'status' || msg.type === 'complete') {
             // Ignore export-related status messages — encoding progress is
@@ -580,9 +584,14 @@ export default function Analysis() {
             if (!isExportStatus) {
               setJob((prev) => {
                 if (!prev) return prev;
-                const nextStatus = msg.status || prev.status;
+                // Coerce all values to safe primitives — WS messages are not sanitized
+                const nextStatus = typeof msg.status === 'string' ? msg.status : String(msg.status || prev.status);
                 const nextProgress = typeof msg.progress === 'number' ? msg.progress : (prev.progress ?? 0);
-                const nextMessage = typeof msg.message === 'string' ? msg.message : (prev.progress_message || '');
+                const nextMessage = typeof msg.message === 'string'
+                  ? msg.message
+                  : (msg.message != null && typeof msg.message === 'object')
+                    ? JSON.stringify(msg.message)
+                    : String(msg.message ?? prev.progress_message ?? '');
                 // Skip update if nothing actually changed — prevents cascading re-renders
                 // during rapid WS messages (large file processing can send many per second)
                 if (prev.status === nextStatus && prev.progress === nextProgress && prev.progress_message === nextMessage) {
@@ -611,8 +620,8 @@ export default function Analysis() {
               fetchJob();
             }
           } else if (msg.type === 'fallback') {
-            pushLog('warning', `Provider fallback: ${msg.from_provider} → ${msg.to_provider} (${msg.reason})`);
-            showToast(`Fallback: ${msg.from_provider} -> ${msg.to_provider}: ${msg.reason}`, 'warning');
+            pushLog('warning', `Provider fallback: ${String(msg.from_provider || '?')} → ${String(msg.to_provider || '?')} (${String(msg.reason || 'unknown')})`);
+            showToast(`Fallback: ${String(msg.from_provider || '?')} -> ${String(msg.to_provider || '?')}: ${String(msg.reason || '')}`, 'warning');
           } else if (msg.type === 'export_complete') {
             const label = msg.clip_id === 0 ? 'Full video' : `Clip ${msg.clip_id}`;
             pushLog('success', `${label} exported`);
@@ -621,8 +630,8 @@ export default function Analysis() {
             // Download is handled by useEncodingManager (global) — do NOT
             // trigger a second download here to avoid duplicate file saves.
           } else if (msg.type === 'clips_generated') {
-            pushLog('success', msg.message || `Generated ${msg.count} clips`);
-            showToast(msg.message || `Found ${msg.count} clip candidates`, 'success');
+            pushLog('success', String(msg.message || `Generated ${msg.count} clips`));
+            showToast(String(msg.message || `Found ${msg.count} clip candidates`), 'success');
             setIsGeneratingClips((prev) => prev ? false : prev);
             fetchJob();
             // Re-run QA validation after new clips are generated
@@ -635,12 +644,12 @@ export default function Analysis() {
           } else if (msg.type === 'subject_tracking') {
             pushLog(
               msg.enabled ? 'info' : 'warning',
-              msg.message,
+              String(msg.message || ''),
               { tracked_scenes: msg.tracked_scenes, total_scenes: msg.total_scenes },
             );
           } else if (msg.type === 'error') {
-            pushLog('error', msg.message);
-            showToast(msg.message, 'error');
+            pushLog('error', String(msg.message || 'Unknown error'));
+            showToast(String(msg.message || 'Unknown error'), 'error');
             setIsGeneratingClips((prev) => prev ? false : prev);
             fetchJob();
           }
@@ -1759,7 +1768,7 @@ export default function Analysis() {
               src={videoSrc}
               clipStart={clipPreview.start_time}
               clipEnd={clipPreview.end_time}
-              title={clipPreview.title || `Clip ${clipPreview.id}`}
+              title={String(clipPreview.title || `Clip ${clipPreview.id}`)}
               aspectRatio={clipSettings.aspectRatio || null}
               sourceWidth={sourceDims.w}
               sourceHeight={sourceDims.h}
@@ -1848,7 +1857,7 @@ export default function Analysis() {
               src={videoSrc}
               clipStart={fullVideoRange ? fullVideoRange.start : 0}
               clipEnd={fullVideoRange ? fullVideoRange.end : (job.duration || 0)}
-              title={job.filename || 'Full Video'}
+              title={String(job.filename || 'Full Video')}
               aspectRatio={clipSettings.aspectRatio || null}
               sourceWidth={sourceDims.w}
               sourceHeight={sourceDims.h}
@@ -1998,7 +2007,7 @@ export default function Analysis() {
           )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div style={{ flex: 1 }}>
-              <ProgressBar progress={job.progress || 0} message={job.progress_message || 'Preparing analysis pipeline...'} />
+              <ProgressBar progress={job.progress || 0} message={String(job.progress_message || 'Preparing analysis pipeline...')} />
             </div>
             <button
               disabled={cancellingJob}
@@ -2154,7 +2163,7 @@ export default function Analysis() {
         {job.fps > 0 && <span style={{ fontFamily: 'var(--font-mono)' }}>{job.fps} FPS</span>}
         {job.file_size_mb > 0 && <span style={{ fontFamily: 'var(--font-mono)' }}>{job.file_size_mb.toFixed(1)} MB</span>}
         {Object.keys(job.provider_used || {}).length > 0 && (
-          <span>Providers: {Object.entries(job.provider_used).map(([k, v]) => `${k}=${v}`).join(', ')}</span>
+          <span>Providers: {Object.entries(job.provider_used).map(([k, v]) => `${String(k)}=${typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(', ')}</span>
         )}
         {job.analysis_duration_seconds > 0 && (
           <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--success)' }}>
@@ -2303,7 +2312,7 @@ export default function Analysis() {
                       minWidth: 4,
                       transition: 'opacity 0.2s',
                     }}
-                    title={`${formatDuration(scene.timestamp)} - Score: ${scene.importance_score}/10`}
+                    title={`${formatDuration(scene.timestamp)} - Score: ${Number(scene.importance_score) || 0}/10`}
                   />
                 ))}
               </div>

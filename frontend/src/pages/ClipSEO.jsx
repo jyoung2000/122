@@ -1686,7 +1686,7 @@ export default function ClipSEO() {
                       animation: 'seo-pulse 2s ease-in-out infinite',
                       whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                     }}>
-                      {genStatus}
+                      {String(genStatus ?? '')}
                     </div>
                   </div>
                   <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', flexShrink: 0 }}>

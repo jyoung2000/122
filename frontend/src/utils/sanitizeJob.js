@@ -14,7 +14,11 @@
  * @param {number} [depth]  Internal recursion guard.
  */
 function deepSanitize(val, objectKeys, depth = 0) {
-  if (val == null || typeof val !== 'object' || depth > 10) return val;
+  if (val == null || typeof val !== 'object') return val;
+  // At max depth, stringify any remaining objects instead of leaking them
+  if (depth > 10) {
+    try { return JSON.stringify(val); } catch { return String(val); }
+  }
   if (Array.isArray(val)) {
     return val.map((item) => deepSanitize(item, objectKeys, depth + 1));
   }

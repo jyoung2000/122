@@ -757,7 +757,7 @@ export default function ViralClips() {
                 const sx = (jd.scenes || []).map((s) => s.subject_x);
                 if (sx.some((v) => v !== 50)) {
                   clearInterval(poll);
-                  setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? jd : j));
+                  setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? sanitizeJob(jd) : j));
                   setPreviewKey((k) => k + 1);
                   setCenterSubjectState('done');
                   setTrackingApplied(true);
@@ -772,7 +772,7 @@ export default function ViralClips() {
             fetch(`/api/jobs/${previewClip.jobId}`, { cache: 'no-store' })
               .then((jr) => jr.ok ? jr.json() : null)
               .then((jd) => {
-                if (jd) setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? jd : j));
+                if (jd) setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? sanitizeJob(jd) : j));
               })
               .catch(() => {});
             setPreviewKey((k) => k + 1);
@@ -823,7 +823,7 @@ export default function ViralClips() {
                 const nowHasWords = (jd.transcript || []).some((s) => s.words && s.words.length > 0);
                 if (nowHasWords) {
                   clearInterval(poll);
-                  setJobs((prev) => prev.map((j) => j.job_id === job.job_id ? jd : j));
+                  setJobs((prev) => prev.map((j) => j.job_id === job.job_id ? sanitizeJob(jd) : j));
                   showToast('Word timestamps ready — active word highlighting is now accurate', 'success');
                 }
               } catch { /* ignore */ }
@@ -1451,10 +1451,10 @@ export default function ViralClips() {
                   </span>
                   <div style={{ textAlign: 'right' }}>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: clip.clip_focus ? 'var(--success)' : scoreColor }}>
-                      {clip.focus_relevance || clip.viral_score}
+                      {String(clip.focus_relevance || clip.viral_score || '')}
                     </div>
                     <div style={{ fontSize: 10, color: clip.clip_focus ? 'var(--success)' : 'var(--text-secondary)', textTransform: 'uppercase' }}>
-                      {clip.clip_focus ? (clip.focus_tier || 'FOCUS') : '/100'}
+                      {clip.clip_focus ? String(clip.focus_tier || 'FOCUS') : '/100'}
                     </div>
                   </div>
                 </div>
@@ -1563,7 +1563,7 @@ export default function ViralClips() {
                       lineHeight: 1.4,
                     }}>
                       <span style={{ fontWeight: 600, color: 'var(--text-secondary)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.03em' }}>Detected subject: </span>
-                      {best.description.length > 120 ? best.description.slice(0, 120) + '...' : best.description}
+                      {String(best.description || '').length > 120 ? String(best.description).slice(0, 120) + '...' : String(best.description || '')}
                     </div>
                   );
                 })()}
@@ -1926,7 +1926,7 @@ export default function ViralClips() {
                           const sx = (jd.scenes || []).map((s) => s.subject_x);
                           if (sx.some((v) => v !== 50)) {
                             clearInterval(poll);
-                            setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? jd : j));
+                            setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? sanitizeJob(jd) : j));
                             setPreviewKey((k) => k + 1);
                             finishSuccess('Subject centered');
                           }
@@ -1937,7 +1937,7 @@ export default function ViralClips() {
                       const jr = await fetch(`/api/jobs/${previewClip.jobId}`, { cache: 'no-store' });
                       if (jr.ok) {
                         const jd = await jr.json();
-                        setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? jd : j));
+                        setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? sanitizeJob(jd) : j));
                         setPreviewKey((k) => k + 1);
                       }
                       finishSuccess(data.per_scene
@@ -1996,7 +1996,7 @@ export default function ViralClips() {
                           const nonDefault = sx.some((v) => v !== 50);
                           if (nonDefault) {
                             clearInterval(poll);
-                            setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? jd : j));
+                            setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? sanitizeJob(jd) : j));
                             setPreviewKey((k) => k + 1);
                             setTrackingApplied(true);
                             showToast('Subject tracking updated', 'success');
