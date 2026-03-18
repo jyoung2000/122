@@ -399,9 +399,14 @@ async def _run_analysis_inner(job_id: str):
             await _update_branch_progress("transcription", 95, JobStatus.TRANSCRIBING,
                 "Polishing transcript with AI...")
             try:
-                result = await correct_transcript(result, orchestrator)
+                result = await asyncio.wait_for(
+                    correct_transcript(result, orchestrator),
+                    timeout=180,  # 3 minute max for entire transcript correction
+                )
                 await database.update_job_status(job_id, transcript=list(result))
                 logger.info("[%s] AI transcript correction applied", job_id)
+            except asyncio.TimeoutError:
+                logger.warning("[%s] AI transcript correction timed out after 180s (using raw)", job_id)
             except Exception as e:
                 logger.warning("[%s] AI transcript correction failed (using raw): %s", job_id, e)
 

@@ -7,6 +7,7 @@ Uses the configured LLM provider to fix common Whisper transcription issues:
 - Number formatting inconsistencies
 """
 
+import asyncio
 import json
 import logging
 from backend.config import settings
@@ -62,7 +63,10 @@ async def correct_transcript(
         )
 
         try:
-            response = await orchestrator.text_completion(prompt)
+            response = await asyncio.wait_for(
+                orchestrator.text_completion(prompt, timeout=45),
+                timeout=60,  # Hard outer timeout per batch
+            )
 
             # Parse the JSON array response
             # Strip markdown code fences if present
@@ -94,6 +98,9 @@ async def correct_transcript(
                     len(corrections) if isinstance(corrections, list) else -1,
                     len(batch),
                 )
+        except asyncio.TimeoutError:
+            logger.warning("AI transcript correction timed out for batch %d-%d — skipping",
+                           batch_start, batch_start + len(batch))
         except json.JSONDecodeError:
             logger.warning("AI correction returned non-JSON response — skipping batch")
         except Exception as e:

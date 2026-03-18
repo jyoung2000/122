@@ -324,7 +324,7 @@ class AIOrchestrator:
                 continue
         raise AllProvidersFailedError("All providers failed for viral clip detection")
 
-    async def text_completion(self, prompt: str, max_tokens: int = 4096) -> str:
+    async def text_completion(self, prompt: str, max_tokens: int = 4096, timeout: float = 60) -> str:
         """Generic text completion using the configured provider chain.
 
         Used by transcript correction, translation, and other text-only tasks.
@@ -336,11 +336,18 @@ class AIOrchestrator:
                 logger.debug("text_completion via %s (%d chars prompt)", pname, len(prompt))
                 t0 = time.monotonic()
                 # Use the provider's underlying client for a simple text completion
-                result = await provider.text_complete(prompt, max_tokens=max_tokens)
+                result = await asyncio.wait_for(
+                    provider.text_complete(prompt, max_tokens=max_tokens),
+                    timeout=timeout,
+                )
                 elapsed = time.monotonic() - t0
                 logger.debug("text_completion via %s completed in %.1fs", pname, elapsed)
                 self._circuit_breaker.record_success(pname)
                 return result
+            except asyncio.TimeoutError:
+                self._circuit_breaker.record_failure(pname)
+                logger.warning("text_completion via %s timed out after %.0fs", pname, timeout)
+                continue
             except Exception as e:
                 self._circuit_breaker.record_failure(pname)
                 logger.warning("text_completion via %s failed: %s", pname, e)
