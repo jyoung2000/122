@@ -132,19 +132,28 @@ def _parse_correction_response(response: str, expected_count: int) -> list[str] 
     return None
 
 
+# Timeouts — standard models finish in 5-30s; thinking models need 60-120s+
+_THINKING_MODEL_TIMEOUT = 120     # inner timeout per attempt for thinking models
+_STANDARD_MODEL_TIMEOUT = 60      # inner timeout per attempt for standard models
+_OUTER_TIMEOUT_MARGIN = 30        # outer timeout = inner + this margin
+
+
 async def correct_transcript(
     segments: list[TranscriptSegment],
     orchestrator: AIOrchestrator,
     batch_size: int = 30,
     job_id: str = "",
 ) -> list[TranscriptSegment]:
-    """Correct transcript text using the configured LLM.
+    """Correct transcript text using the user's configured AI text model.
 
-    Processes segments in batches to fit within context limits.
-    Each batch retries up to MAX_BATCH_RETRIES times on parse/format
-    failures before skipping, giving the provider chain a chance to
-    fall back to alternative providers.
-    Word timestamps are preserved — only the text field is modified.
+    The model used is determined by the active provider chain — for OpenRouter,
+    this is settings.OPENROUTER_TEXT_MODEL (selected by the user in Settings).
+
+    Uses skip_circuit_breaker=True so failures here do NOT degrade providers
+    for subsequent critical operations (summary, clip detection).
+    Implements early exit: if the first batch fails, remaining batches are
+    skipped (the provider/model is likely to fail for all of them too).
+    Word timestamps are re-aligned after text changes.
     """
     if not settings.AI_TRANSCRIPT_CORRECTION:
         return segments
@@ -152,12 +161,43 @@ async def correct_transcript(
     if not segments:
         return segments
 
+    # Query which model will handle polishing so we can set an appropriate timeout
+    model_info = orchestrator.get_text_model_info()
+    model_name = model_info["model"]
+    is_thinking = model_info["is_thinking"]
+
+    if model_info["provider"] == "none":
+        logger.warning("No AI providers available for transcript correction — skipping")
+        return segments
+
+    # Set timeout based on model type
+    if is_thinking:
+        inner_timeout = _THINKING_MODEL_TIMEOUT
+        logger.info(
+            "Transcript correction using thinking model %s via %s — timeout %ds per batch",
+            model_name, model_info["provider"], inner_timeout,
+        )
+    else:
+        inner_timeout = _STANDARD_MODEL_TIMEOUT
+        logger.info(
+            "Transcript correction using model %s via %s — timeout %ds per batch",
+            model_name, model_info["provider"], inner_timeout,
+        )
+    outer_timeout = inner_timeout + _OUTER_TIMEOUT_MARGIN
+
     corrected = list(segments)  # Copy to avoid mutating input
     total_batches = -(-len(segments) // batch_size)  # ceiling division
+    first_batch_failed = False
 
     for batch_idx, batch_start in enumerate(range(0, len(segments), batch_size)):
         batch = segments[batch_start : batch_start + batch_size]
         batch_label = f"batch {batch_idx + 1}/{total_batches} (segments {batch_start}-{batch_start + len(batch) - 1})"
+
+        # Early exit: if the first batch failed, all subsequent batches
+        # will fail too (same provider, same timeout, same model).
+        if first_batch_failed:
+            logger.info("Skipping %s — first batch failed, provider likely unavailable", batch_label)
+            continue
 
         # Build the prompt with segment texts
         seg_texts = [{"index": i, "text": seg.text} for i, seg in enumerate(batch)]
@@ -167,22 +207,28 @@ async def correct_transcript(
         )
 
         batch_succeeded = False
-        for attempt in range(MAX_BATCH_RETRIES + 1):
+        # Only 1 retry (2 total attempts). Correction is optional —
+        # don't waste time on retries that will likely all timeout.
+        max_attempts = min(MAX_BATCH_RETRIES + 1, 2)
+        for attempt in range(max_attempts):
             try:
                 response = await asyncio.wait_for(
-                    orchestrator.text_completion(prompt, timeout=45, job_id=job_id),
-                    timeout=60,  # Hard outer timeout per batch attempt
+                    orchestrator.text_completion(
+                        prompt, timeout=inner_timeout, job_id=job_id,
+                        skip_circuit_breaker=True,  # CRITICAL: don't poison the breaker
+                    ),
+                    timeout=outer_timeout,  # Hard outer timeout per batch attempt
                 )
 
                 corrections = _parse_correction_response(response, len(batch))
                 if corrections is None:
                     logger.warning(
-                        "AI correction %s returned unparseable/wrong-length response (attempt %d/%d)",
-                        batch_label, attempt + 1, MAX_BATCH_RETRIES + 1,
+                        "AI correction %s returned unparseable/wrong-length response from %s (attempt %d/%d)",
+                        batch_label, model_name, attempt + 1, max_attempts,
                     )
-                    if attempt < MAX_BATCH_RETRIES:
-                        continue  # Retry — may hit a different provider via circuit breaker
-                    break  # Exhausted retries
+                    if attempt < max_attempts - 1:
+                        continue
+                    break
 
                 # Apply corrections
                 for i, new_text in enumerate(corrections):
@@ -204,17 +250,22 @@ async def correct_transcript(
                 break  # Success — move to next batch
 
             except asyncio.TimeoutError:
-                logger.warning("AI transcript correction timed out for %s (attempt %d/%d)",
-                               batch_label, attempt + 1, MAX_BATCH_RETRIES + 1)
-                if attempt < MAX_BATCH_RETRIES:
-                    continue  # Retry — provider chain will try next provider
+                logger.warning("AI transcript correction timed out for %s using %s (attempt %d/%d, %ds timeout)",
+                               batch_label, model_name, attempt + 1, max_attempts, inner_timeout)
+                if attempt < max_attempts - 1:
+                    continue
             except Exception as e:
-                logger.warning("AI transcript correction failed for %s (attempt %d/%d): %s",
-                               batch_label, attempt + 1, MAX_BATCH_RETRIES + 1, e)
-                if attempt < MAX_BATCH_RETRIES:
+                logger.warning("AI transcript correction failed for %s using %s (attempt %d/%d): %s",
+                               batch_label, model_name, attempt + 1, max_attempts, e)
+                if attempt < max_attempts - 1:
                     continue
 
         if not batch_succeeded:
-            logger.warning("All attempts exhausted for %s — keeping raw transcript for these segments", batch_label)
+            logger.warning("All attempts exhausted for %s via %s — keeping raw transcript for these segments",
+                           batch_label, model_name)
+            if batch_idx == 0:
+                first_batch_failed = True
+                logger.warning("First batch failed — will skip remaining %d batches (model %s likely unavailable or too slow)",
+                               total_batches - 1, model_name)
 
     return corrected

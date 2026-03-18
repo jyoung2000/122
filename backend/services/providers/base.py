@@ -437,3 +437,32 @@ class AIProvider(ABC):
     def total_tokens(self) -> int:
         """Return total tokens used by this provider instance."""
         return getattr(self, '_total_tokens', 0)
+
+    @property
+    def text_model_name(self) -> str:
+        """Return the model ID used for text completion.
+
+        Providers override this to return the actual model string
+        (e.g. 'google/gemini-2.5-pro') so callers can log which
+        model is handling their request and adapt timeouts.
+        """
+        return f"{self.provider_name}/unknown"
+
+    @property
+    def is_thinking_model(self) -> bool:
+        """Return True if the text model is a 'thinking' model that needs extended timeouts.
+
+        Thinking models (Gemini 2.5 Flash/Pro, Claude with extended thinking, o1/o3, etc.)
+        internally reason before responding, routinely taking 60-120s+ on complex prompts.
+        """
+        model = self.text_model_name.lower()
+        thinking_patterns = [
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "o1",
+            "o3",
+            "o4-mini",
+            "deepseek-r1",
+            "qwq",
+        ]
+        return any(pattern in model for pattern in thinking_patterns)

@@ -55,6 +55,21 @@ class _CircuitBreaker:
         if was_degraded:
             logger.info("Circuit breaker: provider %s RECOVERED (success after degraded)", name)
 
+    def clear_degraded(self, name: str):
+        """Immediately remove degraded status for a provider."""
+        was_degraded = name in self._degraded_until
+        self._degraded_until.pop(name, None)
+        if was_degraded:
+            logger.info("Circuit breaker: %s manually un-degraded before critical operation", name)
+
+    def force_reset_all(self):
+        """Reset ALL provider states. Used before critical pipeline stages."""
+        had_degraded = list(self._degraded_until.keys())
+        self._failures.clear()
+        self._degraded_until.clear()
+        if had_degraded:
+            logger.info("Circuit breaker: RESET all states (was degraded: %s)", had_degraded)
+
 
 def _build_provider(name: str) -> Optional[AIProvider]:
     try:
@@ -112,6 +127,32 @@ class AIOrchestrator:
                 rate = self._COST_PER_1K_TOKENS.get(name, 0.001)
                 total += (tokens / 1000) * rate
         return round(total, 6)
+
+    def reset_circuit_breaker(self):
+        """Reset circuit breaker state before critical pipeline operations.
+
+        Call this before summary generation and clip detection to ensure
+        that failures from non-critical steps (transcript correction)
+        don't block the core analysis pipeline.
+        """
+        self._circuit_breaker.force_reset_all()
+
+    def get_text_model_info(self) -> dict:
+        """Return info about the text model that will handle the next text_completion call.
+
+        Used by transcript correction to:
+        1. Log which model is polishing the transcript
+        2. Set an appropriate timeout based on model type (thinking vs standard)
+        """
+        chain = self._get_active_chain()
+        if not chain:
+            return {"provider": "none", "model": "none", "is_thinking": False}
+        provider = chain[0]
+        return {
+            "provider": provider.provider_name,
+            "model": provider.text_model_name,
+            "is_thinking": provider.is_thinking_model,
+        }
 
     def _get_active_chain(self) -> list[AIProvider]:
         chain = []
@@ -324,35 +365,44 @@ class AIOrchestrator:
                 continue
         raise AllProvidersFailedError("All providers failed for viral clip detection")
 
-    async def text_completion(self, prompt: str, max_tokens: int = 4096, timeout: float = 60, job_id: str = "") -> str:
+    async def text_completion(self, prompt: str, max_tokens: int = 4096, timeout: float = 60, job_id: str = "", skip_circuit_breaker: bool = False) -> str:
         """Generic text completion using the configured provider chain.
 
         Used by transcript correction, translation, and other text-only tasks.
-        Falls back through the provider chain on failure, matching the pattern
-        used by analyze_frames, detect_viral_clips, and other AI methods.
+        Falls back through the provider chain on failure.
         Returns the raw text response from the first successful provider.
+
+        Args:
+            skip_circuit_breaker: If True, failures are NOT recorded in the
+                circuit breaker. Use this for non-critical/optional operations
+                (like transcript polishing) that should not degrade the provider
+                for subsequent critical operations (summary, clip detection).
         """
         for provider in self._get_active_chain():
             pname = provider.provider_name
+            model_name = provider.text_model_name
             try:
-                logger.info("text_completion attempting via %s (%d chars prompt)", pname, len(prompt))
+                logger.info("text_completion attempting via %s model=%s (%d chars prompt)", pname, model_name, len(prompt))
                 t0 = time.monotonic()
                 result = await asyncio.wait_for(
                     provider.text_complete(prompt, max_tokens=max_tokens),
                     timeout=timeout,
                 )
                 elapsed = time.monotonic() - t0
-                logger.info("text_completion via %s completed in %.1fs", pname, elapsed)
-                self._circuit_breaker.record_success(pname)
+                logger.info("text_completion via %s model=%s completed in %.1fs", pname, model_name, elapsed)
+                if not skip_circuit_breaker:
+                    self._circuit_breaker.record_success(pname)
                 return result
             except asyncio.TimeoutError:
-                self._circuit_breaker.record_failure(pname)
-                logger.warning("text_completion via %s timed out after %.0fs — trying next provider", pname, timeout)
-                await self._notify_fallback(job_id, pname, f"Text completion timed out after {timeout:.0f}s")
+                if not skip_circuit_breaker:
+                    self._circuit_breaker.record_failure(pname)
+                logger.warning("text_completion via %s model=%s timed out after %.0fs — trying next provider", pname, model_name, timeout)
+                await self._notify_fallback(job_id, pname, f"Text completion timed out after {timeout:.0f}s (model={model_name})")
                 continue
             except Exception as e:
-                self._circuit_breaker.record_failure(pname)
-                logger.warning("text_completion via %s failed: %s — trying next provider", pname, e)
+                if not skip_circuit_breaker:
+                    self._circuit_breaker.record_failure(pname)
+                logger.warning("text_completion via %s model=%s failed: %s — trying next provider", pname, model_name, e)
                 await self._notify_fallback(job_id, pname, str(e))
                 continue
         raise AllProvidersFailedError("All providers failed for text completion")

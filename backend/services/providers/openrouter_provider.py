@@ -233,6 +233,11 @@ class OpenRouterProvider(AIProvider):
     def provider_name(self) -> str:
         return "openrouter"
 
+    @property
+    def text_model_name(self) -> str:
+        """Return the user's configured OpenRouter text model ID."""
+        return self._text_model
+
     _API_TIMEOUT = 180  # 3 minutes per API call
 
     async def _call(self, model: str, messages: list[dict], max_tokens: int = 4096, timeout: int | None = None) -> str:

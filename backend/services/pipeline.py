@@ -19,7 +19,7 @@ from backend.services.frame_extractor import (
 from backend.services.transcription import transcribe_audio
 from backend.services.ai_orchestrator import AIOrchestrator
 from backend.services.prompts import load_prompts
-from backend.services.providers.base import build_summary_from_transcript, has_real_summary_content
+from backend.services.providers.base import build_summary_from_transcript, has_real_summary_content, AllProvidersFailedError
 from backend.services.audio_analyzer import analyze_audio_energy, format_audio_energy_map
 from backend.services.clip_boundary_snapper import snap_all_clips
 
@@ -408,12 +408,20 @@ async def _run_analysis_inner(job_id: str):
         # AI transcript correction (optional, after initial transcription)
         if settings.AI_TRANSCRIPT_CORRECTION and result:
             from backend.services.transcript_corrector import correct_transcript
+            # Show which model is polishing the transcript
+            _polish_info = orchestrator.get_text_model_info()
+            _polish_model = _polish_info.get("model", "AI")
+            _polish_label = f"Polishing transcript with {_polish_model}..."
+            if _polish_info.get("is_thinking"):
+                _polish_label += " (thinking model — may take 1-2 min)"
             await _update_branch_progress("transcription", 95, JobStatus.TRANSCRIBING,
-                "Polishing transcript with AI...")
+                _polish_label)
             try:
+                # Allow more time for thinking models (they need 60-120s per batch)
+                _correction_timeout = 360 if _polish_info.get("is_thinking") else 180
                 result = await asyncio.wait_for(
                     correct_transcript(result, orchestrator, job_id=job_id),
-                    timeout=180,  # 3 minute max for entire transcript correction
+                    timeout=_correction_timeout,
                 )
                 await database.update_job_status(job_id, transcript=list(result))
                 logger.info("[%s] AI transcript correction applied", job_id)
@@ -606,6 +614,12 @@ async def _run_analysis_inner(job_id: str):
         f"Generating video summary...{_pipeline_eta(65)}",
     )
 
+    # CRITICAL: Reset circuit breaker before critical AI operations.
+    # Transcript correction (optional) may have degraded providers via
+    # repeated timeouts. Summary and clip detection MUST have access to
+    # all configured providers regardless of correction failures.
+    orchestrator.reset_circuit_breaker()
+
     # Step 5: Summary first
     _summary_start = _time.monotonic()
     try:
@@ -614,6 +628,20 @@ async def _run_analysis_inner(job_id: str):
         )
     except CancelledError:
         raise
+    except AllProvidersFailedError:
+        # All providers failed — wait briefly and retry once
+        logger.warning("[%s] All providers failed for summary — retrying in 5s", job_id)
+        orchestrator.reset_circuit_breaker()
+        await asyncio.sleep(5)
+        try:
+            summary, summary_provider = await orchestrator.generate_summary(
+                transcript, scenes, job_id,
+            )
+        except Exception:
+            logger.exception("[%s] Summary generation retry also failed, building from transcript", job_id)
+            fb = build_summary_from_transcript(transcript, scenes)
+            summary = VideoSummary(**fb)
+            summary_provider = "none"
     except Exception as e:
         logger.exception("[%s] Summary generation failed, building from transcript", job_id)
         fb = build_summary_from_transcript(transcript, scenes)
@@ -650,6 +678,11 @@ async def _run_analysis_inner(job_id: str):
 
     # Step 6: Clip detection with summary context
     cancel_check()
+
+    # Reset again before clip detection — summary generation may have
+    # had transient failures that shouldn't block clip detection.
+    orchestrator.reset_circuit_breaker()
+
     _clips_start = _time.monotonic()
 
     clip_detection_task = None
@@ -673,16 +706,35 @@ async def _run_analysis_inner(job_id: str):
 
     heartbeat_task = asyncio.create_task(_clips_heartbeat())
     try:
-        clip_detection_task = asyncio.ensure_future(
-            orchestrator.detect_viral_clips(
-                transcript, scenes, metadata["duration"], job_id,
-                video_summary=summary_text,
+        try:
+            clip_detection_task = asyncio.ensure_future(
+                orchestrator.detect_viral_clips(
+                    transcript, scenes, metadata["duration"], job_id,
+                    video_summary=summary_text,
+                )
             )
-        )
-        clips, clips_provider = await asyncio.wait_for(
-            clip_detection_task,
-            timeout=_SUMMARY_CLIP_TIMEOUT,
-        )
+            clips, clips_provider = await asyncio.wait_for(
+                clip_detection_task,
+                timeout=_SUMMARY_CLIP_TIMEOUT,
+            )
+        except AllProvidersFailedError:
+            # All providers failed on first attempt — wait briefly for any
+            # transient rate limits to clear and retry once.
+            logger.warning("[%s] All providers failed for clip detection — retrying in 10s", job_id)
+            orchestrator.reset_circuit_breaker()
+            await asyncio.sleep(10)
+            try:
+                clips, clips_provider = await asyncio.wait_for(
+                    orchestrator.detect_viral_clips(
+                        transcript, scenes, metadata["duration"], job_id,
+                        video_summary=summary_text,
+                    ),
+                    timeout=_SUMMARY_CLIP_TIMEOUT,
+                )
+            except Exception:
+                logger.exception("[%s] Clip detection retry also failed", job_id)
+                clips = []
+                clips_provider = "none"
     except asyncio.TimeoutError:
         logger.error("[%s] Clip detection timed out", job_id)
         clips = []

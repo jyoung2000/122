@@ -44,6 +44,10 @@ class OllamaProvider(AIProvider):
     def provider_name(self) -> str:
         return "ollama"
 
+    @property
+    def text_model_name(self) -> str:
+        return self._text_model
+
     async def _call_vision(self, prompt: str, image_base64: str) -> str:
         """Send ONE frame at a time to the vision model - VRAM constraint."""
         async with httpx.AsyncClient(timeout=120.0) as client:

@@ -72,6 +72,10 @@ class GeminiProvider(AIProvider):
     def provider_name(self) -> str:
         return "gemini"
 
+    @property
+    def text_model_name(self) -> str:
+        return getattr(self, '_model_name', 'gemini/unknown')
+
     async def _upload_video_file(self, video_path: str) -> Optional[object]:
         """Upload a video file via the Gemini File API for native video analysis.
 
