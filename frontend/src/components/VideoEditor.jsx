@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
-import { processKeyframes, interpolateSubjectX, isDynamic, safeSubjectX } from '../utils/subjectTracking';
+import { processKeyframes, interpolateSubjectX, isDynamic, safeSubjectX, subjectXToCenterPct } from '../utils/subjectTracking';
 import useResponsive from '../hooks/useResponsive';
 import useTimelineStore from '../stores/timelineStore';
 import useTimelinePersistence from '../hooks/useTimelinePersistence';
@@ -131,22 +131,7 @@ const Icon = {
 };
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
-function subjectXToCenterPct(sx, srcRatio, targetRatio) {
-  const R = srcRatio / targetRatio;
-  if (R <= 1.01) return Math.max(0, Math.min(100, sx));
-  const pct = (R * sx - 50) / (R - 1);
-
-  // Soft clamp: if pct is outside [0, 100], ease toward the edge
-  // instead of hard-clamping. This prevents the "slam to edge" visual.
-  if (pct < 0) {
-    return Math.max(0, 5 * (1 - Math.min(1, Math.abs(pct) / 50)));
-  }
-  if (pct > 100) {
-    return Math.min(100, 100 - 5 * (1 - Math.min(1, (pct - 100) / 50)));
-  }
-
-  return pct;
-}
+// subjectXToCenterPct is imported from subjectTracking.js (shared with ClipPreview)
 
 function formatTimecode(seconds) {
   if (!seconds || isNaN(seconds) || seconds < 0) return '0:00.00';
@@ -1365,7 +1350,7 @@ export default function VideoEditor({
         ? interpolateSubjectX(subjectKeyframes, relTime)
         : (safeSubjectX ? safeSubjectX(subjectX) : subjectX);
       const centerPct = subjectXToCenterPct(sx, srcRatio, targetRatio);
-      const rounded = Math.round(centerPct * 100) / 100;
+      const rounded = Math.round(centerPct * 10000) / 10000;
       if (rounded !== lastPct) {
         video.style.objectPosition = `${centerPct}% 50%`;
         lastPct = rounded;
@@ -1375,7 +1360,10 @@ export default function VideoEditor({
     animId = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(animId);
-      video.style.objectPosition = '';
+      // Do NOT clear video.style.objectPosition here — the cleanup runs
+      // after React's DOM commit, so clearing would overwrite the correct
+      // static objectPosition that React just applied. This matches
+      // ClipPreview.jsx behavior.
     };
   }, [hasDynamicSubject, subjectKeyframes, clipStart, srcRatio, targetRatio, segments, subjectX]);
 
@@ -1384,7 +1372,8 @@ export default function VideoEditor({
     if (hasDynamicSubject || !isCrop) return;
     const video = videoRef.current;
     if (!video) return;
-    const sx = safeSubjectX ? safeSubjectX(subjectX) : subjectX;
+    // Pass aspect ratio params for dynamic safe range (matches keyframe pipeline)
+    const sx = safeSubjectX ? safeSubjectX(subjectX, srcRatio, targetRatio) : subjectX;
     const centerPct = subjectXToCenterPct(Math.max(0, Math.min(100, sx)), srcRatio, targetRatio);
     video.style.objectPosition = `${centerPct}% 50%`;
   }, [hasDynamicSubject, isCrop, subjectX, srcRatio, targetRatio]);
@@ -2271,7 +2260,9 @@ export default function VideoEditor({
 
   const initialObjectPosition = isCrop
     ? `${subjectXToCenterPct(
-        hasDynamicSubject ? subjectKeyframes[0].x : (safeSubjectX ? safeSubjectX(subjectX) : subjectX),
+        hasDynamicSubject
+          ? subjectKeyframes[0].x
+          : (safeSubjectX ? safeSubjectX(subjectX, srcRatio, targetRatio) : subjectX),
         srcRatio,
         targetRatio,
       )}% 50%`

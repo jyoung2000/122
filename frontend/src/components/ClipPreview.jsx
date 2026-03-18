@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
-import { processKeyframes, interpolateSubjectX, isDynamic, safeSubjectX } from '../utils/subjectTracking';
+import { processKeyframes, interpolateSubjectX, isDynamic, safeSubjectX, subjectXToCenterPct } from '../utils/subjectTracking';
 import { outlineTextShadow } from '../utils/textOutline';
 import useResponsive from '../hooks/useResponsive';
 
@@ -78,33 +78,7 @@ function getFrameMode(aspectRatio, sourceWidth, sourceHeight) {
   return { mode: 'crop', targetRatio };
 }
 
-/**
- * Convert subject_x (0-100) to a CSS objectPosition percentage that
- * centers the subject in the cropped frame.
- *
- * With objectFit: cover, objectPosition X% aligns the X% point of the
- * content with the X% point of the container — so using the raw subject_x
- * places the subject at subject_x% of the output, not centered.
- *
- * This function computes the objectPosition value that puts the subject
- * at exactly 50% (center) of the visible crop.
- *
- * R = srcRatio / targetRatio = rendered_width / container_width (for cover)
- * centerPct = (R * sx - 50) / (R - 1)
- */
-function subjectXToCenterPct(sx, srcRatio, targetRatio) {
-  const R = srcRatio / targetRatio;
-  if (R <= 1.01) return Math.max(0, Math.min(100, sx));
-  const pct = (R * sx - 50) / (R - 1);
-
-  // HARD clamp: keep objectPosition in [8, 92] to prevent exposing
-  // baked-in pillarboxing from the source video. The backend uses
-  // FFmpeg cropdetect to strip these bars during export, but the
-  // preview plays the raw source file. This ensures full-frame
-  // coverage always takes priority over perfect subject centering.
-  const EDGE_GUARD = 8;
-  return Math.max(EDGE_GUARD, Math.min(100 - EDGE_GUARD, pct));
-}
+// subjectXToCenterPct is imported from subjectTracking.js (shared with VideoEditor)
 
 function formatTime(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00';

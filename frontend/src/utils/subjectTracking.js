@@ -511,6 +511,37 @@ export function interpolateSubjectX(keyframes, t) {
 export { smoothKeyframesBidirectional as smoothKeyframes };
 
 /**
+ * Convert subject_x (0-100) to a CSS objectPosition percentage that
+ * centers the subject in the cropped frame.
+ *
+ * With objectFit: cover, objectPosition X% aligns the X% point of the
+ * content with the X% point of the container.
+ *
+ * R = srcRatio / targetRatio
+ * centerPct = (R * sx - 50) / (R - 1)
+ *
+ * Hard-clamped to [EDGE_GUARD, 100-EDGE_GUARD] to prevent exposing
+ * baked-in pillarboxing from the source video. The backend uses
+ * FFmpeg cropdetect to strip bars during export, but the preview
+ * plays the raw source. Full-frame coverage > subject centering.
+ *
+ * @param {number} sx - Subject x position (0-100)
+ * @param {number} srcRatio - Source video aspect ratio
+ * @param {number} targetRatio - Target crop aspect ratio
+ * @returns {number} CSS objectPosition percentage
+ */
+export function subjectXToCenterPct(sx, srcRatio, targetRatio) {
+  const R = srcRatio / targetRatio;
+  if (R <= 1.01) return Math.max(0, Math.min(100, sx));
+  const pct = (R * sx - 50) / (R - 1);
+
+  // HARD clamp: keep objectPosition in [EDGE_GUARD, 100-EDGE_GUARD]
+  // to prevent exposing baked-in pillarboxing from source video.
+  const EDGE_GUARD = 8;
+  return Math.max(EDGE_GUARD, Math.min(100 - EDGE_GUARD, pct));
+}
+
+/**
  * Check if keyframes represent dynamic motion (more than one unique x value).
  *
  * @param {Array<{t: number, x: number}>} keyframes

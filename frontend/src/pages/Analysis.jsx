@@ -1076,6 +1076,70 @@ export default function Analysis() {
     ? computeClipSubjectX(job.scenes, clipPreview.start_time, clipPreview.end_time)
     : 50;
 
+  // --- Auto-trigger subject tracking when clip or aspect ratio changes ---
+  // Mirrors ViralClips.jsx auto-trigger behavior. When a clip is opened with
+  // a crop aspect ratio, check if AI scene data exists. If not, trigger
+  // background analysis so subject tracking can center the crop on the subject.
+  const prevAnalysisTrackingRef = useRef({ clipId: null, ar: null });
+  useEffect(() => {
+    const ar = clipSettings?.aspectRatio;
+    const prev = prevAnalysisTrackingRef.current;
+    const clipId = clipPreview?.id ?? null;
+
+    const clipChanged = clipId !== prev.clipId;
+    const arChanged = ar !== prev.ar;
+    prevAnalysisTrackingRef.current = { clipId, ar };
+
+    // Only act when a clip is open with a crop aspect ratio, and something changed
+    if (!clipPreview || !ar) return;
+    if (!clipChanged && !arChanged) return;
+
+    // Check if this job already has AI-detected per-scene subject positions
+    const scenes = job.scenes || [];
+    const hasAiData = scenes.some((s) => {
+      const sx = typeof s === 'object' ? (s.subject_x ?? 50) : 50;
+      return sx !== 50;
+    });
+
+    if (!hasAiData && jobId) {
+      // No AI subject data — trigger background scene analysis
+      console.log('[Analysis] Auto-triggering subject tracking for clip', clipId, 'aspect', ar);
+      fetch(`/api/jobs/${jobId}/recenter-subject`, { method: 'POST' })
+        .then((res) => {
+          if (!res.ok) throw new Error('recenter failed');
+          return res.json();
+        })
+        .then((data) => {
+          if (data.status === 'reanalyzing') {
+            showToast('Analyzing subject position...', 'info');
+            // Poll for completion
+            const poll = setInterval(async () => {
+              try {
+                const jr = await fetch(`/api/jobs/${jobId}`, { cache: 'no-store' });
+                if (!jr.ok) return;
+                const jd = await jr.json();
+                const sxVals = (jd.scenes || []).map((s) => s.subject_x);
+                if (sxVals.some((v) => v !== 50)) {
+                  clearInterval(poll);
+                  // Refresh job data so scenes are updated
+                  await fetchJob();
+                  showToast('Subject tracking applied', 'success');
+                }
+              } catch { /* ignore polling errors */ }
+            }, 3000);
+            // Timeout after 2 minutes
+            setTimeout(() => clearInterval(poll), 120000);
+          } else {
+            // Data already exists — refresh job
+            fetchJob();
+          }
+        })
+        .catch((err) => {
+          console.warn('[Analysis] Subject tracking auto-trigger failed:', err);
+        });
+    }
+  }, [clipPreview?.id, clipSettings?.aspectRatio]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Always use ClipPreview when a clip is selected so it responds to
   // aspect ratio and subtitle settings changes in real time.
   const showExportPreview = !!clipPreview;
