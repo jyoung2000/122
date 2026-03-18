@@ -19,6 +19,11 @@ from backend.services.clip_exporter import (
     _center_crop_offset,
     _build_subject_keyframes,
     _smooth_keyframes,
+    _smooth_keyframes_bidirectional,
+    _apply_dead_zone,
+    _handle_scene_cuts,
+    _compress_range,
+    _merge_holds,
     _build_crop_x_expr,
     _build_filter_chain,
     _compute_safe_range,
@@ -757,3 +762,114 @@ class TestValidateSubjectTrackingQA:
         # Should have no errors about off-screen crops
         off_screen_warnings = [w for w in warnings if "off-screen" in w or "outside" in w.lower()]
         assert len(off_screen_warnings) == 0, f"Off-screen crop warnings: {off_screen_warnings}"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Spring-damped smoother
+# ══════════════════════════════════════════════════════════════════════
+
+class TestSpringDampedSmoother:
+    """Verify the spring-damped smoothing model produces natural motion."""
+
+    def test_empty(self):
+        assert _smooth_keyframes_bidirectional([]) == []
+
+    def test_single_keyframe(self):
+        kf = [(0.0, 50)]
+        assert _smooth_keyframes_bidirectional(kf) == [(0.0, 50)]
+
+    def test_converges_toward_target(self):
+        """Spring should move position toward target over time."""
+        kf = [(0.0, 20), (2.0, 80)]
+        result = _smooth_keyframes_bidirectional(kf)
+        assert result[0][1] == 20  # Starts at initial
+        # Should have moved toward 80 but may not reach it exactly in 2s
+        assert result[1][1] > 20, "Spring should move toward target"
+        assert result[1][1] <= 100, "Should not exceed bounds"
+
+    def test_respects_max_speed(self):
+        """Large jump should be speed-limited."""
+        kf = [(0.0, 0), (0.5, 100)]
+        result = _smooth_keyframes_bidirectional(kf, max_speed=25)
+        # In 0.5s at max 25 units/s = max 12.5 units movement
+        assert result[1][1] <= 20, f"Expected speed-limited result, got {result[1][1]}"
+
+    def test_instant_cut_snaps(self):
+        """Scene cut keyframes (1ms apart) should snap immediately."""
+        kf = [(0.0, 30), (4.999, 30), (5.0, 70)]
+        result = _smooth_keyframes_bidirectional(kf)
+        # The 1ms gap should cause an instant snap
+        assert result[2][1] == 70, "Scene cut should snap to target"
+
+    def test_values_in_valid_range(self):
+        """All output values should be within [0, 100]."""
+        kf = [(0.0, 5), (1.0, 95), (2.0, 10), (3.0, 90)]
+        result = _smooth_keyframes_bidirectional(kf)
+        for t, sx in result:
+            assert 0 <= sx <= 100, f"Value {sx} at t={t} outside [0, 100]"
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Anchor-based dead zone
+# ══════════════════════════════════════════════════════════════════════
+
+class TestDeadZoneAnchor:
+    """Verify the anchor-based dead zone eliminates drift accumulation."""
+
+    def test_cumulative_drift(self):
+        """Small consecutive movements should eventually trigger camera movement."""
+        # 5 keyframes each moving 2 units right (total 10 units)
+        kf = [(0.0, 50), (1.0, 52), (2.0, 54), (3.0, 56), (4.0, 58)]
+        result = _apply_dead_zone(kf, threshold=5)
+        # The anchor starts at 50. At kf (3.0, 56), drift from anchor = 6 > 5.
+        # So camera should move at or before t=3.0
+        final_x = result[-1][1]
+        assert final_x > 50, "Camera must have moved after cumulative drift exceeded threshold"
+
+    def test_small_movements_held(self):
+        """Movements within threshold should hold at anchor."""
+        kf = [(0.0, 50), (1.0, 52), (2.0, 51), (3.0, 53)]
+        result = _apply_dead_zone(kf, threshold=5)
+        # All within 5 of anchor (50), should hold
+        for _, sx in result:
+            assert sx == 50, f"Expected hold at 50, got {sx}"
+
+    def test_large_movement_passes(self):
+        """Movement exceeding threshold should pass through."""
+        kf = [(0.0, 50), (1.0, 60)]
+        result = _apply_dead_zone(kf, threshold=5)
+        assert result[1][1] == 60
+
+
+# ══════════════════════════════════════════════════════════════════════
+# Pipeline ordering — scene cuts survive
+# ══════════════════════════════════════════════════════════════════════
+
+class TestPipelineOrdering:
+    """Verify scene cuts are not absorbed by dead zone or compression."""
+
+    def test_scene_cuts_survive_pipeline(self):
+        """Scene cut keyframes must not be absorbed by dead zone."""
+        # Simulate the pipeline: compress → dead zone → scene cuts
+        # Create keyframes with a scene cut (large jump)
+        kf = [
+            (0.0, 30), (2.0, 32), (4.0, 31),  # Stable around 30
+            (5.0, 70), (7.0, 72), (9.0, 71),   # Scene cut to ~70
+        ]
+        after_compress = _compress_range(kf)
+        after_dead_zone = _apply_dead_zone(after_compress, threshold=5)
+        after_cuts = _handle_scene_cuts(after_dead_zone)
+
+        # There should be a 1ms hold keyframe before the scene cut
+        times = [t for t, _ in after_cuts]
+        # Check that there's an instant transition near the scene cut
+        has_instant_cut = False
+        for i in range(1, len(after_cuts)):
+            t_prev, sx_prev = after_cuts[i - 1]
+            t_cur, sx_cur = after_cuts[i]
+            if (t_cur - t_prev) <= 0.002 and abs(sx_cur - sx_prev) >= 10:
+                has_instant_cut = True
+                break
+        assert has_instant_cut, (
+            f"Expected instant scene cut in pipeline output, got: {after_cuts}"
+        )

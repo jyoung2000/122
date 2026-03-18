@@ -7,10 +7,10 @@
  *
  * Processing pipeline (applied in order):
  *   1. buildSubjectKeyframes()        — raw (time, subject_x) pairs with DYNAMIC safe margin
- *   2. handleSceneCuts()              — insert 1ms instant-jump keyframes at hard cuts
- *   3. compressRange()                — limit total sx swing per clip toward median
- *   4. applyDeadZone()                — eliminate micro-movements based on VISIBLE crop delta
- *   5. smoothKeyframesBidirectional() — two-pass speed limiting (maxSpeed=25)
+ *   2. compressRange()                — limit total sx swing per clip toward median (maxRange=40)
+ *   3. applyDeadZone()                — anchor-based hold zone (eliminate drift, not movements)
+ *   4. handleSceneCuts()              — insert 1ms instant-jump keyframes at hard cuts
+ *   5. smoothKeyframesBidirectional() — velocity-damped spring tracking (maxSpeed=25)
  *   6. mergeHolds()                   — merge similar consecutive values into rests (tolerance=3)
  *   7. interpolateSubjectX()          — smoothstep ease-in/ease-out interpolation
  */
@@ -28,7 +28,7 @@ const SAFE_MARGIN = 10;
  * @param {number} edgeBuffer - Buffer from objectPosition 0%/100% (default 5)
  * @returns {{ min: number, max: number }} Safe subject_x range
  */
-export function computeSafeRange(srcRatio, targetRatio, edgeBuffer = 5) {
+export function computeSafeRange(srcRatio, targetRatio, edgeBuffer = 2) {
   const R = srcRatio / targetRatio;
   if (R <= 1.01) {
     // No horizontal overflow — any subject_x is fine
@@ -200,7 +200,7 @@ export function handleSceneCuts(keyframes, jumpThreshold = 12) {
  * @param {number} maxRange - Maximum allowed range of sx values (default 25)
  * @returns {Array<{t: number, x: number}>}
  */
-export function compressRange(keyframes, maxRange = 25) {
+export function compressRange(keyframes, maxRange = 40) {
   if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
 
   const xs = keyframes.map(k => k.x);
@@ -217,7 +217,7 @@ export function compressRange(keyframes, maxRange = 25) {
 
   return keyframes.map(k => ({
     t: k.t,
-    x: Math.round(Math.max(0, Math.min(100, median + (k.x - median) * scale))),
+    x: Math.max(0, Math.min(100, median + (k.x - median) * scale)),
   }));
 }
 
@@ -251,15 +251,18 @@ export function applyDeadZone(keyframes, threshold = 5, srcRatio = null, targetR
     }
   }
 
-  const result = [keyframes[0]];
+  const result = [{ ...keyframes[0] }];
+  let anchor = keyframes[0].x; // The position the camera is "committed to"
   for (let i = 1; i < keyframes.length; i++) {
     const cur = keyframes[i];
-    const prevX = result[result.length - 1].x;
-    if (Math.abs(cur.x - prevX) < effectiveThreshold) {
-      // Small change — hold position (snap to previous)
-      result.push({ t: cur.t, x: prevX });
-    } else {
+    const driftFromAnchor = Math.abs(cur.x - anchor);
+    if (driftFromAnchor >= effectiveThreshold) {
+      // Subject has drifted far enough from anchor — move to new position
       result.push({ t: cur.t, x: cur.x });
+      anchor = cur.x; // Reset anchor to new committed position
+    } else {
+      // Within dead zone of anchor — hold at anchor
+      result.push({ t: cur.t, x: anchor });
     }
   }
 
@@ -282,52 +285,47 @@ export function applyDeadZone(keyframes, threshold = 5, srcRatio = null, targetR
 export function smoothKeyframesBidirectional(keyframes, maxSpeed = 25) {
   if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
 
-  // Forward pass
-  const fwd = [keyframes[0]];
+  // Critically-damped spring parameters
+  const springK = 8.0;  // Spring stiffness (higher = snappier tracking)
+  const dampingD = 2 * Math.sqrt(springK);  // Critical damping
+  const dt_step = 0.016;  // 16ms simulation step
+
+  const result = [{ t: keyframes[0].t, x: keyframes[0].x }];
+  let pos = keyframes[0].x;
+  let vel = 0;
+
   for (let i = 1; i < keyframes.length; i++) {
-    const prev = fwd[fwd.length - 1];
-    const cur = keyframes[i];
-    const dt = cur.t - prev.t;
-    if (dt <= 0) {
-      fwd.push({ t: cur.t, x: prev.x });
+    const target = keyframes[i].x;
+    const segDt = keyframes[i].t - keyframes[i - 1].t;
+
+    if (segDt <= 0.002) {
+      // Instant cut (scene cut keyframes are 1ms apart) — snap immediately
+      pos = target;
+      vel = 0;
+      result.push({ t: keyframes[i].t, x: pos });
       continue;
     }
-    const maxDelta = maxSpeed * dt;
-    const delta = cur.x - prev.x;
-    let newX = cur.x;
-    if (Math.abs(delta) > maxDelta) {
-      newX = Math.round(prev.x + maxDelta * (delta > 0 ? 1 : -1));
-      newX = Math.max(0, Math.min(100, newX));
-    }
-    fwd.push({ t: cur.t, x: newX });
-  }
 
-  // Reverse pass
-  const rev = [keyframes[keyframes.length - 1]];
-  for (let i = keyframes.length - 2; i >= 0; i--) {
-    const next = rev[rev.length - 1];
-    const cur = keyframes[i];
-    const dt = next.t - cur.t;
-    if (dt <= 0) {
-      rev.push({ t: cur.t, x: next.x });
-      continue;
+    // Simulate spring from current pos toward target
+    let simTime = 0;
+    while (simTime < segDt) {
+      const step = Math.min(dt_step, segDt - simTime);
+      const force = springK * (target - pos);
+      const damping = dampingD * vel;
+      const accel = force - damping;
+      vel += accel * step;
+      // Speed limit to prevent overshooting
+      const maxDelta = maxSpeed * step;
+      if (Math.abs(vel * step) > maxDelta) {
+        vel = (vel > 0 ? 1 : -1) * maxSpeed;
+      }
+      pos += vel * step;
+      simTime += step;
     }
-    const maxDelta = maxSpeed * dt;
-    const delta = cur.x - next.x;
-    let newX = cur.x;
-    if (Math.abs(delta) > maxDelta) {
-      newX = Math.round(next.x + maxDelta * (delta > 0 ? 1 : -1));
-      newX = Math.max(0, Math.min(100, newX));
-    }
-    rev.push({ t: cur.t, x: newX });
-  }
-  rev.reverse();
 
-  // Average both passes
-  const result = [];
-  for (let i = 0; i < keyframes.length; i++) {
-    const avgX = Math.round((fwd[i].x + rev[i].x) / 2);
-    result.push({ t: fwd[i].t, x: Math.max(0, Math.min(100, avgX)) });
+    // Clamp to valid range
+    pos = Math.max(0, Math.min(100, pos));
+    result.push({ t: keyframes[i].t, x: pos });
   }
 
   return result;
@@ -365,7 +363,7 @@ export function mergeHolds(keyframes, tolerance = 3) {
 
 /**
  * Full keyframe processing pipeline:
- *   build → scene cuts → compress range → dead zone → bidirectional smooth → merge holds
+ *   build → compress range → dead zone → scene cuts → spring smooth → merge holds
  *
  * Matches the backend export_clip() pipeline exactly for preview-export parity.
  *
@@ -380,10 +378,11 @@ export function processKeyframes(scenes, clipStart, clipEnd, srcRatio = null, ta
   const raw = buildSubjectKeyframes(scenes, clipStart, clipEnd, srcRatio, targetRatio);
   if (!raw || raw.length <= 1) return raw;
 
-  const afterCuts = handleSceneCuts(raw);
-  const afterCompress = compressRange(afterCuts);
+  // NEW ORDER: compress → dead zone → scene cuts → smooth → merge holds
+  const afterCompress = compressRange(raw);
   const afterDeadZone = applyDeadZone(afterCompress, 5, srcRatio, targetRatio);
-  const afterSmooth = smoothKeyframesBidirectional(afterDeadZone);
+  const afterCuts = handleSceneCuts(afterDeadZone);
+  const afterSmooth = smoothKeyframesBidirectional(afterCuts);
   const afterHolds = mergeHolds(afterSmooth);
 
   // Final bounds enforcement — ensure every keyframe x is clamped to [0, 100]

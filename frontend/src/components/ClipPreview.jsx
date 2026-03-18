@@ -317,7 +317,7 @@ export default function ClipPreview({
       const processed = processKeyframes(scenes, clipStart, clipEnd, _isCrop ? _srcRatio : null, _isCrop ? _targetRatio : null);
       const dynamic = processed && isDynamic(processed);
       console.log(
-        `[SubjectTracking] ClipPreview: ${processed?.length || 0} keyframes (pipeline: build→cuts→compress→deadzone→smooth→holds) ` +
+        `[SubjectTracking] ClipPreview: ${processed?.length || 0} keyframes (pipeline: build→compress→deadzone→cuts→smooth→holds) ` +
         `(${clipStart.toFixed(1)}s-${clipEnd.toFixed(1)}s), ` +
         `mode=${dynamic ? 'DYNAMIC' : 'STATIC'}, ` +
         `sx range: [${Math.min(...(processed || []).map(k=>k.x))}-${Math.max(...(processed || []).map(k=>k.x))}], ` +
@@ -555,7 +555,9 @@ export default function ClipPreview({
       const sx = interpolateSubjectX(subjectKeyframes, relTime);
       const centerPct = subjectXToCenterPct(Math.max(0, Math.min(100, sx)), srcRatio, targetRatio);
       // Only update DOM if value actually changed (avoid layout thrashing)
-      const rounded = Math.round(centerPct * 100) / 100;
+      // Use higher precision — 4 decimal places eliminates visible stepping
+      // while still preventing unnecessary DOM updates
+      const rounded = Math.round(centerPct * 10000) / 10000;
       if (rounded !== lastPct) {
         video.style.objectPosition = `${centerPct}% 50%`;
         lastPct = rounded;

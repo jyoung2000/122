@@ -2029,7 +2029,7 @@ def _compute_video_out_dims(
     return src_w, src_h
 
 
-def _compute_safe_range(src_ratio: float, target_ratio: float, edge_buffer: int = 5) -> tuple[int, int]:
+def _compute_safe_range(src_ratio: float, target_ratio: float, edge_buffer: int = 2) -> tuple[int, int]:
     """Compute safe subject_x range for a given aspect ratio conversion.
 
     Ensures that any subject_x within this range will produce a non-clamped
@@ -2334,20 +2334,23 @@ def _apply_dead_zone(
             effective_threshold = max(2, round(VISIBLE_THRESHOLD * (R - 1) / R))
 
     result = [keyframes[0]]
+    anchor = keyframes[0][1]  # The position the camera is "committed to"
     snapped_count = 0
     for i in range(1, len(keyframes)):
         t, sx = keyframes[i]
-        _, prev_sx = result[-1]
-        if abs(sx - prev_sx) < effective_threshold:
-            # Small change — hold position (snap to previous)
-            result.append((t, prev_sx))
-            snapped_count += 1
-        else:
+        drift_from_anchor = abs(sx - anchor)
+        if drift_from_anchor >= effective_threshold:
+            # Subject has drifted far enough from anchor — move to new position
             result.append((t, sx))
+            anchor = sx  # Reset anchor to new committed position
+        else:
+            # Within dead zone of anchor — hold at anchor
+            result.append((t, anchor))
+            snapped_count += 1
 
     if snapped_count > 0:
         logger.info(
-            "[SubjectTracking] _apply_dead_zone: %d/%d keyframes snapped to previous (effective_threshold=%d, base=%d)",
+            "[SubjectTracking] _apply_dead_zone: %d/%d keyframes snapped to anchor (effective_threshold=%d, base=%d)",
             snapped_count, len(keyframes) - 1, effective_threshold, threshold,
         )
 
@@ -2358,60 +2361,59 @@ def _smooth_keyframes_bidirectional(
     keyframes: list[tuple[float, int]],
     max_speed: float = 25.0,
 ) -> list[tuple[float, int]]:
-    """Two-pass bidirectional smoothing that eliminates trailing lag.
+    """Velocity-damped spring tracking for human-like camera motion.
 
-    Forward pass: clamp speed going forward (prevents anticipation overshoot)
-    Reverse pass: clamp speed going backward (prevents trailing lag)
-    Average: blend both passes for natural-feeling movement
+    Uses a critically-damped spring model to produce natural acceleration
+    and deceleration when following the subject. Respects maxSpeed limit.
 
     Matches frontend smoothKeyframesBidirectional() exactly for preview-export parity.
     """
     if len(keyframes) <= 1:
         return list(keyframes)
 
-    # Forward pass
-    fwd = [keyframes[0]]
+    import math as _math
+
+    # Critically-damped spring parameters
+    spring_k = 8.0  # Spring stiffness (higher = snappier tracking)
+    damping_d = 2 * _math.sqrt(spring_k)  # Critical damping
+    dt_step = 0.016  # 16ms simulation step
+
+    result = [keyframes[0]]
+    pos = float(keyframes[0][1])
+    vel = 0.0
+
     for i in range(1, len(keyframes)):
-        t_prev, sx_prev = fwd[-1]
-        t_cur, sx_cur = keyframes[i]
-        dt = t_cur - t_prev
-        if dt <= 0:
-            fwd.append((t_cur, sx_prev))
-            continue
-        max_delta = max_speed * dt
-        delta = sx_cur - sx_prev
-        if abs(delta) > max_delta:
-            sx_cur = int(sx_prev + max_delta * (1 if delta > 0 else -1))
-            sx_cur = max(0, min(100, sx_cur))
-        fwd.append((t_cur, sx_cur))
+        target = float(keyframes[i][1])
+        seg_dt = keyframes[i][0] - keyframes[i - 1][0]
 
-    # Reverse pass
-    rev = [keyframes[-1]]
-    for i in range(len(keyframes) - 2, -1, -1):
-        t_next, sx_next = rev[-1]
-        t_cur, sx_cur = keyframes[i]
-        dt = t_next - t_cur
-        if dt <= 0:
-            rev.append((t_cur, sx_next))
+        if seg_dt <= 0.002:
+            # Instant cut (scene cut keyframes are 1ms apart) — snap immediately
+            pos = target
+            vel = 0.0
+            result.append((keyframes[i][0], pos))
             continue
-        max_delta = max_speed * dt
-        delta = sx_cur - sx_next
-        if abs(delta) > max_delta:
-            sx_cur = int(sx_next + max_delta * (1 if delta > 0 else -1))
-            sx_cur = max(0, min(100, sx_cur))
-        rev.append((t_cur, sx_cur))
-    rev.reverse()
 
-    # Average both passes
-    result = []
-    for i in range(len(keyframes)):
-        t = fwd[i][0]
-        avg_sx = int(round((fwd[i][1] + rev[i][1]) / 2))
-        avg_sx = max(0, min(100, avg_sx))
-        result.append((t, avg_sx))
+        # Simulate spring from current pos toward target
+        sim_time = 0.0
+        while sim_time < seg_dt:
+            step = min(dt_step, seg_dt - sim_time)
+            force = spring_k * (target - pos)
+            damping = damping_d * vel
+            accel = force - damping
+            vel += accel * step
+            # Speed limit to prevent overshooting
+            max_delta = max_speed * step
+            if abs(vel * step) > max_delta:
+                vel = (1 if vel > 0 else -1) * max_speed
+            pos += vel * step
+            sim_time += step
+
+        # Clamp to valid range
+        pos = max(0.0, min(100.0, pos))
+        result.append((keyframes[i][0], pos))
 
     logger.info(
-        "[SubjectTracking] _smooth_keyframes_bidirectional: %d keyframes processed (max_speed=%.0f/s)",
+        "[SubjectTracking] _smooth_keyframes_bidirectional: %d keyframes processed (max_speed=%.0f/s, spring model)",
         len(keyframes), max_speed,
     )
 
@@ -2455,7 +2457,7 @@ def _merge_holds(
 
 def _compress_range(
     keyframes: list[tuple[float, int]],
-    max_range: int = 25,
+    max_range: int = 40,
 ) -> list[tuple[float, int]]:
     """Compress the range of subject_x values to prevent erratic swinging.
 
@@ -2483,7 +2485,7 @@ def _compress_range(
 
     result = []
     for t, sx in keyframes:
-        new_sx = round(max(0, min(100, median + (sx - median) * scale)))
+        new_sx = max(0, min(100, median + (sx - median) * scale))
         result.append((t, new_sx))
 
     logger.info(
@@ -4960,11 +4962,11 @@ async def export_clip(
                     clip_id, len(raw_kf), len(subject_scenes),
                 )
                 if len(raw_kf) > 1:
-                    # Full pipeline: build → scene cuts → compress range → dead zone → smooth → merge holds
-                    after_cuts = _handle_scene_cuts(raw_kf)
-                    after_compress = _compress_range(after_cuts)
+                    # Full pipeline: build → compress range → dead zone → scene cuts → smooth → merge holds
+                    after_compress = _compress_range(raw_kf)
                     after_dead_zone = _apply_dead_zone(after_compress, src_ratio=_src_ratio, target_ratio=_target_ratio)
-                    after_smooth = _smooth_keyframes_bidirectional(after_dead_zone)
+                    after_cuts = _handle_scene_cuts(after_dead_zone)
+                    after_smooth = _smooth_keyframes_bidirectional(after_cuts)
                     after_holds = _merge_holds(after_smooth)
 
                     # Final bounds enforcement — clamp every keyframe to safe range
@@ -4977,8 +4979,8 @@ async def export_clip(
                     ]
 
                     logger.info(
-                        "[SubjectTracking] clip %s: pipeline stages — raw=%d → cuts=%d → compress=%d → deadzone=%d → smooth=%d → holds=%d → clamped=%d (safe=[%d,%d])",
-                        clip_id, len(raw_kf), len(after_cuts), len(after_compress), len(after_dead_zone),
+                        "[SubjectTracking] clip %s: pipeline stages — raw=%d → compress=%d → deadzone=%d → cuts=%d → smooth=%d → holds=%d → clamped=%d (safe=[%d,%d])",
+                        clip_id, len(raw_kf), len(after_compress), len(after_dead_zone), len(after_cuts),
                         len(after_smooth), len(after_holds), len(keyframes), safe_lo, safe_hi,
                     )
 
