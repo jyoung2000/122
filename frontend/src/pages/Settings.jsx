@@ -372,12 +372,13 @@ export default function Settings() {
     loadAvailableModels();
   }, []);
 
-  // Reload models when provider status changes
+  // Reload models when provider status changes (including Ollama toggle)
   useEffect(() => {
     const hasProvider = statuses.openrouter?.status === 'configured' || statuses.openrouter?.status === 'connected'
-      || statuses.anthropic?.status === 'configured' || statuses.gemini?.status === 'configured';
+      || statuses.anthropic?.status === 'configured' || statuses.gemini?.status === 'configured'
+      || statuses._active?.ollama_enabled;
     if (hasProvider) loadAvailableModels();
-  }, [statuses.openrouter?.status, statuses.anthropic?.status, statuses.gemini?.status]);
+  }, [statuses.openrouter?.status, statuses.anthropic?.status, statuses.gemini?.status, statuses._active?.ollama_enabled]);
 
   // Save & test a provider key
   const handleSaveKey = async (providerName) => {
@@ -998,6 +999,8 @@ export default function Settings() {
                             ...prev,
                             _active: { ...prev._active, ollama_enabled: enabled, fallback_chain: data.chain },
                           }));
+                          // Refresh model lists — Ollama models appear/disappear based on enabled state
+                          loadAvailableModels();
                         }
                       } catch {
                         showToast('Failed to toggle Ollama', 'error');

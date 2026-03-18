@@ -1216,30 +1216,39 @@ async def available_models():
     chain = [p.strip() for p in settings.AI_FALLBACK_CHAIN.split(",") if p.strip()]
     ollama_enabled = "ollama" in chain
     if ollama_enabled:
+        ollama_models = []
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(f"{settings.OLLAMA_HOST}/api/tags")
                 resp.raise_for_status()
                 data = resp.json()
                 ollama_models = [m["name"] for m in data.get("models", [])]
-                _OLLAMA_VISION_NAMES = ("moondream", "llava", "bakllava", "minicpm", "llama3.2-vision")
-                for model_name in ollama_models:
-                    has_vision = any(v in model_name.lower() for v in _OLLAMA_VISION_NAMES)
-                    mid = f"ollama/{model_name}"
-                    entry = {
-                        "id": mid, "name": f"Ollama: {model_name}", "provider": "ollama",
-                        "cost_per_hour": 0, "is_free": True, "context_length": 0,
-                        "created": int(time.time()),  # sort to top as "newest"
-                        "desc": "FREE — Local Ollama model",
-                        "quality_score": 2, "quality": "basic",
-                        **_estimate_speed(mid, "text", True),
-                    }
-                    if has_vision:
-                        v_entry = {**entry, **_estimate_speed(mid, "vision", True)}
-                        vision.insert(0, v_entry)
-                    text.insert(0, entry)
         except Exception:
-            pass  # Ollama unreachable — skip
+            # Ollama unreachable — fall back to configured defaults so users
+            # can still see and select the configured models
+            defaults = set()
+            if settings.OLLAMA_VISION_MODEL:
+                defaults.add(settings.OLLAMA_VISION_MODEL)
+            if settings.OLLAMA_TEXT_MODEL:
+                defaults.add(settings.OLLAMA_TEXT_MODEL)
+            ollama_models = list(defaults)
+
+        _OLLAMA_VISION_NAMES = ("moondream", "llava", "bakllava", "minicpm", "llama3.2-vision")
+        for model_name in ollama_models:
+            has_vision = any(v in model_name.lower() for v in _OLLAMA_VISION_NAMES)
+            mid = f"ollama/{model_name}"
+            entry = {
+                "id": mid, "name": f"Ollama: {model_name}", "provider": "ollama",
+                "cost_per_hour": 0, "is_free": True, "context_length": 0,
+                "created": int(time.time()),  # sort to top as "newest"
+                "desc": "FREE — Local Ollama model",
+                "quality_score": 2, "quality": "basic",
+                **_estimate_speed(mid, "text", True),
+            }
+            if has_vision:
+                v_entry = {**entry, **_estimate_speed(mid, "vision", True)}
+                vision.insert(0, v_entry)
+            text.insert(0, entry)
 
     # Sort: free first, then newer + cheaper towards the top
     # Within free models: newest first.  Within paid: newest first, then cheapest.
