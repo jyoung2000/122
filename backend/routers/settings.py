@@ -1250,13 +1250,14 @@ async def available_models():
                 vision.insert(0, v_entry)
             text.insert(0, entry)
 
-    # Sort: free first, then newer + cheaper towards the top
-    # Within free models: newest first.  Within paid: newest first, then cheapest.
+    # Sort: Ollama (local/free) first, then free cloud, then paid.
+    # Within each tier: newest first, then cheapest.
     def _sort_key(m):
+        is_ollama = 0 if m.get("provider") == "ollama" else 1
         is_paid = 0 if m.get("is_free") else 1
         newest_first = -(m.get("created", 0))  # negate so newer = smaller = first
         cost = m.get("cost_per_hour", 999)
-        return (is_paid, newest_first, cost)
+        return (is_ollama, is_paid, newest_first, cost)
 
     vision.sort(key=_sort_key)
     text.sort(key=_sort_key)
