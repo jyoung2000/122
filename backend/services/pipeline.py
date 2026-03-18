@@ -407,7 +407,7 @@ async def _run_analysis_inner(job_id: str):
 
         # AI transcript correction (optional, after initial transcription)
         if settings.AI_TRANSCRIPT_CORRECTION and result:
-            from backend.services.transcript_corrector import correct_transcript
+            from backend.services.transcript_corrector import correct_transcript, _adaptive_batch_size
             # Show which model is polishing the transcript
             _polish_info = orchestrator.get_text_model_info()
             _polish_model = _polish_info.get("model", "AI")
@@ -417,8 +417,21 @@ async def _run_analysis_inner(job_id: str):
             await _update_branch_progress("transcription", 95, JobStatus.TRANSCRIBING,
                 _polish_label)
             try:
-                # Allow more time for thinking models (they need 60-120s per batch)
-                _correction_timeout = 360 if _polish_info.get("is_thinking") else 180
+                # Dynamic timeout: scale with transcript length
+                # probe batch (timeout) + ceil(remaining_batches / 3) waves × timeout + buffer
+                _batch_size = _adaptive_batch_size(len(result))
+                _total_batches = -(-len(result) // _batch_size)
+                _remaining_waves = -(- max(0, _total_batches - 1) // 3)  # concurrent waves of 3
+                _per_batch = 150 if _polish_info.get("is_thinking") else 90
+                # probe + waves + 30s buffer
+                _correction_timeout = _per_batch + (_remaining_waves * _per_batch) + 30
+                # Clamp: minimum 120s, maximum 600s (10 min)
+                _correction_timeout = max(120, min(600, _correction_timeout))
+
+                logger.info(
+                    "[%s] Transcript polishing: %d segments, %d batches, timeout=%ds",
+                    job_id, len(result), _total_batches, _correction_timeout,
+                )
                 result = await asyncio.wait_for(
                     correct_transcript(result, orchestrator, job_id=job_id),
                     timeout=_correction_timeout,
@@ -426,7 +439,7 @@ async def _run_analysis_inner(job_id: str):
                 await database.update_job_status(job_id, transcript=list(result))
                 logger.info("[%s] AI transcript correction applied", job_id)
             except asyncio.TimeoutError:
-                logger.warning("[%s] AI transcript correction timed out after 180s (using raw)", job_id)
+                logger.warning("[%s] AI transcript correction timed out after %ds (using raw)", job_id, _correction_timeout)
             except Exception as e:
                 logger.warning("[%s] AI transcript correction failed (using raw): %s", job_id, e)
 

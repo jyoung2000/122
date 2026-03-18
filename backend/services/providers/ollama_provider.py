@@ -99,7 +99,7 @@ class OllamaProvider(AIProvider):
             except Exception as e:
                 raise ProviderError(f"Ollama text error ({type(e).__name__}): {e}")
 
-    async def text_complete(self, prompt: str, max_tokens: int = 4096) -> str:
+    async def text_complete(self, prompt: str, max_tokens: int = 4096, timeout: int | None = None) -> str:
         return await self._call_text(prompt, max_tokens=max_tokens)
 
     async def analyze_frames(

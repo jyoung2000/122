@@ -292,7 +292,7 @@ class GeminiProvider(AIProvider):
                 raise ProviderRateLimitError(f"Gemini rate limited: {e}")
             raise ProviderError(f"Gemini error: {e}")
 
-    async def text_complete(self, prompt: str, max_tokens: int = 4096) -> str:
+    async def text_complete(self, prompt: str, max_tokens: int = 4096, timeout: int | None = None) -> str:
         return await self._call(prompt, max_tokens=max_tokens)
 
     async def analyze_frames(

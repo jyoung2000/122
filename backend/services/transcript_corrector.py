@@ -35,7 +35,7 @@ Return a JSON array of corrected text strings, exactly {count} elements.
 Example: ["Fixed text one.", "Fixed text two."]"""
 
 
-MAX_BATCH_RETRIES = 2  # Retry each batch up to 2 times on parse failures
+MAX_BATCH_RETRIES = 1  # Only 1 retry (2 total attempts) — polishing is optional
 
 
 def _realign_word_timestamps(segment: TranscriptSegment, original_text: str) -> TranscriptSegment:
@@ -132,28 +132,45 @@ def _parse_correction_response(response: str, expected_count: int) -> list[str] 
     return None
 
 
-# Timeouts — standard models finish in 5-30s; thinking models need 60-120s+
-_THINKING_MODEL_TIMEOUT = 120     # inner timeout per attempt for thinking models
-_STANDARD_MODEL_TIMEOUT = 60      # inner timeout per attempt for standard models
-_OUTER_TIMEOUT_MARGIN = 30        # outer timeout = inner + this margin
+# ── Timeouts ──────────────────────────────────────────────────────────
+_STANDARD_BATCH_TIMEOUT = 90       # per-batch timeout for standard models
+_THINKING_BATCH_TIMEOUT = 150      # per-batch timeout for thinking models
+_OUTER_TIMEOUT_MARGIN = 30         # outer = inner + margin
+_MAX_CONCURRENCY = 3               # max parallel batch requests
+
+
+def _adaptive_batch_size(segment_count: int) -> int:
+    """Scale batch size inversely with transcript length.
+
+    Smaller batches for large transcripts:
+    - Faster per-batch inference (shorter prompts)
+    - Better concurrency utilization
+    - Smaller blast radius on failure (fewer segments lost)
+    """
+    if segment_count <= 50:
+        return 25
+    elif segment_count <= 150:
+        return 15
+    else:
+        return 10
 
 
 async def correct_transcript(
     segments: list[TranscriptSegment],
     orchestrator: AIOrchestrator,
-    batch_size: int = 30,
+    batch_size: int | None = None,
     job_id: str = "",
 ) -> list[TranscriptSegment]:
     """Correct transcript text using the user's configured AI text model.
 
-    The model used is determined by the active provider chain — for OpenRouter,
-    this is settings.OPENROUTER_TEXT_MODEL (selected by the user in Settings).
+    Improvements over the original implementation:
+    - Adaptive batch sizing based on transcript length
+    - Concurrent batch processing (up to 3 parallel requests)
+    - Extended per-batch timeouts (90s standard, 150s thinking)
+    - Graceful partial success (batches that succeed are kept, failures stay raw)
 
     Uses skip_circuit_breaker=True so failures here do NOT degrade providers
     for subsequent critical operations (summary, clip detection).
-    Implements early exit: if the first batch fails, remaining batches are
-    skipped (the provider/model is likely to fail for all of them too).
-    Word timestamps are re-aligned after text changes.
     """
     if not settings.AI_TRANSCRIPT_CORRECTION:
         return segments
@@ -161,7 +178,7 @@ async def correct_transcript(
     if not segments:
         return segments
 
-    # Query which model will handle polishing so we can set an appropriate timeout
+    # Query which model will handle polishing
     model_info = orchestrator.get_text_model_info()
     model_name = model_info["model"]
     is_thinking = model_info["is_thinking"]
@@ -170,102 +187,134 @@ async def correct_transcript(
         logger.warning("No AI providers available for transcript correction — skipping")
         return segments
 
+    # Adaptive batch size
+    if batch_size is None:
+        batch_size = _adaptive_batch_size(len(segments))
+
     # Set timeout based on model type
-    if is_thinking:
-        inner_timeout = _THINKING_MODEL_TIMEOUT
-        logger.info(
-            "Transcript correction using thinking model %s via %s — timeout %ds per batch",
-            model_name, model_info["provider"], inner_timeout,
-        )
-    else:
-        inner_timeout = _STANDARD_MODEL_TIMEOUT
-        logger.info(
-            "Transcript correction using model %s via %s — timeout %ds per batch",
-            model_name, model_info["provider"], inner_timeout,
-        )
+    inner_timeout = _THINKING_BATCH_TIMEOUT if is_thinking else _STANDARD_BATCH_TIMEOUT
     outer_timeout = inner_timeout + _OUTER_TIMEOUT_MARGIN
+
+    logger.info(
+        "Transcript correction: %d segments, batch_size=%d, model=%s via %s, "
+        "timeout=%ds/batch, concurrency=%d",
+        len(segments), batch_size, model_name, model_info["provider"],
+        inner_timeout, _MAX_CONCURRENCY,
+    )
 
     corrected = list(segments)  # Copy to avoid mutating input
     total_batches = -(-len(segments) // batch_size)  # ceiling division
-    first_batch_failed = False
+    semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
 
-    for batch_idx, batch_start in enumerate(range(0, len(segments), batch_size)):
+    # Track first-batch probe result for early exit
+    first_batch_result = None  # Will be set by batch 0
+
+    async def _process_batch(batch_idx: int, batch_start: int) -> bool:
+        """Process a single batch. Returns True on success, False on failure."""
+        nonlocal first_batch_result
+
         batch = segments[batch_start : batch_start + batch_size]
-        batch_label = f"batch {batch_idx + 1}/{total_batches} (segments {batch_start}-{batch_start + len(batch) - 1})"
+        batch_label = f"batch {batch_idx + 1}/{total_batches} (segs {batch_start}-{batch_start + len(batch) - 1})"
 
-        # Early exit: if the first batch failed, all subsequent batches
-        # will fail too (same provider, same timeout, same model).
-        if first_batch_failed:
-            logger.info("Skipping %s — first batch failed, provider likely unavailable", batch_label)
-            continue
+        async with semaphore:
+            # Early exit: if batch 0 already failed, skip this batch
+            if first_batch_result is False and batch_idx > 0:
+                logger.info("Skipping %s — probe batch failed", batch_label)
+                return False
 
-        # Build the prompt with segment texts
-        seg_texts = [{"index": i, "text": seg.text} for i, seg in enumerate(batch)]
-        prompt = CORRECTION_PROMPT.format(
-            segments_json=json.dumps(seg_texts, indent=2),
-            count=len(batch),
-        )
+            seg_texts = [{"index": i, "text": seg.text} for i, seg in enumerate(batch)]
+            prompt = CORRECTION_PROMPT.format(
+                segments_json=json.dumps(seg_texts, indent=2),
+                count=len(batch),
+            )
 
-        batch_succeeded = False
-        # Only 1 retry (2 total attempts). Correction is optional —
-        # don't waste time on retries that will likely all timeout.
-        max_attempts = min(MAX_BATCH_RETRIES + 1, 2)
-        for attempt in range(max_attempts):
-            try:
-                response = await asyncio.wait_for(
-                    orchestrator.text_completion(
-                        prompt, timeout=inner_timeout, job_id=job_id,
-                        skip_circuit_breaker=True,  # CRITICAL: don't poison the breaker
-                    ),
-                    timeout=outer_timeout,  # Hard outer timeout per batch attempt
-                )
+            max_attempts = MAX_BATCH_RETRIES + 1
+            for attempt in range(max_attempts):
+                try:
+                    response = await asyncio.wait_for(
+                        orchestrator.text_completion(
+                            prompt, timeout=inner_timeout, job_id=job_id,
+                            skip_circuit_breaker=True,
+                        ),
+                        timeout=outer_timeout,
+                    )
 
-                corrections = _parse_correction_response(response, len(batch))
-                if corrections is None:
+                    corrections = _parse_correction_response(response, len(batch))
+                    if corrections is None:
+                        logger.warning(
+                            "AI correction %s returned unparseable response (attempt %d/%d)",
+                            batch_label, attempt + 1, max_attempts,
+                        )
+                        if attempt < max_attempts - 1:
+                            continue
+                        if batch_idx == 0:
+                            first_batch_result = False
+                        return False
+
+                    # Apply corrections
+                    for i, new_text in enumerate(corrections):
+                        if isinstance(new_text, str) and new_text.strip():
+                            idx = batch_start + i
+                            old_text = corrected[idx].text
+                            corrected[idx] = corrected[idx].model_copy(
+                                update={"text": new_text.strip()}
+                            )
+                            if old_text != new_text.strip() and corrected[idx].words:
+                                corrected[idx] = _realign_word_timestamps(corrected[idx], old_text)
+
+                    logger.info("Corrected %s successfully", batch_label)
+                    if batch_idx == 0:
+                        first_batch_result = True
+                    return True
+
+                except asyncio.TimeoutError:
                     logger.warning(
-                        "AI correction %s returned unparseable/wrong-length response from %s (attempt %d/%d)",
-                        batch_label, model_name, attempt + 1, max_attempts,
+                        "AI correction %s timed out (%ds, attempt %d/%d)",
+                        batch_label, inner_timeout, attempt + 1, max_attempts,
                     )
                     if attempt < max_attempts - 1:
                         continue
-                    break
+                except Exception as e:
+                    logger.warning(
+                        "AI correction %s failed (attempt %d/%d): %s",
+                        batch_label, attempt + 1, max_attempts, e,
+                    )
+                    if attempt < max_attempts - 1:
+                        continue
 
-                # Apply corrections
-                for i, new_text in enumerate(corrections):
-                    if isinstance(new_text, str) and new_text.strip():
-                        idx = batch_start + i
-                        old_text = corrected[idx].text
-                        corrected[idx] = corrected[idx].model_copy(
-                            update={"text": new_text.strip()}
-                        )
-                        if old_text != new_text.strip():
-                            logger.debug(
-                                "Corrected [%.1fs]: '%s' → '%s'",
-                                corrected[idx].start, old_text[:60], new_text.strip()[:60],
-                            )
-                            # Re-align word timestamps after text correction
-                            if corrected[idx].words:
-                                corrected[idx] = _realign_word_timestamps(corrected[idx], old_text)
-                batch_succeeded = True
-                break  # Success — move to next batch
-
-            except asyncio.TimeoutError:
-                logger.warning("AI transcript correction timed out for %s using %s (attempt %d/%d, %ds timeout)",
-                               batch_label, model_name, attempt + 1, max_attempts, inner_timeout)
-                if attempt < max_attempts - 1:
-                    continue
-            except Exception as e:
-                logger.warning("AI transcript correction failed for %s using %s (attempt %d/%d): %s",
-                               batch_label, model_name, attempt + 1, max_attempts, e)
-                if attempt < max_attempts - 1:
-                    continue
-
-        if not batch_succeeded:
-            logger.warning("All attempts exhausted for %s via %s — keeping raw transcript for these segments",
-                           batch_label, model_name)
+            # All attempts exhausted
+            logger.warning("All attempts exhausted for %s — keeping raw transcript", batch_label)
             if batch_idx == 0:
-                first_batch_failed = True
-                logger.warning("First batch failed — will skip remaining %d batches (model %s likely unavailable or too slow)",
-                               total_batches - 1, model_name)
+                first_batch_result = False
+            return False
+
+    # ── Probe-then-fan-out strategy ──
+    # Run batch 0 first as a probe. If the model/provider is completely
+    # unavailable, we skip all remaining batches immediately instead of
+    # firing N concurrent requests that all timeout.
+    batch_ranges = list(range(0, len(segments), batch_size))
+
+    if batch_ranges:
+        # Probe: run batch 0 alone
+        await _process_batch(0, batch_ranges[0])
+
+        if first_batch_result is False:
+            logger.warning(
+                "Probe batch failed — skipping remaining %d batches (model %s likely unavailable)",
+                len(batch_ranges) - 1, model_name,
+            )
+        elif len(batch_ranges) > 1:
+            # Fan out remaining batches concurrently
+            tasks = [
+                _process_batch(idx, start)
+                for idx, start in enumerate(batch_ranges[1:], start=1)
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            succeeded = sum(1 for r in results if r is True)
+            failed = sum(1 for r in results if r is not True)
+            logger.info(
+                "Transcript correction: %d/%d batches succeeded (probe + %d concurrent)",
+                succeeded + 1, total_batches, len(tasks),
+            )
 
     return corrected

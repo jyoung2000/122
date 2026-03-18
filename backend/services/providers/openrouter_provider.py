@@ -220,10 +220,13 @@ class OpenRouterProvider(AIProvider):
             f"clip={self._text_model} (+{len(self._text_fallbacks)} fallbacks)"
         )
 
-    async def text_complete(self, prompt: str, max_tokens: int = 4096) -> str:
-        """Generic text completion using the text model."""
+    async def text_complete(self, prompt: str, max_tokens: int = 4096, timeout: int | None = None) -> str:
+        """Generic text completion using the text model with fallback chain."""
         messages = [{"role": "user", "content": prompt}]
-        return await self._call(self._text_model, messages, max_tokens=max_tokens)
+        return await self._call_with_fallback(
+            self._text_model, self._text_fallbacks, messages,
+            max_tokens=max_tokens, timeout=timeout,
+        )
 
     @property
     def supports_vision(self) -> bool:

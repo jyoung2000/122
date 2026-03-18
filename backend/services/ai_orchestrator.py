@@ -385,7 +385,7 @@ class AIOrchestrator:
                 logger.info("text_completion attempting via %s model=%s (%d chars prompt)", pname, model_name, len(prompt))
                 t0 = time.monotonic()
                 result = await asyncio.wait_for(
-                    provider.text_complete(prompt, max_tokens=max_tokens),
+                    provider.text_complete(prompt, max_tokens=max_tokens, timeout=int(timeout)),
                     timeout=timeout,
                 )
                 elapsed = time.monotonic() - t0

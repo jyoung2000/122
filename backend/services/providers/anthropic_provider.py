@@ -64,7 +64,7 @@ class AnthropicProvider(AIProvider):
         except Exception as e:
             raise ProviderError(f"Anthropic error: {e}")
 
-    async def text_complete(self, prompt: str, max_tokens: int = 4096) -> str:
+    async def text_complete(self, prompt: str, max_tokens: int = 4096, timeout: int | None = None) -> str:
         messages = [{"role": "user", "content": prompt}]
         return await self._call(messages, max_tokens=max_tokens)
 
