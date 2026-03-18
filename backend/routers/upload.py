@@ -19,48 +19,7 @@ router = APIRouter(prefix="/api", tags=["upload"])
 
 ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm"}
 
-# Expected magic bytes at offset 0 for each format
-_MAGIC = {
-    "mkv": (0, b"\x1a\x45\xdf\xa3"),   # EBML header
-    "webm": (0, b"\x1a\x45\xdf\xa3"),  # EBML header
-    "avi": (0, b"RIFF"),               # RIFF container
-}
-# MP4/MOV: ftyp box — first 4 bytes are box size, bytes 4-7 are "ftyp"
-_FTYP_MAGIC = b"ftyp"
-
-
-def _validate_video_header(path: str, ext: str) -> str | None:
-    """Check the first bytes of a video file. Returns an error message or None."""
-    with open(path, "rb") as f:
-        header = f.read(12)
-
-    if len(header) < 8:
-        return "File is too small to be a valid video"
-
-    # Check for all-zeros header (common sign of incomplete download)
-    if header[:8] == b"\x00" * 8:
-        return (
-            "The file appears to be corrupt or an incomplete download — "
-            "the first bytes are all zeros. Please verify the file plays "
-            "correctly on your device before uploading."
-        )
-
-    # Format-specific checks
-    if ext in _MAGIC:
-        offset, magic = _MAGIC[ext]
-        if header[offset:offset + len(magic)] != magic:
-            return (
-                f"File header does not match expected {ext.upper()} format. "
-                "The file may be corrupt or mislabeled."
-            )
-    elif ext in ("mp4", "mov"):
-        if header[4:8] != _FTYP_MAGIC:
-            return (
-                f"File header does not match expected {ext.upper()} format. "
-                "The file may be corrupt or mislabeled."
-            )
-
-    return None
+from backend.services.video_validation import validate_video_header as _validate_video_header
 
 
 def _parse_content_type(header: str) -> tuple[str, str]:

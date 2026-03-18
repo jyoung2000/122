@@ -5,7 +5,25 @@ import useResponsive from '../hooks/useResponsive';
 
 const ACCEPTED = '.mp4,.mov,.avi,.mkv,.webm';
 const ACCEPTED_DISPLAY = 'MP4 \u00B7 MOV \u00B7 AVI \u00B7 MKV \u00B7 WEBM';
-const CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB — matches backend default
+const DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB — matches backend default
+const MIN_CHUNK = 1 * 1024 * 1024;   // 1 MB
+const MAX_CHUNK = 50 * 1024 * 1024;  // 50 MB
+
+// Adaptive chunk sizing: use stored throughput from previous uploads
+function getAdaptiveChunkSize() {
+  try {
+    const stored = localStorage.getItem('clipai_chunk_speed');
+    if (stored) {
+      const bytesPerSec = parseFloat(stored);
+      // Target ~2 seconds per chunk for good balance of overhead vs responsiveness
+      const ideal = Math.round(bytesPerSec * 2);
+      return Math.max(MIN_CHUNK, Math.min(ideal, MAX_CHUNK));
+    }
+  } catch { /* ignore */ }
+  return DEFAULT_CHUNK_SIZE;
+}
+
+const CHUNK_SIZE = getAdaptiveChunkSize();
 const MAX_RETRIES = 4;
 const RETRY_DELAYS = [2000, 4000, 8000, 16000]; // exponential backoff
 
@@ -34,28 +52,33 @@ function validateFileHeader(file) {
   });
 }
 
-// Compute MD5 hash of a chunk using SubtleCrypto (fallback: skip)
+// Compute SHA-256 hash of a chunk using Web Crypto API
 async function computeChunkHash(blob) {
   try {
     const buffer = await blob.arrayBuffer();
     const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-    // We use MD5 on the backend, but for simplicity we'll skip hash verification
-    // if SubtleCrypto isn't available. The backend validates file integrity anyway.
-    // Actually, use a simple checksum approach instead.
-    const bytes = new Uint8Array(buffer);
-    let hash = 0;
-    for (let i = 0; i < bytes.length; i++) {
-      hash = ((hash << 5) - hash + bytes[i]) | 0;
-    }
-    return null; // Skip hash for now — backend validates integrity at assembly
+    return Array.from(new Uint8Array(hashBuffer))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
   } catch {
-    return null;
+    return '';
   }
 }
 
-async function computeFileMD5(file) {
-  // We'll skip full-file MD5 on the client — the backend does size + integrity checks
-  return '';
+// Compute SHA-256 hash of the full file using streaming reads
+async function computeFileHash(file) {
+  try {
+    const SLICE = 2 * 1024 * 1024; // 2MB slices
+    // Web Crypto doesn't support incremental hashing, so read full file
+    // For very large files (>2GB) this may fail — fall back gracefully
+    const buffer = await file.arrayBuffer();
+    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+    return Array.from(new Uint8Array(hashBuffer))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  } catch {
+    return '';
+  }
 }
 
 const LANGUAGES = [
@@ -234,6 +257,7 @@ export default function Upload() {
   const [uploadLog, setUploadLog] = useState([]);
   const fileRef = useRef(null);
   const abortRef = useRef(false);
+  const uploadIdRef = useRef(null);
   const navigate = useNavigate();
   const { isMobile } = useResponsive();
 
@@ -283,10 +307,11 @@ export default function Upload() {
   const uploadChunkWithRetry = useCallback(async (uploadId, chunkIndex, blob) => {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
+        const chunkHash = await computeChunkHash(blob);
         const formData = new FormData();
         formData.append('upload_id', uploadId);
         formData.append('chunk_index', chunkIndex.toString());
-        formData.append('chunk_hash', '');
+        formData.append('chunk_hash', chunkHash);
         formData.append('file', blob, `chunk_${chunkIndex}`);
 
         if (attempt > 0) {
@@ -342,36 +367,68 @@ export default function Upload() {
 
     addLog(`Starting chunked upload: ${file.name} (${formatBytes(file.size)}, ${numChunks} chunks)`);
 
-    // Step 1: Initialize upload session
+    // Step 1: Try to resume a previous upload, or initialize a new session
     let uploadId, serverChunkSize, serverTotalChunks;
-    try {
-      addLog('Initializing upload session...');
-      const initResp = await fetch('/api/upload/init', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          filename: file.name,
-          file_size: file.size,
-          language,
-          chunk_size: CHUNK_SIZE,
-        }),
-      });
+    const resumeKey = `clipai_upload_${file.name}_${file.size}`;
+    let resumedChunks = new Set();
 
-      if (!initResp.ok) {
-        let msg = 'Failed to initialize upload';
+    try {
+      // Check for a resumable upload
+      const savedUploadId = localStorage.getItem(resumeKey);
+      if (savedUploadId) {
         try {
-          const body = await initResp.json();
-          if (body.detail) msg = body.detail;
-        } catch {}
-        throw new Error(msg);
+          const resumeResp = await fetch(`/api/upload/resume/${savedUploadId}`);
+          if (resumeResp.ok) {
+            const resumeData = await resumeResp.json();
+            if (resumeData.state === 'uploading') {
+              uploadId = savedUploadId;
+              serverChunkSize = resumeData.chunk_size;
+              serverTotalChunks = resumeData.total_chunks;
+              resumedChunks = new Set(resumeData.chunks_received);
+              setTotalChunks(serverTotalChunks);
+              addLog(`Resuming upload ${uploadId.slice(0, 8)}... (${resumedChunks.size}/${serverTotalChunks} chunks already done)`);
+              // Mark resumed chunks as done in the grid
+              const doneStates = {};
+              for (const idx of resumedChunks) doneStates[idx] = 'done';
+              setChunkStates(doneStates);
+            }
+          }
+        } catch { /* Fall through to fresh upload */ }
       }
 
-      const initData = await initResp.json();
-      uploadId = initData.upload_id;
-      serverChunkSize = initData.chunk_size;
-      serverTotalChunks = initData.total_chunks;
-      setTotalChunks(serverTotalChunks);
-      addLog(`Session created: ${uploadId.slice(0, 8)}... (${serverTotalChunks} chunks of ${formatBytes(serverChunkSize)})`);
+      // If resume didn't work, init a new session
+      if (!uploadId) {
+        addLog('Initializing upload session...');
+        const initResp = await fetch('/api/upload/init', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            filename: file.name,
+            file_size: file.size,
+            language,
+            chunk_size: CHUNK_SIZE,
+          }),
+        });
+
+        if (!initResp.ok) {
+          let msg = 'Failed to initialize upload';
+          try {
+            const body = await initResp.json();
+            if (body.detail) msg = body.detail;
+          } catch {}
+          throw new Error(msg);
+        }
+
+        const initData = await initResp.json();
+        uploadId = initData.upload_id;
+        serverChunkSize = initData.chunk_size;
+        serverTotalChunks = initData.total_chunks;
+        setTotalChunks(serverTotalChunks);
+        addLog(`Session created: ${uploadId.slice(0, 8)}... (${serverTotalChunks} chunks of ${formatBytes(serverChunkSize)})`);
+      }
+
+      uploadIdRef.current = uploadId;
+      localStorage.setItem(resumeKey, uploadId);
     } catch (err) {
       setError(err.message);
       setUploading(false);
@@ -379,67 +436,101 @@ export default function Upload() {
       return;
     }
 
-    // Step 2: Upload chunks sequentially with progress tracking
+    // Step 2: Upload chunks in parallel (3 concurrent) with progress tracking
+    const CONCURRENCY = 3;
     const chunkSize = serverChunkSize || CHUNK_SIZE;
     const totalChunksActual = serverTotalChunks || numChunks;
+    // Account for already-resumed chunks
     let bytesUploaded = 0;
+    let completedCount = resumedChunks.size;
+    for (const idx of resumedChunks) {
+      const s = idx * chunkSize;
+      const e = Math.min(s + chunkSize, file.size);
+      bytesUploaded += (e - s);
+    }
     const startTime = Date.now();
     let lastSpeedCalcTime = startTime;
-    let lastSpeedCalcBytes = 0;
+    let lastSpeedCalcBytes = bytesUploaded;
+    // Only queue chunks that haven't been uploaded yet
+    const queue = Array.from({ length: totalChunksActual }, (_, i) => i).filter((i) => !resumedChunks.has(i));
+    let uploadError = null;
 
-    for (let i = 0; i < totalChunksActual; i++) {
+    async function uploadNext() {
+      while (queue.length > 0 && !abortRef.current && !uploadError) {
+        const i = queue.shift();
+        const start = i * chunkSize;
+        const end = Math.min(start + chunkSize, file.size);
+        const blob = file.slice(start, end);
+
+        setChunkStates((prev) => ({ ...prev, [i]: 'uploading' }));
+
+        try {
+          await uploadChunkWithRetry(uploadId, i, blob);
+          setChunkStates((prev) => ({ ...prev, [i]: 'done' }));
+          bytesUploaded += (end - start);
+          completedCount++;
+
+          // Calculate speed and ETA
+          const now = Date.now();
+          const elapsed = (now - lastSpeedCalcTime) / 1000;
+          if (elapsed >= 0.5) {
+            const bytesSinceCalc = bytesUploaded - lastSpeedCalcBytes;
+            const currentSpeed = bytesSinceCalc / elapsed;
+            setSpeed(currentSpeed);
+            const remaining = file.size - bytesUploaded;
+            setEta(currentSpeed > 0 ? remaining / currentSpeed : 0);
+            lastSpeedCalcTime = now;
+            lastSpeedCalcBytes = bytesUploaded;
+            // Store throughput for adaptive chunk sizing on next upload
+            try { localStorage.setItem('clipai_chunk_speed', currentSpeed.toString()); } catch {}
+          }
+
+          const chunkProgress = Math.round((completedCount / totalChunksActual) * 90);
+          setProgress(chunkProgress);
+        } catch (err) {
+          setChunkStates((prev) => ({ ...prev, [i]: 'error' }));
+          uploadError = err;
+          throw err;
+        }
+      }
+    }
+
+    try {
+      await Promise.all(Array.from({ length: CONCURRENCY }, () => uploadNext()));
+    } catch (err) {
       if (abortRef.current) {
         addLog('Upload cancelled by user', 'warn');
         setError('Upload cancelled');
-        setUploading(false);
-        return;
+      } else {
+        setError(`Upload failed: ${err.message}`);
+        addLog(`Fatal error: ${err.message}`, 'error');
       }
+      setUploading(false);
+      return;
+    }
 
-      const start = i * chunkSize;
-      const end = Math.min(start + chunkSize, file.size);
-      const blob = file.slice(start, end);
-
-      setChunkStates((prev) => ({ ...prev, [i]: 'uploading' }));
-
-      try {
-        const result = await uploadChunkWithRetry(uploadId, i, blob);
-        setChunkStates((prev) => ({ ...prev, [i]: 'done' }));
-        bytesUploaded += (end - start);
-
-        // Calculate speed and ETA
-        const now = Date.now();
-        const elapsed = (now - lastSpeedCalcTime) / 1000;
-        if (elapsed >= 0.5) {
-          const bytesSinceCalc = bytesUploaded - lastSpeedCalcBytes;
-          const currentSpeed = bytesSinceCalc / elapsed;
-          setSpeed(currentSpeed);
-          const remaining = file.size - bytesUploaded;
-          setEta(currentSpeed > 0 ? remaining / currentSpeed : 0);
-          lastSpeedCalcTime = now;
-          lastSpeedCalcBytes = bytesUploaded;
-        }
-
-        // Progress: 0-90% for chunks, 90-95% for assembly, 95-100% for validation
-        const chunkProgress = Math.round((result.chunks_done / totalChunksActual) * 90);
-        setProgress(chunkProgress);
-      } catch (err) {
-        setChunkStates((prev) => ({ ...prev, [i]: 'error' }));
-        setError(`Upload failed at chunk ${i + 1}/${totalChunksActual}: ${err.message}`);
-        setUploading(false);
-        addLog(`Fatal error at chunk ${i + 1}: ${err.message}`, 'error');
-        return;
-      }
+    if (abortRef.current) {
+      addLog('Upload cancelled by user', 'warn');
+      setError('Upload cancelled');
+      setUploading(false);
+      return;
     }
 
     // Step 3: Complete — assemble and validate
     setUploadPhase('assembling');
     setProgress(92);
-    addLog('All chunks uploaded. Assembling file on server...');
+    addLog('All chunks uploaded. Computing file hash...');
+
+    const fileHash = await computeFileHash(file);
+    if (fileHash) {
+      addLog(`File SHA-256: ${fileHash.slice(0, 16)}...`);
+    }
+    addLog('Assembling file on server...');
 
     try {
       const completeForm = new FormData();
       completeForm.append('upload_id', uploadId);
-      completeForm.append('file_hash', '');
+      completeForm.append('file_hash', fileHash);
 
       // 10 minute timeout for assembly of large files
       const assemblyController = new AbortController();
@@ -479,6 +570,7 @@ export default function Upload() {
       setProgress(100);
       setUploadDone(true);
       setQaReport(completeData.qa);
+      localStorage.removeItem(resumeKey);
       addLog(`Upload complete! Job ID: ${completeData.job_id}, QA: ${completeData.qa?.overall?.pass ? 'PASSED' : 'ISSUES FOUND'}`, 'success');
 
       // Navigate to analysis
@@ -493,8 +585,14 @@ export default function Upload() {
     }
   };
 
-  const cancelUpload = useCallback(() => {
+  const cancelUpload = useCallback(async () => {
     abortRef.current = true;
+    if (uploadIdRef.current) {
+      try {
+        await fetch(`/api/upload/${uploadIdRef.current}`, { method: 'DELETE' });
+      } catch { /* Best-effort cleanup */ }
+      uploadIdRef.current = null;
+    }
   }, []);
 
   // Post-upload countdown

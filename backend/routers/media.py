@@ -147,6 +147,63 @@ async def upload_media(
     })
 
 
+@router.post("/api/media/register")
+async def register_media(
+    file_path: str = Query(...),
+    filename: str = Query(...),
+    media_type: str = Query(...),
+    job_id: str = Query(default=GLOBAL_LIBRARY_ID),
+):
+    """Register an already-assembled file (from chunked upload) in the media library.
+
+    Moves/links the file from the upload directory into the media directory
+    so it appears in the media library alongside directly uploaded files.
+    """
+    # Security: ensure file_path is under /data/uploads/
+    real_path = os.path.realpath(file_path)
+    if not real_path.startswith("/data/uploads/"):
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if not os.path.isfile(real_path):
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if media_type not in ("video", "audio", "image"):
+        raise HTTPException(status_code=400, detail=f"Invalid media type: {media_type}")
+
+    media_dir = os.path.join(UPLOAD_DIR, job_id, "media")
+    os.makedirs(media_dir, exist_ok=True)
+
+    media_id = str(uuid.uuid4())[:8]
+    ext = Path(filename).suffix.lower() or Path(real_path).suffix.lower()
+    safe_filename = f"{media_id}{ext}"
+    dest_path = os.path.join(media_dir, safe_filename)
+
+    # Move the assembled file into the media directory
+    try:
+        os.rename(real_path, dest_path)
+    except OSError:
+        # Cross-device: fall back to copy
+        import shutil
+        shutil.move(real_path, dest_path)
+
+    total_size = os.path.getsize(dest_path)
+
+    # Save original filename in metadata
+    meta = _load_meta(media_dir)
+    meta[media_id] = {"original_filename": filename}
+    _save_meta(media_dir, meta)
+
+    url = f"/api/files/{job_id}/media/{safe_filename}"
+    logger.info("Registered media %s (%s, %d bytes) for job %s", safe_filename, media_type, total_size, job_id)
+
+    return JSONResponse({
+        "id": media_id,
+        "filename": filename,
+        "type": media_type,
+        "size": total_size,
+        "url": url,
+    })
+
+
 @router.get("/api/media/list")
 async def list_media(job_id: str = Query(default=GLOBAL_LIBRARY_ID)):
     """List all uploaded media files for a job (defaults to global library)."""

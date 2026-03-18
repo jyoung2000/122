@@ -244,49 +244,81 @@ export default function MediaUploader({ jobId, compact = false }) {
       const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
 
       if (file.size > CHUNK_THRESHOLD) {
-        // Chunked upload for large files — send as single stream to the media
-        // upload endpoint which handles streaming to disk. We split into chunks
-        // on the client side for progress tracking and retry resilience.
+        // Chunked upload for large files — route through the chunked upload
+        // protocol (init → chunk → complete) then register in media library.
         try {
-          const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-          let lastResp = null;
+          // 1. Initialize chunked upload session
+          const initResp = await fetch('/api/upload/init', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename: file.name, file_size: file.size }),
+          });
+          if (!initResp.ok) throw new Error('Failed to initialize chunked upload');
+          const initData = await initResp.json();
+          const uploadId = initData.upload_id;
+          const chunkSizeActual = initData.chunk_size || CHUNK_SIZE;
+          const totalChunks = initData.total_chunks;
+
+          // 2. Upload chunks with retry
           for (let i = 0; i < totalChunks; i++) {
-            const start = i * CHUNK_SIZE;
-            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const start = i * chunkSizeActual;
+            const end = Math.min(start + chunkSizeActual, file.size);
             const chunk = file.slice(start, end);
             const chunkForm = new FormData();
-            chunkForm.append('file', chunk, file.name);
+            chunkForm.append('upload_id', uploadId);
             chunkForm.append('chunk_index', i.toString());
-            chunkForm.append('total_chunks', totalChunks.toString());
-            chunkForm.append('filename', file.name);
+            chunkForm.append('chunk_hash', '');
+            chunkForm.append('file', chunk, `chunk_${i}`);
 
             let success = false;
             for (let attempt = 0; attempt < 4 && !success; attempt++) {
               try {
-                const resp = await fetch(uploadUrl, {
+                const resp = await fetch('/api/upload/chunk', {
                   method: 'POST',
                   body: chunkForm,
                 });
                 if (resp.ok) {
                   success = true;
-                  lastResp = resp;
                 } else if (attempt < 3) {
                   await new Promise(r => setTimeout(r, [2000, 4000, 8000][attempt]));
+                } else {
+                  throw new Error(`Chunk ${i} upload failed after retries`);
                 }
-              } catch {
-                if (attempt < 3) await new Promise(r => setTimeout(r, [2000, 4000, 8000][attempt]));
+              } catch (err) {
+                if (attempt >= 3) throw err;
+                await new Promise(r => setTimeout(r, [2000, 4000, 8000][attempt]));
               }
             }
-            setUploading({ filename: file.name, progress: Math.round(((i + 1) / totalChunks) * 100) });
+            setUploading({ filename: file.name, progress: Math.round(((i + 1) / totalChunks) * 90) });
           }
-          // Update store with backend URL from the last chunk response
-          if (lastResp) {
-            try {
-              const data = await lastResp.json();
-              if (data.url && data.id && localId) {
-                replaceMediaId(localId, data.id, { url: data.url });
-              }
-            } catch { /* ignore */ }
+
+          // 3. Complete — assemble chunks on server
+          setUploading({ filename: file.name, progress: 92 });
+          const completeForm = new FormData();
+          completeForm.append('upload_id', uploadId);
+          completeForm.append('file_hash', '');
+          const completeResp = await fetch('/api/upload/complete', {
+            method: 'POST',
+            body: completeForm,
+          });
+          if (!completeResp.ok) throw new Error('Chunked upload assembly failed');
+          const completeData = await completeResp.json();
+
+          // 4. Register the assembled file in the media library
+          setUploading({ filename: file.name, progress: 96 });
+          const targetJobId = jobId || '_library';
+          const registerParams = new URLSearchParams({
+            file_path: `/data/uploads/${completeData.job_id}/video.${file.name.split('.').pop().toLowerCase()}`,
+            filename: file.name,
+            media_type: mediaType,
+            job_id: targetJobId,
+          });
+          const regResp = await fetch(`/api/media/register?${registerParams}`, { method: 'POST' });
+          if (regResp.ok) {
+            const regData = await regResp.json();
+            if (regData.url && regData.id && localId) {
+              replaceMediaId(localId, regData.id, { url: regData.url });
+            }
           }
           setUploading(null);
         } catch {

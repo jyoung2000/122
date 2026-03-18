@@ -290,6 +290,30 @@ async def _startup_preload():
     else:
         logger.info("Ollama not in fallback chain — skipping background model pull")
 
+@app.on_event("startup")
+async def recover_uploads():
+    """Recover in-progress chunked upload sessions from disk after restart."""
+    from backend.routers.chunked_upload import restore_sessions
+    await restore_sessions()
+
+
+@app.on_event("startup")
+async def start_cleanup_task():
+    """Periodically expire stale upload sessions (every 10 minutes)."""
+    import asyncio
+
+    async def cleanup_loop():
+        while True:
+            await asyncio.sleep(600)  # 10 minutes
+            try:
+                from backend.routers.chunked_upload import expire_stale_uploads
+                expire_stale_uploads()
+            except Exception as exc:
+                logger.warning("Stale upload cleanup error: %s", exc)
+
+    asyncio.create_task(cleanup_loop())
+
+
 # Register API routers
 app.include_router(upload.router)
 app.include_router(chunked_upload.router)
