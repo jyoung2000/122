@@ -279,6 +279,8 @@ class AIOrchestrator:
         clip_focus: Optional[str] = None,
         video_summary: Optional[str] = None,
         existing_clips: Optional[str] = None,
+        hot_zones=None,
+        progress_callback=None,
     ) -> tuple[list[ClipCandidate], str]:
         """Returns (clips, provider_name_used)."""
         clip_prompt = self._custom_prompts.viral_clip_detection if self._custom_prompts else None
@@ -347,6 +349,8 @@ class AIOrchestrator:
                         max_duration=max_duration,
                         video_summary=video_summary,
                         existing_clips=existing_clips,
+                        hot_zones=hot_zones,
+                        progress_callback=progress_callback,
                     ),
                     timeout=timeout,
                 )

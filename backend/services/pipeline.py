@@ -350,7 +350,7 @@ async def _run_analysis_inner(job_id: str):
     # Adaptive timeouts based on video duration
     vid_minutes = metadata["duration"] / 60
     _EXTRACTION_TIMEOUT = max(600, int(vid_minutes * 60))      # ~1 min per minute of video
-    _SUMMARY_CLIP_TIMEOUT = max(900, int(vid_minutes * 30))    # scale with content length
+    _SUMMARY_CLIP_TIMEOUT = max(900, int(vid_minutes * 120))   # ~2 min per minute of video for multi-pass
     _B64_ENCODE_TIMEOUT = max(300, int(vid_minutes * 10))      # scale with frame count
     logger.info(
         "[%s] Adaptive timeouts: extraction=%ds, summary_clip=%ds, b64=%ds (%.1f min video)",
@@ -798,6 +798,42 @@ async def _run_analysis_inner(job_id: str):
 
     clip_detection_task = None
 
+    async def _clip_progress(phase: str, info: dict):
+        """Progress callback from multi-pass clip detection."""
+        elapsed = int(_time.monotonic() - _clips_start)
+
+        if phase == "pass1_start":
+            n_windows = info.get("windows", 1)
+            msg = f"Pass 1: scanning {n_windows} window{'s' if n_windows > 1 else ''}..."
+            pct = 78
+        elif phase == "pass1_done":
+            n_clips = info.get("clips", 0)
+            msg = f"Pass 1 found {n_clips} clips — checking coverage..."
+            pct = 86
+        elif phase == "pass2_start":
+            n_gaps = info.get("gaps", 0)
+            msg = f"Pass 2: sweeping {n_gaps} gap{'s' if n_gaps != 1 else ''} for hidden moments..."
+            pct = 87
+        elif phase == "pass2_gap":
+            idx = info.get("gap_idx", 1)
+            total = info.get("gap_total", 1)
+            start = info.get("start", 0)
+            end = info.get("end", 0)
+            msg = f"Pass 2: scanning gap {idx}/{total} ({start:.0f}-{end:.0f}s)..."
+            pct = 87 + int((idx / max(total, 1)) * 5)  # 87-92%
+        elif phase == "pass3_merge":
+            raw = info.get("raw", 0)
+            msg = f"Merging {raw} candidates..."
+            pct = 93
+        else:
+            msg = f"Identifying viral moments... ({elapsed}s elapsed)"
+            pct = min(93, 78 + elapsed // 10)
+
+        await _update_progress(
+            job_id, JobStatus.DETECTING_CLIPS, min(94, pct),
+            f"{msg}{_pipeline_eta(min(94, pct))}",
+        )
+
     async def _clips_heartbeat():
         await asyncio.sleep(10)
         while True:
@@ -822,6 +858,8 @@ async def _run_analysis_inner(job_id: str):
                 orchestrator.detect_viral_clips(
                     transcript, scenes, metadata["duration"], job_id,
                     video_summary=summary_text,
+                    hot_zones=hot_zones,
+                    progress_callback=_clip_progress,
                 )
             )
             clips, clips_provider = await asyncio.wait_for(
@@ -839,6 +877,8 @@ async def _run_analysis_inner(job_id: str):
                     orchestrator.detect_viral_clips(
                         transcript, scenes, metadata["duration"], job_id,
                         video_summary=summary_text,
+                        hot_zones=hot_zones,
+                        progress_callback=_clip_progress,
                     ),
                     timeout=_SUMMARY_CLIP_TIMEOUT,
                 )

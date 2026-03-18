@@ -167,11 +167,17 @@ async def extract_frames(
     rate = sample_rate or settings.FRAME_SAMPLE_RATE
 
     # Adjust sample rate to avoid over-extraction (extracting 100+ frames then
-    # discarding 40% wastes I/O time). Target slightly more than max_frames
-    # to leave room for scene-change bonus frames.
+    # discarding 40% wastes I/O time). Scene detection adds ~30-40% bonus
+    # frames on top of interval-based frames, so set the interval so that
+    # total (interval + scene) ≈ max_frames.
     if video_duration and video_duration > 0:
-        ideal_rate = video_duration / max_frames * 0.8  # 80% to allow scene bonuses
-        rate = max(rate, int(ideal_rate))
+        ideal_rate = int(video_duration * 1.35 / max_frames)
+        if ideal_rate > rate:
+            logger.info(
+                "Adaptive frame rate: default=%ds, ideal=%ds (%.0fs video, %d max frames)",
+                rate, ideal_rate, video_duration, max_frames,
+            )
+            rate = ideal_rate
     os.makedirs(output_dir, exist_ok=True)
 
     # Use GPU-accelerated decoding if available (speeds up long video

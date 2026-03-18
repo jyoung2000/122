@@ -682,43 +682,57 @@ class OpenRouterProvider(AIProvider):
     ) -> list[ClipCandidate]:
         """Split long videos into overlapping windows and run clip detection on each.
 
+        Processes up to 2 windows concurrently for speed.
         Merges results with de-duplication to cover the entire video.
         """
-        all_clips = []
+        # Build window list
+        windows = []
         window_start = 0.0
-        window_idx = 0
-
         while window_start < video_duration:
             window_end = min(window_start + window_duration, video_duration)
-
-            # Filter transcript and scenes to this window
-            window_transcript = [
-                seg for seg in transcript
-                if seg.start >= window_start - overlap_duration / 2
-                and seg.end <= window_end + overlap_duration / 2
-            ]
-            window_scenes = [
-                s for s in scenes
-                if s.timestamp >= window_start and s.timestamp <= window_end
-            ]
-
-            logger.info(
-                "Window %d: %.0f-%.0fs (%d segments, %d scenes)",
-                window_idx, window_start, window_end,
-                len(window_transcript), len(window_scenes),
-            )
-
-            try:
-                window_clips = await self._single_pass_clip_detection(
-                    window_transcript, window_scenes, window_end - window_start,
-                    **kwargs,
-                )
-                all_clips.extend(window_clips)
-            except Exception as e:
-                logger.warning("Window %d clip detection failed: %s", window_idx, e)
-
+            windows.append((window_start, window_end))
             window_start += window_duration - overlap_duration
-            window_idx += 1
+
+        sem = asyncio.Semaphore(2)  # Up to 2 concurrent windows
+
+        async def _process_window(idx: int, w_start: float, w_end: float):
+            async with sem:
+                window_transcript = [
+                    seg for seg in transcript
+                    if seg.start >= w_start - overlap_duration / 2
+                    and seg.end <= w_end + overlap_duration / 2
+                ]
+                window_scenes = [
+                    s for s in scenes
+                    if s.timestamp >= w_start and s.timestamp <= w_end
+                ]
+
+                logger.info(
+                    "Window %d/%d: %.0f-%.0fs (%d segments, %d scenes)",
+                    idx + 1, len(windows), w_start, w_end,
+                    len(window_transcript), len(window_scenes),
+                )
+
+                try:
+                    return await self._single_pass_clip_detection(
+                        window_transcript, window_scenes, w_end - w_start,
+                        **kwargs,
+                    )
+                except Exception as e:
+                    logger.warning("Window %d clip detection failed: %s", idx + 1, e)
+                    return []
+
+        results = await asyncio.gather(
+            *[_process_window(i, ws, we) for i, (ws, we) in enumerate(windows)],
+            return_exceptions=True,
+        )
+
+        all_clips = []
+        for result in results:
+            if isinstance(result, list):
+                all_clips.extend(result)
+            elif isinstance(result, BaseException):
+                logger.warning("Window failed with exception: %s", result)
 
         # De-duplicate overlapping window results
         return self._deduplicate_clips(all_clips)
@@ -735,6 +749,8 @@ class OpenRouterProvider(AIProvider):
         max_duration: Optional[float] = None,
         video_summary: Optional[str] = None,
         existing_clips: Optional[str] = None,
+        hot_zones=None,
+        progress_callback=None,
     ) -> list[ClipCandidate]:
         # For videos >5 min, use multi-pass detection for better coverage
         if video_duration > 300:
@@ -745,6 +761,8 @@ class OpenRouterProvider(AIProvider):
                 clip_count=clip_count, min_duration=min_duration,
                 max_duration=max_duration, video_summary=video_summary,
                 existing_clips=existing_clips,
+                hot_zones=hot_zones,
+                progress_callback=progress_callback,
             )
 
         return await self._single_pass_clip_detection(
@@ -767,6 +785,8 @@ class OpenRouterProvider(AIProvider):
         max_duration: Optional[float] = None,
         video_summary: Optional[str] = None,
         existing_clips: Optional[str] = None,
+        hot_zones=None,
+        progress_callback=None,
     ) -> list[ClipCandidate]:
         """Multi-pass clip detection for comprehensive coverage.
 
@@ -794,67 +814,105 @@ class OpenRouterProvider(AIProvider):
         )
 
         # Pass 1: windowed scan
+        if progress_callback:
+            # Count windows for progress reporting
+            _wcount = 0
+            _ws = 0.0
+            while _ws < video_duration:
+                _wcount += 1
+                _ws += window_dur - overlap_dur
+            await progress_callback("pass1_start", {"windows": _wcount})
+
         pass1_clips = await self._windowed_clip_detection(
             transcript, scenes, video_duration,
             window_duration=window_dur, overlap_duration=overlap_dur,
             custom_prompt=custom_prompt, cancel_check=cancel_check,
-            clip_count=max(6, num_clips // 2),
+            clip_count=max(8, num_clips),  # Ask full count per window; dedup is cheap
             min_duration=min_duration, max_duration=max_duration,
             video_summary=video_summary, existing_clips=existing_clips,
         )
         all_clips.extend(pass1_clips)
         logger.info("Pass 1 found %d clips", len(pass1_clips))
 
+        if progress_callback:
+            await progress_callback("pass1_done", {"clips": len(pass1_clips)})
+
         # Pass 2: Coverage sweep — find regions with no clips
         if len(all_clips) < num_clips:
             from backend.services.hot_zone_scorer import get_coverage_gaps
-            gaps = get_coverage_gaps([], all_clips, video_duration, min_gap_duration=45.0)
+            gaps = get_coverage_gaps(
+                hot_zones or [], all_clips, video_duration, min_gap_duration=45.0,
+            )
 
             if gaps:
+                if progress_callback:
+                    await progress_callback("pass2_start", {"gaps": min(4, len(gaps))})
+
                 existing_desc = "\n".join(
                     f"  - '{c.title}' ({c.start_time:.0f}-{c.end_time:.0f}s)"
                     for c in all_clips
                 )
 
-                for gap_start, gap_end in gaps[:4]:  # Max 4 gap scans
-                    if cancel_check:
-                        cancel_check()
+                gap_sem = asyncio.Semaphore(2)
 
-                    gap_transcript = [
-                        s for s in transcript
-                        if s.start >= gap_start - 15 and s.end <= gap_end + 15
-                    ]
-                    gap_scenes = [
-                        s for s in scenes
-                        if gap_start <= s.timestamp <= gap_end
-                    ]
+                async def _scan_gap(idx: int, gap_start: float, gap_end: float):
+                    async with gap_sem:
+                        if cancel_check:
+                            cancel_check()
 
-                    if not gap_transcript and not gap_scenes:
-                        continue
+                        gap_transcript = [
+                            s for s in transcript
+                            if s.start >= gap_start - 15 and s.end <= gap_end + 15
+                        ]
+                        gap_scenes = [
+                            s for s in scenes
+                            if gap_start <= s.timestamp <= gap_end
+                        ]
 
-                    logger.info(
-                        "Pass 2: scanning gap %.0f-%.0fs (%d segments, %d scenes)",
-                        gap_start, gap_end, len(gap_transcript), len(gap_scenes),
-                    )
+                        if not gap_transcript and not gap_scenes:
+                            return []
 
-                    try:
-                        gap_clips = await self._single_pass_clip_detection(
-                            gap_transcript, gap_scenes, gap_end - gap_start,
-                            custom_prompt=custom_prompt, cancel_check=cancel_check,
-                            clip_count=3,
-                            min_duration=min_duration, max_duration=max_duration,
-                            video_summary=video_summary,
-                            existing_clips=existing_desc,
-                        )
-                        all_clips.extend(gap_clips)
+                        if progress_callback:
+                            await progress_callback("pass2_gap", {
+                                "gap_idx": idx + 1,
+                                "gap_total": min(4, len(gaps)),
+                                "start": gap_start,
+                                "end": gap_end,
+                            })
+
                         logger.info(
-                            "Pass 2 gap %.0f-%.0fs found %d clips",
-                            gap_start, gap_end, len(gap_clips),
+                            "Pass 2: scanning gap %.0f-%.0fs (%d segments, %d scenes)",
+                            gap_start, gap_end, len(gap_transcript), len(gap_scenes),
                         )
-                    except Exception as e:
-                        logger.warning("Pass 2 gap scan failed: %s", e)
+
+                        try:
+                            return await self._single_pass_clip_detection(
+                                gap_transcript, gap_scenes, gap_end - gap_start,
+                                custom_prompt=custom_prompt, cancel_check=cancel_check,
+                                clip_count=3,
+                                min_duration=min_duration, max_duration=max_duration,
+                                video_summary=video_summary,
+                                existing_clips=existing_desc,
+                            )
+                        except Exception as e:
+                            logger.warning("Pass 2 gap scan failed: %s", e)
+                            return []
+
+                gap_results = await asyncio.gather(
+                    *[_scan_gap(i, gs, ge) for i, (gs, ge) in enumerate(gaps[:4])],
+                    return_exceptions=True,
+                )
+
+                for result in gap_results:
+                    if isinstance(result, list):
+                        all_clips.extend(result)
+                        logger.info("Pass 2 found %d clips from gap", len(result))
+                    elif isinstance(result, BaseException):
+                        logger.warning("Pass 2 gap failed with exception: %s", result)
 
         # Pass 3: Merge, deduplicate, sort by score
+        if progress_callback:
+            await progress_callback("pass3_merge", {"raw": len(all_clips)})
         raw_count = len(all_clips)
         all_clips = self._deduplicate_clips(all_clips, max_overlap=0.4)
         all_clips.sort(key=lambda c: c.viral_score, reverse=True)
