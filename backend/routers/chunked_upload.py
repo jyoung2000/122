@@ -75,6 +75,7 @@ class CompleteResponse(BaseModel):
     filename: str
     file_size_mb: float
     qa: dict
+    poll: bool = False  # If True, client should poll /status/{upload_id} for final result
 
 
 class StatusResponse(BaseModel):
@@ -88,6 +89,7 @@ class StatusResponse(BaseModel):
     state: str  # "uploading", "assembling", "validating", "complete", "error"
     qa: dict
     error: Optional[str] = None
+    job_id: Optional[str] = None  # Set when assembly+validation completes
 
 
 # ── Shared validation ─────────────────────────────────────────────────────────
@@ -305,44 +307,31 @@ def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int) -> tuple[
     return total_written, assembled_hash
 
 
-@router.post("/complete", response_model=CompleteResponse)
-async def complete_upload(
-    upload_id: str = Form(...),
-    file_hash: str = Form(""),
-    background_tasks: BackgroundTasks = None,
-):
-    """Assemble chunks, validate, and start analysis pipeline."""
+async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
+    """Background task: assemble chunks, validate, create job, start analysis.
+
+    Runs outside the HTTP request so upstream proxies (Cloudflare, nginx, Caddy)
+    don't time out waiting for large file assembly (which can take 2+ minutes
+    for files > 500MB on slow storage).
+    """
     info = _active_uploads.get(upload_id)
     if not info:
-        raise HTTPException(404, "Upload session not found or expired")
+        logger.error("Assembly background task: upload %s not found", upload_id)
+        return
 
-    chunks_done = len(info["chunks_received"])
-    if chunks_done < info["total_chunks"]:
-        missing = info["total_chunks"] - chunks_done
-        raise HTTPException(
-            400,
-            f"Upload incomplete: {missing} of {info['total_chunks']} chunks missing"
-        )
-
-    info["state"] = "assembling"
-    job_id = str(uuid.uuid4())
     job_dir = os.path.join(UPLOAD_DIR, job_id)
     qa = {}
-    logger.info("Starting complete_upload for %s (%d chunks, %.1f MB)",
-                upload_id, info["total_chunks"], info["file_size"] / (1024 * 1024))
 
     try:
-        await asyncio.to_thread(os.makedirs, job_dir, exist_ok=True)
+        os.makedirs(job_dir, exist_ok=True)
     except OSError as exc:
-        if exc.errno == errno.ENOSPC:
-            info["state"] = "error"
-            info["error"] = "Disk full"
-            raise HTTPException(507, "Server storage is full")
-        raise
+        info["state"] = "error"
+        info["error"] = "Disk full" if exc.errno == errno.ENOSPC else str(exc)
+        return
 
     tmp_path = os.path.join(job_dir, "video.tmp")
 
-    # Assemble chunks in a single thread (much faster than per-chunk async I/O)
+    # Assemble chunks
     try:
         total_written, assembled_hash = await asyncio.wait_for(
             asyncio.to_thread(
@@ -354,26 +343,23 @@ async def complete_upload(
         info["state"] = "error"
         info["error"] = "Assembly timed out after 10 minutes"
         logger.error("Chunked upload %s assembly timed out", upload_id)
-        # Clean up partial file
         try:
             os.remove(tmp_path)
             if not os.listdir(job_dir):
                 os.rmdir(job_dir)
         except OSError:
             pass
-        raise HTTPException(504, "File assembly timed out — the file may be too large")
+        return
     except OSError as exc:
         info["state"] = "error"
-        info["error"] = str(exc)
-        if exc.errno == errno.ENOSPC:
-            raise HTTPException(507, "Server storage is full during assembly")
+        info["error"] = "Disk full during assembly" if exc.errno == errno.ENOSPC else str(exc)
         logger.error("Chunked upload %s assembly OS error: %s", upload_id, exc)
-        raise HTTPException(500, detail={"message": f"Assembly failed: {exc}", "qa": {}})
+        return
     except Exception as exc:
         info["state"] = "error"
         info["error"] = str(exc)
         logger.exception("Chunked upload %s assembly unexpected error", upload_id)
-        raise HTTPException(500, detail={"message": f"Assembly failed: {exc}", "qa": {}})
+        return
 
     # QA: check assembled file hash
     if file_hash:
@@ -413,14 +399,13 @@ async def complete_upload(
         info["state"] = "error"
         info["error"] = header_err
         info["qa"] = qa
-        # Clean up bad file
         try:
             os.remove(video_path)
             if not os.listdir(job_dir):
                 os.rmdir(job_dir)
         except OSError:
             pass
-        raise HTTPException(422, detail={"message": header_err, "qa": qa})
+        return
 
     # Check all QA passed
     all_passed = all(
@@ -428,7 +413,6 @@ async def complete_upload(
         for check in qa.values()
         if isinstance(check, dict)
     )
-    # Sub-checks in integrity
     if isinstance(qa.get("integrity"), dict):
         for sub in qa["integrity"].values():
             if isinstance(sub, dict) and not sub.get("pass", True):
@@ -438,7 +422,7 @@ async def complete_upload(
     info["state"] = "complete"
     info["qa"] = qa
 
-    # Clean up chunks in background thread (avoid blocking event loop)
+    # Clean up chunks in background thread
     def _cleanup_chunk_dir(cdir: str):
         try:
             for f in os.listdir(cdir):
@@ -447,7 +431,8 @@ async def complete_upload(
         except OSError:
             pass
 
-    asyncio.get_event_loop().run_in_executor(None, _cleanup_chunk_dir, info["chunk_dir"])
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, _cleanup_chunk_dir, info["chunk_dir"])
 
     file_size_mb = round(total_written / (1024 * 1024), 2)
     filename = info["filename"]
@@ -472,20 +457,58 @@ async def complete_upload(
     )
     await database.save_job(job)
 
-    if settings.AUTO_ANALYZE and background_tasks:
-        background_tasks.add_task(run_analysis, job_id)
+    info["job_id"] = job_id
+
+    if settings.AUTO_ANALYZE:
         job.progress_message = "Analysis starting..."
         await database.save_job(job)
+        asyncio.create_task(run_analysis(job_id))
 
-    # Remove from active uploads (keep qa accessible via status for a bit)
-    info["job_id"] = job_id
+
+@router.post("/complete", response_model=CompleteResponse)
+async def complete_upload(
+    upload_id: str = Form(...),
+    file_hash: str = Form(""),
+    background_tasks: BackgroundTasks = None,
+):
+    """Start assembly of uploaded chunks.
+
+    Returns immediately with job_id and poll=True. The client should poll
+    GET /api/upload/status/{upload_id} until state="complete" or state="error".
+
+    This non-blocking design prevents HTTP 524 timeouts from upstream proxies
+    when assembling large files (500MB+ can take 2+ minutes on slow storage).
+    """
+    info = _active_uploads.get(upload_id)
+    if not info:
+        raise HTTPException(404, "Upload session not found or expired")
+
+    chunks_done = len(info["chunks_received"])
+    if chunks_done < info["total_chunks"]:
+        missing = info["total_chunks"] - chunks_done
+        raise HTTPException(
+            400,
+            f"Upload incomplete: {missing} of {info['total_chunks']} chunks missing"
+        )
+
+    info["state"] = "assembling"
+    job_id = str(uuid.uuid4())
+    file_size_mb = round(info["file_size"] / (1024 * 1024), 2)
+    filename = info["filename"]
+
+    logger.info("Starting async assembly for %s (%d chunks, %.1f MB) → job %s",
+                upload_id, info["total_chunks"], file_size_mb, job_id)
+
+    # Kick off assembly in background — returns immediately to avoid proxy timeouts
+    asyncio.create_task(_assemble_and_finalize(upload_id, job_id, file_hash))
 
     return CompleteResponse(
         job_id=job_id,
-        status=str(job.status),
+        status="assembling",
         filename=filename,
         file_size_mb=file_size_mb,
-        qa=qa,
+        qa={},
+        poll=True,
     )
 
 
@@ -510,6 +533,7 @@ async def upload_status(upload_id: str):
         state=info["state"],
         qa=info.get("qa", {}),
         error=info.get("error"),
+        job_id=info.get("job_id"),
     )
 
 

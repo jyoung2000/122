@@ -516,7 +516,7 @@ export default function Upload() {
       return;
     }
 
-    // Step 3: Complete — assemble and validate
+    // Step 3: Complete — kick off assembly (non-blocking)
     setUploadPhase('assembling');
     setProgress(92);
     addLog('All chunks uploaded. Computing file hash...');
@@ -532,16 +532,11 @@ export default function Upload() {
       completeForm.append('upload_id', uploadId);
       completeForm.append('file_hash', fileHash);
 
-      // 10 minute timeout for assembly of large files
-      const assemblyController = new AbortController();
-      const assemblyTimeout = setTimeout(() => assemblyController.abort(), 10 * 60 * 1000);
-
+      // This returns immediately — assembly runs in background on server
       const completeResp = await fetch('/api/upload/complete', {
         method: 'POST',
         body: completeForm,
-        signal: assemblyController.signal,
       });
-      clearTimeout(assemblyTimeout);
 
       if (!completeResp.ok) {
         let msg = `Assembly/validation failed (HTTP ${completeResp.status})`;
@@ -558,7 +553,6 @@ export default function Upload() {
               }
             }
           } catch {
-            // Response wasn't JSON — include raw text for debugging
             if (text && text.length < 500) msg += `: ${text}`;
           }
         } catch {}
@@ -566,6 +560,58 @@ export default function Upload() {
       }
 
       const completeData = await completeResp.json();
+
+      // If server returned poll=true, poll /status until assembly is done
+      if (completeData.poll) {
+        addLog('Server is assembling file in background — polling for completion...');
+        const pollStart = Date.now();
+        const pollTimeout = 10 * 60 * 1000; // 10 minute max poll time
+
+        while (Date.now() - pollStart < pollTimeout) {
+          if (abortRef.current) {
+            throw new Error('Upload cancelled during assembly');
+          }
+
+          await new Promise(r => setTimeout(r, 2000)); // Poll every 2s
+          setProgress(Math.min(98, 92 + Math.floor((Date.now() - pollStart) / 1000 / 3)));
+
+          try {
+            const statusResp = await fetch(`/api/upload/status/${uploadId}`);
+            if (!statusResp.ok) continue;
+            const status = await statusResp.json();
+
+            if (status.state === 'validating') {
+              addLog('Validating assembled file...');
+              setProgress(96);
+            } else if (status.state === 'complete') {
+              setUploadPhase('complete');
+              setProgress(100);
+              setUploadDone(true);
+              setQaReport(status.qa);
+              localStorage.removeItem(resumeKey);
+              const jobId = status.job_id || completeData.job_id;
+              addLog(`Upload complete! Job ID: ${jobId}, QA: ${status.qa?.overall?.pass ? 'PASSED' : 'ISSUES FOUND'}`, 'success');
+              setTimeout(() => {
+                navigate(`/analysis/${jobId}`);
+              }, 800);
+              return; // Done!
+            } else if (status.state === 'error') {
+              const errMsg = status.error || 'Assembly failed on server';
+              if (status.qa) setQaReport(status.qa);
+              throw new Error(errMsg);
+            }
+            // state === 'assembling' — keep polling
+          } catch (pollErr) {
+            if (pollErr.message && !pollErr.message.includes('fetch')) {
+              throw pollErr; // Re-throw assembly errors
+            }
+            // Network error during poll — retry
+          }
+        }
+        throw new Error('Assembly timed out after 10 minutes');
+      }
+
+      // Legacy path: server returned result directly (no polling needed)
       setUploadPhase('complete');
       setProgress(100);
       setUploadDone(true);
@@ -573,7 +619,6 @@ export default function Upload() {
       localStorage.removeItem(resumeKey);
       addLog(`Upload complete! Job ID: ${completeData.job_id}, QA: ${completeData.qa?.overall?.pass ? 'PASSED' : 'ISSUES FOUND'}`, 'success');
 
-      // Navigate to analysis
       setTimeout(() => {
         navigate(`/analysis/${completeData.job_id}`);
       }, 800);
