@@ -441,10 +441,16 @@ export default function Upload() {
       completeForm.append('upload_id', uploadId);
       completeForm.append('file_hash', '');
 
+      // 10 minute timeout for assembly of large files
+      const assemblyController = new AbortController();
+      const assemblyTimeout = setTimeout(() => assemblyController.abort(), 10 * 60 * 1000);
+
       const completeResp = await fetch('/api/upload/complete', {
         method: 'POST',
         body: completeForm,
+        signal: assemblyController.signal,
       });
+      clearTimeout(assemblyTimeout);
 
       if (!completeResp.ok) {
         let msg = `Assembly/validation failed (HTTP ${completeResp.status})`;

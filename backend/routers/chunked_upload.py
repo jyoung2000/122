@@ -285,9 +285,13 @@ def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int) -> tuple[
     """
     total_written = 0
     file_md5 = hashlib.md5()
+    t0 = time.monotonic()
+    logger.info("Assembly starting: %d chunks → %s", total_chunks, tmp_path)
     with open(tmp_path, "wb") as out:
         for i in range(total_chunks):
             chunk_path = os.path.join(chunk_dir, f"chunk_{i:06d}")
+            if not os.path.exists(chunk_path):
+                raise FileNotFoundError(f"Missing chunk file: {chunk_path}")
             with open(chunk_path, "rb") as cf:
                 while True:
                     block = cf.read(1024 * 1024)  # 1MB blocks for memory efficiency
@@ -296,6 +300,16 @@ def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int) -> tuple[
                     out.write(block)
                     file_md5.update(block)
                     total_written += len(block)
+            # Log progress every 25 chunks
+            if (i + 1) % 25 == 0 or i == total_chunks - 1:
+                elapsed = time.monotonic() - t0
+                mb_written = total_written / (1024 * 1024)
+                logger.info("Assembly progress: %d/%d chunks (%.1f MB, %.1fs)",
+                            i + 1, total_chunks, mb_written, elapsed)
+    elapsed = time.monotonic() - t0
+    logger.info("Assembly complete: %.1f MB in %.1fs (%.1f MB/s)",
+                total_written / (1024 * 1024), elapsed,
+                (total_written / (1024 * 1024)) / max(elapsed, 0.001))
     return total_written, file_md5.hexdigest()
 
 
@@ -322,6 +336,8 @@ async def complete_upload(
     job_id = str(uuid.uuid4())
     job_dir = os.path.join(UPLOAD_DIR, job_id)
     qa = {}
+    logger.info("Starting complete_upload for %s (%d chunks, %.1f MB)",
+                upload_id, info["total_chunks"], info["file_size"] / (1024 * 1024))
 
     try:
         await asyncio.to_thread(os.makedirs, job_dir, exist_ok=True)
@@ -385,6 +401,7 @@ async def complete_upload(
     }
 
     info["state"] = "validating"
+    logger.info("Assembly done for %s, starting validation", upload_id)
 
     # Rename to final path
     ext = info["ext"]
@@ -398,6 +415,7 @@ async def complete_upload(
     # QA: video header
     header_err = await asyncio.to_thread(_validate_video_header, video_path, ext)
     qa["header_valid"] = {"pass": header_err is None, "error": header_err}
+    logger.info("Validation done for %s: header=%s", upload_id, "OK" if not header_err else header_err)
 
     if header_err:
         info["state"] = "error"
@@ -428,14 +446,16 @@ async def complete_upload(
     info["state"] = "complete"
     info["qa"] = qa
 
-    # Clean up chunks
-    try:
-        chunk_dir = info["chunk_dir"]
-        for f in os.listdir(chunk_dir):
-            os.remove(os.path.join(chunk_dir, f))
-        os.rmdir(chunk_dir)
-    except OSError:
-        pass
+    # Clean up chunks in background thread (avoid blocking event loop)
+    def _cleanup_chunk_dir(cdir: str):
+        try:
+            for f in os.listdir(cdir):
+                os.remove(os.path.join(cdir, f))
+            os.rmdir(cdir)
+        except OSError:
+            pass
+
+    asyncio.get_event_loop().run_in_executor(None, _cleanup_chunk_dir, info["chunk_dir"])
 
     file_size_mb = round(total_written / (1024 * 1024), 2)
     filename = info["filename"]
