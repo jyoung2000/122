@@ -291,6 +291,20 @@ async def _startup_preload():
         logger.info("Ollama not in fallback chain — skipping background model pull")
 
 @app.on_event("startup")
+async def warmup_ollama():
+    """Pre-load Ollama models into VRAM to avoid cold-start on first analysis."""
+    from backend.config import settings as cfg
+    if "ollama" in cfg.active_provider_chain:
+        try:
+            from backend.services.providers.ollama_provider import OllamaProvider
+            provider = OllamaProvider()
+            await provider._detect_capabilities()
+            await provider.warmup()
+            await provider.close()
+        except Exception as e:
+            logger.warning("Ollama warmup at startup failed (non-fatal): %s", e)
+
+@app.on_event("startup")
 async def recover_uploads():
     """Recover in-progress chunked upload sessions from disk after restart."""
     from backend.routers.chunked_upload import restore_sessions

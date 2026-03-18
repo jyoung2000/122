@@ -402,6 +402,8 @@ class AIProvider(ABC):
         max_duration: Optional[float] = None,
         video_summary: Optional[str] = None,
         existing_clips: Optional[str] = None,
+        hot_zones=None,
+        progress_callback=None,
     ) -> list[ClipCandidate]:
         """All returned clips MUST have duration between min_duration and max_duration seconds."""
         pass

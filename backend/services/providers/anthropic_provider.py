@@ -214,6 +214,8 @@ class AnthropicProvider(AIProvider):
         max_duration: Optional[float] = None,
         video_summary: Optional[str] = None,
         existing_clips: Optional[str] = None,
+        hot_zones=None,
+        progress_callback=None,
     ) -> list[ClipCandidate]:
         instruction = custom_prompt if custom_prompt else DEFAULT_VIRAL_CLIP_PROMPT
 
