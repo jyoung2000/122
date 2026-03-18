@@ -84,6 +84,7 @@ class JobResult(BaseModel):
     filename: str
     file_path: str
     language: str = ""  # ISO 639-1 code, empty = auto-detect
+    subtitle_language: str = ""  # ISO 639-1 target language for subtitles, empty = same as audio
     duration: float = 0.0
     resolution: str = ""
     fps: float = 0.0
@@ -99,6 +100,7 @@ class JobResult(BaseModel):
     summary: Optional[VideoSummary] = None
     scenes: list[SceneDescription] = []
     transcript: list[TranscriptSegment] = []
+    translated_transcript: list[TranscriptSegment] = []  # Translated subtitle segments
     clips: list[ClipCandidate] = []
     speaker_names: dict[str, str] = {}  # {"Speaker 1": "Eric", "Speaker 2": "Alice"}
     exported_clips: list[dict] = []

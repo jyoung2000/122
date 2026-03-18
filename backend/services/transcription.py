@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 _whisper_model = None
 _model_lock = threading.Lock()
 
+# Stores the last detected language from Whisper auto-detection so the
+# pipeline can read it after transcription completes.
+_last_detected_language = {}
+
 # Exposed after model loads so the pipeline can report GPU info in status messages
 whisper_device_info = {"device": "cpu", "compute_type": "int8", "gpu_name": ""}
 
@@ -541,6 +545,7 @@ def _transcribe_sync(
 
     segments_iter, info = model.transcribe(audio_path, **transcribe_kwargs)
     detected_lang = info.language
+    _last_detected_language["lang"] = detected_lang
     logger.info(f"Detected language: {detected_lang} (prob={info.language_probability:.2f})")
 
     wall_start = time.monotonic()

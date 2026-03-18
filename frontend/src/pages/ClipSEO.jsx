@@ -482,10 +482,11 @@ export default function ClipSEO() {
   }, [targetRatio]);
 
   // Pre-split transcript segments by max words for subtitle preview
+  const subtitleTranscript = job?.translated_transcript?.length ? job.translated_transcript : (job?.transcript || []);
   const splitTranscript = useMemo(() => {
-    if (!subtitleMaxWords || !job?.transcript?.length) return job?.transcript || [];
-    return splitSegmentsByMaxWords(job.transcript, subtitleMaxWords);
-  }, [job?.transcript, subtitleMaxWords]);
+    if (!subtitleMaxWords || !subtitleTranscript?.length) return subtitleTranscript;
+    return splitSegmentsByMaxWords(subtitleTranscript, subtitleMaxWords);
+  }, [subtitleTranscript, subtitleMaxWords]);
 
   // WebSocket for SEO generation progress only;
   // export progress is handled by the global useEncodingManager hook.
@@ -959,14 +960,14 @@ export default function ClipSEO() {
               onSettingsChange={setClipSettings}
               jobId={jobId}
               clipId={clipId}
-              transcript={job.transcript || []}
+              transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
               onTranscriptUpdated={fetchJob}
               onVideoRef={handleVideoRef}
               onAspectRatioChange={(ar) => setClipSettings((prev) => ({ ...prev, aspectRatio: ar }))}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={currentTime}
-                  transcript={job.transcript || []}
+                  transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
                   clipStart={startTime ?? clip.start_time}
                   clipEnd={endTime ?? clip.end_time}
                   settings={clipSettings}
@@ -1188,14 +1189,14 @@ export default function ClipSEO() {
               onSettingsChange={setClipSettings}
               jobId={jobId}
               clipId={clipId}
-              transcript={job.transcript || []}
+              transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
               onTranscriptUpdated={fetchJob}
               onVideoRef={handleVideoRef}
               onAspectRatioChange={(ar) => setClipSettings((prev) => ({ ...prev, aspectRatio: ar }))}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={currentTime}
-                  transcript={job.transcript || []}
+                  transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
                   clipStart={startTime ?? clip.start_time}
                   clipEnd={endTime ?? clip.end_time}
                   settings={clipSettings}

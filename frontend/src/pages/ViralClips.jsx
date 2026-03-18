@@ -671,7 +671,7 @@ export default function ViralClips() {
   const previewTranscript = useMemo(() => {
     if (!previewClip) return [];
     const job = jobs.find((j) => j.job_id === previewClip.jobId);
-    return job?.transcript || [];
+    return job?.translated_transcript?.length ? job.translated_transcript : (job?.transcript || []);
   }, [previewClip, jobs]);
 
   const previewSourceDims = useMemo(() => {

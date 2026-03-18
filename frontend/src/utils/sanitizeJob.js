@@ -100,6 +100,19 @@ export default function sanitizeJob(job) {
     });
   }
 
+  // translated_transcript — same sanitization as transcript
+  if (safe.translated_transcript) {
+    safe.translated_transcript = Array.isArray(safe.translated_transcript)
+      ? safe.translated_transcript.map((seg) => {
+          if (!seg || typeof seg !== 'object') return seg;
+          const ss = { ...seg };
+          if (typeof ss.text !== 'string') ss.text = String(ss.text ?? '');
+          if (typeof ss.speaker !== 'string') ss.speaker = String(ss.speaker ?? '');
+          return ss;
+        })
+      : [];
+  }
+
   // scenes — ensure description is a string
   if (Array.isArray(safe.scenes)) {
     safe.scenes = safe.scenes.map((sc) => {

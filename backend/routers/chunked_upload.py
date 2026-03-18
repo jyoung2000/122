@@ -50,6 +50,7 @@ class InitRequest(BaseModel):
     filename: str
     file_size: int
     language: str = ""
+    subtitle_language: str = ""  # Target language for subtitles
     chunk_size: Optional[int] = None
 
 
@@ -163,6 +164,7 @@ async def init_upload(req: InitRequest):
         "filename": req.filename,
         "file_size": req.file_size,
         "language": req.language,
+        "subtitle_language": req.subtitle_language,
         "ext": ext,
         "chunk_size": chunk_size,
         "total_chunks": total_chunks,
@@ -437,6 +439,7 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
     file_size_mb = round(total_written / (1024 * 1024), 2)
     filename = info["filename"]
     lang = info["language"].strip().lower()
+    subtitle_lang = info.get("subtitle_language", "").strip().lower()
 
     logger.info("Chunked upload complete: %s → %s (%d bytes, QA: %s)",
                 upload_id, video_path, total_written, "PASS" if all_passed else "FAIL")
@@ -449,6 +452,7 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
         file_path=video_path,
         file_size_mb=file_size_mb,
         language=lang,
+        subtitle_language=subtitle_lang,
         status=JobStatus.QUEUED,
         progress=0,
         progress_message="Uploaded, waiting for analysis",

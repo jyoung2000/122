@@ -1690,7 +1690,7 @@ export default function Analysis() {
               onSettingsChange={setClipSettings}
               jobId={jobId}
               clipId={clipPreview.id}
-              transcript={job.transcript || []}
+              transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
               onTranscriptUpdated={fetchJob}
               isProcessing={isProcessing}
               onClose={() => {
@@ -1703,7 +1703,7 @@ export default function Analysis() {
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={videoCurrentTime}
-                  transcript={job.transcript || []}
+                  transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
                   clipStart={clipPreview.start_time}
                   clipEnd={clipPreview.end_time}
                   settings={clipSettings}
@@ -1775,13 +1775,13 @@ export default function Analysis() {
               speakerNames={job.speaker_names}
               onSettingsChange={setClipSettings}
               jobId={jobId}
-              transcript={job.transcript || []}
+              transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
               onTranscriptUpdated={fetchJob}
               isProcessing={isProcessing}
               subtitleOverlay={
                 <SubtitleOverlay
                   currentTime={videoCurrentTime}
-                  transcript={job.transcript || []}
+                  transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
                   clipStart={fullVideoRange ? fullVideoRange.start : 0}
                   clipEnd={fullVideoRange ? fullVideoRange.end : (job.duration || 0)}
                   settings={clipSettings}

@@ -243,6 +243,7 @@ export default function Upload() {
   const [dragOver, setDragOver] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
   const [language, setLanguage] = useState('');
+  const [subtitleLanguage, setSubtitleLanguage] = useState('');
   const [uploading, setUploading] = useState(false);
   const [uploadDone, setUploadDone] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -406,6 +407,7 @@ export default function Upload() {
             filename: file.name,
             file_size: file.size,
             language,
+            subtitle_language: subtitleLanguage,
             chunk_size: CHUNK_SIZE,
           }),
         });
@@ -739,7 +741,12 @@ export default function Upload() {
           <select
             id="lang-select"
             value={language}
-            onChange={(e) => setLanguage(e.target.value)}
+            onChange={(e) => {
+              setLanguage(e.target.value);
+              if (!e.target.value || e.target.value === 'en') {
+                setSubtitleLanguage('');
+              }
+            }}
             style={{
               width: '100%',
               padding: '10px 12px',
@@ -755,6 +762,43 @@ export default function Upload() {
               <option key={code} value={code}>{label}</option>
             ))}
           </select>
+        </div>
+      )}
+
+      {/* Subtitle translation selector */}
+      {selectedFile && !uploading && (
+        <div style={{ marginTop: 12 }}>
+          <label
+            htmlFor="subtitle-lang-select"
+            style={{ display: 'block', fontSize: 13, color: 'var(--text-secondary)', marginBottom: 6 }}
+          >
+            Translate subtitles to (optional)
+          </label>
+          <select
+            id="subtitle-lang-select"
+            value={subtitleLanguage}
+            onChange={(e) => setSubtitleLanguage(e.target.value)}
+            style={{
+              width: '100%',
+              padding: '10px 12px',
+              background: 'var(--bg-panel)',
+              color: 'var(--text-primary)',
+              border: '1px solid var(--border)',
+              fontSize: 14,
+              borderRadius: 'var(--radius-sm)',
+              outline: 'none',
+            }}
+          >
+            <option value="">No translation (keep original language)</option>
+            {LANGUAGES.filter(l => l.code).map(({ code, label }) => (
+              <option key={code} value={code}>{label}</option>
+            ))}
+          </select>
+          {subtitleLanguage && (
+            <p style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
+              Subtitles will be automatically translated to {LANGUAGES.find(l => l.code === subtitleLanguage)?.label || subtitleLanguage} after transcription
+            </p>
+          )}
         </div>
       )}
 

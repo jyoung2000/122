@@ -338,7 +338,7 @@ async def export_clip_endpoint(
                 subtitles_enabled=req.subtitles_enabled,
                 global_subtitles_enabled=req.global_subtitles_enabled,
                 subtitle_settings=req.subtitle_settings.model_dump() if req.subtitle_settings else None,
-                transcript=[s.model_dump() for s in (req.edited_subtitle_segments or job.transcript)] if req.subtitles_enabled else None,
+                transcript=[s.model_dump() for s in (req.edited_subtitle_segments or (job.translated_transcript if job.translated_transcript else job.transcript))] if req.subtitles_enabled else None,
                 video_width=vid_w,
                 video_height=vid_h,
                 subject_x=clip_subject_x,
@@ -516,7 +516,7 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                 subtitles_enabled=req.subtitles_enabled,
                 global_subtitles_enabled=req.global_subtitles_enabled,
                 subtitle_settings=req.subtitle_settings.model_dump() if req.subtitle_settings else None,
-                transcript=[s.model_dump() for s in (req.edited_subtitle_segments or job.transcript)] if req.subtitles_enabled and (req.edited_subtitle_segments or job.transcript) else None,
+                transcript=[s.model_dump() for s in (req.edited_subtitle_segments or (job.translated_transcript if job.translated_transcript else job.transcript))] if req.subtitles_enabled and (req.edited_subtitle_segments or job.translated_transcript or job.transcript) else None,
                 video_width=vid_w,
                 video_height=vid_h,
                 subject_x=full_subject_x,
@@ -1044,10 +1044,11 @@ async def translate_subtitles(job_id: str, req: TranslateRequest):
         orchestrator=orchestrator,
     )
 
-    # Store translated transcript alongside original
+    # Store translated transcript and update subtitle_language
     await database.update_job_status(
         job_id,
-        **{f"translated_{req.target_language}": [s.model_dump() for s in translated]},
+        translated_transcript=[s.model_dump() for s in translated],
+        subtitle_language=req.target_language,
     )
 
     return {

@@ -56,7 +56,7 @@ async def _stream_multipart_to_disk(
     request: Request,
     boundary: str,
     video_path: str,
-) -> tuple[int, str, str]:
+) -> tuple[int, str, str, str]:
     """Stream multipart body directly to disk, bypassing SpooledTemporaryFile.
 
     Performance notes:
@@ -66,7 +66,7 @@ async def _stream_multipart_to_disk(
         disk I/O and can keep draining network data in parallel.
       - A 1 MB write buffer batches small safe-flushes into fewer syscalls.
 
-    Returns (total_bytes_written, original_filename, language).
+    Returns (total_bytes_written, original_filename, language, subtitle_language).
     """
     boundary_bytes = f"--{boundary}".encode()
     crlf = b"\r\n"
@@ -74,6 +74,7 @@ async def _stream_multipart_to_disk(
     buf = bytearray()
     filename = "video.mp4"
     language = ""
+    subtitle_language = ""
     total_bytes = 0
     out_file = None
     write_buf = bytearray()
@@ -161,6 +162,8 @@ async def _stream_multipart_to_disk(
                             field_data.extend(part_data)
                             if field_name == "language":
                                 language = field_data.decode("utf-8", errors="replace").strip()
+                            if field_name == "subtitle_language":
+                                subtitle_language = field_data.decode("utf-8", errors="replace").strip()
                             in_field_part = False
 
                         del buf[:next_bnd]
@@ -186,7 +189,7 @@ async def _stream_multipart_to_disk(
         if out_file:
             await out_file.close()
 
-    return total_bytes, filename, language
+    return total_bytes, filename, language, subtitle_language
 
 
 def _cleanup(path: str):
@@ -228,7 +231,7 @@ async def upload_video(
     tmp_path = os.path.join(job_dir, "video.tmp")
 
     try:
-        total_bytes, filename, language = await _stream_multipart_to_disk(
+        total_bytes, filename, language, subtitle_language = await _stream_multipart_to_disk(
             request, boundary, tmp_path,
         )
     except OSError as exc:
@@ -269,6 +272,7 @@ async def upload_video(
     logger.info(f"Upload accepted: {video_path} ({total_bytes} bytes)")
 
     lang = language.strip().lower() if language else ""
+    sub_lang = subtitle_language.strip().lower() if subtitle_language else ""
 
     now = datetime.now(timezone.utc).isoformat()
     job = JobResult(
@@ -277,6 +281,7 @@ async def upload_video(
         file_path=video_path,
         file_size_mb=round(total_bytes / (1024 * 1024), 2),
         language=lang,
+        subtitle_language=sub_lang,
         status=JobStatus.QUEUED,
         progress=0,
         progress_message="Uploaded, waiting for analysis",

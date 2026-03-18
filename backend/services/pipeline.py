@@ -405,6 +405,16 @@ async def _run_analysis_inner(job_id: str):
         )
         await database.update_job_status(job_id, transcript=list(result))
 
+        # If language was auto-detected, store the detected language on the job
+        # so the translator knows the source language
+        if not job.language and result:
+            from backend.services.transcription import _last_detected_language
+            detected = _last_detected_language.get("lang", "")
+            if detected:
+                job.language = detected
+                await database.update_job_status(job_id, language=detected)
+                logger.info("[%s] Auto-detected language: %s", job_id, detected)
+
         # AI transcript correction (optional, after initial transcription)
         if settings.AI_TRANSCRIPT_CORRECTION and result:
             from backend.services.transcript_corrector import correct_transcript, _adaptive_batch_size
@@ -467,6 +477,61 @@ async def _run_analysis_inner(job_id: str):
                     await _polish_hb
                 except asyncio.CancelledError:
                     pass
+
+        # ── Subtitle translation (if subtitle_language differs from audio language) ──
+        if job.subtitle_language and result:
+            source_lang = job.language or "auto"
+            target_lang = job.subtitle_language.strip().lower()
+
+            if target_lang and target_lang != source_lang:
+                from backend.services.translator import translate_segments, SUPPORTED_LANGUAGES
+                target_name = SUPPORTED_LANGUAGES.get(target_lang, target_lang)
+                await _update_branch_progress("transcription", 97, JobStatus.TRANSCRIBING,
+                    f"Translating subtitles to {target_name}...")
+
+                _translate_start = _time.monotonic()
+
+                async def _translate_heartbeat():
+                    await asyncio.sleep(10)
+                    while True:
+                        elapsed = int(_time.monotonic() - _translate_start)
+                        await _update_branch_progress(
+                            "transcription", 97, JobStatus.TRANSCRIBING,
+                            f"Translating subtitles to {target_name}... ({elapsed}s elapsed)",
+                        )
+                        await asyncio.sleep(10)
+
+                _trans_hb = asyncio.create_task(_translate_heartbeat())
+                try:
+                    translated = await asyncio.wait_for(
+                        translate_segments(
+                            result,
+                            source_language=source_lang,
+                            target_language=target_lang,
+                            orchestrator=orchestrator,
+                        ),
+                        timeout=300,
+                    )
+                    await database.update_job_status(
+                        job_id,
+                        translated_transcript=list(translated),
+                    )
+                    logger.info(
+                        "[%s] Translated %d segments from %s to %s",
+                        job_id, len(translated), source_lang, target_lang,
+                    )
+                    await _update_branch_progress("transcription", 99, JobStatus.TRANSCRIBING,
+                        f"Translated {len(translated)} subtitle segments to {target_name}")
+                except asyncio.TimeoutError:
+                    logger.warning("[%s] Subtitle translation timed out after 300s", job_id)
+                except Exception as e:
+                    logger.warning("[%s] Subtitle translation failed: %s", job_id, e)
+                finally:
+                    _trans_hb.cancel()
+                    try:
+                        await _trans_hb
+                    except asyncio.CancelledError:
+                        pass
 
         speaker_count = len(set(s.speaker for s in result))
         await _update_branch_progress("transcription", 100, JobStatus.TRANSCRIBING,
