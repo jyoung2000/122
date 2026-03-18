@@ -400,7 +400,7 @@ async def _run_analysis_inner(job_id: str):
                 "Polishing transcript with AI...")
             try:
                 result = await asyncio.wait_for(
-                    correct_transcript(result, orchestrator),
+                    correct_transcript(result, orchestrator, job_id=job_id),
                     timeout=180,  # 3 minute max for entire transcript correction
                 )
                 await database.update_job_status(job_id, transcript=list(result))

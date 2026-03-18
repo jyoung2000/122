@@ -34,14 +34,45 @@ Return a JSON array of corrected text strings, exactly {count} elements.
 Example: ["Fixed text one.", "Fixed text two."]"""
 
 
+MAX_BATCH_RETRIES = 2  # Retry each batch up to 2 times on parse failures
+
+
+def _parse_correction_response(response: str, expected_count: int) -> list[str] | None:
+    """Parse an AI correction response into a list of strings.
+
+    Returns the list on success, or None if the response is unparseable or
+    has the wrong number of elements.
+    """
+    cleaned = response.strip()
+    # Strip markdown code fences if present
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+    if cleaned.endswith("```"):
+        cleaned = cleaned[:-3]
+    cleaned = cleaned.strip()
+
+    try:
+        corrections = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+
+    if isinstance(corrections, list) and len(corrections) == expected_count:
+        return corrections
+    return None
+
+
 async def correct_transcript(
     segments: list[TranscriptSegment],
     orchestrator: AIOrchestrator,
     batch_size: int = 30,
+    job_id: str = "",
 ) -> list[TranscriptSegment]:
     """Correct transcript text using the configured LLM.
 
     Processes segments in batches to fit within context limits.
+    Each batch retries up to MAX_BATCH_RETRIES times on parse/format
+    failures before skipping, giving the provider chain a chance to
+    fall back to alternative providers.
     Word timestamps are preserved — only the text field is modified.
     """
     if not settings.AI_TRANSCRIPT_CORRECTION:
@@ -51,9 +82,11 @@ async def correct_transcript(
         return segments
 
     corrected = list(segments)  # Copy to avoid mutating input
+    total_batches = -(-len(segments) // batch_size)  # ceiling division
 
-    for batch_start in range(0, len(segments), batch_size):
+    for batch_idx, batch_start in enumerate(range(0, len(segments), batch_size)):
         batch = segments[batch_start : batch_start + batch_size]
+        batch_label = f"batch {batch_idx + 1}/{total_batches} (segments {batch_start}-{batch_start + len(batch) - 1})"
 
         # Build the prompt with segment texts
         seg_texts = [{"index": i, "text": seg.text} for i, seg in enumerate(batch)]
@@ -62,24 +95,25 @@ async def correct_transcript(
             count=len(batch),
         )
 
-        try:
-            response = await asyncio.wait_for(
-                orchestrator.text_completion(prompt, timeout=45),
-                timeout=60,  # Hard outer timeout per batch
-            )
+        batch_succeeded = False
+        for attempt in range(MAX_BATCH_RETRIES + 1):
+            try:
+                response = await asyncio.wait_for(
+                    orchestrator.text_completion(prompt, timeout=45, job_id=job_id),
+                    timeout=60,  # Hard outer timeout per batch attempt
+                )
 
-            # Parse the JSON array response
-            # Strip markdown code fences if present
-            cleaned = response.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-            cleaned = cleaned.strip()
+                corrections = _parse_correction_response(response, len(batch))
+                if corrections is None:
+                    logger.warning(
+                        "AI correction %s returned unparseable/wrong-length response (attempt %d/%d)",
+                        batch_label, attempt + 1, MAX_BATCH_RETRIES + 1,
+                    )
+                    if attempt < MAX_BATCH_RETRIES:
+                        continue  # Retry — may hit a different provider via circuit breaker
+                    break  # Exhausted retries
 
-            corrections = json.loads(cleaned)
-
-            if isinstance(corrections, list) and len(corrections) == len(batch):
+                # Apply corrections
                 for i, new_text in enumerate(corrections):
                     if isinstance(new_text, str) and new_text.strip():
                         idx = batch_start + i
@@ -92,18 +126,21 @@ async def correct_transcript(
                                 "Corrected [%.1fs]: '%s' → '%s'",
                                 corrected[idx].start, old_text[:60], new_text.strip()[:60],
                             )
-            else:
-                logger.warning(
-                    "AI correction returned %d items for %d segments — skipping batch",
-                    len(corrections) if isinstance(corrections, list) else -1,
-                    len(batch),
-                )
-        except asyncio.TimeoutError:
-            logger.warning("AI transcript correction timed out for batch %d-%d — skipping",
-                           batch_start, batch_start + len(batch))
-        except json.JSONDecodeError:
-            logger.warning("AI correction returned non-JSON response — skipping batch")
-        except Exception as e:
-            logger.warning("AI transcript correction failed for batch: %s", e)
+                batch_succeeded = True
+                break  # Success — move to next batch
+
+            except asyncio.TimeoutError:
+                logger.warning("AI transcript correction timed out for %s (attempt %d/%d)",
+                               batch_label, attempt + 1, MAX_BATCH_RETRIES + 1)
+                if attempt < MAX_BATCH_RETRIES:
+                    continue  # Retry — provider chain will try next provider
+            except Exception as e:
+                logger.warning("AI transcript correction failed for %s (attempt %d/%d): %s",
+                               batch_label, attempt + 1, MAX_BATCH_RETRIES + 1, e)
+                if attempt < MAX_BATCH_RETRIES:
+                    continue
+
+        if not batch_succeeded:
+            logger.warning("All attempts exhausted for %s — keeping raw transcript for these segments", batch_label)
 
     return corrected
