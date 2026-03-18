@@ -145,7 +145,8 @@ async def extract_frames(
     sample_rate: Optional[int] = None,
     cancel_check: Optional[Callable] = None,
     progress_callback: Optional[Callable] = None,
-    max_frames: int = 60,
+    max_frames: Optional[int] = None,
+    video_duration: Optional[float] = None,
 ) -> list[FrameData]:
     """Extract frames using scene detection + minimum interval fallback.
 
@@ -153,8 +154,24 @@ async def extract_frames(
     1. Scene detection (threshold 0.3) captures visual transitions
     2. Minimum interval ensures coverage during static scenes
     3. Maximum frame cap prevents API cost explosion on long videos
+    4. Adaptive frame count scales with video duration
     """
+    # Adaptive max_frames based on video duration
+    if max_frames is None:
+        if video_duration and video_duration > 0:
+            target = int(video_duration / 60 * settings.FRAMES_PER_MINUTE)
+            max_frames = max(settings.MIN_FRAMES, min(settings.MAX_FRAMES, target))
+        else:
+            max_frames = 60  # fallback
+
     rate = sample_rate or settings.FRAME_SAMPLE_RATE
+
+    # Adjust sample rate to avoid over-extraction (extracting 100+ frames then
+    # discarding 40% wastes I/O time). Target slightly more than max_frames
+    # to leave room for scene-change bonus frames.
+    if video_duration and video_duration > 0:
+        ideal_rate = video_duration / max_frames * 0.8  # 80% to allow scene bonuses
+        rate = max(rate, int(ideal_rate))
     os.makedirs(output_dir, exist_ok=True)
 
     # Use GPU-accelerated decoding if available (speeds up long video
@@ -243,21 +260,26 @@ async def extract_frames(
         )
 
     # If we got more frames than max, keep the most evenly spaced subset
+    was_capped = False
     if len(frame_files) > max_frames:
         original_count = len(frame_files)
         step = len(frame_files) / max_frames
         indices = [int(i * step) for i in range(max_frames)]
         frame_files = [frame_files[i] for i in indices]
+        was_capped = True
         logger.info("Capped frames from %d to %d", original_count, max_frames)
 
     for idx, fname in enumerate(frame_files):
         path = os.path.join(output_dir, fname)
-        # Estimate timestamp: with scene detection + vfr, frame intervals vary.
-        # Use ffprobe to get actual PTS if available, else fall back to index * rate
-        timestamp = idx * rate  # Fallback; will be refined below
+        # For capped frames with known duration, estimate timestamps proportionally
+        if was_capped and video_duration and video_duration > 0:
+            timestamp = (idx / max(len(frame_files) - 1, 1)) * video_duration
+        else:
+            timestamp = idx * rate  # Fallback; will be refined below
         frames.append(FrameData(timestamp=float(timestamp), path=path))
 
     # Refine timestamps using ffprobe on extracted frames (concurrent)
+    # Skip for large frame counts (>80) to avoid spawning too many ffprobe processes
     async def _probe_frame_pts(frame_path: str) -> float | None:
         probe_cmd = [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
@@ -275,16 +297,19 @@ async def extract_frames(
             pass
         return None
 
-    try:
-        pts_results = await asyncio.gather(
-            *(_probe_frame_pts(frame.path) for frame in frames),
-            return_exceptions=True,
-        )
-        for frame, pts in zip(frames, pts_results):
-            if isinstance(pts, float):
-                frame.timestamp = pts
-    except Exception as e:
-        logger.warning("Could not refine frame timestamps: %s", e)
+    if len(frames) <= 80:
+        try:
+            pts_results = await asyncio.gather(
+                *(_probe_frame_pts(frame.path) for frame in frames),
+                return_exceptions=True,
+            )
+            for frame, pts in zip(frames, pts_results):
+                if isinstance(pts, float):
+                    frame.timestamp = pts
+        except Exception as e:
+            logger.warning("Could not refine frame timestamps: %s", e)
+    else:
+        logger.info("Skipping per-frame ffprobe PTS refinement for %d frames (>80)", len(frames))
 
     logger.info(
         "Scene-aware extraction complete: %d frames from %s (scene detection + %ds interval)",

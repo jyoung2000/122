@@ -134,6 +134,104 @@ async def _update_progress(job_id: str, status: str, progress: int, message: str
     })
 
 
+async def _background_post_processing(job_id: str, transcript: list, orchestrator, job):
+    """Run transcript polishing and subtitle translation in background after analysis.
+
+    These are quality-of-life improvements that don't affect clip detection.
+    Running them after COMPLETE status saves ~5+ minutes on the critical path.
+    """
+    # ── Transcript polishing ──
+    if settings.AI_TRANSCRIPT_CORRECTION and transcript:
+        try:
+            from backend.services.transcript_corrector import correct_transcript, _adaptive_batch_size
+            logger.info("[%s] Background transcript polishing started (%d segments)", job_id, len(transcript))
+
+            await broadcast_ws(job_id, {
+                "type": "background_task",
+                "task": "transcript_polishing",
+                "status": "running",
+                "message": "Polishing transcript in background...",
+            })
+
+            _polish_info = orchestrator.get_text_model_info()
+            _batch_size = _adaptive_batch_size(len(transcript))
+            _total_batches = -(-len(transcript) // _batch_size)
+            _remaining_waves = -(- max(0, _total_batches - 1) // 3)
+            _per_batch = 150 if _polish_info.get("is_thinking") else 90
+            _correction_timeout = max(120, min(600, _per_batch + (_remaining_waves * _per_batch) + 30))
+
+            polished = await asyncio.wait_for(
+                correct_transcript(transcript, orchestrator, job_id=job_id),
+                timeout=_correction_timeout,
+            )
+            await database.update_job_status(job_id, transcript=list(polished))
+            transcript = polished  # Use polished version for translation below
+
+            await broadcast_ws(job_id, {
+                "type": "background_task",
+                "task": "transcript_polishing",
+                "status": "complete",
+                "message": "Transcript polished",
+            })
+            logger.info("[%s] Background transcript polishing complete", job_id)
+        except Exception as e:
+            logger.warning("[%s] Background transcript polishing failed: %s", job_id, e)
+            await broadcast_ws(job_id, {
+                "type": "background_task",
+                "task": "transcript_polishing",
+                "status": "failed",
+                "message": f"Polishing skipped: {str(e)[:80]}",
+            })
+
+    # ── Subtitle translation ──
+    if job.subtitle_language and transcript:
+        source_lang = job.language or "auto"
+        target_lang = job.subtitle_language.strip().lower()
+
+        if target_lang and target_lang != source_lang:
+            try:
+                from backend.services.translator import translate_segments, SUPPORTED_LANGUAGES
+                target_name = SUPPORTED_LANGUAGES.get(target_lang, target_lang)
+                logger.info("[%s] Background subtitle translation to %s started", job_id, target_name)
+
+                await broadcast_ws(job_id, {
+                    "type": "background_task",
+                    "task": "subtitle_translation",
+                    "status": "running",
+                    "message": f"Translating subtitles to {target_name}...",
+                })
+
+                translated = await asyncio.wait_for(
+                    translate_segments(
+                        transcript,
+                        source_language=source_lang,
+                        target_language=target_lang,
+                        orchestrator=orchestrator,
+                    ),
+                    timeout=300,
+                )
+                await database.update_job_status(
+                    job_id,
+                    translated_transcript=list(translated),
+                )
+
+                await broadcast_ws(job_id, {
+                    "type": "background_task",
+                    "task": "subtitle_translation",
+                    "status": "complete",
+                    "message": f"Subtitles translated to {target_name}",
+                })
+                logger.info("[%s] Translated %d segments to %s", job_id, len(translated), target_lang)
+            except Exception as e:
+                logger.warning("[%s] Background subtitle translation failed: %s", job_id, e)
+                await broadcast_ws(job_id, {
+                    "type": "background_task",
+                    "task": "subtitle_translation",
+                    "status": "failed",
+                    "message": f"Translation skipped: {str(e)[:80]}",
+                })
+
+
 async def run_analysis(job_id: str):
     """Execute the full analysis pipeline for a video job."""
     # Set up cancellation event for this job
@@ -248,6 +346,17 @@ async def _run_analysis_inner(job_id: str):
     res = metadata.get("resolution", "?")
     fps_val = metadata.get("fps", 0)
     mb = metadata.get("file_size_mb", 0)
+
+    # Adaptive timeouts based on video duration
+    vid_minutes = metadata["duration"] / 60
+    _EXTRACTION_TIMEOUT = max(600, int(vid_minutes * 60))      # ~1 min per minute of video
+    _SUMMARY_CLIP_TIMEOUT = max(900, int(vid_minutes * 30))    # scale with content length
+    _B64_ENCODE_TIMEOUT = max(300, int(vid_minutes * 10))      # scale with frame count
+    logger.info(
+        "[%s] Adaptive timeouts: extraction=%ds, summary_clip=%ds, b64=%ds (%.1f min video)",
+        job_id, _EXTRACTION_TIMEOUT, _SUMMARY_CLIP_TIMEOUT, _B64_ENCODE_TIMEOUT, vid_minutes,
+    )
+
     await _update_progress(
         job_id, JobStatus.EXTRACTING_FRAMES, 5,
         f"Metadata extracted — {res} @ {fps_val}fps, {dur_fmt} duration, {mb:.1f}MB",
@@ -319,6 +428,7 @@ async def _run_analysis_inner(job_id: str):
                     extract_frames(
                         video_path, frames_dir,
                         cancel_check=cancel_check, progress_callback=_frame_progress,
+                        video_duration=metadata["duration"],
                     ),
                     extract_audio(video_path, audio_path, cancel_check=cancel_check),
                 ),
@@ -415,123 +525,10 @@ async def _run_analysis_inner(job_id: str):
                 await database.update_job_status(job_id, language=detected)
                 logger.info("[%s] Auto-detected language: %s", job_id, detected)
 
-        # AI transcript correction (optional, after initial transcription)
-        if settings.AI_TRANSCRIPT_CORRECTION and result:
-            from backend.services.transcript_corrector import correct_transcript, _adaptive_batch_size
-            # Show which model is polishing the transcript
-            _polish_info = orchestrator.get_text_model_info()
-            _polish_model = _polish_info.get("model", "AI")
-            _polish_label = f"Polishing transcript with {_polish_model}..."
-            if _polish_info.get("is_thinking"):
-                _polish_label += " (thinking model — may take 1-2 min)"
-            await _update_branch_progress("transcription", 95, JobStatus.TRANSCRIBING,
-                _polish_label)
-
-            # Heartbeat during polishing — prevents the UI from going silent
-            # for minutes while batches are processed by slow models.
-            _polish_start = _time.monotonic()
-
-            async def _polish_heartbeat():
-                await asyncio.sleep(15)
-                while True:
-                    elapsed = int(_time.monotonic() - _polish_start)
-                    m, s = divmod(elapsed, 60)
-                    time_str = f"{m}m {s}s" if m else f"{s}s"
-                    await _update_branch_progress(
-                        "transcription", 95, JobStatus.TRANSCRIBING,
-                        f"Polishing transcript with {_polish_model}... ({time_str} elapsed)",
-                    )
-                    await asyncio.sleep(15)
-
-            _polish_hb = asyncio.create_task(_polish_heartbeat())
-
-            try:
-                # Dynamic timeout: scale with transcript length
-                # probe batch (timeout) + ceil(remaining_batches / 3) waves × timeout + buffer
-                _batch_size = _adaptive_batch_size(len(result))
-                _total_batches = -(-len(result) // _batch_size)
-                _remaining_waves = -(- max(0, _total_batches - 1) // 3)  # concurrent waves of 3
-                _per_batch = 150 if _polish_info.get("is_thinking") else 90
-                # probe + waves + 30s buffer
-                _correction_timeout = _per_batch + (_remaining_waves * _per_batch) + 30
-                # Clamp: minimum 120s, maximum 600s (10 min)
-                _correction_timeout = max(120, min(600, _correction_timeout))
-
-                logger.info(
-                    "[%s] Transcript polishing: %d segments, %d batches, timeout=%ds",
-                    job_id, len(result), _total_batches, _correction_timeout,
-                )
-                result = await asyncio.wait_for(
-                    correct_transcript(result, orchestrator, job_id=job_id),
-                    timeout=_correction_timeout,
-                )
-                await database.update_job_status(job_id, transcript=list(result))
-                logger.info("[%s] AI transcript correction applied", job_id)
-            except asyncio.TimeoutError:
-                logger.warning("[%s] AI transcript correction timed out after %ds (using raw)", job_id, _correction_timeout)
-            except Exception as e:
-                logger.warning("[%s] AI transcript correction failed (using raw): %s", job_id, e)
-            finally:
-                _polish_hb.cancel()
-                try:
-                    await _polish_hb
-                except asyncio.CancelledError:
-                    pass
-
-        # ── Subtitle translation (if subtitle_language differs from audio language) ──
-        if job.subtitle_language and result:
-            source_lang = job.language or "auto"
-            target_lang = job.subtitle_language.strip().lower()
-
-            if target_lang and target_lang != source_lang:
-                from backend.services.translator import translate_segments, SUPPORTED_LANGUAGES
-                target_name = SUPPORTED_LANGUAGES.get(target_lang, target_lang)
-                await _update_branch_progress("transcription", 97, JobStatus.TRANSCRIBING,
-                    f"Translating subtitles to {target_name}...")
-
-                _translate_start = _time.monotonic()
-
-                async def _translate_heartbeat():
-                    await asyncio.sleep(10)
-                    while True:
-                        elapsed = int(_time.monotonic() - _translate_start)
-                        await _update_branch_progress(
-                            "transcription", 97, JobStatus.TRANSCRIBING,
-                            f"Translating subtitles to {target_name}... ({elapsed}s elapsed)",
-                        )
-                        await asyncio.sleep(10)
-
-                _trans_hb = asyncio.create_task(_translate_heartbeat())
-                try:
-                    translated = await asyncio.wait_for(
-                        translate_segments(
-                            result,
-                            source_language=source_lang,
-                            target_language=target_lang,
-                            orchestrator=orchestrator,
-                        ),
-                        timeout=300,
-                    )
-                    await database.update_job_status(
-                        job_id,
-                        translated_transcript=list(translated),
-                    )
-                    logger.info(
-                        "[%s] Translated %d segments from %s to %s",
-                        job_id, len(translated), source_lang, target_lang,
-                    )
-                    await _update_branch_progress("transcription", 99, JobStatus.TRANSCRIBING,
-                        f"Translated {len(translated)} subtitle segments to {target_name}")
-                except asyncio.TimeoutError:
-                    logger.warning("[%s] Subtitle translation timed out after 300s", job_id)
-                except Exception as e:
-                    logger.warning("[%s] Subtitle translation failed: %s", job_id, e)
-                finally:
-                    _trans_hb.cancel()
-                    try:
-                        await _trans_hb
-                    except asyncio.CancelledError:
-                        pass
+        # NOTE: Transcript polishing and subtitle translation are deferred to
+        # a background task that runs AFTER analysis completes (see
+        # _background_post_processing). This saves ~5+ minutes on the critical
+        # path — raw Whisper output is good enough for clip detection.
 
         speaker_count = len(set(s.speaker for s in result))
         await _update_branch_progress("transcription", 100, JobStatus.TRANSCRIBING,
@@ -708,9 +705,9 @@ async def _run_analysis_inner(job_id: str):
         f"{len(scenes)} scenes via {scenes_provider}",
     )
 
-    # ── Steps 5+6 — Summary THEN clip detection (sequential) ──
+    # ── Steps 5+6 — Summary + audio/hot-zone analysis, THEN clip detection ──
     # Summary runs first so clip detection can use content context.
-    # The 5-10s delay is worth the quality improvement.
+    # Audio energy + hot zone scoring run concurrently with summary (no AI needed).
     cancel_check()
     await _update_progress(
         job_id, JobStatus.GENERATING_SUMMARY, 65,
@@ -718,21 +715,42 @@ async def _run_analysis_inner(job_id: str):
     )
 
     # CRITICAL: Reset circuit breaker before critical AI operations.
-    # Transcript correction (optional) may have degraded providers via
-    # repeated timeouts. Summary and clip detection MUST have access to
-    # all configured providers regardless of correction failures.
     orchestrator.reset_circuit_breaker()
 
-    # Step 5: Summary first
+    # Launch summary generation as a task
     _summary_start = _time.monotonic()
+    summary_task = asyncio.create_task(
+        orchestrator.generate_summary(transcript, scenes, job_id)
+    )
+
+    # While summary runs, do audio energy analysis + hot zone scoring (no AI)
+    audio_energy_text = ""
+    audio_moments = []
+    hot_zone_text = ""
     try:
-        summary, summary_provider = await orchestrator.generate_summary(
-            transcript, scenes, job_id,
-        )
+        audio_moments = await analyze_audio_energy(audio_path)
+        audio_energy_text = format_audio_energy_map(audio_moments)
+        if audio_energy_text:
+            logger.info("[%s] Audio energy analysis: %d spikes detected", job_id, len(audio_moments))
+    except Exception as e:
+        logger.warning("[%s] Audio energy analysis failed (non-critical): %s", job_id, e)
+
+    # Hot zone pre-scoring (instant, no AI calls)
+    from backend.services.hot_zone_scorer import score_hot_zones, format_hot_zones_for_prompt
+    hot_zones = score_hot_zones(transcript, scenes, audio_moments, metadata["duration"])
+    hot_zone_text = format_hot_zones_for_prompt(hot_zones)
+    logger.info(
+        "[%s] Hot zone scoring: %d zones, top score=%.1f",
+        job_id, len(hot_zones),
+        hot_zones[0].composite_score if hot_zones else 0,
+    )
+
+    # Now await summary
+    try:
+        summary, summary_provider = await summary_task
     except CancelledError:
         raise
     except AllProvidersFailedError:
-        # All providers failed — wait briefly and retry once
         logger.warning("[%s] All providers failed for summary — retrying in 5s", job_id)
         orchestrator.reset_circuit_breaker()
         await asyncio.sleep(5)
@@ -764,20 +782,10 @@ async def _run_analysis_inner(job_id: str):
         summary_text += f"\nCategory: {summary.content_category}"
     if summary.tone:
         summary_text += f"\nTone: {summary.tone}"
-
-    # Step 5b: Audio energy analysis (runs quickly on already-extracted WAV)
-    audio_energy_text = ""
-    try:
-        audio_moments = await analyze_audio_energy(audio_path)
-        audio_energy_text = format_audio_energy_map(audio_moments)
-        if audio_energy_text:
-            logger.info("[%s] Audio energy analysis: %d spikes detected", job_id, len(audio_moments))
-    except Exception as e:
-        logger.warning("[%s] Audio energy analysis failed (non-critical): %s", job_id, e)
-
-    # Append audio energy to summary context for clip detection
     if audio_energy_text:
         summary_text += audio_energy_text
+    if hot_zone_text:
+        summary_text += hot_zone_text
 
     # Step 6: Clip detection with summary context
     cancel_check()
@@ -925,3 +933,10 @@ async def _run_analysis_inner(job_id: str):
         job_id, completion_msg,
         summary_provider, scenes_provider, clips_provider,
     )
+
+    # Launch background post-processing (transcript polishing + subtitle translation)
+    # These improve quality but don't affect clip detection — run after COMPLETE.
+    if transcript:
+        asyncio.create_task(
+            _background_post_processing(job_id, transcript, orchestrator, job)
+        )

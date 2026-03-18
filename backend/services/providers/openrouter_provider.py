@@ -736,10 +736,10 @@ class OpenRouterProvider(AIProvider):
         video_summary: Optional[str] = None,
         existing_clips: Optional[str] = None,
     ) -> list[ClipCandidate]:
-        # For long videos (>15 min), use windowed detection to cover entire video
-        if video_duration > 900:
-            logger.info("Long video (%.0fs) — using windowed clip detection", video_duration)
-            return await self._windowed_clip_detection(
+        # For videos >5 min, use multi-pass detection for better coverage
+        if video_duration > 300:
+            logger.info("Video %.0fs (>5min) — using multi-pass clip detection", video_duration)
+            return await self._multi_pass_clip_detection(
                 transcript, scenes, video_duration,
                 custom_prompt=custom_prompt, cancel_check=cancel_check,
                 clip_count=clip_count, min_duration=min_duration,
@@ -754,6 +754,120 @@ class OpenRouterProvider(AIProvider):
             max_duration=max_duration, video_summary=video_summary,
             existing_clips=existing_clips,
         )
+
+    async def _multi_pass_clip_detection(
+        self,
+        transcript: list[TranscriptSegment],
+        scenes: list[SceneDescription],
+        video_duration: float,
+        custom_prompt: Optional[str] = None,
+        cancel_check=None,
+        clip_count: Optional[int] = None,
+        min_duration: Optional[float] = None,
+        max_duration: Optional[float] = None,
+        video_summary: Optional[str] = None,
+        existing_clips: Optional[str] = None,
+    ) -> list[ClipCandidate]:
+        """Multi-pass clip detection for comprehensive coverage.
+
+        Pass 1: Windowed detection across the full video
+        Pass 2: Coverage sweep on under-represented regions
+        Pass 3: Merge, deduplicate, score-sort
+        """
+        num_clips = clip_count or settings.MAX_CLIP_CANDIDATES
+        all_clips = []
+
+        # Adaptive window sizing based on video length
+        if video_duration > 1800:  # > 30 min
+            window_dur = 600.0   # 10 min windows
+            overlap_dur = 120.0  # 2 min overlap
+        elif video_duration > 600:  # > 10 min
+            window_dur = 480.0   # 8 min windows
+            overlap_dur = 90.0   # 1.5 min overlap
+        else:  # 5-10 min
+            window_dur = video_duration  # single window but still do pass 2
+            overlap_dur = 0.0
+
+        logger.info(
+            "Multi-pass clip detection: %.0fs video, window=%.0fs, overlap=%.0fs",
+            video_duration, window_dur, overlap_dur,
+        )
+
+        # Pass 1: windowed scan
+        pass1_clips = await self._windowed_clip_detection(
+            transcript, scenes, video_duration,
+            window_duration=window_dur, overlap_duration=overlap_dur,
+            custom_prompt=custom_prompt, cancel_check=cancel_check,
+            clip_count=max(6, num_clips // 2),
+            min_duration=min_duration, max_duration=max_duration,
+            video_summary=video_summary, existing_clips=existing_clips,
+        )
+        all_clips.extend(pass1_clips)
+        logger.info("Pass 1 found %d clips", len(pass1_clips))
+
+        # Pass 2: Coverage sweep — find regions with no clips
+        if len(all_clips) < num_clips:
+            from backend.services.hot_zone_scorer import get_coverage_gaps
+            gaps = get_coverage_gaps([], all_clips, video_duration, min_gap_duration=45.0)
+
+            if gaps:
+                existing_desc = "\n".join(
+                    f"  - '{c.title}' ({c.start_time:.0f}-{c.end_time:.0f}s)"
+                    for c in all_clips
+                )
+
+                for gap_start, gap_end in gaps[:4]:  # Max 4 gap scans
+                    if cancel_check:
+                        cancel_check()
+
+                    gap_transcript = [
+                        s for s in transcript
+                        if s.start >= gap_start - 15 and s.end <= gap_end + 15
+                    ]
+                    gap_scenes = [
+                        s for s in scenes
+                        if gap_start <= s.timestamp <= gap_end
+                    ]
+
+                    if not gap_transcript and not gap_scenes:
+                        continue
+
+                    logger.info(
+                        "Pass 2: scanning gap %.0f-%.0fs (%d segments, %d scenes)",
+                        gap_start, gap_end, len(gap_transcript), len(gap_scenes),
+                    )
+
+                    try:
+                        gap_clips = await self._single_pass_clip_detection(
+                            gap_transcript, gap_scenes, gap_end - gap_start,
+                            custom_prompt=custom_prompt, cancel_check=cancel_check,
+                            clip_count=3,
+                            min_duration=min_duration, max_duration=max_duration,
+                            video_summary=video_summary,
+                            existing_clips=existing_desc,
+                        )
+                        all_clips.extend(gap_clips)
+                        logger.info(
+                            "Pass 2 gap %.0f-%.0fs found %d clips",
+                            gap_start, gap_end, len(gap_clips),
+                        )
+                    except Exception as e:
+                        logger.warning("Pass 2 gap scan failed: %s", e)
+
+        # Pass 3: Merge, deduplicate, sort by score
+        raw_count = len(all_clips)
+        all_clips = self._deduplicate_clips(all_clips, max_overlap=0.4)
+        all_clips.sort(key=lambda c: c.viral_score, reverse=True)
+
+        if len(all_clips) > num_clips:
+            all_clips = all_clips[:num_clips]
+
+        logger.info(
+            "Multi-pass complete: %d final clips (from %d raw)",
+            len(all_clips), raw_count,
+        )
+
+        return all_clips
 
     async def _single_pass_clip_detection(
         self,
@@ -829,7 +943,10 @@ class OpenRouterProvider(AIProvider):
             "- Must work standalone without context from the full video\n"
             "- The main subject/speaker MUST remain in focus for the entire clip\n"
             "- Do NOT combine scenes from different settings or unrelated topics into one clip\n"
-            "- When a visual peak (★ scene) coincides with strong transcript content, score that clip higher\n\n"
+            "- When a visual peak (★ scene) coincides with strong transcript content, score that clip higher\n"
+            "- HOT ZONES: If hot zone scores are provided, PRIORITIZE clips overlapping "
+            "high-scoring zones (score >50). These zones have verified audio energy spikes, "
+            "rapid dialogue, visual peaks, or speaker dynamics that indicate viral moments.\n\n"
             "Return ONLY valid JSON, no other text:\n"
             '{"clips": [{"id": 1, "title": "Hook-driven title under 60 chars", '
             '"start_time": 45.2, "end_time": 112.8, "duration": 67.6, '

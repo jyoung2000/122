@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     WHISPER_VAD_FILTER: bool = True    # skip silence — major speedup
     FRAME_SAMPLE_RATE: int = 10        # seconds between frames (lower=more detail, slower)
     MAX_CLIP_CANDIDATES: int = 12
+    # Adaptive frame extraction
+    MIN_FRAMES: int = 30               # minimum for any video
+    MAX_FRAMES: int = 200              # absolute ceiling
+    FRAMES_PER_MINUTE: float = 6       # target density
     CONCURRENT_ANALYSES: int = 2
     AUTO_ANALYZE: bool = True
     SUBJECT_TRACKING_ENABLED: bool = True
