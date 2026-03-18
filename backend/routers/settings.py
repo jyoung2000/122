@@ -1224,8 +1224,11 @@ async def available_models():
                 data = resp.json()
                 ollama_models = [m["name"] for m in data.get("models", [])]
         except Exception:
-            # Ollama unreachable — fall back to configured defaults so users
-            # can still see and select the configured models
+            pass  # ollama_models stays empty
+
+        # If no models returned (still downloading or unreachable), use
+        # configured defaults so users can still see/select them.
+        if not ollama_models:
             defaults = set()
             if settings.OLLAMA_VISION_MODEL:
                 defaults.add(settings.OLLAMA_VISION_MODEL)
