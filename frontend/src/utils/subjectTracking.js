@@ -7,10 +7,10 @@
  *
  * Processing pipeline (applied in order):
  *   1. buildSubjectKeyframes()        — raw (time, subject_x) pairs with DYNAMIC safe margin
- *   2. compressRange()                — limit total sx swing per clip toward median (maxRange=40)
+ *   2. compressRange()                — limit total sx swing per clip toward median (maxRange=20)
  *   3. applyDeadZone()                — anchor-based hold zone (eliminate drift, not movements)
  *   4. handleSceneCuts()              — insert 1ms instant-jump keyframes at hard cuts
- *   5. smoothKeyframesBidirectional() — velocity-damped spring tracking (maxSpeed=25)
+ *   5. smoothKeyframesBidirectional() — damped-lerp with hold-then-move (maxSpeed=15)
  *   6. mergeHolds()                   — merge similar consecutive values into rests (tolerance=3)
  *   7. interpolateSubjectX()          — smoothstep ease-in/ease-out interpolation
  */
@@ -25,10 +25,10 @@ const SAFE_MARGIN = 10;
  *
  * @param {number} srcRatio - Source video aspect ratio (e.g., 16/9)
  * @param {number} targetRatio - Target crop aspect ratio (e.g., 9/16)
- * @param {number} edgeBuffer - Buffer from objectPosition 0%/100% (default 5)
+ * @param {number} edgeBuffer - Buffer from objectPosition 0%/100% (default 8)
  * @returns {{ min: number, max: number }} Safe subject_x range
  */
-export function computeSafeRange(srcRatio, targetRatio, edgeBuffer = 2) {
+export function computeSafeRange(srcRatio, targetRatio, edgeBuffer = 8) {
   const R = srcRatio / targetRatio;
   if (R <= 1.01) {
     // No horizontal overflow — any subject_x is fine
@@ -157,10 +157,10 @@ export function buildSubjectKeyframes(scenes, clipStart, clipEnd, srcRatio = nul
  * Matches backend _handle_scene_cuts() exactly for preview-export parity.
  *
  * @param {Array<{t: number, x: number}>} keyframes - Sorted keyframes
- * @param {number} jumpThreshold - Minimum subject_x delta to treat as a cut (default 12)
+ * @param {number} jumpThreshold - Minimum subject_x delta to treat as a cut (default 15)
  * @returns {Array<{t: number, x: number}>} Keyframes with instant-cut transitions
  */
-export function handleSceneCuts(keyframes, jumpThreshold = 12) {
+export function handleSceneCuts(keyframes, jumpThreshold = 15) {
   if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
 
   const result = [keyframes[0]];
@@ -200,7 +200,7 @@ export function handleSceneCuts(keyframes, jumpThreshold = 12) {
  * @param {number} maxRange - Maximum allowed range of sx values (default 25)
  * @returns {Array<{t: number, x: number}>}
  */
-export function compressRange(keyframes, maxRange = 40) {
+export function compressRange(keyframes, maxRange = 20) {
   if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
 
   const xs = keyframes.map(k => k.x);
@@ -241,7 +241,7 @@ export function applyDeadZone(keyframes, threshold = 5, srcRatio = null, targetR
   if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
 
   // Compute effective threshold: we want ~3% of VISIBLE crop width as the dead zone
-  const VISIBLE_THRESHOLD = 3; // % of visible crop width
+  const VISIBLE_THRESHOLD = 5; // % of visible crop width
   let effectiveThreshold = threshold;
   if (srcRatio && targetRatio) {
     const R = srcRatio / targetRatio;
@@ -270,60 +270,87 @@ export function applyDeadZone(keyframes, threshold = 5, srcRatio = null, targetR
 }
 
 /**
- * Two-pass bidirectional smoothing that eliminates trailing lag.
+ * Damped-lerp with hold-then-move for human-like camera motion.
  *
- * Forward pass: clamp speed going forward (prevents anticipation overshoot)
- * Reverse pass: clamp speed going backward (prevents trailing lag)
- * Average: blend both passes for natural-feeling movement
+ * Mimics a professional camera operator: holds steady, then makes
+ * deliberate smooth reframes. No oscillation, no reactive tracking.
  *
  * Matches backend _smooth_keyframes_bidirectional() exactly for preview-export parity.
  *
  * @param {Array<{t: number, x: number}>} keyframes - Sorted keyframes
- * @param {number} maxSpeed - Maximum subject_x units per second (default 25)
+ * @param {number} maxSpeed - Maximum subject_x units per second (default 15)
  * @returns {Array<{t: number, x: number}>} Smoothed keyframes
  */
-export function smoothKeyframesBidirectional(keyframes, maxSpeed = 25) {
+export function smoothKeyframesBidirectional(keyframes, maxSpeed = 15) {
   if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
 
-  // Critically-damped spring parameters
-  const springK = 8.0;  // Spring stiffness (higher = snappier tracking)
-  const dampingD = 2 * Math.sqrt(springK);  // Critical damping
-  const dt_step = 0.016;  // 16ms simulation step
+  // Human camera operator model:
+  // 1. Hold steady at current position for MIN_HOLD_TIME before any pan
+  // 2. Ease toward target with damped lerp (naturally decelerates near target)
+  // 3. Never exceed maxSpeed units per second
+  // 4. When target changes significantly, re-enter hold period (deliberate, not reactive)
+
+  const MIN_HOLD_TIME = 0.5;   // Seconds to hold before panning
+  const EASE_FACTOR = 0.12;    // Per-step lerp factor (lower = smoother/slower)
+  const dt_step = 0.016;       // 16ms simulation step
 
   const result = [{ t: keyframes[0].t, x: keyframes[0].x }];
   let pos = keyframes[0].x;
-  let vel = 0;
+  let holdTimer = MIN_HOLD_TIME;   // Always start with a hold
+  let lastTarget = keyframes[0].x;
 
   for (let i = 1; i < keyframes.length; i++) {
     const target = keyframes[i].x;
     const segDt = keyframes[i].t - keyframes[i - 1].t;
 
     if (segDt <= 0.002) {
-      // Instant cut (scene cut keyframes are 1ms apart) — snap immediately
+      // Instant cut (scene cut keyframes are 1ms apart) — snap, reset hold
       pos = target;
-      vel = 0;
+      holdTimer = MIN_HOLD_TIME;
+      lastTarget = target;
       result.push({ t: keyframes[i].t, x: pos });
       continue;
     }
 
-    // Simulate spring from current pos toward target
+    // If target changed significantly, reset hold timer (be deliberate)
+    if (Math.abs(target - lastTarget) > 3) {
+      holdTimer = MIN_HOLD_TIME;
+      lastTarget = target;
+    }
+
+    // Simulate per-step
     let simTime = 0;
     while (simTime < segDt) {
       const step = Math.min(dt_step, segDt - simTime);
-      const force = springK * (target - pos);
-      const damping = dampingD * vel;
-      const accel = force - damping;
-      vel += accel * step;
-      // Speed limit to prevent overshooting
-      const maxDelta = maxSpeed * step;
-      if (Math.abs(vel * step) > maxDelta) {
-        vel = (vel > 0 ? 1 : -1) * maxSpeed;
+
+      if (holdTimer > 0) {
+        // During hold period — camera stays still
+        holdTimer -= step;
+      } else {
+        // Damped lerp toward target
+        const delta = target - pos;
+        const absDelta = Math.abs(delta);
+
+        if (absDelta > 0.5) {
+          // Lerp produces natural deceleration (movement shrinks as pos approaches target)
+          let movement = delta * EASE_FACTOR;
+
+          // Speed limit
+          const maxDist = maxSpeed * step;
+          if (Math.abs(movement) > maxDist) {
+            movement = (movement > 0 ? 1 : -1) * maxDist;
+          }
+
+          pos += movement;
+        } else {
+          // Within 0.5 units — snap to target (sub-pixel, invisible)
+          pos = target;
+        }
       }
-      pos += vel * step;
+
       simTime += step;
     }
 
-    // Clamp to valid range
     pos = Math.max(0, Math.min(100, pos));
     result.push({ t: keyframes[i].t, x: pos });
   }

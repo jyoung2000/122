@@ -94,21 +94,16 @@ function getFrameMode(aspectRatio, sourceWidth, sourceHeight) {
  */
 function subjectXToCenterPct(sx, srcRatio, targetRatio) {
   const R = srcRatio / targetRatio;
-  if (R <= 1.01) return Math.max(0, Math.min(100, sx)); // no horizontal overflow
+  if (R <= 1.01) return Math.max(0, Math.min(100, sx));
   const pct = (R * sx - 50) / (R - 1);
 
-  // Soft clamp: if pct is outside [0, 100], ease toward the edge
-  // instead of hard-clamping. This prevents the "slam to edge" visual.
-  if (pct < 0) {
-    // Subject is too far left to center — ease toward 0%
-    return Math.max(0, 5 * (1 - Math.min(1, Math.abs(pct) / 50)));
-  }
-  if (pct > 100) {
-    // Subject is too far right to center — ease toward 100%
-    return Math.min(100, 100 - 5 * (1 - Math.min(1, (pct - 100) / 50)));
-  }
-
-  return pct;
+  // HARD clamp: keep objectPosition in [8, 92] to prevent exposing
+  // baked-in pillarboxing from the source video. The backend uses
+  // FFmpeg cropdetect to strip these bars during export, but the
+  // preview plays the raw source file. This ensures full-frame
+  // coverage always takes priority over perfect subject centering.
+  const EDGE_GUARD = 8;
+  return Math.max(EDGE_GUARD, Math.min(100 - EDGE_GUARD, pct));
 }
 
 function formatTime(seconds) {

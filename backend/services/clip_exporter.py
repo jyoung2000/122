@@ -2029,7 +2029,7 @@ def _compute_video_out_dims(
     return src_w, src_h
 
 
-def _compute_safe_range(src_ratio: float, target_ratio: float, edge_buffer: int = 2) -> tuple[int, int]:
+def _compute_safe_range(src_ratio: float, target_ratio: float, edge_buffer: int = 8) -> tuple[int, int]:
     """Compute safe subject_x range for a given aspect ratio conversion.
 
     Ensures that any subject_x within this range will produce a non-clamped
@@ -2261,7 +2261,7 @@ def _smooth_keyframes(
 
 def _handle_scene_cuts(
     keyframes: list[tuple[float, int]],
-    jump_threshold: int = 12,
+    jump_threshold: int = 15,
 ) -> list[tuple[float, int]]:
     """Insert instant-jump keyframes at likely scene cuts.
 
@@ -2325,7 +2325,7 @@ def _apply_dead_zone(
         return list(keyframes)
 
     # Compute effective threshold: we want ~3% of VISIBLE crop width as the dead zone
-    VISIBLE_THRESHOLD = 3  # % of visible crop width
+    VISIBLE_THRESHOLD = 5  # % of visible crop width
     effective_threshold = threshold
     if src_ratio > 0 and target_ratio > 0:
         R = src_ratio / target_ratio
@@ -2359,61 +2359,68 @@ def _apply_dead_zone(
 
 def _smooth_keyframes_bidirectional(
     keyframes: list[tuple[float, int]],
-    max_speed: float = 25.0,
+    max_speed: float = 15.0,
 ) -> list[tuple[float, int]]:
-    """Velocity-damped spring tracking for human-like camera motion.
+    """Damped-lerp with hold-then-move for human-like camera motion.
 
-    Uses a critically-damped spring model to produce natural acceleration
-    and deceleration when following the subject. Respects maxSpeed limit.
+    Mimics a professional camera operator: holds steady, then makes
+    deliberate smooth reframes. No oscillation, no reactive tracking.
 
     Matches frontend smoothKeyframesBidirectional() exactly for preview-export parity.
     """
     if len(keyframes) <= 1:
         return list(keyframes)
 
-    import math as _math
-
-    # Critically-damped spring parameters
-    spring_k = 8.0  # Spring stiffness (higher = snappier tracking)
-    damping_d = 2 * _math.sqrt(spring_k)  # Critical damping
-    dt_step = 0.016  # 16ms simulation step
+    MIN_HOLD_TIME = 0.5    # Seconds to hold before panning
+    EASE_FACTOR = 0.12     # Per-step lerp factor
+    dt_step = 0.016        # 16ms simulation step
 
     result = [keyframes[0]]
     pos = float(keyframes[0][1])
-    vel = 0.0
+    hold_timer = MIN_HOLD_TIME
+    last_target = float(keyframes[0][1])
 
     for i in range(1, len(keyframes)):
         target = float(keyframes[i][1])
         seg_dt = keyframes[i][0] - keyframes[i - 1][0]
 
         if seg_dt <= 0.002:
-            # Instant cut (scene cut keyframes are 1ms apart) — snap immediately
             pos = target
-            vel = 0.0
+            hold_timer = MIN_HOLD_TIME
+            last_target = target
             result.append((keyframes[i][0], pos))
             continue
 
-        # Simulate spring from current pos toward target
+        if abs(target - last_target) > 3:
+            hold_timer = MIN_HOLD_TIME
+            last_target = target
+
         sim_time = 0.0
         while sim_time < seg_dt:
             step = min(dt_step, seg_dt - sim_time)
-            force = spring_k * (target - pos)
-            damping = damping_d * vel
-            accel = force - damping
-            vel += accel * step
-            # Speed limit to prevent overshooting
-            max_delta = max_speed * step
-            if abs(vel * step) > max_delta:
-                vel = (1 if vel > 0 else -1) * max_speed
-            pos += vel * step
+
+            if hold_timer > 0:
+                hold_timer -= step
+            else:
+                delta = target - pos
+                abs_delta = abs(delta)
+
+                if abs_delta > 0.5:
+                    movement = delta * EASE_FACTOR
+                    max_dist = max_speed * step
+                    if abs(movement) > max_dist:
+                        movement = (1 if movement > 0 else -1) * max_speed * step
+                    pos += movement
+                else:
+                    pos = target
+
             sim_time += step
 
-        # Clamp to valid range
         pos = max(0.0, min(100.0, pos))
         result.append((keyframes[i][0], pos))
 
     logger.info(
-        "[SubjectTracking] _smooth_keyframes_bidirectional: %d keyframes processed (max_speed=%.0f/s, spring model)",
+        "[SubjectTracking] _smooth_keyframes_bidirectional: %d keyframes processed (max_speed=%.0f/s, damped-lerp + hold)",
         len(keyframes), max_speed,
     )
 
@@ -2457,7 +2464,7 @@ def _merge_holds(
 
 def _compress_range(
     keyframes: list[tuple[float, int]],
-    max_range: int = 40,
+    max_range: int = 20,
 ) -> list[tuple[float, int]]:
     """Compress the range of subject_x values to prevent erratic swinging.
 
@@ -4962,7 +4969,7 @@ async def export_clip(
                     clip_id, len(raw_kf), len(subject_scenes),
                 )
                 if len(raw_kf) > 1:
-                    # Full pipeline: build → compress range → dead zone → scene cuts → smooth → merge holds
+                    # Full pipeline: build → compress range → dead zone → scene cuts → damped-lerp smooth → merge holds
                     after_compress = _compress_range(raw_kf)
                     after_dead_zone = _apply_dead_zone(after_compress, src_ratio=_src_ratio, target_ratio=_target_ratio)
                     after_cuts = _handle_scene_cuts(after_dead_zone)
@@ -4974,7 +4981,7 @@ async def export_clip(
                     # the crop off-screen or cause black bars
                     safe_lo, safe_hi = _compute_safe_range(_src_ratio, _target_ratio)
                     keyframes = [
-                        (t, max(safe_lo, min(safe_hi, sx)))
+                        (t, max(safe_lo, min(safe_hi, round(sx))))
                         for t, sx in after_holds
                     ]
 
