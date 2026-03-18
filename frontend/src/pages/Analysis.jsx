@@ -473,7 +473,7 @@ export default function Analysis() {
         fetchJobRetryRef.current = 0;
         // Sync generating state from job status (handles page refresh mid-generation)
         if (data.status === 'detecting_clips') {
-          setIsGeneratingClips(true);
+          setIsGeneratingClips((prev) => prev || true);
         }
       } else if (res.status === 404 && fetchJobRetryRef.current < 10) {
         // Job may still be initializing (pipeline writes job.json async).
@@ -591,11 +591,12 @@ export default function Analysis() {
                 return { ...prev, status: nextStatus, progress: nextProgress, progress_message: nextMessage };
               });
             }
-            // Track clip generation state from status messages
+            // Track clip generation state from status messages — use functional
+            // updater to avoid re-render when value hasn't changed
             if (msg.status === 'detecting_clips') {
-              setIsGeneratingClips(true);
+              setIsGeneratingClips((prev) => prev || true);
             } else if (msg.type === 'complete') {
-              setIsGeneratingClips(false);
+              setIsGeneratingClips((prev) => prev ? false : prev);
             }
             pushLog(
               msg.type === 'complete' ? 'success' : 'status',
@@ -622,7 +623,7 @@ export default function Analysis() {
           } else if (msg.type === 'clips_generated') {
             pushLog('success', msg.message || `Generated ${msg.count} clips`);
             showToast(msg.message || `Found ${msg.count} clip candidates`, 'success');
-            setIsGeneratingClips(false);
+            setIsGeneratingClips((prev) => prev ? false : prev);
             fetchJob();
             // Re-run QA validation after new clips are generated
             setQaResult(null);
@@ -640,7 +641,7 @@ export default function Analysis() {
           } else if (msg.type === 'error') {
             pushLog('error', msg.message);
             showToast(msg.message, 'error');
-            setIsGeneratingClips(false);
+            setIsGeneratingClips((prev) => prev ? false : prev);
             fetchJob();
           }
         } catch {
