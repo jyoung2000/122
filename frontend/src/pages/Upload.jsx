@@ -563,9 +563,13 @@ export default function Upload() {
 
       // If server returned poll=true, poll /status until assembly is done
       if (completeData.poll) {
-        addLog('Server is assembling file in background — polling for completion...');
+        const fileSizeMB = file.size / (1024 * 1024);
+        // Estimate assembly time: ~5 MB/s for cat + sha256sum on typical storage
+        const estimatedSeconds = Math.max(10, Math.round(fileSizeMB / 5));
+        addLog(`Assembling ${fileSizeMB.toFixed(0)} MB on server (estimated ~${estimatedSeconds}s)...`);
         const pollStart = Date.now();
         const pollTimeout = 10 * 60 * 1000; // 10 minute max poll time
+        let lastLoggedState = '';
 
         while (Date.now() - pollStart < pollTimeout) {
           if (abortRef.current) {
@@ -573,16 +577,31 @@ export default function Upload() {
           }
 
           await new Promise(r => setTimeout(r, 2000)); // Poll every 2s
-          setProgress(Math.min(98, 92 + Math.floor((Date.now() - pollStart) / 1000 / 3)));
+
+          const elapsedSec = Math.round((Date.now() - pollStart) / 1000);
+          const remainingSec = Math.max(0, estimatedSeconds - elapsedSec);
+          // Progress: 92% → 98% over the estimated duration
+          const assemblyPct = Math.min(1, elapsedSec / Math.max(estimatedSeconds, 1));
+          setProgress(Math.min(98, Math.round(92 + assemblyPct * 6)));
 
           try {
             const statusResp = await fetch(`/api/upload/status/${uploadId}`);
             if (!statusResp.ok) continue;
             const status = await statusResp.json();
 
-            if (status.state === 'validating') {
-              addLog('Validating assembled file...');
-              setProgress(96);
+            if (status.state === 'assembling' && lastLoggedState !== 'assembling-update') {
+              // Log periodic updates during assembly (every ~10s)
+              if (elapsedSec > 0 && elapsedSec % 10 < 3) {
+                const eta = remainingSec > 0 ? ` — ~${remainingSec}s remaining` : ' — finishing up...';
+                addLog(`Assembling: ${elapsedSec}s elapsed${eta}`);
+                lastLoggedState = 'assembling-update';
+                // Reset so we log again after next 10s window
+                setTimeout(() => { lastLoggedState = ''; }, 8000);
+              }
+            } else if (status.state === 'validating' && lastLoggedState !== 'validating') {
+              addLog('Assembly complete — validating file integrity...');
+              lastLoggedState = 'validating';
+              setProgress(97);
             } else if (status.state === 'complete') {
               setUploadPhase('complete');
               setProgress(100);
