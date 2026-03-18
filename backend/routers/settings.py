@@ -347,6 +347,20 @@ async def provider_status():
                 active_summary_model = "llama-3.1-8b-instant"
             break
 
+    # If the user has explicitly selected models (via Save Models), honour
+    # those selections — they may point to a different provider than the
+    # first one in the fallback chain.
+    selected_vision = getattr(settings, 'SELECTED_VISION_MODEL', '')
+    selected_text = getattr(settings, 'SELECTED_TEXT_MODEL', '')
+    if selected_vision:
+        active_vision_model = selected_vision
+        # Derive active provider from the selection if it differs
+        if selected_vision.startswith("ollama/"):
+            active_provider = active_provider or "ollama"
+    if selected_text:
+        active_text_model = selected_text
+        active_summary_model = selected_text
+
     statuses["_active"] = {
         "provider": active_provider or "none",
         "transcript_model": settings.WHISPER_MODEL,
@@ -696,7 +710,7 @@ async def toggle_ollama(req: ToggleOllamaRequest):
     chain = [p.strip() for p in settings.AI_FALLBACK_CHAIN.split(",") if p.strip()]
     if req.enabled:
         if "ollama" not in chain:
-            chain.append("ollama")
+            chain.insert(0, "ollama")  # Local models get highest priority
     else:
         chain = [p for p in chain if p != "ollama"]
     settings.AI_FALLBACK_CHAIN = ",".join(chain)
