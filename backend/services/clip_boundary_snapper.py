@@ -39,6 +39,14 @@ def snap_clip_boundaries(
     best_end_word = min(words_in_range, key=lambda w: abs(w.end - clip.end_time))
     snapped_end = best_end_word.end + POST_ROLL_S
 
+    # Guard: snapping must not invert start/end
+    if snapped_start >= snapped_end:
+        logger.warning(
+            "Boundary snap would invert start/end for '%s' (%.1f >= %.1f) — skipping",
+            clip.title, snapped_start, snapped_end,
+        )
+        return clip
+
     # Ensure minimum duration is maintained
     if snapped_end - snapped_start < 15:
         return clip  # Don't snap if it would make the clip too short

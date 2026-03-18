@@ -126,23 +126,24 @@ def _calculate_visual_change_frequency(
         return 0.5
 
     changes_per_min = scene_count / duration_min
+    high_importance = sum(1 for s in clip_scenes if s.importance_score >= 7)
 
-    # Optimal: 3-8 visual changes per minute
+    # Base score from pacing
     if 3 <= changes_per_min <= 8:
-        return 0.8
+        base = 0.8
     elif changes_per_min < 1:
-        return 0.3  # Too static
+        base = 0.3
     elif changes_per_min > 15:
-        return 0.5  # Too jumpy
+        base = 0.5
     else:
-        return 0.6
+        base = 0.6
 
     # Bonus for high-importance scenes
-    high_importance = sum(1 for s in clip_scenes if s.importance_score >= 7)
     if high_importance > 0:
-        return min(1.0, changes_per_min * 0.1 + 0.1)
+        importance_bonus = min(0.15, high_importance * 0.05)
+        return min(1.0, base + importance_bonus)
 
-    return min(1.0, changes_per_min * 0.1)
+    return base
 
 
 def _calculate_emotional_arc(

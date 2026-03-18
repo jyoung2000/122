@@ -271,6 +271,10 @@ def _get_whisper_model():
                     )
                     device = "cpu"
                     compute_type = "int8"
+                    # Downgrade model for CPU — large-v3-turbo is too slow on CPU
+                    if settings.WHISPER_MODEL == "large-v3-turbo":
+                        settings.WHISPER_MODEL = "small"
+                        logger.info("Downgraded Whisper model to 'small' for CPU fallback (large-v3-turbo too slow on CPU)")
                     whisper_device_info.update({"device": device, "compute_type": compute_type})
                     _whisper_model = WhisperModel(
                         settings.WHISPER_MODEL,
@@ -418,7 +422,7 @@ async def transcribe_audio(
     }
     lock = threading.Lock()
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     # Use the dedicated transcription executor so the Whisper thread is
     # never blocked behind base64-encoding or other default-pool tasks.
@@ -590,7 +594,7 @@ def _transcribe_sync(
                 progress_state["segments"] = len(raw_segments)
                 progress_state["latest_end"] = segment.end
                 progress_state["last_text"] = text[:80] if text else ""
-                progress_state["raw_segments"] = list(raw_segments)
+                progress_state["raw_segments"] = raw_segments
 
     if progress_state and progress_lock:
         with progress_lock:
@@ -655,7 +659,7 @@ async def extract_word_timestamps(
     import asyncio
     import functools
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         _transcription_executor,
         functools.partial(_extract_word_timestamps_sync, audio_path, language=language),
@@ -692,13 +696,10 @@ def _assign_speakers(raw_segments: list[dict]) -> list[TranscriptSegment]:
                 speakers_seen += 1
                 previous_speaker = current_speaker
                 current_speaker = speakers_seen
-            elif gap >= TURN_GAP:
+            elif gap >= TURN_GAP and speakers_seen >= 2:
                 # Medium gap — conversation turn, toggle between current and previous
+                # Only toggle when multiple speakers have been established
                 current_speaker, previous_speaker = previous_speaker, current_speaker
-                # If current == previous (only 1 speaker so far), introduce speaker 2
-                if current_speaker == previous_speaker and speakers_seen < MAX_SPEAKERS:
-                    speakers_seen += 1
-                    current_speaker = speakers_seen
 
         # Build word timestamps if available
         words = None
@@ -719,13 +720,33 @@ def _assign_speakers(raw_segments: list[dict]) -> list[TranscriptSegment]:
     return transcript_segments
 
 
+_WHISPER_BOILERPLATE = {
+    "thank you for watching",
+    "thanks for watching",
+    "please subscribe",
+    "like and subscribe",
+    "don't forget to subscribe",
+    "see you in the next video",
+    "bye bye",
+    "thanks for listening",
+    "music playing",
+    "music",
+    "applause",
+    "subtitles by",
+    "captions by",
+}
+
+
 def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
     """Remove Whisper hallucination segments.
 
     Detects and filters:
+    - Non-speech segments (high no_speech_prob + low confidence)
+    - Whisper boilerplate phrases
+    - Backward-jumping timestamps (temporal ordering violations)
+    - Abnormally long single segments (>1500 chars = likely runaway)
     - Repeated n-grams (looping text like "Thank you. Thank you. Thank you.")
-    - Abnormally long single segments (>500 chars = likely runaway)
-    - Segments that are exact or near-exact duplicates of the previous segment
+    - Segments that are near-exact duplicates of the previous segment (sequence-based)
     """
     if not raw_segments:
         return raw_segments
@@ -740,8 +761,34 @@ def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
         if not text:
             continue
 
+        # Check 0a: Non-speech segment (silence/music hallucination)
+        no_speech = seg.get("no_speech_prob", 0.0)
+        confidence = seg.get("confidence", 1.0)
+        if no_speech and no_speech > 0.7 and confidence is not None and confidence < 0.3:
+            logger.warning(
+                "Hallucination filter: removed non-speech segment at %.1fs (no_speech=%.2f, conf=%.2f): %s...",
+                seg["start"], no_speech, confidence, text[:60],
+            )
+            continue
+
+        # Check 0b: Whisper boilerplate phrases
+        if text.lower().strip().rstrip('.!') in _WHISPER_BOILERPLATE:
+            logger.warning(
+                "Hallucination filter: removed boilerplate at %.1fs: %s",
+                seg["start"], text[:60],
+            )
+            continue
+
+        # Check 0c: Temporal ordering — segment start must not jump backward
+        if filtered and seg["start"] < filtered[-1]["start"]:
+            logger.warning(
+                "Hallucination filter: removed backward-jumping segment at %.1fs (prev started %.1fs): %s...",
+                seg["start"], filtered[-1]["start"], text[:60],
+            )
+            continue
+
         # Check 1: Abnormally long segment (Whisper runaway)
-        if len(text) > 500:
+        if len(text) > 1500:
             logger.warning(
                 "Hallucination filter: removed runaway segment at %.1fs (%d chars): %s...",
                 seg["start"], len(text), text[:80],
@@ -763,18 +810,18 @@ def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
                 )
                 continue
 
-        # Check 3: Near-duplicate of previous segment
-        if prev_text and text:
-            prev_words = set(prev_text.lower().split())
-            curr_words = set(text.lower().split())
-            if prev_words and curr_words:
-                overlap = len(prev_words & curr_words) / max(len(prev_words), len(curr_words))
-                if overlap > 0.8 and len(curr_words) > 3:
-                    logger.warning(
-                        "Hallucination filter: removed duplicate segment at %.1fs: %s...",
-                        seg["start"], text[:60],
-                    )
-                    continue
+        # Check 3: Near-duplicate of previous segment (sequence-based)
+        if prev_text and text and len(text.split()) > 3:
+            from difflib import SequenceMatcher
+            ratio = SequenceMatcher(None, prev_text.lower(), text.lower()).ratio()
+            seg_duration = seg["end"] - seg["start"]
+            # Only filter if very high similarity AND segment is short (< 5 seconds)
+            if ratio > 0.85 and seg_duration < 5.0:
+                logger.warning(
+                    "Hallucination filter: removed duplicate segment at %.1fs (%.0f%% similar): %s...",
+                    seg["start"], ratio * 100, text[:60],
+                )
+                continue
 
         filtered.append(seg)
         prev_text = text

@@ -236,6 +236,12 @@ async def extract_frames(
         f for f in os.listdir(output_dir) if f.startswith("frame_") and f.endswith(".jpg")
     )
 
+    if not frame_files:
+        raise RuntimeError(
+            "FFmpeg extracted 0 frames from the video. The file may be too short, "
+            "contain only audio, or use an unsupported codec."
+        )
+
     # If we got more frames than max, keep the most evenly spaced subset
     if len(frame_files) > max_frames:
         original_count = len(frame_files)
@@ -251,23 +257,32 @@ async def extract_frames(
         timestamp = idx * rate  # Fallback; will be refined below
         frames.append(FrameData(timestamp=float(timestamp), path=path))
 
-    # Refine timestamps using ffprobe on extracted frames
-    try:
-        for i, frame in enumerate(frames):
-            probe_cmd = [
-                "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "frame=pts_time",
-                "-of", "csv=p=0", frame.path,
-            ]
+    # Refine timestamps using ffprobe on extracted frames (concurrent)
+    async def _probe_frame_pts(frame_path: str) -> float | None:
+        probe_cmd = [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "frame=pts_time",
+            "-of", "csv=p=0", frame_path,
+        ]
+        try:
             proc = await asyncio.create_subprocess_exec(
                 *probe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
             if stdout.strip():
-                try:
-                    frame.timestamp = float(stdout.strip())
-                except ValueError:
-                    pass
+                return float(stdout.strip())
+        except (asyncio.TimeoutError, ValueError, Exception):
+            pass
+        return None
+
+    try:
+        pts_results = await asyncio.gather(
+            *(_probe_frame_pts(frame.path) for frame in frames),
+            return_exceptions=True,
+        )
+        for frame, pts in zip(frames, pts_results):
+            if isinstance(pts, float):
+                frame.timestamp = pts
     except Exception as e:
         logger.warning("Could not refine frame timestamps: %s", e)
 

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import time as _time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -252,6 +253,17 @@ async def _run_analysis_inner(job_id: str):
         f"Metadata extracted — {res} @ {fps_val}fps, {dur_fmt} duration, {mb:.1f}MB",
     )
 
+    # Disk space pre-check — estimate needed space from video metadata
+    disk_usage = shutil.disk_usage("/data")
+    # Estimate: audio WAV ~1.8MB/min + frames ~3MB + overhead
+    estimated_need_mb = max(50, metadata.get("file_size_mb", 100) * 0.3)
+    if disk_usage.free < estimated_need_mb * 1024 * 1024:
+        raise RuntimeError(
+            f"Insufficient disk space: {disk_usage.free // (1024*1024)}MB free, "
+            f"estimated {int(estimated_need_mb)}MB needed. "
+            f"Please free space on the /data volume."
+        )
+
     # Broadcast GPU info early so user can see what hardware is available
     try:
         from backend.services.clip_exporter import detect_gpu_capabilities, get_encoder_label
@@ -422,7 +434,7 @@ async def _run_analysis_inner(job_id: str):
         await _update_branch_progress("scene_analysis", 0, JobStatus.ANALYZING_SCENES,
             f"Preparing {total_frames} frames for AI analysis...")
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         _completed = 0
         _batch_size = min(16, max(1, total_frames))
 
@@ -640,9 +652,18 @@ async def _run_analysis_inner(job_id: str):
     cancel_check()
     _clips_start = _time.monotonic()
 
+    clip_detection_task = None
+
     async def _clips_heartbeat():
         await asyncio.sleep(10)
         while True:
+            try:
+                cancel_check()
+            except Exception:
+                # Cancel requested — also cancel the main clip detection task
+                if clip_detection_task and not clip_detection_task.done():
+                    clip_detection_task.cancel()
+                raise
             elapsed = int(_time.monotonic() - _clips_start)
             await _update_progress(
                 job_id, JobStatus.DETECTING_CLIPS, min(93, 78 + elapsed // 10),
@@ -652,11 +673,14 @@ async def _run_analysis_inner(job_id: str):
 
     heartbeat_task = asyncio.create_task(_clips_heartbeat())
     try:
-        clips, clips_provider = await asyncio.wait_for(
+        clip_detection_task = asyncio.ensure_future(
             orchestrator.detect_viral_clips(
                 transcript, scenes, metadata["duration"], job_id,
                 video_summary=summary_text,
-            ),
+            )
+        )
+        clips, clips_provider = await asyncio.wait_for(
+            clip_detection_task,
             timeout=_SUMMARY_CLIP_TIMEOUT,
         )
     except asyncio.TimeoutError:
@@ -673,7 +697,7 @@ async def _run_analysis_inner(job_id: str):
         heartbeat_task.cancel()
         try:
             await heartbeat_task
-        except asyncio.CancelledError:
+        except (asyncio.CancelledError, CancelledError):
             pass
 
     await _update_progress(

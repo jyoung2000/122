@@ -40,7 +40,10 @@ async def analyze_audio_energy(
         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
     except asyncio.TimeoutError:
         proc.kill()
-        await proc.wait()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            logger.warning("Audio analysis process did not exit after kill — force continuing")
         logger.warning("Audio analysis timed out")
         return []
 
