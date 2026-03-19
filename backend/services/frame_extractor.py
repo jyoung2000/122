@@ -305,20 +305,17 @@ async def extract_frames(
     2. CPU decode + scene detection filter (GPU may be incompatible)
     3. CPU decode + interval-only filter (scene detection may be failing)
     """
-    # Adaptive max_frames — scales with video duration using diminishing density:
-    #   0-30 min:  6 frames/min  (e.g. 10 min → 60,  30 min → 180)
-    #   30-90 min: 4 frames/min  (e.g. 60 min → 300, 90 min → 420)
-    #   90+ min:   2 frames/min  (e.g. 120 min → 480, 180 min → 600)
-    # This ensures long videos get enough coverage without exploding I/O.
+    # Adaptive max_frames — no upper ceiling. Guarantees at least 3 frames/min
+    # for any video length, with 6 frames/min for shorter content:
+    #   0-60 min:  6 frames/min  (e.g. 10 min → 60, 60 min → 360)
+    #   60+ min:   3 frames/min  (e.g. 120 min → 540, 3 hrs → 720)
     if max_frames is None:
         if video_duration and video_duration > 0:
             minutes = video_duration / 60
-            if minutes <= 30:
-                target = int(minutes * settings.FRAMES_PER_MINUTE)
-            elif minutes <= 90:
-                target = int(30 * settings.FRAMES_PER_MINUTE + (minutes - 30) * 4)
+            if minutes <= 60:
+                target = int(minutes * settings.FRAMES_PER_MINUTE)  # 6/min
             else:
-                target = int(30 * settings.FRAMES_PER_MINUTE + 60 * 4 + (minutes - 90) * 2)
+                target = int(60 * settings.FRAMES_PER_MINUTE + (minutes - 60) * 3)
             max_frames = max(settings.MIN_FRAMES, target)
         else:
             max_frames = 60  # fallback
