@@ -250,8 +250,48 @@ async def extract_frames(
         raise
 
     if proc.returncode != 0:
-        logger.error(f"FFmpeg frame extraction failed: {stderr.decode()}")
-        raise RuntimeError(f"FFmpeg failed: {stderr.decode()[:500]}")
+        stderr_text = stderr.decode(errors="replace")
+        # Show the LAST 500 chars (the actual error), not the first (banner)
+        error_tail = stderr_text[-500:] if len(stderr_text) > 500 else stderr_text
+
+        # If GPU decode was used, retry without it — the container FFmpeg
+        # may lack CUDA/cuvid support even though NVIDIA GPU is present.
+        if _hw_dec:
+            logger.warning(
+                "FFmpeg frame extraction failed with GPU decode (%s), "
+                "retrying with CPU decode: %s", _hw_dec, error_tail,
+            )
+            # Clean any partial frames from the failed attempt
+            for f in os.listdir(output_dir):
+                if f.startswith("frame_") and f.endswith(".jpg"):
+                    os.remove(os.path.join(output_dir, f))
+
+            cmd_cpu = [
+                "ffmpeg", "-y",
+                "-threads", "0",
+                "-i", video_path,
+                "-an",
+                "-vf", scene_filter,
+                "-vsync", "vfr",
+                "-q:v", "12",
+                "-frame_pts", "1",
+                os.path.join(output_dir, "frame_%06d.jpg"),
+            ]
+            logger.info("FFmpeg CPU fallback extraction: %s", " ".join(cmd_cpu))
+            proc2 = await asyncio.create_subprocess_exec(
+                *cmd_cpu,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr2 = await proc2.communicate()
+            if proc2.returncode != 0:
+                stderr2_text = stderr2.decode(errors="replace")
+                error2_tail = stderr2_text[-500:] if len(stderr2_text) > 500 else stderr2_text
+                logger.error(f"FFmpeg CPU fallback also failed: {stderr2_text}")
+                raise RuntimeError(f"FFmpeg failed: {error2_tail}")
+        else:
+            logger.error(f"FFmpeg frame extraction failed: {stderr_text}")
+            raise RuntimeError(f"FFmpeg failed: {error_tail}")
 
     # Collect extracted frames with actual timestamps from PTS
     frames = []
