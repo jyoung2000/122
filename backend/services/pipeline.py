@@ -316,31 +316,41 @@ async def _run_analysis_inner(job_id: str):
     def _pipeline_elapsed():
         return _time.monotonic() - _pipeline_start
 
-    def _pipeline_eta(current_pct):
-        """Estimate remaining time based on current progress percentage.
+    _clips_phase_start = [0.0]  # mutable; set when clip detection starts
 
-        Uses phase-aware estimation during clip detection (78-95%) to avoid
-        the nonsensical ETA drift that occurs when progress caps at 93%.
+    def _pipeline_eta(current_pct):
+        """Estimate remaining time based on progress.
+
+        Uses phase-local estimation during clip detection (78-95%) to avoid
+        the nonsensical ETA drift from global rate + capped progress.
         """
         if current_pct <= 2:
             return ""
         elapsed = _pipeline_elapsed()
 
-        # During clip detection phase (78-95%), use phase-local estimation
-        if 78 <= current_pct <= 95 and hasattr(_pipeline_eta, '_clips_start'):
-            clips_elapsed = _time.monotonic() - _pipeline_eta._clips_start
-            clips_pct = current_pct - 78  # 0-17 within this phase
-            if clips_pct > 1 and clips_elapsed > 10:
-                clips_rate = clips_pct / clips_elapsed
-                clips_remaining = max(0, (95 - current_pct) / clips_rate)
-                remaining = clips_remaining + 30  # ~30s for post-clip saving
-                if remaining < 60:
-                    return f" — ~{int(remaining)}s remaining"
-                m, s = divmod(int(remaining), 60)
-                return f" — ~{m}m {s}s remaining"
+        # During clip detection (78-95%), use phase-local ETA
+        if 78 <= current_pct <= 95 and _clips_phase_start[0] > 0:
+            phase_elapsed = _time.monotonic() - _clips_phase_start[0]
+            phase_pct = current_pct - 78  # 0-17 within clip phase
+            if phase_pct > 0 and phase_elapsed > 5:
+                phase_rate = phase_pct / phase_elapsed
+                phase_remaining = max(0, (95 - current_pct) / phase_rate)
+                total_remaining = phase_remaining + 15  # ~15s for saving
+            else:
+                # Not enough data yet — rough estimate from video duration
+                vid_min = metadata["duration"] / 60 if metadata.get("duration") else 10
+                total_remaining = max(60, vid_min * 8)
+            if total_remaining < 60:
+                return f" — ~{int(total_remaining)}s remaining"
+            m, s = divmod(int(total_remaining), 60)
+            return f" — ~{m}m {s}s remaining"
 
-        # Default: overall pipeline rate
+        # Default: global pipeline rate
+        if elapsed <= 0:
+            return ""
         rate = current_pct / elapsed
+        if rate <= 0:
+            return ""
         remaining = max(0, (100 - current_pct) / rate)
         if remaining < 60:
             return f" — ~{int(remaining)}s remaining"
@@ -443,8 +453,13 @@ async def _run_analysis_inner(job_id: str):
         f"Extracting frames + audio{size_note}...",
     )
 
+    # Estimate total frames for progress scaling
+    _est_frame_rate = settings.FRAME_SAMPLE_RATE
+    _est_total_frames = max(50, int(metadata["duration"] / _est_frame_rate)) if metadata["duration"] > 0 else 100
+
     async def _frame_progress(frames_so_far: int):
-        pct = min(14, 8 + frames_so_far)
+        extraction_pct = min(1.0, frames_so_far / _est_total_frames)
+        pct = 8 + int(extraction_pct * 6)  # 8% to 14%
         await _update_progress(
             job_id, JobStatus.EXTRACTING_FRAMES, pct,
             f"Extracted {frames_so_far} frames so far{size_note}...",
@@ -827,14 +842,26 @@ async def _run_analysis_inner(job_id: str):
     orchestrator.reset_circuit_breaker()
 
     _clips_start = _time.monotonic()
-    _pipeline_eta._clips_start = _clips_start  # Store for phase-aware ETA
+    _clips_phase_start[0] = _clips_start  # For phase-aware ETA
+
+    # Scale clip count with video duration
+    vid_minutes = metadata["duration"] / 60
+    if vid_minutes > 60:
+        dynamic_clip_count = min(30, int(vid_minutes * 0.4))
+    elif vid_minutes > 15:
+        dynamic_clip_count = min(20, 12 + int((vid_minutes - 15) * 0.2))
+    else:
+        dynamic_clip_count = settings.MAX_CLIP_CANDIDATES
+    logger.info(
+        "[%s] Dynamic clip count: %d (%.0f min video, default=%d)",
+        job_id, dynamic_clip_count, vid_minutes, settings.MAX_CLIP_CANDIDATES,
+    )
 
     clip_detection_task = None
-    _last_callback_time = [0.0]  # mutable container for closure
+    _clips_max_pct = [78]  # Track highest progress seen (never go backward)
 
     async def _clip_progress(phase: str, info: dict):
         """Progress callback from multi-pass clip detection."""
-        _last_callback_time[0] = _time.monotonic()
         elapsed = int(_time.monotonic() - _clips_start)
 
         if phase == "pass1_start":
@@ -846,8 +873,7 @@ async def _run_analysis_inner(job_id: str):
             total = info.get("window_total", 1)
             clips_so_far = info.get("clips_so_far", 0)
             msg = f"Pass 1: window {idx}/{total} done ({clips_so_far} clips so far)..."
-            # Scale 78-90% across windows
-            pct = 78 + int((idx / max(total, 1)) * 12)
+            pct = 78 + int((idx / max(total, 1)) * 12)  # 78-90%
         elif phase == "pass1_done":
             n_clips = info.get("clips", 0)
             msg = f"Pass 1 found {n_clips} clips — checking coverage..."
@@ -862,14 +888,18 @@ async def _run_analysis_inner(job_id: str):
             start = info.get("start", 0)
             end = info.get("end", 0)
             msg = f"Pass 2: scanning gap {idx}/{total} ({start:.0f}-{end:.0f}s)..."
-            pct = 91 + int((idx / max(total, 1)) * 3)
+            pct = 91 + int((idx / max(total, 1)) * 3)  # 91-94%
         elif phase == "pass3_merge":
             raw = info.get("raw", 0)
             msg = f"Merging {raw} candidates..."
             pct = 94
         else:
             msg = f"Identifying viral moments... ({elapsed}s elapsed)"
-            pct = min(94, 78 + elapsed // 10)
+            pct = min(94, 78 + elapsed // 15)
+
+        # Never go backward
+        pct = max(pct, _clips_max_pct[0])
+        _clips_max_pct[0] = pct
 
         await _update_progress(
             job_id, JobStatus.DETECTING_CLIPS, min(95, pct),
@@ -882,19 +912,17 @@ async def _run_analysis_inner(job_id: str):
             try:
                 cancel_check()
             except Exception:
-                # Cancel requested — also cancel the main clip detection task
                 if clip_detection_task and not clip_detection_task.done():
                     clip_detection_task.cancel()
                 raise
             elapsed = int(_time.monotonic() - _clips_start)
-            # Only show heartbeat if no callback has fired in the last 20s
-            # This prevents the heartbeat from overwriting detailed progress
-            since_callback = _time.monotonic() - _last_callback_time[0]
-            if since_callback > 20:
-                pct = min(94, 78 + elapsed // 15)  # slower growth, caps at 94% after 240s
+            hb_pct = min(94, 78 + elapsed // 15)
+            # Only update if heartbeat would ADVANCE progress (never regress)
+            if hb_pct > _clips_max_pct[0]:
+                _clips_max_pct[0] = hb_pct
                 await _update_progress(
-                    job_id, JobStatus.DETECTING_CLIPS, pct,
-                    f"Identifying viral moments... ({elapsed}s elapsed){_pipeline_eta(pct)}",
+                    job_id, JobStatus.DETECTING_CLIPS, hb_pct,
+                    f"Identifying viral moments... ({elapsed}s elapsed){_pipeline_eta(hb_pct)}",
                 )
             await asyncio.sleep(8)
 
@@ -907,6 +935,7 @@ async def _run_analysis_inner(job_id: str):
                     video_summary=summary_text,
                     hot_zones=hot_zones,
                     progress_callback=_clip_progress,
+                    clip_count=dynamic_clip_count,
                 )
             )
             clips, clips_provider = await asyncio.wait_for(
@@ -926,6 +955,7 @@ async def _run_analysis_inner(job_id: str):
                         video_summary=summary_text,
                         hot_zones=hot_zones,
                         progress_callback=_clip_progress,
+                        clip_count=dynamic_clip_count,
                     ),
                     timeout=_SUMMARY_CLIP_TIMEOUT,
                 )

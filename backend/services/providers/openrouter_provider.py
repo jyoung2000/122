@@ -750,10 +750,28 @@ class OpenRouterProvider(AIProvider):
                     return []
 
         try:
-            await asyncio.gather(
+            results = await asyncio.gather(
                 *[_process_window(i, ws, we) for i, (ws, we) in enumerate(windows)],
                 return_exceptions=True,
             )
+            # Count failures for logging
+            failed_count = 0
+            for i, result in enumerate(results):
+                if isinstance(result, BaseException):
+                    logger.warning("Window %d/%d failed with exception: %s", i + 1, len(windows), result)
+                    failed_count += 1
+                elif isinstance(result, list) and not result:
+                    failed_count += 1  # empty list from exception handler
+            if failed_count == len(windows):
+                logger.error(
+                    "ALL %d windows failed in windowed detection — likely API/rate-limit issue",
+                    len(windows),
+                )
+            elif failed_count > 0:
+                logger.warning(
+                    "%d/%d windows failed (%d clips from %d successful windows)",
+                    failed_count, len(windows), len(collected_clips), len(windows) - failed_count,
+                )
         except asyncio.CancelledError:
             # Timeout or cancellation — return whatever we collected so far
             logger.warning(
@@ -893,6 +911,7 @@ class OpenRouterProvider(AIProvider):
                         if cancel_check:
                             cancel_check()
 
+                        gap_duration = gap_end - gap_start
                         gap_transcript = [
                             s for s in transcript
                             if s.start >= gap_start - 15 and s.end <= gap_end + 15
@@ -914,19 +933,38 @@ class OpenRouterProvider(AIProvider):
                             })
 
                         logger.info(
-                            "Pass 2: scanning gap %.0f-%.0fs (%d segments, %d scenes)",
-                            gap_start, gap_end, len(gap_transcript), len(gap_scenes),
+                            "Pass 2: scanning gap %.0f-%.0fs (%d segments, %d scenes, %.0fs duration)",
+                            gap_start, gap_end, len(gap_transcript), len(gap_scenes), gap_duration,
                         )
 
                         try:
-                            return await self._single_pass_clip_detection(
-                                gap_transcript, gap_scenes, gap_end - gap_start,
-                                custom_prompt=custom_prompt, cancel_check=cancel_check,
-                                clip_count=3,
-                                min_duration=min_duration, max_duration=max_duration,
-                                video_summary=video_summary,
-                                existing_clips=existing_desc,
-                            )
+                            # Large gaps (>10 min) get windowed detection to ensure full coverage.
+                            # Without this, _single_pass truncates the transcript and only sees
+                            # the beginning of the gap.
+                            if gap_duration > 600:
+                                logger.info(
+                                    "Pass 2 gap %.0f-%.0fs is %.0fmin — using windowed sub-scan",
+                                    gap_start, gap_end, gap_duration / 60,
+                                )
+                                return await self._windowed_clip_detection(
+                                    gap_transcript, gap_scenes, gap_duration,
+                                    window_duration=480.0,
+                                    overlap_duration=60.0,
+                                    custom_prompt=custom_prompt, cancel_check=cancel_check,
+                                    clip_count=max(3, num_clips // 2),
+                                    min_duration=min_duration, max_duration=max_duration,
+                                    video_summary=video_summary,
+                                    existing_clips=existing_desc,
+                                )
+                            else:
+                                return await self._single_pass_clip_detection(
+                                    gap_transcript, gap_scenes, gap_duration,
+                                    custom_prompt=custom_prompt, cancel_check=cancel_check,
+                                    clip_count=3,
+                                    min_duration=min_duration, max_duration=max_duration,
+                                    video_summary=video_summary,
+                                    existing_clips=existing_desc,
+                                )
                         except Exception as e:
                             logger.warning("Pass 2 gap scan failed: %s", e)
                             return []
