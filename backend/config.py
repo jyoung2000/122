@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     # Speaker diarization (pyannote)
     DIARIZATION_ENABLED: bool = True  # Use pyannote for real speaker diarization
     DIARIZATION_MIN_SPEAKERS: int = 1
-    DIARIZATION_MAX_SPEAKERS: int = 10
+    DIARIZATION_MAX_SPEAKERS: int = 0  # 0 = unlimited (pyannote auto-detects)
     HF_AUTH_TOKEN: str = ""  # HuggingFace token for pyannote model access
 
     @property

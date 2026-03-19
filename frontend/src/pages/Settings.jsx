@@ -1039,6 +1039,91 @@ export default function Settings() {
                 )}
               </p>
             </div>
+
+            {/* Speaker Detection — HuggingFace token for pyannote neural diarization */}
+            {(() => {
+              const hfName = 'huggingface';
+              const hfSt = statuses[hfName]?.status || 'not_configured';
+              const hfUp = hfSt === 'connected' || hfSt === 'configured';
+              const hfBusy = providerSaving[hfName] || providerTesting[hfName];
+              const hfResult = providerResults[hfName];
+              return (
+                <div style={{
+                  background: 'var(--bg-panel)', border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)', padding: isMobile ? '12px' : '12px 16px',
+                  boxShadow: 'var(--shadow-sm)',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <div style={{
+                      width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+                      background: hfSt === 'connected' ? 'var(--success)' : hfUp ? 'var(--accent-cyan)' : hfSt === 'invalid_key' ? 'var(--danger)' : 'var(--text-muted)',
+                    }} />
+                    <span style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>Speaker Detection</span>
+                    <span style={{ fontSize: 10, color: hfUp ? 'var(--success)' : 'var(--text-muted)', fontWeight: 600 }}>
+                      {hfUp ? 'Neural diarization active' : 'Heuristic mode'}
+                    </span>
+                  </div>
+                  <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.5 }}>
+                    Without a token, speaker detection uses pause-based heuristics.
+                    Add a HuggingFace token to enable <strong style={{ color: 'var(--text-secondary)' }}>pyannote neural diarization</strong> —
+                    accurately identifies who is speaking with unlimited speakers.
+                  </p>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10, lineHeight: 1.6, paddingLeft: 8, borderLeft: '2px solid var(--border)' }}>
+                    <div>1. Create a free account at <a href="https://huggingface.co/join" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>huggingface.co</a></div>
+                    <div>2. Get a token at <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>Settings &gt; Access Tokens</a></div>
+                    <div>3. Accept model terms at <a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>pyannote/speaker-diarization-3.1</a></div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, flexDirection: isMobile ? 'column' : 'row' }}>
+                    <input
+                      type="password"
+                      placeholder="hf_..."
+                      value={providerKeys[hfName] || ''}
+                      onChange={(e) => setProviderKeys((p) => ({ ...p, [hfName]: e.target.value }))}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSaveKey(hfName)}
+                      style={{
+                        flex: 1, padding: '7px 10px', background: 'var(--bg-base)',
+                        border: `1px solid ${hfUp ? 'var(--success)' : 'var(--border)'}`,
+                        borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-mono)',
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                    <button
+                      onClick={() => handleSaveKey(hfName)}
+                      disabled={hfBusy || !(providerKeys[hfName] || '').trim()}
+                      style={{
+                        padding: '7px 14px', background: 'var(--accent-cyan)', color: 'var(--bg-base)',
+                        border: 'none', borderRadius: 'var(--radius-sm)', fontSize: 11, fontWeight: 600,
+                        opacity: hfBusy || !(providerKeys[hfName] || '').trim() ? 0.5 : 1, whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {providerSaving[hfName] ? 'Saving...' : 'Save & Test'}
+                    </button>
+                    {hfUp && (
+                      <button
+                        onClick={() => handleTestProvider(hfName)}
+                        disabled={hfBusy}
+                        style={{
+                          padding: '7px 10px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 11,
+                          opacity: hfBusy ? 0.5 : 1, whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {providerTesting[hfName] ? '...' : 'Test'}
+                      </button>
+                    )}
+                  </div>
+                  {hfResult && (
+                    <div style={{
+                      marginTop: 8, padding: '6px 10px', borderRadius: 'var(--radius-sm)', fontSize: 11, lineHeight: 1.5,
+                      background: hfResult.status === 'connected' ? 'var(--success-dim)' : hfResult.status === 'invalid_key' ? 'var(--danger-dim)' : 'var(--amber-dim)',
+                      color: hfResult.status === 'connected' ? 'var(--success)' : hfResult.status === 'invalid_key' ? 'var(--danger)' : 'var(--accent-amber)',
+                    }}>
+                      {hfResult.message}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           {/* ── Model Selection Section ── */}

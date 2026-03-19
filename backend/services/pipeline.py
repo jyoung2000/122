@@ -578,8 +578,11 @@ async def _run_analysis_inner(job_id: str):
         # path — raw Whisper output is good enough for clip detection.
 
         speaker_count = len(set(s.speaker for s in result))
+        from backend.services.transcription import _last_diarization_method
+        diar_method = _last_diarization_method.get("method", "heuristic")
+        diar_label = "neural (pyannote)" if diar_method == "neural" else "heuristic (pause-based)"
         await _update_branch_progress("transcription", 100, JobStatus.TRANSCRIBING,
-            f"Transcribed {len(result)} segments \u2014 {speaker_count} speaker{'s' if speaker_count != 1 else ''} detected")
+            f"Transcribed {len(result)} segments \u2014 {speaker_count} speaker{'s' if speaker_count != 1 else ''} detected via {diar_label}")
         return result
 
     # ── Branch B: Base64 encoding + AI scene analysis ──

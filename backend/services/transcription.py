@@ -16,6 +16,9 @@ _model_lock = threading.Lock()
 # pipeline can read it after transcription completes.
 _last_detected_language = {}
 
+# Stores which diarization method was used ("neural" or "heuristic")
+_last_diarization_method = {"method": "heuristic"}
+
 # Exposed after model loads so the pipeline can report GPU info in status messages
 whisper_device_info = {"device": "cpu", "compute_type": "int8", "gpu_name": ""}
 
@@ -178,6 +181,14 @@ def reload_model():
     with _model_lock:
         _whisper_model = None
     logger.info("Whisper model cache cleared — will reload on next use")
+
+
+def reload_diarization():
+    """Force-reload the pyannote pipeline when HF_AUTH_TOKEN changes."""
+    global _diarization_pipeline
+    with _diarization_lock:
+        _diarization_pipeline = None
+    logger.info("pyannote diarization cache cleared — will reload on next use")
 
 
 def _get_whisper_model():
@@ -616,9 +627,13 @@ def _transcribe_sync(
     # Try pyannote diarization first, fall back to pause-based heuristic
     speaker_map = _diarize_audio(audio_path)
     if speaker_map:
+        logger.info("Speaker detection: NEURAL mode (pyannote diarization)")
         transcript_segments = _assign_speakers_from_diarization(raw_segments, speaker_map)
+        _last_diarization_method["method"] = "neural"
     else:
+        logger.info("Speaker detection: HEURISTIC mode (pause-based) — set HF_AUTH_TOKEN for neural diarization")
         transcript_segments = _assign_speakers(raw_segments)
+        _last_diarization_method["method"] = "heuristic"
 
     speaker_set = set(s.speaker for s in transcript_segments)
     logger.info(f"Transcription complete: {len(transcript_segments)} segments, {len(speaker_set)} speakers detected")
@@ -672,41 +687,105 @@ async def extract_word_timestamps(
 
 
 def _assign_speakers(raw_segments: list[dict]) -> list[TranscriptSegment]:
-    """Assign speaker labels using pause-based turn detection.
+    """Assign speaker labels using enhanced pause-based turn detection.
 
-    Heuristics:
-    - Short gaps (< 1.5s): same speaker continues
-    - Medium gaps (1.5-4s): speaker turn — toggle between the two most recent speakers
-    - Large gaps (> 4s): potential new speaker introduction (up to max 4)
-    - Very long segments (> 30s) followed by a gap suggest a monologue ending, then a response
+    No artificial speaker cap. Tracks speaker history and speech rate per speaker
+    to make smarter toggle decisions for 3+ person conversations.
     """
-    TURN_GAP = 1.5       # seconds — conversation turn boundary
-    NEW_SPEAKER_GAP = 4.0  # seconds — possible new speaker
-    MAX_SPEAKERS = 4
+    TURN_GAP = 1.2
+    NEW_SPEAKER_GAP = 5.0
+    MONOLOGUE_DURATION = 15.0
+    INTERJECTION_WORDS = 4
+    RATE_CHANGE_THRESHOLD = 0.4
 
     if not raw_segments:
         return []
 
     transcript_segments = []
     current_speaker = 1
-    previous_speaker = 1
     speakers_seen = 1
+    speaker_history: list[int] = [1]
+    speaker_rates: dict[int, list[float]] = {1: []}
+
+    def _words_per_sec(seg: dict) -> float:
+        duration = seg["end"] - seg["start"]
+        if duration <= 0:
+            return 3.0
+        word_count = len(seg["text"].split()) if seg["text"] else 0
+        return word_count / duration if duration > 0.5 else 3.0
+
+    def _avg_rate(speaker: int) -> float:
+        rates = speaker_rates.get(speaker, [])
+        return sum(rates) / len(rates) if rates else 3.0
+
+    def _most_likely_existing_speaker(rate: float) -> int:
+        best_speaker = current_speaker
+        best_diff = float('inf')
+        for sp, rates in speaker_rates.items():
+            if not rates:
+                continue
+            avg = sum(rates) / len(rates)
+            diff = abs(avg - rate)
+            if diff < best_diff:
+                best_diff = diff
+                best_speaker = sp
+        return best_speaker
 
     for i, seg in enumerate(raw_segments):
+        seg_rate = _words_per_sec(seg)
+        seg_word_count = len(seg["text"].split()) if seg["text"] else 0
+
         if i > 0:
             gap = seg["start"] - raw_segments[i - 1]["end"]
+            prev_duration = raw_segments[i - 1]["end"] - raw_segments[i - 1]["start"]
+            prev_rate = _words_per_sec(raw_segments[i - 1])
 
-            if gap >= NEW_SPEAKER_GAP and speakers_seen < MAX_SPEAKERS:
-                # Large gap — introduce a new speaker
-                speakers_seen += 1
-                previous_speaker = current_speaker
-                current_speaker = speakers_seen
-            elif gap >= TURN_GAP and speakers_seen >= 2:
-                # Medium gap — conversation turn, toggle between current and previous
-                # Only toggle when multiple speakers have been established
-                current_speaker, previous_speaker = previous_speaker, current_speaker
+            if gap >= NEW_SPEAKER_GAP:
+                rate_match = _most_likely_existing_speaker(seg_rate)
+                rate_diff = abs(seg_rate - _avg_rate(rate_match))
+                if rate_diff < RATE_CHANGE_THRESHOLD and rate_match != current_speaker:
+                    current_speaker = rate_match
+                else:
+                    speakers_seen += 1
+                    current_speaker = speakers_seen
+            elif gap >= TURN_GAP:
+                other = None
+                for sp in reversed(speaker_history):
+                    if sp != current_speaker:
+                        other = sp
+                        break
+                if other:
+                    current_speaker = other
+                else:
+                    speakers_seen += 1
+                    current_speaker = speakers_seen
+            elif (prev_duration > MONOLOGUE_DURATION
+                  and seg_word_count <= INTERJECTION_WORDS and gap < 0.5):
+                other = None
+                for sp in reversed(speaker_history):
+                    if sp != current_speaker:
+                        other = sp
+                        break
+                if other:
+                    current_speaker = other
+                else:
+                    speakers_seen += 1
+                    current_speaker = speakers_seen
+            elif abs(seg_rate - prev_rate) > RATE_CHANGE_THRESHOLD * max(seg_rate, prev_rate, 0.1):
+                rate_match = _most_likely_existing_speaker(seg_rate)
+                if rate_match != current_speaker:
+                    current_speaker = rate_match
 
-        # Build word timestamps if available
+        speaker_history.append(current_speaker)
+        if len(speaker_history) > 20:
+            speaker_history = speaker_history[-20:]
+
+        if current_speaker not in speaker_rates:
+            speaker_rates[current_speaker] = []
+        speaker_rates[current_speaker].append(seg_rate)
+        if len(speaker_rates[current_speaker]) > 10:
+            speaker_rates[current_speaker] = speaker_rates[current_speaker][-10:]
+
         words = None
         if seg.get("words"):
             words = [WordTimestamp(**w) for w in seg["words"]]
@@ -884,10 +963,11 @@ def _diarize_audio(audio_path: str):
         return None
 
     try:
+        max_spk = settings.DIARIZATION_MAX_SPEAKERS if settings.DIARIZATION_MAX_SPEAKERS > 0 else None
         diarization = pipeline(
             audio_path,
             min_speakers=settings.DIARIZATION_MIN_SPEAKERS,
-            max_speakers=settings.DIARIZATION_MAX_SPEAKERS,
+            max_speakers=max_spk,
         )
 
         # Build time-to-speaker mapping
@@ -910,13 +990,20 @@ def _diarize_audio(audio_path: str):
 def _assign_speakers_from_diarization(
     raw_segments: list[dict], speaker_map: dict
 ) -> list[TranscriptSegment]:
-    """Align Whisper segments with pyannote diarization output."""
+    """Align Whisper segments with pyannote diarization output.
+
+    Speakers are numbered by order of first appearance in the audio
+    (not alphabetically by pyannote's internal SPEAKER_XX labels).
+    """
     # Sort diarization turns by start time
     turns = sorted(speaker_map.items(), key=lambda x: x[0][0])
 
-    # Create a canonical speaker name mapping (SPEAKER_00 → Speaker 1, etc.)
-    unique_speakers = sorted(set(speaker_map.values()))
-    speaker_names = {s: f"Speaker {i+1}" for i, s in enumerate(unique_speakers)}
+    # Build speaker name mapping by first-appearance order
+    seen_order: list[str] = []
+    for (_, _), speaker in turns:
+        if speaker not in seen_order:
+            seen_order.append(speaker)
+    speaker_names = {s: f"Speaker {i+1}" for i, s in enumerate(seen_order)}
 
     transcript_segments = []
     for seg in raw_segments:

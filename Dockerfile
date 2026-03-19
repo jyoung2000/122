@@ -65,6 +65,10 @@ COPY backend/requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# Install pyannote.audio for neural speaker diarization (CPU torch for non-GPU builds)
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir pyannote.audio>=3.1.0
+
 # Install CUDA runtime libraries via pip for GPU passthrough support.
 # These PyPI packages provide the CUDA shared libraries that ctranslate2
 # and faster-whisper need — no NVIDIA apt repo or system CUDA required.

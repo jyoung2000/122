@@ -47,6 +47,7 @@ _PLACEHOLDER_KEYS = {"sk-or-...", "sk-ant-...", "AIza...", "gsk_...", ""}
 # Keys that are persisted to user_settings.json
 _PERSISTABLE_KEYS = [
     "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
+    "HF_AUTH_TOKEN",
     "OPENROUTER_PRESET", "OPENROUTER_VISION_MODEL", "OPENROUTER_TEXT_MODEL",
     "OPENROUTER_SUMMARY_MODEL", "WHISPER_MODEL", "WHISPER_BEAM_SIZE",
     "WHISPER_VAD_FILTER", "FRAME_SAMPLE_RATE", "SUBJECT_TRACKING_ENABLED",
@@ -57,7 +58,7 @@ _PERSISTABLE_KEYS = [
 ]
 
 # API key fields specifically (used to filter out placeholder values)
-_API_KEY_FIELDS = {"OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY"}
+_API_KEY_FIELDS = {"OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "HF_AUTH_TOKEN"}
 
 
 def _is_real_value(key: str, val: str) -> bool:
@@ -156,6 +157,7 @@ _PROVIDER_KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "groq": "GROQ_API_KEY",
+    "huggingface": "HF_AUTH_TOKEN",
 }
 
 # -- Cost estimation for a 10-min video --
@@ -314,6 +316,13 @@ async def provider_status():
     else:
         statuses["groq"] = {"status": "not_configured"}
 
+    # HuggingFace (speaker diarization)
+    hf_token = settings.HF_AUTH_TOKEN
+    if hf_token and hf_token.strip():
+        statuses["huggingface"] = {"status": "configured", "message": "Token set"}
+    else:
+        statuses["huggingface"] = {"status": "not_configured", "message": "No HF token"}
+
     # Determine the active provider and models based on fallback chain
     chain = settings.active_provider_chain
     active_provider = None
@@ -379,6 +388,8 @@ async def test_provider(provider_name: str):
         return await _test_gemini()
     elif provider_name == "groq":
         return await _test_groq()
+    elif provider_name == "huggingface":
+        return await _test_huggingface()
     else:
         return {"status": "error", "message": f"Unknown provider: {provider_name}"}
 
@@ -590,6 +601,49 @@ async def _test_groq():
         return {"status": "error", "message": f"Connection failed: {str(e)[:200]}"}
 
 
+async def _test_huggingface():
+    token = settings.HF_AUTH_TOKEN
+    if not token or not token.strip():
+        return {
+            "status": "not_configured",
+            "message": "HF_AUTH_TOKEN is not set. Add your HuggingFace access token to enable pyannote speaker diarization.",
+            "help": "Get a free token at https://huggingface.co/settings/tokens",
+        }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://huggingface.co/api/whoami-v2",
+                headers={"Authorization": f"Bearer {token.strip()}"},
+            )
+            if resp.status_code == 200:
+                username = resp.json().get("name", "unknown")
+                model_resp = await client.get(
+                    "https://huggingface.co/api/models/pyannote/speaker-diarization-3.1",
+                    headers={"Authorization": f"Bearer {token.strip()}"},
+                )
+                if model_resp.status_code == 200:
+                    return {
+                        "status": "connected",
+                        "message": f"Connected as '{username}'. pyannote model access confirmed — neural speaker diarization is enabled.",
+                    }
+                elif model_resp.status_code == 403:
+                    return {
+                        "status": "connected",
+                        "message": f"Connected as '{username}', but you must accept the pyannote model terms at https://huggingface.co/pyannote/speaker-diarization-3.1 and click 'Agree and access repository'.",
+                    }
+                else:
+                    return {
+                        "status": "connected",
+                        "message": f"Connected as '{username}'. Could not verify pyannote model access (HTTP {model_resp.status_code}).",
+                    }
+            elif resp.status_code == 401:
+                return {"status": "invalid_key", "message": "Token is invalid or expired."}
+            else:
+                return {"status": "error", "message": f"HuggingFace API returned HTTP {resp.status_code}."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to reach HuggingFace API: {e}"}
+
+
 class SaveKeyRequest(BaseModel):
     provider: str
     key: str
@@ -620,6 +674,15 @@ async def save_provider_key(req: SaveKeyRequest):
     # Update the settings object in memory
     setattr(settings, env_var, key_val)
     _invalidate_status_cache()
+
+    # If the HuggingFace token changed, reload the diarization pipeline
+    if env_var == "HF_AUTH_TOKEN":
+        try:
+            from backend.services.transcription import reload_diarization
+            reload_diarization()
+            logger.info("Reloading pyannote diarization pipeline with new HF token")
+        except Exception as e:
+            logger.warning("Failed to reload diarization pipeline: %s", e)
 
     # Persist to .env file (backup)
     env_path = _find_env_file()
