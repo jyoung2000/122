@@ -332,12 +332,34 @@ class AIOrchestrator:
         # fallback chain.  Cloud APIs get 5 min for clip detection (large
         # prompts with full transcript + scenes need time); local ollama
         # gets 2 min (3 retries × ~30s each with 90s httpx timeout as cap).
+        # Scale timeout for long videos: multi-pass creates N windows processed
+        # in pairs (sem=2). Each window worst-case ≈ 130s (primary timeout +
+        # fallback). Need: ceil(N/2) rounds × 130s + buffer.
+        vid_minutes = video_duration / 60 if video_duration else 0
+        if vid_minutes > 30:
+            est_windows = max(1, int(video_duration / 480))  # ~480s effective window
+            est_rounds = (est_windows + 1) // 2  # sem=2
+            default_timeout = max(330, est_rounds * 150 + 60)
+        else:
+            default_timeout = 330
         _PROVIDER_TIMEOUT = {"ollama": 120}
-        _DEFAULT_PROVIDER_TIMEOUT = 330  # 5.5 min — allows 300s internal + overhead
+
+        # Shared partial results container. Providers populate this incrementally
+        # so even if a timeout fires, we have whatever completed.
+        _partial_clips: list = []
 
         for provider in self._get_active_chain():
             pname = provider.provider_name
-            timeout = _PROVIDER_TIMEOUT.get(pname, _DEFAULT_PROVIDER_TIMEOUT)
+            # Ollama models have context windows too small for clip detection prompts
+            # which include full transcript + scenes + system instructions (~6000+ tokens).
+            # The model truncates the input and produces garbage. Skip for long videos.
+            if pname == "ollama" and video_duration > 120:
+                logger.info(
+                    "Skipping ollama for clip detection — context window too small for %ds video",
+                    int(video_duration),
+                )
+                continue
+            timeout = _PROVIDER_TIMEOUT.get(pname, default_timeout)
             try:
                 await self._notify_attempt(job_id, pname, "viral clip detection")
                 t0 = time.monotonic()
@@ -351,6 +373,7 @@ class AIOrchestrator:
                         existing_clips=existing_clips,
                         hot_zones=hot_zones,
                         progress_callback=progress_callback,
+                        _partial_results=_partial_clips,
                     ),
                     timeout=timeout,
                 )
@@ -359,6 +382,18 @@ class AIOrchestrator:
                 self._circuit_breaker.record_success(pname)
                 return result, pname
             except asyncio.TimeoutError:
+                elapsed = time.monotonic() - t0
+                # Check if partial results were collected before timeout
+                if _partial_clips:
+                    if hasattr(provider, '_deduplicate_clips'):
+                        deduped = provider._deduplicate_clips(_partial_clips)
+                    else:
+                        deduped = _partial_clips
+                    logger.warning(
+                        "Clip detection via %s timed out after %ds but recovered %d partial clips",
+                        pname, timeout, len(deduped),
+                    )
+                    return deduped, f"{pname} (partial)"
                 logger.warning("Clip detection via %s timed out after %ds", pname, timeout)
                 self._circuit_breaker.record_failure(pname)
                 await self._notify_fallback(job_id, pname, f"Timed out after {timeout}s")
@@ -367,6 +402,13 @@ class AIOrchestrator:
                 self._circuit_breaker.record_failure(pname)
                 await self._notify_fallback(job_id, pname, str(e))
                 continue
+
+        # Even if all providers "failed", check partial results
+        if _partial_clips:
+            logger.warning(
+                "All providers failed but recovered %d partial clips", len(_partial_clips),
+            )
+            return _partial_clips, "partial"
         raise AllProvidersFailedError("All providers failed for viral clip detection")
 
     async def text_completion(self, prompt: str, max_tokens: int = 4096, timeout: float = 60, job_id: str = "", skip_circuit_breaker: bool = False) -> str:

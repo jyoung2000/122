@@ -153,9 +153,22 @@ async def get_video_metadata(video_path: str) -> dict:
 
 
 def _build_scene_filter(rate: int) -> str:
-    """Build the hybrid scene detection + interval filter string."""
+    """Build the hybrid scene detection + interval filter string.
+
+    Adaptive scene threshold: for long videos with high sample rates,
+    raise the threshold to avoid scene detection overwhelming the interval cap.
+    Standard rate=10 uses threshold 0.3.
+    rate=30+ uses threshold 0.45 (only major scene changes).
+    """
+    if rate >= 30:
+        threshold = 0.45  # Only major scene changes for long videos
+    elif rate >= 20:
+        threshold = 0.38
+    else:
+        threshold = 0.3  # Default for short/medium videos
+
     return (
-        f"select='gt(scene\\,0.3)+isnan(prev_selected_t)"
+        f"select='gt(scene\\,{threshold})+isnan(prev_selected_t)"
         f"+gte(t-prev_selected_t\\,{rate})',"
         f"scale='min(1024\\,iw)':'min(576\\,ih)':force_original_aspect_ratio=decrease,"
         f"format=pix_fmts=yuvj420p"

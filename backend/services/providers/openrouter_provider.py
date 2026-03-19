@@ -678,12 +678,14 @@ class OpenRouterProvider(AIProvider):
         video_duration: float,
         window_duration: float = 600.0,
         overlap_duration: float = 120.0,
+        _partial_results: Optional[list] = None,
         **kwargs,
     ) -> list[ClipCandidate]:
         """Split long videos into overlapping windows and run clip detection on each.
 
         Processes up to 2 windows concurrently for speed.
-        Merges results with de-duplication to cover the entire video.
+        Collects results incrementally — completed windows are preserved even if
+        the overall task is cancelled mid-flight (e.g. by orchestrator timeout).
         """
         # Build window list
         windows = []
@@ -693,7 +695,13 @@ class OpenRouterProvider(AIProvider):
             windows.append((window_start, window_end))
             window_start += window_duration - overlap_duration
 
-        sem = asyncio.Semaphore(2)  # Up to 2 concurrent windows
+        # Shared result list — completed windows append here immediately.
+        # Even if later windows are still running when a timeout fires,
+        # the caller can read partial results from this list.
+        collected_clips: list[ClipCandidate] = []
+        sem = asyncio.Semaphore(2)
+
+        progress_callback = kwargs.get("progress_callback")
 
         async def _process_window(idx: int, w_start: float, w_end: float):
             async with sem:
@@ -714,28 +722,48 @@ class OpenRouterProvider(AIProvider):
                 )
 
                 try:
-                    return await self._single_pass_clip_detection(
+                    clips = await self._single_pass_clip_detection(
                         window_transcript, window_scenes, w_end - w_start,
                         **kwargs,
                     )
+                    # Immediately collect — survives if other windows timeout
+                    collected_clips.extend(clips)
+                    if _partial_results is not None:
+                        _partial_results.extend(clips)
+                    logger.info(
+                        "Window %d/%d found %d clips (total collected: %d)",
+                        idx + 1, len(windows), len(clips), len(collected_clips),
+                    )
+                    # Fire per-window progress
+                    if progress_callback:
+                        try:
+                            await progress_callback("pass1_window_done", {
+                                "window_idx": idx + 1,
+                                "window_total": len(windows),
+                                "clips_so_far": len(collected_clips),
+                            })
+                        except Exception:
+                            pass
+                    return clips
                 except Exception as e:
                     logger.warning("Window %d clip detection failed: %s", idx + 1, e)
                     return []
 
-        results = await asyncio.gather(
-            *[_process_window(i, ws, we) for i, (ws, we) in enumerate(windows)],
-            return_exceptions=True,
-        )
-
-        all_clips = []
-        for result in results:
-            if isinstance(result, list):
-                all_clips.extend(result)
-            elif isinstance(result, BaseException):
-                logger.warning("Window failed with exception: %s", result)
+        try:
+            await asyncio.gather(
+                *[_process_window(i, ws, we) for i, (ws, we) in enumerate(windows)],
+                return_exceptions=True,
+            )
+        except asyncio.CancelledError:
+            # Timeout or cancellation — return whatever we collected so far
+            logger.warning(
+                "Windowed detection cancelled — returning %d clips from completed windows",
+                len(collected_clips),
+            )
+            # Fall through to dedup and return
 
         # De-duplicate overlapping window results
-        return self._deduplicate_clips(all_clips)
+        return self._deduplicate_clips(collected_clips)
 
     async def detect_viral_clips(
         self,
@@ -751,6 +779,7 @@ class OpenRouterProvider(AIProvider):
         existing_clips: Optional[str] = None,
         hot_zones=None,
         progress_callback=None,
+        _partial_results: Optional[list] = None,
     ) -> list[ClipCandidate]:
         # For videos >5 min, use multi-pass detection for better coverage
         if video_duration > 300:
@@ -763,6 +792,7 @@ class OpenRouterProvider(AIProvider):
                 existing_clips=existing_clips,
                 hot_zones=hot_zones,
                 progress_callback=progress_callback,
+                _partial_results=_partial_results,
             )
 
         return await self._single_pass_clip_detection(
@@ -787,6 +817,7 @@ class OpenRouterProvider(AIProvider):
         existing_clips: Optional[str] = None,
         hot_zones=None,
         progress_callback=None,
+        _partial_results: Optional[list] = None,
     ) -> list[ClipCandidate]:
         """Multi-pass clip detection for comprehensive coverage.
 
@@ -826,10 +857,12 @@ class OpenRouterProvider(AIProvider):
         pass1_clips = await self._windowed_clip_detection(
             transcript, scenes, video_duration,
             window_duration=window_dur, overlap_duration=overlap_dur,
+            _partial_results=_partial_results,
             custom_prompt=custom_prompt, cancel_check=cancel_check,
             clip_count=max(8, num_clips),  # Ask full count per window; dedup is cheap
             min_duration=min_duration, max_duration=max_duration,
             video_summary=video_summary, existing_clips=existing_clips,
+            progress_callback=progress_callback,
         )
         all_clips.extend(pass1_clips)
         logger.info("Pass 1 found %d clips", len(pass1_clips))

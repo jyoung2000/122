@@ -317,11 +317,30 @@ async def _run_analysis_inner(job_id: str):
         return _time.monotonic() - _pipeline_start
 
     def _pipeline_eta(current_pct):
-        """Estimate remaining time based on current progress percentage."""
+        """Estimate remaining time based on current progress percentage.
+
+        Uses phase-aware estimation during clip detection (78-95%) to avoid
+        the nonsensical ETA drift that occurs when progress caps at 93%.
+        """
         if current_pct <= 2:
             return ""
         elapsed = _pipeline_elapsed()
-        rate = current_pct / elapsed  # percent per second
+
+        # During clip detection phase (78-95%), use phase-local estimation
+        if 78 <= current_pct <= 95 and hasattr(_pipeline_eta, '_clips_start'):
+            clips_elapsed = _time.monotonic() - _pipeline_eta._clips_start
+            clips_pct = current_pct - 78  # 0-17 within this phase
+            if clips_pct > 1 and clips_elapsed > 10:
+                clips_rate = clips_pct / clips_elapsed
+                clips_remaining = max(0, (95 - current_pct) / clips_rate)
+                remaining = clips_remaining + 30  # ~30s for post-clip saving
+                if remaining < 60:
+                    return f" — ~{int(remaining)}s remaining"
+                m, s = divmod(int(remaining), 60)
+                return f" — ~{m}m {s}s remaining"
+
+        # Default: overall pipeline rate
+        rate = current_pct / elapsed
         remaining = max(0, (100 - current_pct) / rate)
         if remaining < 60:
             return f" — ~{int(remaining)}s remaining"
@@ -808,43 +827,53 @@ async def _run_analysis_inner(job_id: str):
     orchestrator.reset_circuit_breaker()
 
     _clips_start = _time.monotonic()
+    _pipeline_eta._clips_start = _clips_start  # Store for phase-aware ETA
 
     clip_detection_task = None
+    _last_callback_time = [0.0]  # mutable container for closure
 
     async def _clip_progress(phase: str, info: dict):
         """Progress callback from multi-pass clip detection."""
+        _last_callback_time[0] = _time.monotonic()
         elapsed = int(_time.monotonic() - _clips_start)
 
         if phase == "pass1_start":
             n_windows = info.get("windows", 1)
             msg = f"Pass 1: scanning {n_windows} window{'s' if n_windows > 1 else ''}..."
             pct = 78
+        elif phase == "pass1_window_done":
+            idx = info.get("window_idx", 1)
+            total = info.get("window_total", 1)
+            clips_so_far = info.get("clips_so_far", 0)
+            msg = f"Pass 1: window {idx}/{total} done ({clips_so_far} clips so far)..."
+            # Scale 78-90% across windows
+            pct = 78 + int((idx / max(total, 1)) * 12)
         elif phase == "pass1_done":
             n_clips = info.get("clips", 0)
             msg = f"Pass 1 found {n_clips} clips — checking coverage..."
-            pct = 86
+            pct = 90
         elif phase == "pass2_start":
             n_gaps = info.get("gaps", 0)
             msg = f"Pass 2: sweeping {n_gaps} gap{'s' if n_gaps != 1 else ''} for hidden moments..."
-            pct = 87
+            pct = 91
         elif phase == "pass2_gap":
             idx = info.get("gap_idx", 1)
             total = info.get("gap_total", 1)
             start = info.get("start", 0)
             end = info.get("end", 0)
             msg = f"Pass 2: scanning gap {idx}/{total} ({start:.0f}-{end:.0f}s)..."
-            pct = 87 + int((idx / max(total, 1)) * 5)  # 87-92%
+            pct = 91 + int((idx / max(total, 1)) * 3)
         elif phase == "pass3_merge":
             raw = info.get("raw", 0)
             msg = f"Merging {raw} candidates..."
-            pct = 93
+            pct = 94
         else:
             msg = f"Identifying viral moments... ({elapsed}s elapsed)"
-            pct = min(93, 78 + elapsed // 10)
+            pct = min(94, 78 + elapsed // 10)
 
         await _update_progress(
-            job_id, JobStatus.DETECTING_CLIPS, min(94, pct),
-            f"{msg}{_pipeline_eta(min(94, pct))}",
+            job_id, JobStatus.DETECTING_CLIPS, min(95, pct),
+            f"{msg}{_pipeline_eta(min(95, pct))}",
         )
 
     async def _clips_heartbeat():
@@ -858,10 +887,15 @@ async def _run_analysis_inner(job_id: str):
                     clip_detection_task.cancel()
                 raise
             elapsed = int(_time.monotonic() - _clips_start)
-            await _update_progress(
-                job_id, JobStatus.DETECTING_CLIPS, min(93, 78 + elapsed // 10),
-                f"Identifying viral moments... ({elapsed}s elapsed){_pipeline_eta(min(93, 78 + elapsed // 10))}",
-            )
+            # Only show heartbeat if no callback has fired in the last 20s
+            # This prevents the heartbeat from overwriting detailed progress
+            since_callback = _time.monotonic() - _last_callback_time[0]
+            if since_callback > 20:
+                pct = min(94, 78 + elapsed // 15)  # slower growth, caps at 94% after 240s
+                await _update_progress(
+                    job_id, JobStatus.DETECTING_CLIPS, pct,
+                    f"Identifying viral moments... ({elapsed}s elapsed){_pipeline_eta(pct)}",
+                )
             await asyncio.sleep(8)
 
     heartbeat_task = asyncio.create_task(_clips_heartbeat())
