@@ -36,8 +36,7 @@ class Settings(BaseSettings):
     MAX_CLIP_CANDIDATES: int = 12
     # Adaptive frame extraction
     MIN_FRAMES: int = 30               # minimum for any video
-    MAX_FRAMES: int = 500              # absolute ceiling (raised for 30+ min videos)
-    FRAMES_PER_MINUTE: float = 6       # target density
+    FRAMES_PER_MINUTE: float = 6       # target density (first 30 min; diminishes for longer videos)
     CONCURRENT_ANALYSES: int = 2
     AUTO_ANALYZE: bool = True
     SUBJECT_TRACKING_ENABLED: bool = True
