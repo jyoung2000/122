@@ -372,12 +372,13 @@ export default function Settings() {
     loadAvailableModels();
   }, []);
 
-  // Reload models when provider status changes
+  // Reload models when provider status changes (including Ollama toggle)
   useEffect(() => {
     const hasProvider = statuses.openrouter?.status === 'configured' || statuses.openrouter?.status === 'connected'
-      || statuses.anthropic?.status === 'configured' || statuses.gemini?.status === 'configured';
+      || statuses.anthropic?.status === 'configured' || statuses.gemini?.status === 'configured'
+      || statuses._active?.ollama_enabled;
     if (hasProvider) loadAvailableModels();
-  }, [statuses.openrouter?.status, statuses.anthropic?.status, statuses.gemini?.status]);
+  }, [statuses.openrouter?.status, statuses.anthropic?.status, statuses.gemini?.status, statuses._active?.ollama_enabled]);
 
   // Save & test a provider key
   const handleSaveKey = async (providerName) => {
@@ -998,6 +999,7 @@ export default function Settings() {
                             ...prev,
                             _active: { ...prev._active, ollama_enabled: enabled, fallback_chain: data.chain },
                           }));
+                          loadAvailableModels();
                         }
                       } catch {
                         showToast('Failed to toggle Ollama', 'error');
@@ -1021,12 +1023,19 @@ export default function Settings() {
                 )}
               </div>
               <p style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4, margin: 0 }}>
-                No API key needed — runs models locally.
-                {!statuses._active?.ollama_enabled && ' Toggle on to add Ollama as a fallback provider.'}
-                {statuses._active?.ollama_enabled && statuses.ollama?.models_loaded?.length > 0 && (
-                  <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 10, marginTop: 4 }}>
-                    Models: {statuses.ollama.models_loaded.join(', ')}
-                  </span>
+                No API key needed — runs models locally on your GPU.
+                {!statuses._active?.ollama_enabled && ' Toggle on to use Ollama as your primary AI provider.'}
+                {statuses._active?.ollama_enabled && (
+                  <>
+                    <span style={{ display: 'block', color: 'var(--success)', fontWeight: 600, marginTop: 4 }}>
+                      Primary provider — Ollama models will be tried first.
+                    </span>
+                    {statuses.ollama?.models_loaded?.length > 0 && (
+                      <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 10, marginTop: 4 }}>
+                        Available: {statuses.ollama.models_loaded.join(', ')}
+                      </span>
+                    )}
+                  </>
                 )}
               </p>
             </div>

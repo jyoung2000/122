@@ -62,6 +62,7 @@ class OllamaProvider(AIProvider):
         self._summary_model = self._text_model
         self._total_tokens = 0
         self._model_ctx: dict[str, int] = {}
+        self._capabilities_detected = False
         # Shared connection pool — reused across all API calls
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(120.0, connect=10.0),
@@ -71,6 +72,12 @@ class OllamaProvider(AIProvider):
     async def close(self):
         """Close the shared HTTP client. Call when provider is no longer needed."""
         await self._client.aclose()
+
+    async def _ensure_capabilities(self):
+        """Lazy-detect model capabilities on first use."""
+        if not self._capabilities_detected:
+            await self._detect_capabilities()
+            self._capabilities_detected = True
 
     @property
     def supports_vision(self) -> bool:
@@ -124,6 +131,7 @@ class OllamaProvider(AIProvider):
 
     async def _call_vision(self, prompt: str, image_base64: str) -> str:
         """Send ONE frame at a time to the vision model via /api/chat."""
+        await self._ensure_capabilities()
         try:
             response = await self._client.post(
                 f"{self._host}/api/chat",
@@ -151,6 +159,7 @@ class OllamaProvider(AIProvider):
 
     async def _call_text(self, prompt: str, system: str = "", max_tokens: int = 4096,
                          timeout: float = 90.0, json_mode: bool = False) -> str:
+        await self._ensure_capabilities()
         try:
             messages = []
             if system:

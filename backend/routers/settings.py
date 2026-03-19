@@ -696,7 +696,7 @@ async def toggle_ollama(req: ToggleOllamaRequest):
     chain = [p.strip() for p in settings.AI_FALLBACK_CHAIN.split(",") if p.strip()]
     if req.enabled:
         if "ollama" not in chain:
-            chain.append("ollama")
+            chain.insert(0, "ollama")  # Ollama goes FIRST — user wants to use local models
     else:
         chain = [p for p in chain if p != "ollama"]
     settings.AI_FALLBACK_CHAIN = ",".join(chain)
@@ -1196,6 +1196,56 @@ async def available_models():
                 vision.append({**entry, **_estimate_speed(mid, "vision", False)})
             text.append({**entry, **_estimate_speed(mid, "text", False)})
 
+    # Add Ollama local models if Ollama is in the chain and reachable
+    if "ollama" in settings.active_provider_chain:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{settings.OLLAMA_HOST}/api/tags")
+                if resp.status_code == 200:
+                    ollama_data = resp.json()
+                    _VISION_FAMILIES = {"llava", "moondream", "bakllava", "minicpm-v", "llava-llama3", "llava-phi3", "nanollava"}
+                    for m in ollama_data.get("models", []):
+                        model_name = m.get("name", "")
+                        model_family = model_name.split(":")[0].lower()
+                        has_vision = any(vf in model_family for vf in _VISION_FAMILIES)
+
+                        size_bytes = m.get("size", 0)
+                        size_gb = round(size_bytes / (1024**3), 1) if size_bytes else 0
+                        details = m.get("details", {})
+                        param_size = details.get("parameter_size", "")
+                        quant = details.get("quantization_level", "")
+
+                        desc_parts = ["LOCAL", "FREE"]
+                        if param_size:
+                            desc_parts.append(param_size)
+                        if quant:
+                            desc_parts.append(quant)
+                        if size_gb:
+                            desc_parts.append(f"{size_gb}GB")
+                        desc = " — ".join(desc_parts)
+
+                        entry = {
+                            "id": f"ollama/{model_name}",
+                            "name": f"{model_name} (Ollama Local)",
+                            "provider": "ollama",
+                            "is_free": True,
+                            "cost_per_hour": 0,
+                            "context_length": 0,
+                            "created": int(time.time()),  # Sort to top as "newest"
+                            "desc": desc,
+                            "speed": "balanced",
+                            "est_time_display": "varies by GPU",
+                            "quality_score": 3,
+                            "quality": "good",
+                        }
+
+                        if has_vision:
+                            vision.append(entry)
+                        # All models can do text
+                        text.append(entry)
+        except Exception as e:
+            logger.warning("Failed to fetch Ollama models for available list: %s", e)
+
     # Sort: free first, then newer + cheaper towards the top
     # Within free models: newest first.  Within paid: newest first, then cheapest.
     def _sort_key(m):
@@ -1208,14 +1258,22 @@ async def available_models():
     text.sort(key=_sort_key)
 
     # Limit to top 100 per category to avoid overwhelming the UI
+    chain = settings.active_provider_chain
+    if chain and chain[0] == "ollama":
+        current_vision = f"ollama/{settings.OLLAMA_VISION_MODEL}"
+        current_text = f"ollama/{settings.OLLAMA_TEXT_MODEL}"
+    else:
+        current_vision = settings.OPENROUTER_VISION_MODEL
+        current_text = settings.OPENROUTER_TEXT_MODEL
+
     return {
         "transcript": transcript,
         "vision": vision[:100],
         "text": text[:100],
         "current": {
             "transcript_model": settings.WHISPER_MODEL,
-            "vision_model": settings.OPENROUTER_VISION_MODEL,
-            "text_model": settings.OPENROUTER_TEXT_MODEL,
+            "vision_model": current_vision,
+            "text_model": current_text,
         },
     }
 
@@ -1237,23 +1295,46 @@ async def save_models(req: SaveModelsRequest):
             _upsert_env_var(env_path, "WHISPER_MODEL", req.transcript_model)
 
     if req.vision_model:
-        settings.OPENROUTER_VISION_MODEL = req.vision_model
-        settings.OPENROUTER_PRESET = "custom"
-        if env_path:
-            _upsert_env_var(env_path, "OPENROUTER_VISION_MODEL", req.vision_model)
-            _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
+        if req.vision_model.startswith("ollama/"):
+            # Strip the "ollama/" prefix to get the raw model name
+            ollama_model = req.vision_model[len("ollama/"):]
+            settings.OLLAMA_VISION_MODEL = ollama_model
+            if env_path:
+                _upsert_env_var(env_path, "OLLAMA_VISION_MODEL", ollama_model)
+        else:
+            settings.OPENROUTER_VISION_MODEL = req.vision_model
+            settings.OPENROUTER_PRESET = "custom"
+            if env_path:
+                _upsert_env_var(env_path, "OPENROUTER_VISION_MODEL", req.vision_model)
+                _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
 
     if req.text_model:
-        settings.OPENROUTER_TEXT_MODEL = req.text_model
-        settings.OPENROUTER_SUMMARY_MODEL = req.text_model
-        settings.OPENROUTER_PRESET = "custom"
-        if env_path:
-            _upsert_env_var(env_path, "OPENROUTER_TEXT_MODEL", req.text_model)
-            _upsert_env_var(env_path, "OPENROUTER_SUMMARY_MODEL", req.text_model)
-            _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
+        if req.text_model.startswith("ollama/"):
+            ollama_model = req.text_model[len("ollama/"):]
+            settings.OLLAMA_TEXT_MODEL = ollama_model
+            if env_path:
+                _upsert_env_var(env_path, "OLLAMA_TEXT_MODEL", ollama_model)
+        else:
+            settings.OPENROUTER_TEXT_MODEL = req.text_model
+            settings.OPENROUTER_SUMMARY_MODEL = req.text_model
+            settings.OPENROUTER_PRESET = "custom"
+            if env_path:
+                _upsert_env_var(env_path, "OPENROUTER_TEXT_MODEL", req.text_model)
+                _upsert_env_var(env_path, "OPENROUTER_SUMMARY_MODEL", req.text_model)
+                _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
 
     _invalidate_status_cache()
     _persist_user_settings()
+
+    # Return the currently active models (respecting which provider is primary)
+    chain = settings.active_provider_chain
+    if chain and chain[0] == "ollama":
+        return {
+            "status": "saved",
+            "transcript_model": settings.WHISPER_MODEL,
+            "vision_model": f"ollama/{settings.OLLAMA_VISION_MODEL}",
+            "text_model": f"ollama/{settings.OLLAMA_TEXT_MODEL}",
+        }
     return {
         "status": "saved",
         "transcript_model": settings.WHISPER_MODEL,
