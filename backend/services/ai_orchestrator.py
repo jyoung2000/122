@@ -333,13 +333,15 @@ class AIOrchestrator:
         # prompts with full transcript + scenes need time); local ollama
         # gets 2 min (3 retries × ~30s each with 90s httpx timeout as cap).
         # Scale timeout for long videos: multi-pass creates N windows processed
-        # in pairs (sem=2). Each window worst-case ≈ 130s (primary timeout +
-        # fallback). Need: ceil(N/2) rounds × 130s + buffer.
+        # in pairs (sem=2). Each window worst-case ≈ 300s (preset timeout with
+        # fallback chain). Need: ceil(N/2) rounds × 300s + pass2 buffer.
         vid_minutes = video_duration / 60 if video_duration else 0
         if vid_minutes > 30:
-            est_windows = max(1, int(video_duration / 480))  # ~480s effective window
+            # 10-min windows for >30 min videos, processed 2 at a time
+            est_windows = max(1, int(video_duration / 600) + 1)
             est_rounds = (est_windows + 1) // 2  # sem=2
-            default_timeout = max(330, est_rounds * 150 + 60)
+            # Each round needs up to 300s (preset timeout) + pass 2 gap sweeps
+            default_timeout = max(600, est_rounds * 330 + 300)
         else:
             default_timeout = 330
         _PROVIDER_TIMEOUT = {"ollama": 120}

@@ -335,11 +335,12 @@ class OpenRouterProvider(AIProvider):
         if self._preset_name == "free" and "openrouter/free" not in chain:
             chain.append("openrouter/free")
 
-        # Distribute timeout: primary gets 40%, rest is split among fallbacks
+        # Distribute timeout: primary gets 60%, rest is split among fallbacks.
+        # Primary needs more time since it's usually the best model for the job.
         if timeout and len(chain) > 1:
-            primary_timeout = int(timeout * 0.4)
+            primary_timeout = int(timeout * 0.6)
             fb_count = len(chain) - 1
-            fb_timeout = max(30, (timeout - primary_timeout) // fb_count)
+            fb_timeout = max(45, (timeout - primary_timeout) // fb_count)
         else:
             primary_timeout = timeout
             fb_timeout = timeout
@@ -561,12 +562,12 @@ class OpenRouterProvider(AIProvider):
     # Scaled by preset: free models are slower but get less data, paid models
     # are faster and get more data.
     _CLIP_TIMEOUT_BY_PRESET = {
-        "free": 240,       # 4 min — shorter because prompt is smaller
-        "efficient": 240,  # 4 min
-        "balanced": 300,   # 5 min
-        "premium": 300,    # 5 min
+        "free": 300,       # 5 min — free models are slower, need more time
+        "efficient": 300,  # 5 min
+        "balanced": 360,   # 6 min
+        "premium": 360,    # 6 min
     }
-    _DEFAULT_CLIP_TIMEOUT = 300
+    _DEFAULT_CLIP_TIMEOUT = 360
 
     @staticmethod
     def _condense_transcript(transcript: list[TranscriptSegment], max_chars: int = 12000) -> str:
