@@ -2480,7 +2480,7 @@ export default function VideoEditor({
               <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
                 <rect x="1" y="3" width="14" height="10" rx="1.5" />
               </svg>
-              {aspectRatio}
+              {String(aspectRatio)}
             </span>
           )}
           {isMuted && (
@@ -3010,7 +3010,7 @@ export default function VideoEditor({
                         onClick={(e) => { e.stopPropagation(); updateSegment(seg.id, { speed: spd }); }}
                         style={Math.abs((seg.speed || 1) - spd) < 0.001 ? { background: segHexColor, color: '#fff', borderColor: segHexColor } : {}}
                       >
-                        {spd}x
+                        {String(spd)}x
                       </button>
                     ))}
                   </div>
@@ -3072,7 +3072,7 @@ export default function VideoEditor({
           </span>
           {speakers.map((spk, spkIdx) => {
             const color = settings?.speakerColors?.[spk] || DEFAULT_SPEAKER_PALETTE[spkIdx % DEFAULT_SPEAKER_PALETTE.length];
-            const displayName = speakerNames?.[spk] || spk;
+            const displayName = String(speakerNames?.[spk] || spk || '');
             return (
               <label key={spk} style={{
                 display: 'inline-flex', alignItems: 'center', gap: 6,
@@ -3230,7 +3230,7 @@ export default function VideoEditor({
                       }}
                     />
                     <span className={`ve-volume__label${dispMax > 150 ? ' ve-volume__label--warn' : ''}`}>
-                      {dispVol}%
+                      {String(dispVol)}%
                     </span>
                   </>
                 );

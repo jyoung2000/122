@@ -30,8 +30,8 @@ function deepSanitize(val, objectKeys, depth = 0) {
     } else if (Array.isArray(v)) {
       out[k] = v.map((item) => deepSanitize(item, objectKeys, depth + 1));
     } else if (objectKeys && objectKeys.has(k)) {
-      // Preserve whitelisted object values (e.g. speakerColors, words)
-      out[k] = v;
+      // Preserve whitelisted object structure but still sanitize leaf values
+      out[k] = deepSanitize(v, objectKeys, depth + 1);
     } else {
       // Recurse into nested objects
       out[k] = deepSanitize(v, objectKeys, depth + 1);
@@ -229,4 +229,17 @@ export function safeStr(val) {
   if (typeof val === 'string') return val;
   if (typeof val === 'number' || typeof val === 'boolean') return String(val);
   return JSON.stringify(val);
+}
+
+/**
+ * Wrap any value for safe JSX rendering.
+ * Use in JSX: {safeRender(maybeObject)}
+ */
+export function safeRender(val) {
+  if (val == null) return '';
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return val;
+  if (typeof val === 'object') {
+    try { return JSON.stringify(val); } catch { return '[object]'; }
+  }
+  return String(val);
 }

@@ -102,12 +102,19 @@ def unregister_ws_subscriber(job_id: str, ws):
 
 async def broadcast_ws(job_id: str, message: dict):
     """Broadcast a message to all WebSocket subscribers for a job."""
-    import json
+    from enum import Enum
+    # Pre-sanitize: ensure all values are JSON-safe primitives (no Enum remnants)
+    safe_message = {}
+    for k, v in message.items():
+        if isinstance(v, Enum):
+            safe_message[k] = str(v.value) if hasattr(v, 'value') else str(v)
+        else:
+            safe_message[k] = v
     subscribers = _ws_subscribers.get(job_id, [])
     dead = []
     for ws in subscribers:
         try:
-            await ws.send_json(message)
+            await ws.send_json(safe_message)
         except Exception:
             dead.append(ws)
     for ws in dead:

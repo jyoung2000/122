@@ -65,6 +65,37 @@ const TABS = ['Summary', 'Key Scenes', 'Transcript', 'Viral Clips'];
 
 // sanitizeJob imported from ../utils/sanitizeJob
 
+/**
+ * Error boundary that isolates VideoEditor crashes so they don't take down
+ * the entire Analysis page.  Shows a retry button on failure.
+ */
+class VideoEditorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+  static getDerivedStateFromError(error) { return { hasError: true, error }; }
+  componentDidCatch(error, info) {
+    console.error('[VideoEditorBoundary]', error, info?.componentStack?.slice(0, 500));
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 24, textAlign: 'center', color: 'var(--danger, #ef4444)' }}>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Video preview failed to render</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+            {String(this.state.error?.message || 'Unknown error')}
+          </div>
+          <button
+            onClick={() => this.setState({ hasError: false, error: null })}
+            style={{ padding: '6px 16px', fontSize: 12, background: 'var(--accent-cyan)', color: '#000', border: 'none', borderRadius: 4, cursor: 'pointer' }}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 function AddSceneForm({ jobId, duration, onAdded }) {
   const [open, setOpen] = React.useState(false);
   const [timestamp, setTimestamp] = React.useState('');
@@ -484,7 +515,9 @@ export default function Analysis() {
         setTimeout(() => fetchJob(), 2000);
         return; // Don't clear loading yet
       }
-    } catch {
+    } catch (err) {
+      // Only log — if setJob was never called, job stays null and the "not found" guard handles it.
+      console.warn('[Analysis] fetchJob error:', err?.message || err);
     } finally {
       setLoading(false);
     }
@@ -652,6 +685,24 @@ export default function Analysis() {
             showToast(String(msg.message || 'Unknown error'), 'error');
             setIsGeneratingClips((prev) => prev ? false : prev);
             fetchJob();
+          } else if (msg.type === 'background_task') {
+            // Background post-processing (transcript polishing, translation)
+            const taskName = String(msg.task || 'background');
+            const taskStatus = String(msg.status || 'running');
+            const taskMsg = String(msg.message || `${taskName}: ${taskStatus}`);
+            pushLog(
+              taskStatus === 'complete' ? 'success' : taskStatus === 'failed' ? 'warning' : 'info',
+              taskMsg,
+            );
+            // Refresh job data when background task completes (e.g., polished transcript)
+            if (taskStatus === 'complete') {
+              fetchJob();
+            }
+          } else {
+            // Unknown message type — log but don't crash.  Coerce all fields.
+            const safeType = String(msg.type || 'unknown');
+            const safeMsg = String(msg.message || msg.status || `Received: ${safeType}`);
+            pushLog('info', safeMsg);
           }
         } catch {
         }
@@ -1764,6 +1815,7 @@ export default function Analysis() {
       <div ref={stickyPlayerRef} style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg-base)', display: (tab === 2 && !showExportPreview) ? 'none' : 'block' }}>
         {showExportPreview ? (
           <div style={{ position: 'relative', width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto' }}>
+            <VideoEditorBoundary>
             <VideoEditor
               src={videoSrc}
               clipStart={clipPreview.start_time}
@@ -1824,6 +1876,7 @@ export default function Analysis() {
                 />
               }
             />
+            </VideoEditorBoundary>
             {/* Auto-applied settings indicator */}
             {settingsAppliedFlash && (
               <div style={{
@@ -1853,6 +1906,7 @@ export default function Analysis() {
           </div>
         ) : (
           <div style={{ width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto' }}>
+            <VideoEditorBoundary>
             <VideoEditor
               src={videoSrc}
               clipStart={fullVideoRange ? fullVideoRange.start : 0}
@@ -1902,6 +1956,7 @@ export default function Analysis() {
                 />
               }
             />
+            </VideoEditorBoundary>
 
             {/* ── Inline Editor Toolbar: Export + Subtitle Settings ── */}
             {renderInlineSubToolbar(
@@ -2912,7 +2967,7 @@ export default function Analysis() {
                           {qaResult.overall === 'pass' ? 'All Checks Passed' : qaResult.overall === 'warn' ? 'Passed with Warnings' : 'Issues Detected'}
                         </span>
                         <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 'auto' }}>
-                          {qaResult.summary}
+                          {String(qaResult.summary || '')}
                         </span>
                       </div>
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -2922,22 +2977,22 @@ export default function Analysis() {
                               width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
                               background: check.status === 'pass' ? 'var(--success)' : check.status === 'warn' ? 'var(--accent-amber)' : check.status === 'fail' ? 'var(--danger)' : 'var(--text-muted)',
                             }} />
-                            <span style={{ color: 'var(--text-secondary)', fontWeight: 600, minWidth: 100 }}>{check.name}</span>
-                            <span style={{ color: 'var(--text-muted)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{check.detail}</span>
+                            <span style={{ color: 'var(--text-secondary)', fontWeight: 600, minWidth: 100 }}>{String(check.name || '')}</span>
+                            <span style={{ color: 'var(--text-muted)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{String(check.detail || '')}</span>
                           </div>
                         ))}
                       </div>
                       {qaResult.errors?.length > 0 && (
                         <div style={{ marginTop: 8, padding: '6px 8px', background: 'rgba(239, 68, 68, 0.08)', borderRadius: 'var(--radius-sm)' }}>
                           {qaResult.errors.map((e, i) => (
-                            <div key={i} style={{ fontSize: 10, color: 'var(--danger)', lineHeight: 1.4 }}>{e}</div>
+                            <div key={i} style={{ fontSize: 10, color: 'var(--danger)', lineHeight: 1.4 }}>{String(e || '')}</div>
                           ))}
                         </div>
                       )}
                       {qaResult.warnings?.length > 0 && (
                         <div style={{ marginTop: 6, padding: '6px 8px', background: 'rgba(245, 158, 11, 0.08)', borderRadius: 'var(--radius-sm)' }}>
                           {qaResult.warnings.slice(0, 5).map((w, i) => (
-                            <div key={i} style={{ fontSize: 10, color: 'var(--accent-amber)', lineHeight: 1.4 }}>{w}</div>
+                            <div key={i} style={{ fontSize: 10, color: 'var(--accent-amber)', lineHeight: 1.4 }}>{String(w || '')}</div>
                           ))}
                           {qaResult.warnings.length > 5 && (
                             <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>+{qaResult.warnings.length - 5} more warnings</div>
