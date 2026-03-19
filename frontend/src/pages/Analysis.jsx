@@ -1115,44 +1115,6 @@ export default function Analysis() {
     });
   }, [speakers]);
 
-  if (loading) {
-    return (
-      <div style={{ textAlign: 'center', padding: 48, color: 'var(--text-secondary)' }}>
-        <div style={{
-          width: 24, height: 24, border: '2px solid var(--border)', borderTopColor: 'var(--accent-cyan)',
-          borderRadius: '50%', animation: 'spin 0.8s linear infinite',
-          margin: '0 auto 12px',
-        }} />
-        <div style={{ fontSize: 14, marginBottom: 4 }}>Connecting to analysis...</div>
-        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-          Your video has been uploaded. The analysis pipeline is starting up.
-        </div>
-      </div>
-    );
-  }
-
-  if (!job) {
-    return <div style={{ textAlign: 'center', padding: 48, color: 'var(--danger)' }}>Job not found</div>;
-  }
-
-  const isProcessing = !['complete', 'failed', 'cancelled'].includes(job.status);
-
-  // Parse source video dimensions (plain variable — not a hook, so safe after early returns)
-  let sourceDims = { w: 1920, h: 1080 };
-  if (job.resolution) {
-    const parts = job.resolution.split('x').map(Number);
-    if (parts.length === 2 && parts[0] > 0 && parts[1] > 0) {
-      sourceDims = { w: parts[0], h: parts[1] };
-    }
-  }
-  const videoSrc = `/api/files/${jobId}/video.${job.file_path?.split('.').pop() || 'mp4'}`;
-  const bestClipId = job.clips?.length ? job.clips.reduce((best, c) => c.viral_score > best.viral_score ? c : best, job.clips[0])?.id : null;
-
-  // Compute subject_x from scenes (with boundary interpolation for clips between scene timestamps)
-  const clipSubjectX = clipPreview && job.scenes?.length
-    ? computeClipSubjectX(job.scenes, clipPreview.start_time, clipPreview.end_time)
-    : 50;
-
   // --- Auto-trigger subject tracking when clip or aspect ratio changes ---
   // Mirrors ViralClips.jsx auto-trigger behavior. When a clip is opened with
   // a crop aspect ratio, check if AI scene data exists. If not, trigger
@@ -1165,6 +1127,9 @@ export default function Analysis() {
       clearInterval(subjectTrackingPollRef.current);
       subjectTrackingPollRef.current = null;
     }
+
+    // Guard: job not loaded yet — skip tracking logic
+    if (!job) return;
 
     const ar = clipSettings?.aspectRatio;
     const prev = prevAnalysisTrackingRef.current;
@@ -1235,7 +1200,50 @@ export default function Analysis() {
         subjectTrackingPollRef.current = null;
       }
     };
-  }, [clipPreview?.id, clipSettings?.aspectRatio]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [clipPreview?.id, clipSettings?.aspectRatio, job?.scenes]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ══════════════════════════════════════════════════════════════════
+  // !! ALL React hooks (useState, useEffect, useRef, useMemo,
+  // !! useCallback) MUST be declared ABOVE this line.
+  // !! Moving hooks below causes React error #310 on page load.
+  // ══════════════════════════════════════════════════════════════════
+  if (loading) {
+    return (
+      <div style={{ textAlign: 'center', padding: 48, color: 'var(--text-secondary)' }}>
+        <div style={{
+          width: 24, height: 24, border: '2px solid var(--border)', borderTopColor: 'var(--accent-cyan)',
+          borderRadius: '50%', animation: 'spin 0.8s linear infinite',
+          margin: '0 auto 12px',
+        }} />
+        <div style={{ fontSize: 14, marginBottom: 4 }}>Connecting to analysis...</div>
+        <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+          Your video has been uploaded. The analysis pipeline is starting up.
+        </div>
+      </div>
+    );
+  }
+
+  if (!job) {
+    return <div style={{ textAlign: 'center', padding: 48, color: 'var(--danger)' }}>Job not found</div>;
+  }
+
+  const isProcessing = !['complete', 'failed', 'cancelled'].includes(job.status);
+
+  // Parse source video dimensions (plain variable — not a hook, so safe after early returns)
+  let sourceDims = { w: 1920, h: 1080 };
+  if (job.resolution) {
+    const parts = job.resolution.split('x').map(Number);
+    if (parts.length === 2 && parts[0] > 0 && parts[1] > 0) {
+      sourceDims = { w: parts[0], h: parts[1] };
+    }
+  }
+  const videoSrc = `/api/files/${jobId}/video.${job.file_path?.split('.').pop() || 'mp4'}`;
+  const bestClipId = job.clips?.length ? job.clips.reduce((best, c) => c.viral_score > best.viral_score ? c : best, job.clips[0])?.id : null;
+
+  // Compute subject_x from scenes (with boundary interpolation for clips between scene timestamps)
+  const clipSubjectX = clipPreview && job.scenes?.length
+    ? computeClipSubjectX(job.scenes, clipPreview.start_time, clipPreview.end_time)
+    : 50;
 
   // Always use ClipPreview when a clip is selected so it responds to
   // aspect ratio and subtitle settings changes in real time.
