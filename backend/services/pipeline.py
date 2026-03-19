@@ -364,9 +364,14 @@ async def _run_analysis_inner(job_id: str):
         job_id, _EXTRACTION_TIMEOUT, _SUMMARY_CLIP_TIMEOUT, _B64_ENCODE_TIMEOUT, vid_minutes,
     )
 
+    codec_label = metadata.get("codec_name", "unknown")
+    pix_fmt_label = metadata.get("pix_fmt", "")
+    codec_info = f" [{codec_label}]" if codec_label else ""
+    if pix_fmt_label and pix_fmt_label not in ("yuv420p", "yuvj420p"):
+        codec_info += f" ({pix_fmt_label})"
     await _update_progress(
         job_id, JobStatus.EXTRACTING_FRAMES, 5,
-        f"Metadata extracted — {res} @ {fps_val}fps, {dur_fmt} duration, {mb:.1f}MB",
+        f"Metadata extracted — {res} @ {fps_val}fps, {dur_fmt} duration, {mb:.1f}MB{codec_info}",
     )
 
     # Disk space pre-check — estimate needed space from video metadata
@@ -436,6 +441,7 @@ async def _run_analysis_inner(job_id: str):
                         video_path, frames_dir,
                         cancel_check=cancel_check, progress_callback=_frame_progress,
                         video_duration=metadata["duration"],
+                        video_codec=metadata.get("codec_name", ""),
                     ),
                     extract_audio(video_path, audio_path, cancel_check=cancel_check),
                 ),

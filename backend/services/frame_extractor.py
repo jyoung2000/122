@@ -16,7 +16,7 @@ MAX_DIMENSION = 1568
 
 # After this many seconds with 0 frames produced, kill FFmpeg and retry
 # with a fallback strategy (no GPU / no scene detection).
-_STALL_TIMEOUT = 45
+_STALL_TIMEOUT = 30   # Kill extraction if 0 frames after 30s (was 45)
 
 
 async def _run_subprocess_cancellable(
@@ -135,11 +135,20 @@ async def get_video_metadata(video_path: str) -> dict:
         except (ValueError, ZeroDivisionError):
             fps = 0.0
 
+    # Extract codec info for GPU compatibility checks
+    codec_name = ""
+    pix_fmt = ""
+    if video_stream:
+        codec_name = video_stream.get("codec_name", "")
+        pix_fmt = video_stream.get("pix_fmt", "")
+
     return {
         "duration": duration,
         "resolution": resolution,
         "fps": fps,
         "file_size_mb": file_size_mb,
+        "codec_name": codec_name,
+        "pix_fmt": pix_fmt,
     }
 
 
@@ -148,7 +157,8 @@ def _build_scene_filter(rate: int) -> str:
     return (
         f"select='gt(scene\\,0.3)+isnan(prev_selected_t)"
         f"+gte(t-prev_selected_t\\,{rate})',"
-        f"scale='min(1024\\,iw)':'min(576\\,ih)':force_original_aspect_ratio=decrease"
+        f"scale='min(1024\\,iw)':'min(576\\,ih)':force_original_aspect_ratio=decrease,"
+        f"format=pix_fmts=yuvj420p"
     )
 
 
@@ -156,7 +166,8 @@ def _build_interval_filter(rate: int) -> str:
     """Build a simple interval-only filter (no scene detection)."""
     return (
         f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{rate})',"
-        f"scale='min(1024\\,iw)':'min(576\\,ih)':force_original_aspect_ratio=decrease"
+        f"scale='min(1024\\,iw)':'min(576\\,ih)':force_original_aspect_ratio=decrease,"
+        f"format=pix_fmts=yuvj420p"
     )
 
 
@@ -266,6 +277,7 @@ async def extract_frames(
     progress_callback: Optional[Callable] = None,
     max_frames: Optional[int] = None,
     video_duration: Optional[float] = None,
+    video_codec: Optional[str] = None,
 ) -> list[FrameData]:
     """Extract frames using scene detection + minimum interval fallback.
 
@@ -304,8 +316,27 @@ async def extract_frames(
             rate = ideal_rate
     os.makedirs(output_dir, exist_ok=True)
 
-    # Get GPU decode args (may be empty if GPU unavailable or disabled)
-    _hw_dec = _get_gpu_decode_args()
+    # Get GPU decode args — but only if the codec is hardware-supported.
+    # NVIDIA NVDEC codec support by GPU generation:
+    #   All: h264, hevc, vp8, vp9, mpeg1video, mpeg2video, mpeg4, vc1
+    #   RTX 30xx+: av1
+    # When the codec isn't supported, skip GPU decode entirely to avoid
+    # FFmpeg churning through per-frame CUDA failures for minutes.
+    _NVDEC_SUPPORTED_CODECS = {
+        "h264", "hevc", "h265", "vp8", "vp9",
+        "mpeg1video", "mpeg2video", "mpeg4", "vc1",
+    }
+    _hw_dec = []
+    codec_lower = (video_codec or "").lower()
+    if codec_lower and codec_lower not in _NVDEC_SUPPORTED_CODECS:
+        logger.info(
+            "Skipping GPU decode: codec '%s' not in NVDEC supported set %s",
+            codec_lower, _NVDEC_SUPPORTED_CODECS,
+        )
+    else:
+        _hw_dec = _get_gpu_decode_args()
+        if _hw_dec and codec_lower:
+            logger.info("GPU decode enabled for codec '%s'", codec_lower)
 
     scene_filter = _build_scene_filter(rate)
     interval_filter = _build_interval_filter(rate)
@@ -319,6 +350,64 @@ async def extract_frames(
     attempts.append(([], scene_filter, "CPU+scene"))
     # Attempt 3: CPU decode + interval-only (no scene detection at all)
     attempts.append(([], interval_filter, "CPU+interval"))
+
+    # Quick-test GPU decode: if GPU args are present, run a 5-second probe
+    # to verify the GPU can actually decode this codec. This prevents the
+    # main extraction from churning for minutes on unsupported codecs that
+    # slip past the NVDEC_SUPPORTED_CODECS check.
+    if _hw_dec and attempts[0][2] == "GPU+scene":
+        quick_test_filter = _build_interval_filter(2)  # 1 frame every 2s
+        quick_cmd = [
+            "ffmpeg", "-y", "-threads", "0",
+            *_hw_dec,
+            "-t", "5",  # Only process first 5 seconds
+            "-i", video_path,
+            "-an", "-vf", quick_test_filter,
+            "-vsync", "vfr", "-q:v", "12",
+            os.path.join(output_dir, "gpu_test_%06d.jpg"),
+        ]
+        logger.info("GPU quick-test: probing first 5s with %s", " ".join(_hw_dec))
+        try:
+            qt_proc = await asyncio.create_subprocess_exec(
+                *quick_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, qt_stderr = await asyncio.wait_for(qt_proc.communicate(), timeout=15)
+            qt_frames = len([
+                f for f in os.listdir(output_dir)
+                if f.startswith("gpu_test_") and f.endswith(".jpg")
+            ])
+            # Clean up test frames
+            for f in os.listdir(output_dir):
+                if f.startswith("gpu_test_"):
+                    try:
+                        os.remove(os.path.join(output_dir, f))
+                    except OSError:
+                        pass
+
+            if qt_frames == 0 or qt_proc.returncode != 0:
+                stderr_preview = qt_stderr.decode(errors='replace')[:200] if qt_stderr else ""
+                logger.warning(
+                    "GPU quick-test failed: %d frames, rc=%d, stderr=%s — removing GPU from fallback chain",
+                    qt_frames, qt_proc.returncode, stderr_preview,
+                )
+                # Remove the GPU attempt from the chain
+                attempts = [a for a in attempts if a[2] != "GPU+scene"]
+            else:
+                logger.info("GPU quick-test passed: %d frames in 5s", qt_frames)
+        except asyncio.TimeoutError:
+            logger.warning("GPU quick-test timed out after 15s — removing GPU from fallback chain")
+            attempts = [a for a in attempts if a[2] != "GPU+scene"]
+            # Kill the timed-out process
+            try:
+                qt_proc.terminate()
+                await asyncio.wait_for(qt_proc.wait(), timeout=5)
+            except Exception:
+                qt_proc.kill()
+        except Exception as e:
+            logger.warning("GPU quick-test error: %s — removing GPU from fallback chain", e)
+            attempts = [a for a in attempts if a[2] != "GPU+scene"]
 
     returncode = -1
     stderr = b""
