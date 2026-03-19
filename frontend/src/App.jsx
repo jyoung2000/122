@@ -58,6 +58,17 @@ class PageErrorBoundary extends React.Component {
   }
   componentDidCatch(error, info) {
     console.error('[PageError] Uncaught error in page:', error, info?.componentStack);
+    // Report error to server so it appears in Docker logs
+    try {
+      const body = JSON.stringify({
+        message: String(error?.message || ''),
+        stack: String(error?.stack || '').slice(0, 2000),
+        componentStack: String(info?.componentStack || '').slice(0, 2000),
+        url: window.location.href,
+      });
+      navigator.sendBeacon?.('/api/client-error', body) ||
+        fetch('/api/client-error', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+    } catch {}
   }
   render() {
     if (this.state.hasError) {

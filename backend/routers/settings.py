@@ -1646,6 +1646,20 @@ async def report_client_gpu(req: ClientGpuReport):
 # ── GPU QA & Validation ──────────────────────────────────────────────
 
 
+@router.post("/client-error")
+async def report_client_error(request: Request):
+    """Receive frontend React errors so they appear in Docker logs."""
+    try:
+        body = await request.json()
+        msg = body.get("message", "")
+        url = body.get("url", "")
+        stack = body.get("componentStack", "")[:500]
+        logger.error("CLIENT REACT ERROR at %s: %s\n  Component stack: %s", url, msg, stack)
+    except Exception:
+        pass
+    return {"status": "logged"}
+
+
 @router.get("/gpu-qa")
 async def gpu_qa_validation():
     """Run comprehensive GPU QA validation.
