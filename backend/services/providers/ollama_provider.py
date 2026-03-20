@@ -247,6 +247,8 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
 
         # Two-stage vision: fast scan to identify interesting frames, then detailed analysis
         interesting_indices = set(range(total))  # default: all frames
+        consecutive_failures = 0
+        MAX_CONSECUTIVE_FAILURES = 5  # bail out if Ollama fails this many times in a row
         if total > 10:
             # Stage 1: Quick scan to identify visually interesting frames
             quick_scores = []
@@ -269,8 +271,19 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                     else:
                         score = 5
                     quick_scores.append(score)
+                    consecutive_failures = 0
                 except Exception:
                     quick_scores.append(5)  # assume interesting on failure
+                    consecutive_failures += 1
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        logger.error(
+                            "Ollama quick scan: %d consecutive failures — aborting scan, "
+                            "treating remaining frames as interesting",
+                            consecutive_failures,
+                        )
+                        # Fill remaining frames with default score
+                        quick_scores.extend([5] * (total - len(quick_scores)))
+                        break
 
             # Keep frames scoring 5+ and always include first and last
             interesting_indices = {0, total - 1}
@@ -286,13 +299,15 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         sem = asyncio.Semaphore(VISION_CONCURRENCY)
         scenes: list[Optional[SceneDescription]] = [None] * total
         completed = 0
+        stage2_consecutive_failures = 0
+        stage2_aborted = False
 
         async def _analyze_one(fi: int, frame: FrameData):
-            nonlocal completed
+            nonlocal completed, stage2_consecutive_failures, stage2_aborted
             async with sem:
                 if cancel_check:
                     cancel_check()
-                if not frame.base64 or fi not in interesting_indices:
+                if stage2_aborted or not frame.base64 or fi not in interesting_indices:
                     completed += 1
                     if progress_callback:
                         await progress_callback(completed, total)
@@ -342,6 +357,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                         thumbnail_path=frame.path,
                         subject_x=subject_x,
                     )
+                    stage2_consecutive_failures = 0
                 except Exception as e:
                     logger.warning(f"Ollama frame analysis failed for {frame.timestamp}s: {e}")
                     scenes[fi] = SceneDescription(
@@ -351,6 +367,14 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                         thumbnail_path=frame.path,
                         subject_x=50,
                     )
+                    stage2_consecutive_failures += 1
+                    if stage2_consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        logger.error(
+                            "Ollama frame analysis: %d consecutive failures — aborting "
+                            "remaining frames with fallback descriptions",
+                            stage2_consecutive_failures,
+                        )
+                        stage2_aborted = True
                 completed += 1
                 if progress_callback:
                     await progress_callback(completed, total)

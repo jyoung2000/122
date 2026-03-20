@@ -938,7 +938,7 @@ def _get_diarization_pipeline():
                     return None
                 _diarization_pipeline = Pipeline.from_pretrained(
                     "pyannote/speaker-diarization-3.1",
-                    use_auth_token=token,
+                    token=token,
                 )
                 # Move to GPU if available
                 import torch
