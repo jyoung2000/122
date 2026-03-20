@@ -1322,8 +1322,17 @@ async def available_models():
     text.sort(key=_sort_key)
 
     # Limit to top 100 per category to avoid overwhelming the UI
+    # Return current models based on which provider is primary.
+    # If Ollama is first in chain OR is in the chain and has models configured,
+    # return Ollama models so the UI shows what the user actually selected.
     chain = settings.active_provider_chain
-    if chain and chain[0] == "ollama":
+    ollama_is_primary = chain and chain[0] == "ollama"
+    ollama_models_set = (
+        "ollama" in chain
+        and settings.OLLAMA_VISION_MODEL
+        and settings.OLLAMA_TEXT_MODEL
+    )
+    if ollama_is_primary or (ollama_models_set and not _key_is_set(settings.OPENROUTER_API_KEY)):
         current_vision = f"ollama/{settings.OLLAMA_VISION_MODEL}"
         current_text = f"ollama/{settings.OLLAMA_TEXT_MODEL}"
     else:
@@ -1387,12 +1396,42 @@ async def save_models(req: SaveModelsRequest):
                 _upsert_env_var(env_path, "OPENROUTER_SUMMARY_MODEL", req.text_model)
                 _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
 
+    # If the user selected Ollama models, ensure Ollama is in the fallback chain
+    # so it actually gets used for analysis. Put it first since that's the user's intent.
+    has_ollama_models = (
+        (req.vision_model and req.vision_model.startswith("ollama/"))
+        or (req.text_model and req.text_model.startswith("ollama/"))
+    )
+    if has_ollama_models:
+        chain = [p.strip() for p in settings.AI_FALLBACK_CHAIN.split(",") if p.strip()]
+        if "ollama" not in chain:
+            chain.insert(0, "ollama")
+            settings.AI_FALLBACK_CHAIN = ",".join(chain)
+            if env_path:
+                _upsert_env_var(env_path, "AI_FALLBACK_CHAIN", settings.AI_FALLBACK_CHAIN)
+            logger.info("Auto-enabled Ollama in fallback chain (user selected Ollama models)")
+        elif chain[0] != "ollama":
+            # Move Ollama to front — user clearly wants local models as primary
+            chain = ["ollama"] + [p for p in chain if p != "ollama"]
+            settings.AI_FALLBACK_CHAIN = ",".join(chain)
+            if env_path:
+                _upsert_env_var(env_path, "AI_FALLBACK_CHAIN", settings.AI_FALLBACK_CHAIN)
+            logger.info("Moved Ollama to front of fallback chain (user selected Ollama models)")
+
     _invalidate_status_cache()
     _persist_user_settings()
 
-    # Return the currently active models (respecting which provider is primary)
+    # Return the currently active models.
+    # If the user just saved Ollama models, reflect those regardless of chain order.
+    # This prevents the UI from reverting to OpenRouter models when Ollama is enabled
+    # but not the first provider in the chain.
     chain = settings.active_provider_chain
-    if chain and chain[0] == "ollama":
+    has_ollama_models = (
+        (req.vision_model and req.vision_model.startswith("ollama/"))
+        or (req.text_model and req.text_model.startswith("ollama/"))
+    )
+    use_ollama = has_ollama_models or (chain and chain[0] == "ollama")
+    if use_ollama:
         return {
             "status": "saved",
             "transcript_model": settings.WHISPER_MODEL,

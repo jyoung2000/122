@@ -463,9 +463,15 @@ export default function Settings() {
       });
       if (res.ok) {
         const data = await res.json();
-        setCurrentModels(data);
-        setPendingModels(data);
-        fetch('/api/providers/status').then((r) => r.json()).then(setStatuses).catch(() => {});
+        // Refresh status, then reload models so the UI reflects the saved state.
+        // Do this sequentially to avoid the status-change useEffect from racing
+        // and overwriting the just-saved models with stale data.
+        try {
+          const statusRes = await fetch('/api/providers/status');
+          if (statusRes.ok) setStatuses(await statusRes.json());
+        } catch {}
+        // Now reload available models — the server now knows Ollama is primary
+        await loadAvailableModels();
         showToast('Models saved successfully', 'success');
       }
     } catch {
@@ -488,10 +494,12 @@ export default function Settings() {
         body: JSON.stringify(body),
       });
       if (res.ok) {
-        const data = await res.json();
-        setCurrentModels(data);
-        setPendingModels(data);
-        fetch('/api/providers/status').then((r) => r.json()).then(setStatuses).catch(() => {});
+        // Refresh status first, then reload models to avoid race condition
+        try {
+          const statusRes = await fetch('/api/providers/status');
+          if (statusRes.ok) setStatuses(await statusRes.json());
+        } catch {}
+        await loadAvailableModels();
         showToast('Model saved', 'success');
       }
     } catch {
