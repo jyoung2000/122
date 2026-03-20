@@ -49,9 +49,8 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       - OLLAMA_KEEP_ALIVE=30m
-      - OLLAMA_MAX_LOADED_MODELS=2
+      - OLLAMA_MAX_LOADED_MODELS=1
       - OLLAMA_NUM_PARALLEL=1
-      - OLLAMA_FLASH_ATTENTION=1
     # Enable GPU passthrough so Ollama can use NVIDIA GPUs for inference.
     # Without this, models run on CPU (~30x slower for vision).
     # If no GPU is available, the container still starts normally on CPU.
