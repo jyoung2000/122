@@ -63,9 +63,13 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         self._total_tokens = 0
         self._model_ctx: dict[str, int] = {}
         self._capabilities_detected = False
-        # Shared connection pool — reused across all API calls
+        # Shared connection pool — reused across all API calls.
+        # Default timeout set high (10 min) because local inference on CPU
+        # can be extremely slow (llava:7b on CPU = 3-5 min per vision frame).
+        # Per-request timeouts in _call_vision and _call_text override this
+        # for their specific needs.
         self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(120.0, connect=10.0),
+            timeout=httpx.Timeout(600.0, connect=15.0),
             limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
         )
 
@@ -144,8 +148,15 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             logger.warning("Ollama capability detection failed: %s", e)
 
     async def _call_vision(self, prompt: str, image_base64: str) -> str:
-        """Send ONE frame at a time to the vision model via /api/chat."""
+        """Send ONE frame at a time to the vision model via /api/chat.
+
+        Vision inference with llava:7b is very slow on CPU (~3-5 min per frame).
+        On GPU (GTX 1650) it's ~15-30s. Use a generous timeout to handle both cases.
+        """
         await self._ensure_capabilities()
+        # Vision inference is the slowest operation — llava:7b on CPU can take 3-5 min
+        # per frame. The image encoding + prompt eval + generation all need time.
+        vision_timeout = 360.0  # 6 minutes — enough for CPU inference
         try:
             response = await self._client.post(
                 f"{self._host}/api/chat",
@@ -163,11 +174,14 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                         "num_ctx": self._get_effective_ctx(self._vision_model),
                     },
                 },
+                timeout=vision_timeout,
             )
             response.raise_for_status()
             data = response.json()
             self._total_tokens += data.get("prompt_eval_count", 0) + data.get("eval_count", 0)
             return data.get("message", {}).get("content", "")
+        except httpx.TimeoutException:
+            raise ProviderError(f"Ollama vision timeout after {vision_timeout}s (model={self._vision_model}) — consider using a GPU")
         except Exception as e:
             raise ProviderError(f"Ollama vision error: {e}")
 
