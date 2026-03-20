@@ -1,9 +1,13 @@
+import asyncio
 import json
+import logging
 import re
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
 from backend.models import FrameData, SceneDescription, TranscriptSegment, VideoSummary, ClipCandidate, ClipSEO
+
+_mixin_logger = logging.getLogger(__name__)
 
 
 def _fix_json_newlines(text: str) -> str:
@@ -468,3 +472,442 @@ class AIProvider(ABC):
             "qwq",
         ]
         return any(pattern in model for pattern in thinking_patterns)
+
+
+class ChunkedClipDetectionMixin:
+    """Mixin providing multi-pass windowed clip detection for any provider.
+
+    Providers must implement _single_pass_clip_detection() for a single window.
+    This mixin handles windowing, gap sweeps, partial results, and merge.
+
+    Supports two modes:
+    - concurrent (cloud APIs): processes 2 windows at a time via semaphore
+    - sequential (Ollama/local): processes 1 window at a time for VRAM safety
+    """
+
+    @staticmethod
+    def _deduplicate_clips(clips: list[ClipCandidate], max_overlap: float = 0.5) -> list[ClipCandidate]:
+        """Remove clips that overlap by more than max_overlap fraction of the shorter clip."""
+        if len(clips) <= 1:
+            return clips
+
+        sorted_clips = sorted(clips, key=lambda c: c.viral_score, reverse=True)
+        kept: list[ClipCandidate] = []
+
+        for clip in sorted_clips:
+            is_duplicate = False
+            for existing in kept:
+                overlap_start = max(clip.start_time, existing.start_time)
+                overlap_end = min(clip.end_time, existing.end_time)
+                overlap_duration = max(0, overlap_end - overlap_start)
+                shorter_duration = min(clip.duration, existing.duration)
+
+                if shorter_duration > 0 and overlap_duration / shorter_duration > max_overlap:
+                    is_duplicate = True
+                    _mixin_logger.info(
+                        "De-dup: dropping '%s' (%.0f-%.0fs, score=%d) — overlaps %.0f%% with '%s'",
+                        clip.title, clip.start_time, clip.end_time, clip.viral_score,
+                        (overlap_duration / shorter_duration) * 100, existing.title,
+                    )
+                    break
+
+            if not is_duplicate:
+                kept.append(clip)
+
+        if len(kept) < len(clips):
+            _mixin_logger.info("De-duplication: kept %d of %d clips", len(kept), len(clips))
+        return kept
+
+    @staticmethod
+    def _condense_transcript_proportional(
+        transcript: list[TranscriptSegment],
+        max_chars: int = 12000,
+        hot_zones=None,
+    ) -> str:
+        """Proportionally sample transcript so every time region gets representation.
+
+        Hot zones get 2x weight so the AI gets more detail in high-potential regions.
+        Never truncates mid-sentence — each bucket uses complete segments.
+        """
+        if not transcript:
+            return "(no transcript)"
+
+        # Merge consecutive same-speaker segments
+        merged: list[tuple[float, float, str, str, float]] = []
+        for seg in transcript:
+            conf = getattr(seg, 'confidence', None) or 1.0
+            if merged and merged[-1][3] == seg.speaker:
+                prev = merged[-1]
+                avg_conf = (prev[4] + conf) / 2
+                merged[-1] = (prev[0], seg.end, prev[2] + " " + seg.text, seg.speaker, avg_conf)
+            else:
+                merged.append((seg.start, seg.end, seg.text, seg.speaker, conf))
+
+        # Check if everything fits
+        full_lines: list[str] = []
+        for start, end, text, speaker, conf in merged:
+            conf_marker = " [LOW_CONF]" if conf < 0.4 else ""
+            full_lines.append(f"[{start:.0f}-{end:.0f}] {speaker}: {text}{conf_marker}")
+        full_text = "\n".join(full_lines)
+        if len(full_text) <= max_chars:
+            return full_text
+
+        # Build 60-second buckets
+        if not merged:
+            return "(no transcript)"
+        video_end = merged[-1][1]
+        bucket_size = 60.0
+        num_buckets = max(1, int(video_end / bucket_size) + 1)
+
+        buckets: list[list[tuple[float, float, str, str, float]]] = [[] for _ in range(num_buckets)]
+        for seg in merged:
+            bucket_idx = min(int(seg[0] / bucket_size), num_buckets - 1)
+            buckets[bucket_idx].append(seg)
+
+        # Score each bucket: 2x weight if overlapping hot zone
+        hot_set: set[int] = set()
+        if hot_zones:
+            for z in hot_zones:
+                z_start = getattr(z, 'start', 0)
+                z_end = getattr(z, 'end', 0)
+                for bi in range(max(0, int(z_start / bucket_size)), min(num_buckets, int(z_end / bucket_size) + 1)):
+                    hot_set.add(bi)
+
+        weights = [2.0 if i in hot_set else 1.0 for i in range(num_buckets)]
+        total_weight = sum(weights)
+        if total_weight == 0:
+            total_weight = 1.0
+
+        # Distribute char budget proportionally
+        budget_per_bucket = [(max_chars * w / total_weight) for w in weights]
+
+        # First and last bucket always get full detail
+        if num_buckets >= 2:
+            budget_per_bucket[0] = max(budget_per_bucket[0], max_chars * 0.08)
+            budget_per_bucket[-1] = max(budget_per_bucket[-1], max_chars * 0.05)
+
+        # Build output per bucket
+        result_lines: list[str] = []
+        for bi, bucket_segs in enumerate(buckets):
+            budget = budget_per_bucket[bi]
+            if not bucket_segs:
+                continue
+
+            bucket_lines: list[str] = []
+            used = 0
+            for start, end, text, speaker, conf in bucket_segs:
+                conf_marker = " [LOW_CONF]" if conf < 0.4 else ""
+                line = f"[{start:.0f}-{end:.0f}] {speaker}: {text}{conf_marker}"
+                if used + len(line) + 1 <= budget:
+                    bucket_lines.append(line)
+                    used += len(line) + 1
+                elif not bucket_lines:
+                    # At least include one truncated line
+                    avail = max(50, int(budget))
+                    bucket_lines.append(line[:avail] + "...")
+                    break
+                else:
+                    break
+
+            if bucket_lines:
+                result_lines.extend(bucket_lines)
+            elif bucket_segs:
+                # Bucket got no allocation — add a placeholder
+                b_start = bucket_segs[0][0]
+                b_end = bucket_segs[-1][1]
+                result_lines.append(f"[{b_start:.0f}-{b_end:.0f}s] (content condensed)")
+
+        return "\n".join(result_lines)
+
+    async def _windowed_clip_detection(
+        self,
+        transcript: list[TranscriptSegment],
+        scenes: list[SceneDescription],
+        video_duration: float,
+        window_duration: float = 600.0,
+        overlap_duration: float = 120.0,
+        _partial_results: Optional[list] = None,
+        sequential: bool = False,
+        **kwargs,
+    ) -> list[ClipCandidate]:
+        """Split long videos into overlapping windows and run clip detection on each.
+
+        Args:
+            sequential: If True, process windows one at a time (for Ollama/VRAM safety).
+                        If False, process up to 2 concurrently.
+        """
+        # Build window list
+        windows: list[tuple[float, float]] = []
+        window_start = 0.0
+        step = window_duration - overlap_duration
+        if step <= 0:
+            step = window_duration
+        while window_start < video_duration:
+            window_end = min(window_start + window_duration, video_duration)
+            windows.append((window_start, window_end))
+            window_start += step
+
+        collected_clips: list[ClipCandidate] = []
+        progress_callback = kwargs.get("progress_callback")
+
+        async def _process_window(idx: int, w_start: float, w_end: float):
+            window_transcript = [
+                seg for seg in transcript
+                if seg.start >= w_start - overlap_duration / 2
+                and seg.end <= w_end + overlap_duration / 2
+            ]
+            window_scenes = [
+                s for s in scenes
+                if s.timestamp >= w_start and s.timestamp <= w_end
+            ]
+
+            _mixin_logger.info(
+                "Window %d/%d: %.0f-%.0fs (%d segments, %d scenes)",
+                idx + 1, len(windows), w_start, w_end,
+                len(window_transcript), len(window_scenes),
+            )
+
+            try:
+                clips = await self._single_pass_clip_detection(
+                    window_transcript, window_scenes, w_end - w_start,
+                    **kwargs,
+                )
+                collected_clips.extend(clips)
+                if _partial_results is not None:
+                    _partial_results.extend(clips)
+                _mixin_logger.info(
+                    "Window %d/%d found %d clips (total collected: %d)",
+                    idx + 1, len(windows), len(clips), len(collected_clips),
+                )
+                if progress_callback:
+                    try:
+                        await progress_callback("pass1_window_done", {
+                            "window_idx": idx + 1,
+                            "window_total": len(windows),
+                            "clips_so_far": len(collected_clips),
+                        })
+                    except Exception:
+                        pass
+                return clips
+            except Exception as e:
+                _mixin_logger.warning("Window %d clip detection failed: %s", idx + 1, e)
+                return []
+
+        if sequential:
+            # Process one window at a time (Ollama / VRAM safety)
+            for i, (ws, we) in enumerate(windows):
+                cancel_check = kwargs.get("cancel_check")
+                if cancel_check:
+                    cancel_check()
+                await _process_window(i, ws, we)
+        else:
+            # Concurrent with semaphore
+            sem = asyncio.Semaphore(2)
+
+            async def _concurrent_window(idx: int, ws: float, we: float):
+                async with sem:
+                    return await _process_window(idx, ws, we)
+
+            try:
+                results = await asyncio.gather(
+                    *[_concurrent_window(i, ws, we) for i, (ws, we) in enumerate(windows)],
+                    return_exceptions=True,
+                )
+                failed = sum(1 for r in results if isinstance(r, BaseException) or (isinstance(r, list) and not r))
+                if failed == len(windows):
+                    _mixin_logger.error("ALL %d windows failed in windowed detection", len(windows))
+                elif failed > 0:
+                    _mixin_logger.warning(
+                        "%d/%d windows failed (%d clips from successful windows)",
+                        failed, len(windows), len(collected_clips),
+                    )
+            except asyncio.CancelledError:
+                _mixin_logger.warning(
+                    "Windowed detection cancelled — returning %d clips from completed windows",
+                    len(collected_clips),
+                )
+
+        return self._deduplicate_clips(collected_clips)
+
+    async def _multi_pass_clip_detection(
+        self,
+        transcript: list[TranscriptSegment],
+        scenes: list[SceneDescription],
+        video_duration: float,
+        tier=None,
+        sequential: bool = False,
+        custom_prompt: Optional[str] = None,
+        cancel_check=None,
+        clip_count: Optional[int] = None,
+        min_duration: Optional[float] = None,
+        max_duration: Optional[float] = None,
+        video_summary: Optional[str] = None,
+        existing_clips: Optional[str] = None,
+        hot_zones=None,
+        progress_callback=None,
+        _partial_results: Optional[list] = None,
+    ) -> list[ClipCandidate]:
+        """Multi-pass clip detection for comprehensive coverage.
+
+        Pass 1: Windowed detection across the full video
+        Pass 2: Coverage sweep on under-represented regions
+        Pass 3: Merge, deduplicate, score-sort
+
+        Args:
+            tier: VideoDurationTier controlling window sizes and gap limits.
+            sequential: Process windows sequentially (for Ollama/local inference).
+        """
+        from backend.config import settings as _settings
+
+        num_clips = clip_count or (tier.max_clip_candidates if tier else _settings.MAX_CLIP_CANDIDATES)
+
+        # Window sizing — use tier if available, else adaptive
+        if tier and tier.window_duration > 0:
+            window_dur = tier.window_duration
+            overlap_dur = tier.window_overlap
+        elif video_duration > 1800:
+            window_dur = 600.0
+            overlap_dur = 120.0
+        elif video_duration > 600:
+            window_dur = 480.0
+            overlap_dur = 90.0
+        else:
+            window_dur = video_duration
+            overlap_dur = 0.0
+
+        max_gaps = tier.max_gaps_pass2 if tier else 4
+
+        _mixin_logger.info(
+            "Multi-pass clip detection: %.0fs video, window=%.0fs, overlap=%.0fs, sequential=%s",
+            video_duration, window_dur, overlap_dur, sequential,
+        )
+
+        all_clips: list[ClipCandidate] = []
+
+        # Pass 1: windowed scan
+        if progress_callback:
+            step = window_dur - overlap_dur
+            if step <= 0:
+                step = window_dur
+            _wcount = max(1, int((video_duration + step - 1) / step))
+            await progress_callback("pass1_start", {"windows": _wcount})
+
+        pass1_clips = await self._windowed_clip_detection(
+            transcript, scenes, video_duration,
+            window_duration=window_dur, overlap_duration=overlap_dur,
+            _partial_results=_partial_results,
+            sequential=sequential,
+            custom_prompt=custom_prompt, cancel_check=cancel_check,
+            clip_count=max(8, num_clips),
+            min_duration=min_duration, max_duration=max_duration,
+            video_summary=video_summary, existing_clips=existing_clips,
+            progress_callback=progress_callback,
+        )
+        all_clips.extend(pass1_clips)
+        _mixin_logger.info("Pass 1 found %d clips", len(pass1_clips))
+
+        if progress_callback:
+            await progress_callback("pass1_done", {"clips": len(pass1_clips)})
+
+        # Pass 2: Coverage sweep — find regions with no clips
+        if len(all_clips) < num_clips:
+            from backend.services.hot_zone_scorer import get_coverage_gaps
+            gaps = get_coverage_gaps(
+                hot_zones or [], all_clips, video_duration,
+                min_gap_duration=45.0, max_gaps=max_gaps,
+            )
+
+            if gaps:
+                if progress_callback:
+                    await progress_callback("pass2_start", {"gaps": len(gaps)})
+
+                existing_desc = "\n".join(
+                    f"  - '{c.title}' ({c.start_time:.0f}-{c.end_time:.0f}s)"
+                    for c in all_clips
+                )
+
+                gap_sem = asyncio.Semaphore(1 if sequential else 2)
+
+                async def _scan_gap(idx: int, gap_start: float, gap_end: float):
+                    async with gap_sem:
+                        if cancel_check:
+                            cancel_check()
+                        gap_duration = gap_end - gap_start
+                        gap_transcript = [
+                            s for s in transcript
+                            if s.start >= gap_start - 15 and s.end <= gap_end + 15
+                        ]
+                        gap_scenes = [
+                            s for s in scenes
+                            if gap_start <= s.timestamp <= gap_end
+                        ]
+                        if not gap_transcript and not gap_scenes:
+                            return []
+
+                        if progress_callback:
+                            await progress_callback("pass2_gap", {
+                                "gap_idx": idx + 1,
+                                "gap_total": len(gaps),
+                                "start": gap_start,
+                                "end": gap_end,
+                            })
+
+                        _mixin_logger.info(
+                            "Pass 2: scanning gap %.0f-%.0fs (%d segments, %d scenes)",
+                            gap_start, gap_end, len(gap_transcript), len(gap_scenes),
+                        )
+
+                        try:
+                            if gap_duration > 600 and not sequential:
+                                return await self._windowed_clip_detection(
+                                    gap_transcript, gap_scenes, gap_duration,
+                                    window_duration=480.0, overlap_duration=60.0,
+                                    sequential=sequential,
+                                    custom_prompt=custom_prompt, cancel_check=cancel_check,
+                                    clip_count=max(3, num_clips // 2),
+                                    min_duration=min_duration, max_duration=max_duration,
+                                    video_summary=video_summary, existing_clips=existing_desc,
+                                )
+                            else:
+                                return await self._single_pass_clip_detection(
+                                    gap_transcript, gap_scenes, gap_duration,
+                                    custom_prompt=custom_prompt, cancel_check=cancel_check,
+                                    clip_count=3,
+                                    min_duration=min_duration, max_duration=max_duration,
+                                    video_summary=video_summary, existing_clips=existing_desc,
+                                )
+                        except Exception as e:
+                            _mixin_logger.warning("Pass 2 gap scan failed: %s", e)
+                            return []
+
+                if sequential:
+                    for i, (gs, ge) in enumerate(gaps):
+                        result = await _scan_gap(i, gs, ge)
+                        if result:
+                            all_clips.extend(result)
+                            _mixin_logger.info("Pass 2 found %d clips from gap", len(result))
+                else:
+                    gap_results = await asyncio.gather(
+                        *[_scan_gap(i, gs, ge) for i, (gs, ge) in enumerate(gaps)],
+                        return_exceptions=True,
+                    )
+                    for result in gap_results:
+                        if isinstance(result, list):
+                            all_clips.extend(result)
+                        elif isinstance(result, BaseException):
+                            _mixin_logger.warning("Pass 2 gap failed: %s", result)
+
+        # Pass 3: Merge, deduplicate, sort by score
+        if progress_callback:
+            await progress_callback("pass3_merge", {"raw": len(all_clips)})
+        raw_count = len(all_clips)
+        all_clips = self._deduplicate_clips(all_clips, max_overlap=0.4)
+        all_clips.sort(key=lambda c: c.viral_score, reverse=True)
+
+        if len(all_clips) > num_clips:
+            all_clips = all_clips[:num_clips]
+
+        _mixin_logger.info(
+            "Multi-pass complete: %d final clips (from %d raw)", len(all_clips), raw_count,
+        )
+        return all_clips

@@ -225,11 +225,19 @@ def format_hot_zones_for_prompt(zones: list[HotZone], top_n: int = 15) -> str:
     )
 
 
+def get_window_hot_zones(zones: list[HotZone], window_start: float, window_end: float, top_n: int = 8) -> list[HotZone]:
+    """Get the top hot zones within a specific time window."""
+    window_zones = [z for z in zones if z.start >= window_start and z.end <= window_end]
+    window_zones.sort(key=lambda z: z.composite_score, reverse=True)
+    return window_zones[:top_n]
+
+
 def get_coverage_gaps(
     zones: list[HotZone],
     found_clips: list,  # list of ClipCandidate
     video_duration: float,
     min_gap_duration: float = 60.0,
+    max_gaps: int = 4,
 ) -> list[tuple[float, float]]:
     """Find time regions with no clips that still have decent hot zone scores.
 
@@ -279,6 +287,6 @@ def get_coverage_gaps(
                 )
                 if has_potential:
                     filtered_gaps.append((gs, ge))
-            return filtered_gaps
+            return filtered_gaps[:max_gaps]
 
-    return gaps
+    return gaps[:max_gaps]

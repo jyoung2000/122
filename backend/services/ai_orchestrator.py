@@ -249,8 +249,16 @@ class AIOrchestrator:
         transcript: list[TranscriptSegment],
         scenes: list[SceneDescription],
         job_id: str,
+        tier=None,
     ) -> tuple[VideoSummary, str]:
-        """Returns (summary, provider_name_used)."""
+        """Returns (summary, provider_name_used).
+
+        If tier specifies map_reduce strategy, splits transcript into chunks,
+        summarizes each, then merges. This ensures long videos get full coverage.
+        """
+        if tier and tier.summary_strategy == "map_reduce" and tier.summary_chunk_minutes > 0:
+            return await self._map_reduce_summary(transcript, scenes, job_id, tier)
+
         summary_prompt = self._custom_prompts.summary if self._custom_prompts else None
         for provider in self._get_active_chain():
             try:
@@ -267,6 +275,122 @@ class AIOrchestrator:
                 continue
         raise AllProvidersFailedError("All providers failed for summary generation")
 
+    async def _map_reduce_summary(
+        self,
+        transcript: list[TranscriptSegment],
+        scenes: list[SceneDescription],
+        job_id: str,
+        tier,
+    ) -> tuple[VideoSummary, str]:
+        """Hierarchical map-reduce summary for long videos.
+
+        Map: Split transcript into N-minute chunks, generate mini-summary per chunk.
+        Reduce: Feed all mini-summaries into a final summary call.
+        """
+        from backend.services.providers.base import extract_json, has_real_summary_content
+
+        chunk_seconds = tier.summary_chunk_minutes * 60
+        if not transcript:
+            from backend.services.providers.base import build_summary_from_transcript
+            fb = build_summary_from_transcript(transcript, scenes)
+            return VideoSummary(**fb), "fallback"
+
+        video_end = max(s.end for s in transcript)
+        chunks: list[tuple[float, float, list[TranscriptSegment], list[SceneDescription]]] = []
+        t = 0.0
+        while t < video_end:
+            chunk_end = min(t + chunk_seconds, video_end)
+            chunk_segs = [s for s in transcript if s.start >= t and s.end <= chunk_end + 5]
+            chunk_scenes = [s for s in scenes if t <= s.timestamp <= chunk_end]
+            chunks.append((t, chunk_end, chunk_segs, chunk_scenes))
+            t = chunk_end
+
+        chain = self._get_active_chain()
+        is_ollama = chain and chain[0].provider_name == "ollama"
+        max_segs = 20 if is_ollama else 50
+        chunk_timeout = 90 if is_ollama else 60
+        max_chunk_tokens = 300 if is_ollama else 500
+
+        logger.info(
+            "[%s] Map-reduce summary: %d chunks (%.0fs each), ollama=%s",
+            job_id, len(chunks), chunk_seconds, is_ollama,
+        )
+
+        sem = asyncio.Semaphore(1 if is_ollama else 3)
+
+        async def _summarize_chunk(idx, start, end, segs, scns):
+            async with sem:
+                time_label = f"{int(start//60)}:{int(start%60):02d}-{int(end//60)}:{int(end%60):02d}"
+                text = "\n".join(
+                    f"[{s.start:.0f}s] {s.speaker}: {s.text}"
+                    for s in segs[:max_segs]
+                )
+                scene_text = "\n".join(
+                    f"[{s.timestamp:.0f}s] {s.description[:60 if is_ollama else 100]}"
+                    for s in scns[:5 if is_ollama else 10]
+                )
+                prompt = (
+                    f"Summarize this {time_label} segment in 2-3 sentences. "
+                    f"Include: main topic, key speakers, notable moments.\n\n"
+                    f"TRANSCRIPT:\n{text}\n\nSCENES:\n{scene_text}\n\n"
+                    f"Return a plain text summary (no JSON)."
+                )
+                try:
+                    result = await self.text_completion(
+                        prompt, max_tokens=max_chunk_tokens,
+                        timeout=chunk_timeout,
+                        job_id=job_id, skip_circuit_breaker=True,
+                    )
+                    return f"[{time_label}] {result.strip()}"
+                except Exception as e:
+                    logger.warning("[%s] Chunk %d summary failed: %s", job_id, idx, e)
+                    return f"[{time_label}] {segs[0].text[:200] if segs else 'No content'}"
+
+        results = await asyncio.gather(*[
+            _summarize_chunk(i, s, e, segs, scns)
+            for i, (s, e, segs, scns) in enumerate(chunks)
+        ])
+        mini_summaries = [r for r in results if r]
+
+        # Reduce phase
+        combined = "\n".join(mini_summaries)
+        if is_ollama and len(combined) > 2500:
+            combined = combined[:2500]
+
+        reduce_prompt = (
+            f"You have segment-by-segment summaries of a video. "
+            f"Combine them into a cohesive summary.\n\n"
+            f"SEGMENT SUMMARIES:\n{combined}\n\n"
+            "Return ONLY valid JSON:\n"
+            '{"overview": "<paragraph>", "key_topics": ["topic1", ...], '
+            '"tone": "<tone>", "estimated_audience": "<audience>", "content_category": "<category>"}'
+        )
+
+        for provider in chain:
+            try:
+                raw = await asyncio.wait_for(
+                    provider.text_complete(reduce_prompt, max_tokens=1000 if is_ollama else 2000),
+                    timeout=120 if is_ollama else 90,
+                )
+                data = extract_json(raw)
+                if has_real_summary_content(data):
+                    return VideoSummary(**data), provider.provider_name
+            except Exception as e:
+                logger.warning("[%s] Reduce summary via %s failed: %s", job_id, provider.provider_name, e)
+                continue
+
+        # Fallback: use mini-summaries as overview
+        overview = " ".join(mini_summaries[:6])
+        if len(overview) > 500:
+            overview = overview[:500].rsplit(" ", 1)[0] + "..."
+        return VideoSummary(
+            overview=overview,
+            key_topics=[],
+            tone="conversational",
+            estimated_audience="general viewers",
+            content_category="video content",
+        ), "map_reduce_fallback"
+
     async def detect_viral_clips(
         self,
         transcript: list[TranscriptSegment],
@@ -281,6 +405,7 @@ class AIOrchestrator:
         existing_clips: Optional[str] = None,
         hot_zones=None,
         progress_callback=None,
+        tier=None,
     ) -> tuple[list[ClipCandidate], str]:
         """Returns (clips, provider_name_used)."""
         clip_prompt = self._custom_prompts.viral_clip_detection if self._custom_prompts else None
@@ -329,22 +454,15 @@ class AIOrchestrator:
             )
             logger.info("Clip focus mode active for job %s: '%s'", job_id, focus_text)
         # Per-provider timeout prevents any single provider from blocking the
-        # fallback chain.  Cloud APIs get 5 min for clip detection (large
-        # prompts with full transcript + scenes need time); local ollama
-        # gets 2 min (3 retries × ~30s each with 90s httpx timeout as cap).
-        # Scale timeout for long videos: multi-pass creates N windows processed
-        # in pairs (sem=2). Each window worst-case ≈ 300s (preset timeout with
-        # fallback chain). Need: ceil(N/2) rounds × 300s + pass2 buffer.
+        # fallback chain. Scale timeout based on video duration and provider type.
         vid_minutes = video_duration / 60 if video_duration else 0
         if vid_minutes > 30:
-            # 10-min windows for >30 min videos, processed 2 at a time
+            # Windows processed 2 at a time (or sequentially for Ollama)
             est_windows = max(1, int(video_duration / 600) + 1)
-            est_rounds = (est_windows + 1) // 2  # sem=2
-            # Each round needs up to 300s (preset timeout) + pass 2 gap sweeps
+            est_rounds = (est_windows + 1) // 2
             default_timeout = max(600, est_rounds * 330 + 300)
         else:
             default_timeout = 330
-        _PROVIDER_TIMEOUT = {"ollama": 120}
 
         # Shared partial results container. Providers populate this incrementally
         # so even if a timeout fires, we have whatever completed.
@@ -352,16 +470,13 @@ class AIOrchestrator:
 
         for provider in self._get_active_chain():
             pname = provider.provider_name
-            # Ollama models have context windows too small for clip detection prompts
-            # which include full transcript + scenes + system instructions (~6000+ tokens).
-            # The model truncates the input and produces garbage. Skip for long videos.
-            if pname == "ollama" and video_duration > 120:
-                logger.info(
-                    "Skipping ollama for clip detection — context window too small for %ds video",
-                    int(video_duration),
-                )
-                continue
-            timeout = _PROVIDER_TIMEOUT.get(pname, default_timeout)
+            # Compute Ollama timeout: sequential windows need much more time
+            if pname == "ollama":
+                est_windows = max(1, int(video_duration / 300))
+                timeout = max(420, est_windows * 300 + 120)
+                logger.info("Ollama clip detection timeout: %ds (%d est. windows)", timeout, est_windows)
+            else:
+                timeout = default_timeout
             try:
                 await self._notify_attempt(job_id, pname, "viral clip detection")
                 t0 = time.monotonic()
@@ -376,6 +491,7 @@ class AIOrchestrator:
                         hot_zones=hot_zones,
                         progress_callback=progress_callback,
                         _partial_results=_partial_clips,
+                        tier=tier,
                     ),
                     timeout=timeout,
                 )

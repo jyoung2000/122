@@ -1,3 +1,4 @@
+from dataclasses import dataclass, replace
 from pydantic_settings import BaseSettings
 from typing import Optional
 from functools import lru_cache
@@ -80,3 +81,84 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+
+# ── Duration Tier System ─────────────────────────────────────────────────
+
+
+@dataclass
+class VideoDurationTier:
+    """Pipeline configuration that auto-adjusts based on video duration."""
+    name: str
+    max_minutes: float
+    frame_sample_rate: int           # seconds between frame samples
+    summary_strategy: str            # "single" | "map_reduce"
+    summary_chunk_minutes: int       # chunk size for map_reduce (0 = N/A)
+    window_duration: float           # clip detection window size in seconds
+    window_overlap: float            # overlap between windows in seconds
+    max_clip_candidates: int         # max clips to return
+    max_gaps_pass2: int              # max coverage gaps to scan in pass 2
+    hot_zone_top_n: int              # how many hot zones to send to AI
+    per_call_timeout_base: int       # base timeout per AI call in seconds
+    vision_batch_concurrency: int    # concurrent vision API batches
+
+
+DURATION_TIERS = [
+    VideoDurationTier("short",     15,   8, "single",      0,    0,    0, 12,  4, 15, 120, 2),
+    VideoDurationTier("medium",    60,  12, "single",      0,  480,   90, 20,  6, 20, 180, 2),
+    VideoDurationTier("long",     180,  20, "map_reduce", 10,  600,  120, 40,  8, 25, 240, 3),
+    VideoDurationTier("marathon", 9999, 35, "map_reduce", 15,  600,  120, 60, 12, 30, 300, 3),
+]
+
+
+def get_duration_tier(duration_seconds: float) -> VideoDurationTier:
+    """Return the appropriate tier configuration for a given video duration."""
+    minutes = duration_seconds / 60
+    for tier in DURATION_TIERS:
+        if minutes <= tier.max_minutes:
+            return tier
+    return DURATION_TIERS[-1]
+
+
+@dataclass
+class OllamaTierOverrides:
+    """Overrides applied when Ollama is the active provider.
+
+    Ollama (local AI) has much smaller context windows (4K-8K tokens),
+    slower inference (~12 tok/s on GTX 1650), and limited VRAM (4GB).
+    Windows must be smaller, processing must be sequential, and timeouts
+    must be much longer than cloud providers.
+    """
+    window_duration: float           # smaller windows (4-5 min) to fit context
+    window_overlap: float
+    per_call_timeout_base: int       # 300-480s for local 7B inference
+    summary_strategy: str            # always map_reduce (context too small for single-pass)
+    summary_chunk_minutes: int       # smaller chunks (5-10 min) for tiny context
+    vision_batch_concurrency: int    # 1 for 4GB VRAM (never concurrent)
+    max_transcript_chars: int        # per-window transcript budget (chars)
+    max_scene_chars: int             # per-window scene budget (chars)
+    sequential_windows: bool         # True = one window at a time (VRAM safety)
+
+
+OLLAMA_TIER_OVERRIDES = {
+    "short":    OllamaTierOverrides(240, 30, 300, "single",      0, 1, 3000, 1000, True),
+    "medium":   OllamaTierOverrides(240, 45, 360, "map_reduce",  5, 1, 2500,  800, True),
+    "long":     OllamaTierOverrides(300, 60, 420, "map_reduce",  8, 1, 2500,  800, True),
+    "marathon": OllamaTierOverrides(300, 60, 480, "map_reduce", 10, 1, 2000,  600, True),
+}
+
+
+def apply_ollama_overrides(tier: VideoDurationTier, is_ollama: bool) -> VideoDurationTier:
+    """Return a modified tier with Ollama-appropriate settings if Ollama is active."""
+    if not is_ollama:
+        return tier
+    overrides = OLLAMA_TIER_OVERRIDES.get(tier.name, OLLAMA_TIER_OVERRIDES["medium"])
+    return replace(
+        tier,
+        window_duration=overrides.window_duration,
+        window_overlap=overrides.window_overlap,
+        per_call_timeout_base=overrides.per_call_timeout_base,
+        summary_strategy=overrides.summary_strategy,
+        summary_chunk_minutes=overrides.summary_chunk_minutes if overrides.summary_chunk_minutes else tier.summary_chunk_minutes,
+        vision_batch_concurrency=overrides.vision_batch_concurrency,
+    )

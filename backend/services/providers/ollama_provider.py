@@ -9,7 +9,7 @@ from backend.config import settings
 from backend.models import (
     FrameData, SceneDescription, TranscriptSegment, VideoSummary, ClipCandidate, ClipSEO,
 )
-from backend.services.providers.base import AIProvider, ProviderError, extract_json, extract_description_fallback, normalize_seo_data, build_fallback_summary, has_real_summary_content, build_summary_from_transcript
+from backend.services.providers.base import AIProvider, ChunkedClipDetectionMixin, ProviderError, extract_json, extract_description_fallback, normalize_seo_data, build_fallback_summary, has_real_summary_content, build_summary_from_transcript
 from backend.services.prompts import DEFAULT_FRAME_ANALYSIS_PROMPT, DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT, DEFAULT_SUMMARY_PROMPT
 from backend.services.transcript_utils import analyze_transcript_energy, correlate_scenes_with_transcript, derive_content_guidance
 from backend.services.hot_zone_scorer import format_hot_zones_for_prompt
@@ -52,7 +52,7 @@ def _truncate_at_boundary(text: str, max_chars: int) -> str:
     return text[:max_chars]
 
 
-class OllamaProvider(AIProvider):
+class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
     """Local Ollama provider - always available as final fallback."""
 
     def __init__(self):
@@ -166,6 +166,14 @@ class OllamaProvider(AIProvider):
                 messages.append({"role": "system", "content": system})
             messages.append({"role": "user", "content": prompt})
 
+            # Compute minimum viable timeout for local hardware
+            # ~500 tok/s prompt eval on GTX 1650, ~12 tok/s generation
+            prompt_tokens = (len(prompt) + len(system)) // 4
+            eval_time = prompt_tokens / 500
+            gen_time = max_tokens / 12
+            min_timeout = eval_time + gen_time + 30  # 30s buffer for model loading
+            effective_timeout = max(timeout, min_timeout)
+
             payload = {
                 "model": self._text_model,
                 "messages": messages,
@@ -178,12 +186,12 @@ class OllamaProvider(AIProvider):
             }
             if json_mode:
                 payload["format"] = "json"
-            logger.debug("Ollama _call_text (chat): model=%s, prompt_len=%d, system_len=%d, timeout=%.0fs",
-                         self._text_model, len(prompt), len(system), timeout)
+            logger.debug("Ollama _call_text (chat): model=%s, prompt_len=%d, system_len=%d, timeout=%.0fs (min=%.0fs)",
+                         self._text_model, len(prompt), len(system), effective_timeout, min_timeout)
             response = await self._client.post(
                 f"{self._host}/api/chat",
                 json=payload,
-                timeout=timeout,
+                timeout=effective_timeout,
             )
             response.raise_for_status()
             data = response.json()
@@ -375,18 +383,25 @@ class OllamaProvider(AIProvider):
         existing_clips: Optional[str] = None,
         hot_zones=None,
         progress_callback=None,
+        tier=None,
+        _partial_results: Optional[list] = None,
     ) -> list[ClipCandidate]:
-        # For videos > 5 min, use windowed detection
+        # For videos > 5 min, use multi-pass detection via mixin (sequential for VRAM safety)
         if video_duration > 300:
-            logger.info("Ollama: video %.0fs (>5min) — using windowed clip detection", video_duration)
-            return await self._windowed_clip_detection(
+            logger.info("Ollama: video %.0fs (>5min) — using sequential multi-pass clip detection", video_duration)
+            if tier:
+                from backend.config import apply_ollama_overrides
+                tier = apply_ollama_overrides(tier, is_ollama=True)
+            return await self._multi_pass_clip_detection(
                 transcript, scenes, video_duration,
+                tier=tier, sequential=True,
                 custom_prompt=custom_prompt, cancel_check=cancel_check,
                 clip_count=clip_count, min_duration=min_duration,
                 max_duration=max_duration, video_summary=video_summary,
                 existing_clips=existing_clips,
                 hot_zones=hot_zones,
                 progress_callback=progress_callback,
+                _partial_results=_partial_results,
             )
         return await self._single_pass_clip_detection(
             transcript, scenes, video_duration,
@@ -551,94 +566,7 @@ class OllamaProvider(AIProvider):
                 continue
         raise ProviderError("Ollama: failed to parse viral clips after 3 attempts")
 
-    async def _windowed_clip_detection(
-        self,
-        transcript: list[TranscriptSegment],
-        scenes: list[SceneDescription],
-        video_duration: float,
-        window_duration: float = 300.0,  # 5 min windows (fits 3B context)
-        overlap_duration: float = 60.0,
-        **kwargs,
-    ) -> list[ClipCandidate]:
-        """Sequential windowed detection for long videos."""
-        windows = []
-        window_start = 0.0
-        while window_start < video_duration:
-            window_end = min(window_start + window_duration, video_duration)
-            windows.append((window_start, window_end))
-            window_start += window_duration - overlap_duration
-
-        all_clips = []
-        for idx, (w_start, w_end) in enumerate(windows):
-            if kwargs.get("cancel_check"):
-                kwargs["cancel_check"]()
-
-            window_transcript = [
-                seg for seg in transcript
-                if seg.start >= w_start - overlap_duration / 2
-                and seg.end <= w_end + overlap_duration / 2
-            ]
-            window_scenes = [
-                s for s in scenes
-                if s.timestamp >= w_start and s.timestamp <= w_end
-            ]
-
-            logger.info(
-                "Ollama window %d/%d: %.0f-%.0fs (%d segments, %d scenes)",
-                idx + 1, len(windows), w_start, w_end,
-                len(window_transcript), len(window_scenes),
-            )
-
-            try:
-                clips = await self._single_pass_clip_detection(
-                    window_transcript, window_scenes, w_end - w_start,
-                    **kwargs,
-                )
-                # Offset clip times back to absolute video time
-                for clip in clips:
-                    clip.start_time += w_start
-                    clip.end_time += w_start
-                all_clips.extend(clips)
-            except Exception as e:
-                logger.warning("Ollama window %d clip detection failed: %s", idx + 1, e)
-
-        # Deduplicate overlapping clips
-        return self._deduplicate_clips(all_clips)
-
-    @staticmethod
-    def _deduplicate_clips(clips: list[ClipCandidate], max_overlap: float = 0.5) -> list[ClipCandidate]:
-        """Remove clips that overlap by more than max_overlap fraction of the shorter clip."""
-        if len(clips) <= 1:
-            return clips
-
-        # Sort by viral_score descending so we keep the best clip in each overlap group
-        sorted_clips = sorted(clips, key=lambda c: c.viral_score, reverse=True)
-        kept = []
-
-        for clip in sorted_clips:
-            is_duplicate = False
-            for existing in kept:
-                # Calculate overlap
-                overlap_start = max(clip.start_time, existing.start_time)
-                overlap_end = min(clip.end_time, existing.end_time)
-                overlap_duration = max(0, overlap_end - overlap_start)
-                shorter_duration = min(clip.duration, existing.duration)
-
-                if shorter_duration > 0 and overlap_duration / shorter_duration > max_overlap:
-                    is_duplicate = True
-                    logger.info(
-                        "De-dup: dropping '%s' (%.0f-%.0fs, score=%d) — overlaps %.0f%% with '%s'",
-                        clip.title, clip.start_time, clip.end_time, clip.viral_score,
-                        (overlap_duration / shorter_duration) * 100, existing.title,
-                    )
-                    break
-
-            if not is_duplicate:
-                kept.append(clip)
-
-        if len(kept) < len(clips):
-            logger.info("De-duplication: kept %d of %d clips", len(kept), len(clips))
-        return kept
+    # _windowed_clip_detection and _deduplicate_clips inherited from ChunkedClipDetectionMixin
 
     async def generate_seo(
         self, clip_title: str, clip_transcript: str, video_summary: str,

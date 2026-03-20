@@ -10,7 +10,7 @@ from backend.config import settings
 from backend.models import (
     FrameData, SceneDescription, TranscriptSegment, VideoSummary, ClipCandidate, ClipSEO,
 )
-from backend.services.providers.base import AIProvider, ProviderError, ProviderRateLimitError, extract_json, extract_description_fallback, normalize_seo_data, build_fallback_summary, has_real_summary_content, build_summary_from_transcript
+from backend.services.providers.base import AIProvider, ChunkedClipDetectionMixin, ProviderError, ProviderRateLimitError, extract_json, extract_description_fallback, normalize_seo_data, build_fallback_summary, has_real_summary_content, build_summary_from_transcript
 from backend.services.prompts import DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT, DEFAULT_SUMMARY_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,7 @@ MODEL = "llama-3.3-70b-versatile"
 _API_TIMEOUT = 90  # 90s — Groq is fast
 
 
-class GroqProvider(AIProvider):
+class GroqProvider(ChunkedClipDetectionMixin, AIProvider):
     """Groq provider - text only, no vision support."""
 
     def __init__(self):
@@ -131,6 +131,46 @@ class GroqProvider(AIProvider):
         existing_clips: Optional[str] = None,
         hot_zones=None,
         progress_callback=None,
+        tier=None,
+        _partial_results: Optional[list] = None,
+    ) -> list[ClipCandidate]:
+        """Dispatch to multi-pass for long videos, single-pass for short."""
+        if video_duration > 300:
+            logger.info("Groq: video %.0fs (>5min) — using multi-pass clip detection", video_duration)
+            return await self._multi_pass_clip_detection(
+                transcript, scenes, video_duration,
+                tier=tier, sequential=False,
+                custom_prompt=custom_prompt, cancel_check=cancel_check,
+                clip_count=clip_count, min_duration=min_duration,
+                max_duration=max_duration, video_summary=video_summary,
+                existing_clips=existing_clips,
+                hot_zones=hot_zones,
+                progress_callback=progress_callback,
+                _partial_results=_partial_results,
+            )
+        return await self._single_pass_clip_detection(
+            transcript, scenes, video_duration,
+            custom_prompt=custom_prompt, cancel_check=cancel_check,
+            clip_count=clip_count, min_duration=min_duration,
+            max_duration=max_duration, video_summary=video_summary,
+            existing_clips=existing_clips,
+            hot_zones=hot_zones,
+        )
+
+    async def _single_pass_clip_detection(
+        self,
+        transcript: list[TranscriptSegment],
+        scenes: list[SceneDescription],
+        video_duration: float,
+        custom_prompt: Optional[str] = None,
+        cancel_check=None,
+        clip_count: Optional[int] = None,
+        min_duration: Optional[float] = None,
+        max_duration: Optional[float] = None,
+        video_summary: Optional[str] = None,
+        existing_clips: Optional[str] = None,
+        hot_zones=None,
+        **kwargs,
     ) -> list[ClipCandidate]:
         instruction = custom_prompt if custom_prompt else DEFAULT_VIRAL_CLIP_PROMPT
         # Groq models have limited context — keep data compact

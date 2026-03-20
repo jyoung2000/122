@@ -383,11 +383,41 @@ async def _run_analysis_inner(job_id: str):
     fps_val = metadata.get("fps", 0)
     mb = metadata.get("file_size_mb", 0)
 
-    # Adaptive timeouts based on video duration
+    # Duration tier system — auto-adjusts pipeline based on video length
+    from backend.config import get_duration_tier, apply_ollama_overrides
     vid_minutes = metadata["duration"] / 60
-    _EXTRACTION_TIMEOUT = max(600, int(vid_minutes * 60))      # ~1 min per minute of video
-    _SUMMARY_CLIP_TIMEOUT = max(900, int(vid_minutes * 120))   # ~2 min per minute of video for multi-pass
-    _B64_ENCODE_TIMEOUT = max(300, int(vid_minutes * 10))      # scale with frame count
+    tier = get_duration_tier(metadata["duration"])
+
+    # Detect if Ollama is the primary provider
+    _active_chain = orchestrator._get_active_chain()
+    _primary_provider = _active_chain[0] if _active_chain else None
+    is_ollama_primary = _primary_provider and _primary_provider.provider_name == "ollama"
+
+    if is_ollama_primary:
+        tier = apply_ollama_overrides(tier, is_ollama=True)
+        logger.info(
+            "[%s] Ollama is primary provider — applying overrides: "
+            "window=%ds, timeout=%ds, summary=%s, sequential=True",
+            job_id, tier.window_duration, tier.per_call_timeout_base, tier.summary_strategy,
+        )
+
+    logger.info(
+        "[%s] Duration tier: %s (%.1f min) — frame_rate=%ds, summary=%s, "
+        "window=%ds, max_clips=%d, max_gaps=%d, ollama=%s",
+        job_id, tier.name, vid_minutes, tier.frame_sample_rate,
+        tier.summary_strategy, tier.window_duration,
+        tier.max_clip_candidates, tier.max_gaps_pass2, is_ollama_primary,
+    )
+
+    # Adaptive timeouts based on video duration + provider type
+    _EXTRACTION_TIMEOUT = max(600, int(vid_minutes * 60))
+    if is_ollama_primary:
+        est_windows = max(1, int(metadata["duration"] / tier.window_duration)) if tier.window_duration > 0 else 1
+        _SUMMARY_CLIP_TIMEOUT = max(1200, est_windows * tier.per_call_timeout_base + 600)
+        logger.info("[%s] Ollama-scaled clip timeout: %ds (%d windows)", job_id, _SUMMARY_CLIP_TIMEOUT, est_windows)
+    else:
+        _SUMMARY_CLIP_TIMEOUT = max(900, int(vid_minutes * 120))
+    _B64_ENCODE_TIMEOUT = max(300, int(vid_minutes * 10))
     logger.info(
         "[%s] Adaptive timeouts: extraction=%ds, summary_clip=%ds, b64=%ds (%.1f min video)",
         job_id, _EXTRACTION_TIMEOUT, _SUMMARY_CLIP_TIMEOUT, _B64_ENCODE_TIMEOUT, vid_minutes,
@@ -770,7 +800,7 @@ async def _run_analysis_inner(job_id: str):
     # Launch summary generation as a task
     _summary_start = _time.monotonic()
     summary_task = asyncio.create_task(
-        orchestrator.generate_summary(transcript, scenes, job_id)
+        orchestrator.generate_summary(transcript, scenes, job_id, tier=tier)
     )
 
     # While summary runs, do audio energy analysis + hot zone scoring (no AI)
@@ -788,7 +818,7 @@ async def _run_analysis_inner(job_id: str):
     # Hot zone pre-scoring (instant, no AI calls)
     from backend.services.hot_zone_scorer import score_hot_zones, format_hot_zones_for_prompt
     hot_zones = score_hot_zones(transcript, scenes, audio_moments, metadata["duration"])
-    hot_zone_text = format_hot_zones_for_prompt(hot_zones)
+    hot_zone_text = format_hot_zones_for_prompt(hot_zones, top_n=tier.hot_zone_top_n)
     logger.info(
         "[%s] Hot zone scoring: %d zones, top score=%.1f",
         job_id, len(hot_zones),
@@ -806,7 +836,7 @@ async def _run_analysis_inner(job_id: str):
         await asyncio.sleep(5)
         try:
             summary, summary_provider = await orchestrator.generate_summary(
-                transcript, scenes, job_id,
+                transcript, scenes, job_id, tier=tier,
             )
         except Exception:
             logger.exception("[%s] Summary generation retry also failed, building from transcript", job_id)
@@ -847,14 +877,8 @@ async def _run_analysis_inner(job_id: str):
     _clips_start = _time.monotonic()
     _clips_phase_start[0] = _clips_start  # For phase-aware ETA
 
-    # Scale clip count with video duration
-    vid_minutes = metadata["duration"] / 60
-    if vid_minutes > 60:
-        dynamic_clip_count = min(30, int(vid_minutes * 0.4))
-    elif vid_minutes > 15:
-        dynamic_clip_count = min(20, 12 + int((vid_minutes - 15) * 0.2))
-    else:
-        dynamic_clip_count = settings.MAX_CLIP_CANDIDATES
+    # Scale clip count with video duration — use tier if available
+    dynamic_clip_count = tier.max_clip_candidates
     logger.info(
         "[%s] Dynamic clip count: %d (%.0f min video, default=%d)",
         job_id, dynamic_clip_count, vid_minutes, settings.MAX_CLIP_CANDIDATES,
@@ -939,6 +963,7 @@ async def _run_analysis_inner(job_id: str):
                     hot_zones=hot_zones,
                     progress_callback=_clip_progress,
                     clip_count=dynamic_clip_count,
+                    tier=tier,
                 )
             )
             clips, clips_provider = await asyncio.wait_for(
@@ -959,6 +984,7 @@ async def _run_analysis_inner(job_id: str):
                         hot_zones=hot_zones,
                         progress_callback=_clip_progress,
                         clip_count=dynamic_clip_count,
+                        tier=tier,
                     ),
                     timeout=_SUMMARY_CLIP_TIMEOUT,
                 )
