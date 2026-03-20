@@ -689,9 +689,14 @@ async def extract_word_timestamps(
 def _assign_speakers(raw_segments: list[dict]) -> list[TranscriptSegment]:
     """Assign speaker labels using enhanced pause-based turn detection.
 
-    No artificial speaker cap. Tracks speaker history and speech rate per speaker
-    to make smarter toggle decisions for 3+ person conversations.
+    Caps speakers at MAX_HEURISTIC_SPEAKERS to avoid absurd counts (e.g. 34).
+    Tracks speaker history and speech rate per speaker to make smarter toggle
+    decisions for 3+ person conversations.
     """
+    MAX_HEURISTIC_SPEAKERS = max(
+        2,
+        settings.DIARIZATION_MAX_SPEAKERS if settings.DIARIZATION_MAX_SPEAKERS > 0 else 8,
+    )
     TURN_GAP = 1.2
     NEW_SPEAKER_GAP = 5.0
     MONOLOGUE_DURATION = 15.0
@@ -745,9 +750,11 @@ def _assign_speakers(raw_segments: list[dict]) -> list[TranscriptSegment]:
                 rate_diff = abs(seg_rate - _avg_rate(rate_match))
                 if rate_diff < RATE_CHANGE_THRESHOLD and rate_match != current_speaker:
                     current_speaker = rate_match
-                else:
+                elif speakers_seen < MAX_HEURISTIC_SPEAKERS:
                     speakers_seen += 1
                     current_speaker = speakers_seen
+                else:
+                    current_speaker = _most_likely_existing_speaker(seg_rate)
             elif gap >= TURN_GAP:
                 other = None
                 for sp in reversed(speaker_history):
@@ -756,9 +763,11 @@ def _assign_speakers(raw_segments: list[dict]) -> list[TranscriptSegment]:
                         break
                 if other:
                     current_speaker = other
-                else:
+                elif speakers_seen < MAX_HEURISTIC_SPEAKERS:
                     speakers_seen += 1
                     current_speaker = speakers_seen
+                else:
+                    current_speaker = _most_likely_existing_speaker(seg_rate)
             elif (prev_duration > MONOLOGUE_DURATION
                   and seg_word_count <= INTERJECTION_WORDS and gap < 0.5):
                 other = None
@@ -768,9 +777,11 @@ def _assign_speakers(raw_segments: list[dict]) -> list[TranscriptSegment]:
                         break
                 if other:
                     current_speaker = other
-                else:
+                elif speakers_seen < MAX_HEURISTIC_SPEAKERS:
                     speakers_seen += 1
                     current_speaker = speakers_seen
+                else:
+                    current_speaker = _most_likely_existing_speaker(seg_rate)
             elif abs(seg_rate - prev_rate) > RATE_CHANGE_THRESHOLD * max(seg_rate, prev_rate, 0.1):
                 rate_match = _most_likely_existing_speaker(seg_rate)
                 if rate_match != current_speaker:

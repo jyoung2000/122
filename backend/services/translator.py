@@ -100,8 +100,15 @@ async def translate_segments(
     source_name = SUPPORTED_LANGUAGES.get(source_language, source_language)
     target_name = SUPPORTED_LANGUAGES.get(target_language, target_language)
 
+    # If source is "auto" or unknown, try to detect from segment text
+    if source_language in ("auto", "") and segments:
+        # Use the target language name directly; the LLM can figure it out
+        source_name = "the original language"
+
     translated = []
     total_batches = (len(segments) + batch_size - 1) // batch_size
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_BATCH_FAILURES = 3
 
     for batch_idx, batch_start in enumerate(range(0, len(segments), batch_size)):
         batch = segments[batch_start : batch_start + batch_size]
@@ -114,44 +121,63 @@ async def translate_segments(
             segments_json=json.dumps(seg_texts, ensure_ascii=False, indent=2),
         )
 
-        try:
-            response = await orchestrator.text_completion(prompt)
+        batch_success = False
+        for attempt in range(2):  # 2 attempts per batch
+            try:
+                response = await orchestrator.text_completion(prompt, timeout=120)
 
-            # Parse JSON response
-            cleaned = response.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-            cleaned = cleaned.strip()
+                # Parse JSON response
+                cleaned = response.strip()
+                if cleaned.startswith("```"):
+                    cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3]
+                cleaned = cleaned.strip()
 
-            translations = json.loads(cleaned)
+                translations = json.loads(cleaned)
 
-            if isinstance(translations, list) and len(translations) == len(batch):
-                for i, trans_text in enumerate(translations):
-                    orig = batch[i]
-                    if isinstance(trans_text, str) and trans_text.strip():
-                        # Generate proportional word timestamps for translated text
-                        trans_words = _generate_proportional_word_timestamps(
-                            trans_text.strip(), orig.start, orig.end
-                        )
-                        translated.append(TranscriptSegment(
-                            start=orig.start,
-                            end=orig.end,
-                            text=trans_text.strip(),
-                            speaker=orig.speaker,
-                            words=trans_words,
-                            confidence=orig.confidence,
-                        ))
-                    else:
-                        translated.append(orig)  # Keep original if translation failed
-            else:
-                logger.warning("Translation batch %d returned wrong count — using originals", batch_idx)
-                translated.extend(batch)
+                if isinstance(translations, list) and len(translations) == len(batch):
+                    for i, trans_text in enumerate(translations):
+                        orig = batch[i]
+                        if isinstance(trans_text, str) and trans_text.strip():
+                            trans_words = _generate_proportional_word_timestamps(
+                                trans_text.strip(), orig.start, orig.end
+                            )
+                            translated.append(TranscriptSegment(
+                                start=orig.start,
+                                end=orig.end,
+                                text=trans_text.strip(),
+                                speaker=orig.speaker,
+                                words=trans_words,
+                                confidence=orig.confidence,
+                            ))
+                        else:
+                            translated.append(orig)
+                    batch_success = True
+                    break
+                else:
+                    logger.warning("Translation batch %d attempt %d: wrong count (got %d, expected %d)",
+                                   batch_idx, attempt + 1,
+                                   len(translations) if isinstance(translations, list) else -1,
+                                   len(batch))
+            except Exception as e:
+                logger.warning("Translation batch %d attempt %d failed: %s",
+                               batch_idx, attempt + 1, e)
 
-        except Exception as e:
-            logger.warning("Translation batch %d failed: %s — using originals", batch_idx, e)
-            translated.extend(batch)
+        if not batch_success:
+            translated.extend(batch)  # Keep originals for this batch
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_BATCH_FAILURES:
+                logger.error(
+                    "Translation: %d consecutive batch failures — aborting remaining batches",
+                    consecutive_failures,
+                )
+                # Keep originals for all remaining batches
+                remaining_start = batch_start + batch_size
+                translated.extend(segments[remaining_start:])
+                break
+        else:
+            consecutive_failures = 0
 
         if progress_callback:
             pct = int(((batch_idx + 1) / total_batches) * 100)
