@@ -400,6 +400,12 @@ async def _run_analysis_inner(job_id: str):
             "window=%ds, timeout=%ds, summary=%s, sequential=True",
             job_id, tier.window_duration, tier.per_call_timeout_base, tier.summary_strategy,
         )
+        # Warm up models to avoid cold-start timeout on first analysis call
+        try:
+            await _update_progress(job_id, JobStatus.EXTRACTING_FRAMES, 3, "Warming up local AI models...")
+            await _primary_provider.warmup()
+        except Exception:
+            pass
 
     logger.info(
         "[%s] Duration tier: %s (%.1f min) — frame_rate=%ds, summary=%s, "

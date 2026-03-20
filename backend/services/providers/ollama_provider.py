@@ -113,6 +113,20 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         except Exception as e:
             logger.warning("Ollama warmup failed (non-fatal): %s", e)
 
+    def _get_effective_ctx(self, model_name: str) -> int:
+        """Return context length safe for available VRAM (GTX 1650 = 4GB)."""
+        detected = self._model_ctx.get(model_name, 0)
+        if detected > 0:
+            return min(detected, 8192)
+        model_lower = model_name.lower()
+        if "llava" in model_lower or "vision" in model_lower:
+            return 2048
+        elif any(s in model_lower for s in ["7b", "8b"]):
+            return 4096
+        elif any(s in model_lower for s in ["3b", "1b", "0.5b"]):
+            return 8192
+        return 4096
+
     async def _detect_capabilities(self):
         """Probe Ollama for model capabilities to adapt prompt sizing."""
         try:
@@ -146,7 +160,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                     ],
                     "stream": False,
                     "options": {
-                        "num_ctx": 2048,
+                        "num_ctx": self._get_effective_ctx(self._vision_model),
                     },
                 },
             )
@@ -180,7 +194,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 "stream": False,
                 "options": {
                     "num_predict": max_tokens,
-                    "num_ctx": self._model_ctx.get(self._text_model, 4096),
+                    "num_ctx": self._get_effective_ctx(self._text_model),
                     "temperature": 0.3,
                 },
             }
@@ -427,27 +441,32 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         existing_clips: Optional[str] = None,
         hot_zones=None,
         progress_callback=None,
+        **kwargs,
     ) -> list[ClipCandidate]:
         instruction = custom_prompt if custom_prompt else DEFAULT_VIRAL_CLIP_PROMPT
 
-        # Merge consecutive segments from the same speaker for compactness
-        merged_transcript: list[tuple[float, float, str, str]] = []
-        for seg in transcript:
-            if merged_transcript and merged_transcript[-1][3] == seg.speaker:
-                prev = merged_transcript[-1]
-                merged_transcript[-1] = (prev[0], seg.end, prev[2] + " " + seg.text, seg.speaker)
-            else:
-                merged_transcript.append((seg.start, seg.end, seg.text, seg.speaker))
+        # Context-aware budget calculation based on detected model context
+        ctx_tokens = self._get_effective_ctx(self._text_model)
+        input_budget_tokens = int(ctx_tokens * 0.55)  # reserve 45% for output
+        input_budget_chars = input_budget_tokens * 4
+        overhead_chars = 2000  # system prompt + JSON schema
+        content_budget = max(1500, input_budget_chars - overhead_chars)
 
-        transcript_text = "\n".join(
-            f"[{s[0]:.0f}-{s[1]:.0f}] {s[3]}: {s[2]}" for s in merged_transcript
+        # Split: 60% transcript, 20% scenes, 10% enrichment, 10% summary
+        transcript_budget = int(content_budget * 0.6)
+        scene_budget = int(content_budget * 0.2)
+        enrichment_budget = int(content_budget * 0.1)
+        summary_budget = int(content_budget * 0.1)
+
+        # Use proportional condensation from mixin — ensures full video coverage
+        transcript_text = self._condense_transcript_proportional(
+            transcript, max_chars=transcript_budget, hot_zones=hot_zones,
         )
-        transcript_text = _truncate_at_boundary(transcript_text, 4000)
 
         scene_text = "\n".join(
             f"[{s.timestamp:.0f}s] {s.description[:80]}" for s in scenes
         ) if scenes else ""
-        scene_text = _truncate_at_boundary(scene_text, 1500)
+        scene_text = _truncate_at_boundary(scene_text, scene_budget)
 
         dur_min = int(min_duration) if min_duration else 30
         dur_max = int(max_duration) if max_duration else 300
@@ -461,18 +480,24 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             "Return ONLY valid JSON."
         )
 
-        # Enrich prompt with energy analysis (same as OpenRouter)
+        # Enrich prompt with energy analysis — budget-aware
         enrichment = ""
         energy_text = analyze_transcript_energy(transcript, max_moments=15)
         correlation_text = correlate_scenes_with_transcript(transcript, scenes)
         guidance_text = derive_content_guidance(video_summary or "")
 
-        if energy_text:
-            enrichment += f"\nENERGY MAP (high-engagement moments):\n{_truncate_at_boundary(energy_text, 800)}\n"
-        if correlation_text:
-            enrichment += f"\nAUDIO-VISUAL CORRELATION:\n{_truncate_at_boundary(correlation_text, 500)}\n"
-        if guidance_text:
-            enrichment += f"\nCONTENT GUIDANCE:\n{_truncate_at_boundary(guidance_text, 300)}\n"
+        enrich_used = 0
+        if energy_text and enrich_used < enrichment_budget:
+            chunk = _truncate_at_boundary(energy_text, min(800, enrichment_budget - enrich_used))
+            enrichment += f"\nENERGY MAP (high-engagement moments):\n{chunk}\n"
+            enrich_used += len(chunk)
+        if correlation_text and enrich_used < enrichment_budget:
+            chunk = _truncate_at_boundary(correlation_text, min(500, enrichment_budget - enrich_used))
+            enrichment += f"\nAUDIO-VISUAL CORRELATION:\n{chunk}\n"
+            enrich_used += len(chunk)
+        if guidance_text and enrich_used < enrichment_budget:
+            chunk = _truncate_at_boundary(guidance_text, min(300, enrichment_budget - enrich_used))
+            enrichment += f"\nCONTENT GUIDANCE:\n{chunk}\n"
 
         # Inject hot zone data if available
         if hot_zones:
@@ -480,10 +505,10 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             if hz_text:
                 enrichment += f"\n{_truncate_at_boundary(hz_text, 600)}\n"
 
-        # Summary-aware clip detection: include full summary for context
+        # Summary-aware clip detection
         summary_section = ""
         if video_summary:
-            vs = video_summary[:1000] if len(video_summary) > 1000 else video_summary
+            vs = video_summary[:summary_budget] if len(video_summary) > summary_budget else video_summary
             summary_section = (
                 f"VIDEO SUMMARY (use this to ensure clip selections align with the video's main themes):\n{vs}\n\n"
             )
