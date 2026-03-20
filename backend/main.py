@@ -292,17 +292,22 @@ async def _startup_preload():
 
 @app.on_event("startup")
 async def warmup_ollama():
-    """Pre-load Ollama models into VRAM to avoid cold-start on first analysis."""
+    """Detect Ollama model capabilities (without loading into VRAM).
+
+    We skip the VRAM warmup at startup so that Whisper can use the GPU
+    for transcription first.  Ollama models are loaded lazily when the
+    pipeline reaches the scene-analysis phase — after Whisper is done.
+    """
     from backend.config import settings as cfg
     if "ollama" in cfg.active_provider_chain:
         try:
             from backend.services.providers.ollama_provider import OllamaProvider
             provider = OllamaProvider()
             await provider._detect_capabilities()
-            await provider.warmup()
+            # NOTE: warmup() intentionally skipped — see docstring above.
             await provider.close()
         except Exception as e:
-            logger.warning("Ollama warmup at startup failed (non-fatal): %s", e)
+            logger.warning("Ollama capability detection at startup failed (non-fatal): %s", e)
 
 @app.on_event("startup")
 async def recover_uploads():

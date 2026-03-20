@@ -128,6 +128,12 @@ class AIOrchestrator:
                 total += (tokens / 1000) * rate
         return round(total, 6)
 
+    async def unload_local_models(self):
+        """Unload Ollama models from VRAM so GPU is free for other tasks."""
+        ollama = self._providers.get("ollama")
+        if ollama and hasattr(ollama, "unload_models"):
+            await ollama.unload_models()
+
     def reset_circuit_breaker(self):
         """Reset circuit breaker state before critical pipeline operations.
 

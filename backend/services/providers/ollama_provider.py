@@ -77,6 +77,18 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         """Close the shared HTTP client. Call when provider is no longer needed."""
         await self._client.aclose()
 
+    async def unload_models(self):
+        """Unload all models from VRAM so other processes (Whisper) can use the GPU."""
+        for model in (self._vision_model, self._text_model):
+            try:
+                await self._client.post(f"{self._host}/api/generate", json={
+                    "model": model,
+                    "keep_alive": 0,
+                })
+                logger.info("Unloaded Ollama model from VRAM: %s", model)
+            except Exception as e:
+                logger.debug("Failed to unload Ollama model %s: %s", model, e)
+
     async def _ensure_capabilities(self):
         """Lazy-detect model capabilities on first use."""
         if not self._capabilities_detected:

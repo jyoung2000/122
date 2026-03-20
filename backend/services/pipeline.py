@@ -737,32 +737,61 @@ async def _run_analysis_inner(job_id: str):
 
         return scenes_result, provider
 
-    # Run both branches concurrently — this is the key optimization.
-    # Use return_exceptions=True so one branch failing doesn't kill the other.
-    logger.info("[%s] Starting concurrent transcription + scene analysis", job_id)
+    # When Ollama (local GPU inference) is the provider, run transcription
+    # FIRST so Whisper gets exclusive GPU access, then run scene analysis.
+    # On a 4GB GPU, concurrent execution pushes both to CPU (~3x slower).
+    # With cloud providers, run concurrently since there's no VRAM contention.
+    _uses_local_gpu = "ollama" in settings.active_provider_chain
     _trans_scene_timeout = max(600, audio_duration * 5)
-    async with _stage_timer(job_id, "transcription+scene_analysis"):
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(
-                    _branch_transcription(),
-                    _branch_scene_analysis(),
-                    return_exceptions=True,
-                ),
-                timeout=_trans_scene_timeout,
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                "[%s] Transcription+scene analysis timed out after %.0fs",
-                job_id, _trans_scene_timeout,
-            )
-            raise RuntimeError(
-                f"Transcription and scene analysis timed out after "
-                f"{int(_trans_scene_timeout // 60)} minutes."
-            )
 
-    # Unpack results, tolerating individual branch failures
-    trans_result, scene_result = results
+    if _uses_local_gpu:
+        logger.info("[%s] Sequential mode: transcription first, then scene analysis (local GPU)", job_id)
+        async with _stage_timer(job_id, "transcription+scene_analysis"):
+            try:
+                trans_result = await asyncio.wait_for(
+                    _branch_transcription(),
+                    timeout=_trans_scene_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error("[%s] Transcription timed out", job_id)
+                raise RuntimeError("Transcription timed out")
+            except Exception as e:
+                logger.exception("[%s] Transcription branch failed", job_id)
+                trans_result = e
+
+            try:
+                scene_result = await asyncio.wait_for(
+                    _branch_scene_analysis(),
+                    timeout=_trans_scene_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error("[%s] Scene analysis timed out", job_id)
+                raise RuntimeError("Scene analysis timed out")
+            except Exception as e:
+                logger.exception("[%s] Scene analysis branch failed", job_id)
+                scene_result = e
+    else:
+        logger.info("[%s] Concurrent mode: transcription + scene analysis (cloud providers)", job_id)
+        async with _stage_timer(job_id, "transcription+scene_analysis"):
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(
+                        _branch_transcription(),
+                        _branch_scene_analysis(),
+                        return_exceptions=True,
+                    ),
+                    timeout=_trans_scene_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[%s] Transcription+scene analysis timed out after %.0fs",
+                    job_id, _trans_scene_timeout,
+                )
+                raise RuntimeError(
+                    f"Transcription and scene analysis timed out after "
+                    f"{int(_trans_scene_timeout // 60)} minutes."
+                )
+            trans_result, scene_result = results
 
     if isinstance(trans_result, BaseException):
         if isinstance(trans_result, CancelledError):
