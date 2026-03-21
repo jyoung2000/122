@@ -480,9 +480,11 @@ async def serve_file(job_id: str, path: str, request: Request):
 
 # Serve frontend static files
 static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
-if os.path.isdir(static_dir):
-    app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
+_assets_dir = os.path.join(static_dir, "assets")
+if os.path.isdir(_assets_dir):
+    app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
 
+if os.path.isdir(static_dir) and os.path.isfile(os.path.join(static_dir, "index.html")):
     @app.get("/{path:path}")
     async def serve_spa(path: str):
         # Serve index.html for all non-API, non-asset routes (SPA routing)
@@ -518,4 +520,4 @@ if os.path.isdir(static_dir):
 else:
     @app.get("/")
     async def root():
-        return {"message": "ClipAI API running. Frontend not built yet."}
+        return {"message": "ClipAI API running. Frontend not built yet — run 'npm run build' in frontend/."}
