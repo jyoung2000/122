@@ -17,7 +17,7 @@ from backend.services.ai_orchestrator import AIOrchestrator
 
 logger = logging.getLogger(__name__)
 
-CORRECTION_PROMPT = """You are a transcript correction assistant. Fix the following transcript segments while preserving their exact timing and structure.
+CORRECTION_PROMPT_EN = """You are a transcript correction assistant. Fix the following ENGLISH transcript segments while preserving their exact timing and structure.
 
 Rules:
 1. Fix capitalization of proper nouns (names, brands, places)
@@ -33,6 +33,65 @@ Input segments:
 
 Return a JSON array of corrected text strings, exactly {count} elements.
 Example: ["Fixed text one.", "Fixed text two."]"""
+
+CORRECTION_PROMPT_JA = """You are a Japanese transcript correction assistant. Fix the following JAPANESE transcript segments while preserving their exact timing and structure.
+
+Rules:
+1. Fix incorrect kanji (e.g., wrong homophone kanji)
+2. Fix broken sentence boundaries — merge fragments that were split mid-sentence
+3. Remove speech disfluencies: えーと, あの, まあ, その (when used as fillers)
+4. Fix mixed-script errors (e.g., random katakana in hiragana words)
+5. DO NOT translate to English — keep ALL text in Japanese
+6. DO NOT change the meaning, add content, or rephrase
+7. DO NOT merge or split segments — return exactly the same number of segments
+8. Return ONLY a JSON array of corrected text strings, one per input segment
+
+Input segments:
+{segments_json}
+
+Return a JSON array of corrected text strings, exactly {count} elements."""
+
+CORRECTION_PROMPT_GENERIC = """You are a transcript correction assistant. Fix the following transcript segments (detected language: {language}) while preserving their exact timing and structure.
+
+Rules:
+1. Fix obvious transcription errors appropriate for {language}
+2. Fix punctuation and sentence boundaries
+3. Remove speech disfluencies and filler words common in {language}
+4. DO NOT translate to a different language — keep ALL text in {language}
+5. DO NOT change the meaning, add content, or rephrase
+6. DO NOT merge or split segments — return exactly the same number of segments
+7. Return ONLY a JSON array of corrected text strings, one per input segment
+
+Input segments:
+{segments_json}
+
+Return a JSON array of corrected text strings, exactly {count} elements."""
+
+
+def _get_correction_prompt(language: str) -> str:
+    """Get the appropriate correction prompt for the detected language."""
+    lang = language.lower().strip() if language else "en"
+    if lang == "en":
+        return CORRECTION_PROMPT_EN
+    elif lang == "ja":
+        return CORRECTION_PROMPT_JA
+    else:
+        return CORRECTION_PROMPT_GENERIC
+
+
+def _detect_transcript_language(segments: list) -> str:
+    """Auto-detect the language of transcript segments from their text content."""
+    if not segments:
+        return "en"
+    sample_text = " ".join(s.text for s in segments[:5])
+    _CJK_RANGES = [('\u3040', '\u30ff'), ('\u4e00', '\u9fff'), ('\uac00', '\ud7af')]
+    cjk_count = sum(1 for ch in sample_text if any(lo <= ch <= hi for lo, hi in _CJK_RANGES))
+    if cjk_count / max(len(sample_text), 1) > 0.3:
+        jp_count = sum(1 for ch in sample_text if '\u3040' <= ch <= '\u30ff')
+        return "ja" if jp_count > 0 else "zh"
+    elif any('\u0600' <= ch <= '\u06ff' for ch in sample_text):
+        return "ar"
+    return "en"
 
 
 MAX_BATCH_RETRIES = 1  # Only 1 retry (2 total attempts) — polishing is optional
@@ -202,6 +261,11 @@ async def correct_transcript(
         inner_timeout, _MAX_CONCURRENCY,
     )
 
+    # Detect transcript language for language-aware correction prompts
+    detected_lang = _detect_transcript_language(segments)
+    prompt_template = _get_correction_prompt(detected_lang)
+    logger.info("Transcript correction using %s-language prompt (detected: %s)", detected_lang, detected_lang)
+
     corrected = list(segments)  # Copy to avoid mutating input
     total_batches = -(-len(segments) // batch_size)  # ceiling division
     semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
@@ -223,10 +287,13 @@ async def correct_transcript(
                 return False
 
             seg_texts = [{"index": i, "text": seg.text} for i, seg in enumerate(batch)]
-            prompt = CORRECTION_PROMPT.format(
-                segments_json=json.dumps(seg_texts, indent=2),
-                count=len(batch),
-            )
+            fmt_kwargs = {
+                "segments_json": json.dumps(seg_texts, ensure_ascii=False, indent=2),
+                "count": len(batch),
+            }
+            if "{language}" in prompt_template:
+                fmt_kwargs["language"] = detected_lang
+            prompt = prompt_template.format(**fmt_kwargs)
 
             max_attempts = MAX_BATCH_RETRIES + 1
             for attempt in range(max_attempts):

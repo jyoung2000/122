@@ -31,19 +31,48 @@ SUPPORTED_LANGUAGES = {
 
 TRANSLATION_PROMPT = """Translate the following subtitle segments from {source_lang} to {target_lang}.
 
-Rules:
-1. Translate naturally — do NOT transliterate or leave words in the source language
+CRITICAL RULES:
+1. Translate naturally — produce fluent {target_lang}, not word-for-word translation
 2. Preserve the meaning, tone, and speaker intent
-3. Keep translations concise — subtitles must be readable in 2-3 seconds
-4. Preserve proper nouns (names of people, brands) unless they have standard translations
+3. Keep translations concise — each subtitle must be readable in 2-3 seconds
+4. Preserve proper nouns (names of people, brands) UNLESS they have standard {target_lang} translations
 5. Return EXACTLY {count} translated strings as a JSON array
-6. If a segment is very short (e.g., "Yeah", "Okay"), translate the equivalent expression
-
-Segments to translate:
+6. If a segment is very short (e.g., "Yeah", "Okay"), use the natural {target_lang} equivalent
+7. DO NOT leave any words in {source_lang} unless they are proper nouns
+8. DO NOT romanize — output must be in {target_lang} script
+{extra_rules}
+{context_section}Segments to translate:
 {segments_json}
 
-Return ONLY a JSON array of {count} translated strings.
+Return ONLY a JSON array of {count} translated strings. No markdown, no explanation.
 Example: ["Translated one.", "Translated two."]"""
+
+# Language-pair specific rules
+_PAIR_RULES = {
+    ("ja", "en"): (
+        "9. Japanese honorifics: translate -san as Mr./Ms., -sensei as Professor/Teacher, "
+        "-sama as a respectful form, -kun/-chan can be dropped\n"
+        "10. Sentence-final particles (よ, ね, な, わ) convey nuance — "
+        "reflect them in tone rather than translating literally\n"
+        "11. Japanese often omits the subject — infer it from context"
+    ),
+    ("ko", "en"): (
+        "9. Korean honorifics: translate 님 (-nim) as Mr./Ms., 선생님 as Teacher/Professor\n"
+        "10. Respect the speech level (formal/informal) in English word choice"
+    ),
+    ("zh", "en"): (
+        "9. Chinese idioms (成语 chéngyǔ): translate the meaning, not the characters\n"
+        "10. Measure words can be dropped in English"
+    ),
+}
+
+_CJK_LANGS = {"ja", "ko", "zh", "zh-cn", "zh-tw"}
+
+
+def _get_pair_rules(source: str, target: str) -> str:
+    """Get language-pair-specific translation rules."""
+    key = (source.lower(), target.lower())
+    return _PAIR_RULES.get(key, "")
 
 
 def _generate_proportional_word_timestamps(
@@ -201,6 +230,11 @@ async def translate_segments(
     if source_language in ("auto", "") and segments:
         source_name = "the original language"
 
+    # Smaller batches for CJK languages — denser text, LLMs lose count easily
+    if source_language.lower() in _CJK_LANGS or target_language.lower() in _CJK_LANGS:
+        batch_size = min(batch_size, 10)
+        logger.info("Using smaller batch size (%d) for CJK translation", batch_size)
+
     translated = []
     total_batches = (len(segments) + batch_size - 1) // batch_size
     consecutive_failures = 0
@@ -209,12 +243,32 @@ async def translate_segments(
     for batch_idx, batch_start in enumerate(range(0, len(segments), batch_size)):
         batch = segments[batch_start : batch_start + batch_size]
 
+        # Include surrounding segments as context (not to be translated)
+        context_before = segments[max(0, batch_start - 2) : batch_start]
+        context_after = segments[batch_start + len(batch) : batch_start + len(batch) + 2]
+
+        context_section = ""
+        if context_before or context_after:
+            ctx_parts = []
+            if context_before:
+                ctx_parts.append("Previous context (do NOT translate, for reference only):")
+                for s in context_before:
+                    ctx_parts.append(f"  [{s.start:.0f}s] {s.text}")
+            if context_after:
+                ctx_parts.append("Following context (do NOT translate, for reference only):")
+                for s in context_after:
+                    ctx_parts.append(f"  [{s.start:.0f}s] {s.text}")
+            context_section = "\n".join(ctx_parts) + "\n\n"
+
         seg_texts = [{"index": i, "text": seg.text} for i, seg in enumerate(batch)]
+        extra_rules = _get_pair_rules(source_language, target_language)
         prompt = TRANSLATION_PROMPT.format(
             source_lang=source_name,
             target_lang=target_name,
             count=len(batch),
             segments_json=json.dumps(seg_texts, ensure_ascii=False, indent=2),
+            extra_rules=extra_rules,
+            context_section=context_section,
         )
 
         batch_success = False
@@ -338,12 +392,32 @@ async def translate_segments_with_fallback(
     for batch_idx, batch_start in enumerate(range(0, len(segments), fallback_batch_size)):
         batch = segments[batch_start : batch_start + fallback_batch_size]
 
+        # Include surrounding segments as context
+        context_before = segments[max(0, batch_start - 2) : batch_start]
+        context_after = segments[batch_start + len(batch) : batch_start + len(batch) + 2]
+
+        context_section = ""
+        if context_before or context_after:
+            ctx_parts = []
+            if context_before:
+                ctx_parts.append("Previous context (do NOT translate, for reference only):")
+                for s in context_before:
+                    ctx_parts.append(f"  [{s.start:.0f}s] {s.text}")
+            if context_after:
+                ctx_parts.append("Following context (do NOT translate, for reference only):")
+                for s in context_after:
+                    ctx_parts.append(f"  [{s.start:.0f}s] {s.text}")
+            context_section = "\n".join(ctx_parts) + "\n\n"
+
         seg_texts = [{"index": i, "text": seg.text} for i, seg in enumerate(batch)]
+        extra_rules = _get_pair_rules(source_language, target_language)
         prompt = TRANSLATION_PROMPT.format(
             source_lang=source_name,
             target_lang=target_name,
             count=len(batch),
             segments_json=json.dumps(seg_texts, ensure_ascii=False, indent=2),
+            extra_rules=extra_rules,
+            context_section=context_section,
         )
 
         batch_success = False

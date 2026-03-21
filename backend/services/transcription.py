@@ -408,6 +408,8 @@ def preload_model():
 async def transcribe_audio(
     audio_path: str,
     language: str = "",
+    task: str = "transcribe",
+    initial_prompt: str = "",
     cancel_check: Optional[Callable] = None,
     progress_callback: Optional[Callable] = None,
     audio_duration: float = 0,
@@ -444,6 +446,7 @@ async def transcribe_audio(
     future = loop.run_in_executor(
         _transcription_executor, functools.partial(
             _transcribe_sync, audio_path, language=language,
+            task=task, initial_prompt=initial_prompt,
             progress_state=progress_state, progress_lock=lock,
         )
     )
@@ -524,34 +527,46 @@ async def transcribe_audio(
 def _transcribe_sync(
     audio_path: str,
     language: str = "",
+    task: str = "transcribe",
+    initial_prompt: str = "",
     progress_state: Optional[dict] = None,
     progress_lock: Optional[threading.Lock] = None,
 ) -> list[TranscriptSegment]:
     model = _get_whisper_model()
     transcribe_kwargs = {
+        "task": task,
         "beam_size": settings.WHISPER_BEAM_SIZE,
-        "best_of": 1,
+        "best_of": 5,
         "vad_filter": settings.WHISPER_VAD_FILTER,
-        "condition_on_previous_text": True,  # Enables context across segments
+        "condition_on_previous_text": True,
         "word_timestamps": True,
-        "no_speech_threshold": 0.6,          # Filter non-speech segments
-        "log_prob_threshold": -1.0,          # Skip low-confidence segments
-        "compression_ratio_threshold": 2.4,  # Detect hallucination loops
-        "repetition_penalty": 1.1,           # Discourage repetitive output
+        "no_speech_threshold": 0.6,
+        "log_prob_threshold": -1.0,
+        "compression_ratio_threshold": 2.4,
+        "repetition_penalty": 1.1,
+        "no_repeat_ngram_size": 3,
+        "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
     }
     if settings.WHISPER_VAD_FILTER:
-        # Tune VAD parameters — keep speech with short pauses
         transcribe_kwargs["vad_parameters"] = {
             "min_silence_duration_ms": 500,
             "speech_pad_ms": 200,
         }
     if language:
         transcribe_kwargs["language"] = language
-        logger.info(f"Transcribing with explicit language: {language}")
+        logger.info(f"Transcribing with explicit language: {language}, task: {task}")
     else:
-        logger.info("Transcribing with auto language detection")
+        logger.info(f"Transcribing with auto language detection, task: {task}")
 
-    opts = f"beam={settings.WHISPER_BEAM_SIZE}, vad={'on' if settings.WHISPER_VAD_FILTER else 'off'}"
+    if initial_prompt:
+        transcribe_kwargs["initial_prompt"] = initial_prompt
+        logger.info(f"Using initial_prompt ({len(initial_prompt)} chars)")
+
+    opts = (
+        f"task={task}, beam={settings.WHISPER_BEAM_SIZE}, best_of=5, "
+        f"vad={'on' if settings.WHISPER_VAD_FILTER else 'off'}, "
+        f"no_repeat_ngram=3, temp_fallback=6_steps"
+    )
     logger.info(f"Whisper options: {opts}")
 
     segments_iter, info = model.transcribe(audio_path, **transcribe_kwargs)
@@ -890,20 +905,49 @@ def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
             )
             continue
 
-        # Check 2: Repeated trigrams (e.g., "Thank you. Thank you. Thank you.")
-        words = text.lower().split()
-        if len(words) >= 9:
-            trigrams = [tuple(words[i:i+3]) for i in range(len(words) - 2)]
-            trigram_counts: dict[tuple, int] = {}
-            for tg in trigrams:
-                trigram_counts[tg] = trigram_counts.get(tg, 0) + 1
-            max_repeat = max(trigram_counts.values()) if trigram_counts else 0
-            if max_repeat >= 3 and max_repeat / len(trigrams) > 0.4:
-                logger.warning(
-                    "Hallucination filter: removed looping segment at %.1fs: %s...",
-                    seg["start"], text[:80],
-                )
-                continue
+        # Check 2: Repeated n-grams
+        # For CJK languages (no spaces between words), use character-level n-grams.
+        # For space-delimited languages, use word-level trigrams.
+        _CJK_RANGES = (
+            ('\u4e00', '\u9fff'),   # CJK Unified Ideographs
+            ('\u3040', '\u309f'),   # Hiragana
+            ('\u30a0', '\u30ff'),   # Katakana
+            ('\uac00', '\ud7af'),   # Hangul Syllables
+        )
+        is_cjk = any(
+            any(lo <= ch <= hi for lo, hi in _CJK_RANGES)
+            for ch in text[:50]
+        )
+
+        if is_cjk:
+            chars = text.replace(" ", "")
+            ngram_size = 6
+            if len(chars) >= ngram_size * 3:
+                ngrams = [chars[i:i+ngram_size] for i in range(len(chars) - ngram_size + 1)]
+                ngram_counts: dict[str, int] = {}
+                for ng in ngrams:
+                    ngram_counts[ng] = ngram_counts.get(ng, 0) + 1
+                max_repeat = max(ngram_counts.values()) if ngram_counts else 0
+                if max_repeat >= 3 and max_repeat / len(ngrams) > 0.3:
+                    logger.warning(
+                        "Hallucination filter: removed CJK looping segment at %.1fs: %s...",
+                        seg["start"], text[:80],
+                    )
+                    continue
+        else:
+            words = text.lower().split()
+            if len(words) >= 9:
+                trigrams = [tuple(words[i:i+3]) for i in range(len(words) - 2)]
+                trigram_counts: dict[tuple, int] = {}
+                for tg in trigrams:
+                    trigram_counts[tg] = trigram_counts.get(tg, 0) + 1
+                max_repeat = max(trigram_counts.values()) if trigram_counts else 0
+                if max_repeat >= 3 and max_repeat / len(trigrams) > 0.4:
+                    logger.warning(
+                        "Hallucination filter: removed looping segment at %.1fs: %s...",
+                        seg["start"], text[:80],
+                    )
+                    continue
 
         # Check 3: Near-duplicate of previous segment (sequence-based)
         if prev_text and text and len(text.split()) > 3:

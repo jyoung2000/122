@@ -200,7 +200,31 @@ async def _background_post_processing(job_id: str, transcript: list, orchestrato
             from backend.services.transcription import _last_detected_language
             source_lang = _last_detected_language.get("lang", "")
 
-        if target_lang and target_lang != source_lang:
+        # If Whisper used task="translate", the transcript is already in English.
+        # Store it as translated_transcript and skip LLM translation.
+        whisper_did_translate = (
+            target_lang == "en"
+            and source_lang
+            and source_lang != "en"
+        )
+
+        if whisper_did_translate:
+            logger.info(
+                "[%s] Whisper native translate produced English text — "
+                "storing as translated_transcript (skipping LLM translation)",
+                job_id,
+            )
+            await database.update_job_status(
+                job_id,
+                translated_transcript=list(transcript),
+            )
+            await broadcast_ws(job_id, {
+                "type": "background_task",
+                "task": "subtitle_translation",
+                "status": "complete",
+                "message": "English subtitles ready (Whisper native translation)",
+            })
+        elif target_lang and target_lang != source_lang:
             from backend.services.translator import translate_segments_with_fallback, SUPPORTED_LANGUAGES
             target_name = SUPPORTED_LANGUAGES.get(target_lang, target_lang)
             source_name = SUPPORTED_LANGUAGES.get(source_lang, source_lang) if source_lang else "auto-detected"
@@ -606,8 +630,37 @@ async def _run_analysis_inner(job_id: str):
             await _update_branch_progress("transcription", branch_pct,
                 JobStatus.TRANSCRIBING, " \u2014 ".join(parts))
 
+        # Determine the Whisper task: "translate" for direct audio→English,
+        # "transcribe" for same-language transcription.
+        # Whisper's native translate is dramatically more accurate than
+        # transcribe→LLM-translate because it uses the raw audio signal.
+        whisper_task = "transcribe"
+        if job.subtitle_language and job.subtitle_language.strip().lower() == "en":
+            audio_lang = job.language.strip().lower() if job.language else ""
+            if audio_lang and audio_lang != "en":
+                whisper_task = "translate"
+                logger.info("[%s] Using Whisper native translate: %s audio → English subtitles", job_id, audio_lang)
+            elif not audio_lang:
+                whisper_task = "translate"
+                logger.info("[%s] Using Whisper native translate: auto-detect → English subtitles", job_id)
+
+        # Build initial_prompt for Whisper from filename context.
+        # This helps Whisper recognize proper nouns, technical terms, etc.
+        import re
+        initial_prompt_parts = []
+        if job.filename:
+            name_clean = re.sub(r'\.[^.]+$', '', job.filename)
+            name_clean = re.sub(r'[_\-\[\](){}]', ' ', name_clean)
+            name_clean = re.sub(r'\s+', ' ', name_clean).strip()
+            if name_clean and len(name_clean) > 3:
+                initial_prompt_parts.append(name_clean)
+
+        initial_prompt = ". ".join(initial_prompt_parts) if initial_prompt_parts else ""
+
         result = await transcribe_audio(
-            audio_path, language=job.language, cancel_check=cancel_check,
+            audio_path, language=job.language, task=whisper_task,
+            initial_prompt=initial_prompt,
+            cancel_check=cancel_check,
             progress_callback=_transcribe_progress, audio_duration=audio_duration,
         )
         await database.update_job_status(job_id, transcript=list(result))
