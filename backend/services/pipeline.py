@@ -201,7 +201,7 @@ async def _background_post_processing(job_id: str, transcript: list, orchestrato
             source_lang = _last_detected_language.get("lang", "")
 
         if target_lang and target_lang != source_lang:
-            from backend.services.translator import translate_segments, SUPPORTED_LANGUAGES
+            from backend.services.translator import translate_segments_with_fallback, SUPPORTED_LANGUAGES
             target_name = SUPPORTED_LANGUAGES.get(target_lang, target_lang)
             source_name = SUPPORTED_LANGUAGES.get(source_lang, source_lang) if source_lang else "auto-detected"
             logger.info("[%s] Background subtitle translation: %s → %s (%d segments)",
@@ -214,59 +214,42 @@ async def _background_post_processing(job_id: str, transcript: list, orchestrato
                 "message": f"Translating subtitles to {target_name}...",
             })
 
-            # Scale timeout with segment count — small models need more time
-            _trans_timeout = max(300, len(transcript) * 2)
-            max_translation_attempts = 2
-            last_error = None
+            # Scale timeout with segment count — allow extra time for model pull + fallback
+            _trans_timeout = max(600, len(transcript) * 4)
+            try:
+                orchestrator.reset_circuit_breaker()
+                translated = await asyncio.wait_for(
+                    translate_segments_with_fallback(
+                        transcript,
+                        source_language=source_lang if source_lang else "auto",
+                        target_language=target_lang,
+                        orchestrator=orchestrator,
+                    ),
+                    timeout=_trans_timeout,
+                )
 
-            for attempt in range(max_translation_attempts):
-                try:
-                    translated = await asyncio.wait_for(
-                        translate_segments(
-                            transcript,
-                            source_language=source_lang if source_lang else "auto",
-                            target_language=target_lang,
-                            orchestrator=orchestrator,
-                        ),
-                        timeout=_trans_timeout,
-                    )
+                changed = sum(1 for t, o in zip(translated, transcript) if t.text != o.text)
+                await database.update_job_status(
+                    job_id,
+                    translated_transcript=list(translated),
+                )
 
-                    # Check if translation actually produced different text
-                    changed = sum(1 for t, o in zip(translated, transcript) if t.text != o.text)
-                    if changed == 0:
-                        raise RuntimeError("Translation produced no changes — model may not support translation")
+                await broadcast_ws(job_id, {
+                    "type": "background_task",
+                    "task": "subtitle_translation",
+                    "status": "complete",
+                    "message": f"Subtitles translated to {target_name} ({changed}/{len(translated)} segments)",
+                })
+                logger.info("[%s] Translated %d/%d segments to %s",
+                            job_id, changed, len(translated), target_lang)
 
-                    await database.update_job_status(
-                        job_id,
-                        translated_transcript=list(translated),
-                    )
-
-                    await broadcast_ws(job_id, {
-                        "type": "background_task",
-                        "task": "subtitle_translation",
-                        "status": "complete",
-                        "message": f"Subtitles translated to {target_name} ({changed}/{len(translated)} segments)",
-                    })
-                    logger.info("[%s] Translated %d/%d segments to %s",
-                                job_id, changed, len(translated), target_lang)
-                    last_error = None
-                    break
-
-                except Exception as e:
-                    last_error = e
-                    logger.warning("[%s] Translation attempt %d/%d failed: %s",
-                                   job_id, attempt + 1, max_translation_attempts, e)
-                    if attempt < max_translation_attempts - 1:
-                        orchestrator.reset_circuit_breaker()
-                        await asyncio.sleep(5)
-
-            if last_error:
-                logger.error("[%s] All translation attempts failed: %s", job_id, last_error)
+            except Exception as e:
+                logger.error("[%s] Translation failed: %s", job_id, e)
                 await broadcast_ws(job_id, {
                     "type": "background_task",
                     "task": "subtitle_translation",
                     "status": "failed",
-                    "message": f"Translation failed: {str(last_error)[:80]}",
+                    "message": f"Translation failed: {str(e)[:80]}",
                 })
 
 

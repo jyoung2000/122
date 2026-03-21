@@ -269,8 +269,8 @@ async def _startup_preload():
             import httpx
             host = cfg.OLLAMA_HOST
             models = [cfg.OLLAMA_VISION_MODEL, cfg.OLLAMA_TEXT_MODEL]
-            for extra in ("llava", "llama3.2:3b"):
-                if extra not in models:
+            for extra in ("llava", "llama3.2:3b", cfg.OLLAMA_TRANSLATION_MODEL):
+                if extra and extra not in models:
                     models.append(extra)
             for model in models:
                 try:

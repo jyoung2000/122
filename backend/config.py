@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     OLLAMA_HOST: str = "http://ollama:11434"
     OLLAMA_VISION_MODEL: str = "llava:7b"
     OLLAMA_TEXT_MODEL: str = "llama3.1:8b-instruct-q4_0"
+    OLLAMA_TRANSLATION_MODEL: str = "qwen2.5:3b"  # Dedicated model for subtitle translation (multilingual)
 
     # Fallback chain (ollama excluded by default — user can enable it in Settings)
     AI_FALLBACK_CHAIN: str = "openrouter,gemini,groq"
