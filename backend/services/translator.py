@@ -280,16 +280,31 @@ async def translate_segments_with_fallback(
     if source_language == target_language:
         return segments
 
-    # --- Attempt 1: Use orchestrator provider chain ---
-    result = await translate_segments(
-        segments, source_language, target_language,
-        orchestrator, batch_size, progress_callback,
+    # --- Attempt 1: Quick probe with orchestrator (small sample first) ---
+    # Don't waste time translating all 1441 segments if the model can't translate.
+    # Try a 10-segment sample first; only proceed with full translation if it works.
+    probe_size = min(10, len(segments))
+    probe_sample = segments[:probe_size]
+    probe_result = await translate_segments(
+        probe_sample, source_language, target_language,
+        orchestrator, batch_size=probe_size,
     )
+    probe_changed = sum(1 for t, o in zip(probe_result, probe_sample) if t.text != o.text)
 
-    changed = sum(1 for t, o in zip(result, segments) if t.text != o.text)
-    if changed > 0:
-        logger.info("Translation via orchestrator succeeded: %d/%d segments changed", changed, len(segments))
-        return result
+    if probe_changed > 0:
+        logger.info("Orchestrator probe: %d/%d segments changed — proceeding with full translation",
+                     probe_changed, probe_size)
+        result = await translate_segments(
+            segments, source_language, target_language,
+            orchestrator, batch_size, progress_callback,
+        )
+        changed = sum(1 for t, o in zip(result, segments) if t.text != o.text)
+        if changed > 0:
+            logger.info("Translation via orchestrator succeeded: %d/%d segments changed", changed, len(segments))
+            return result
+    else:
+        logger.info("Orchestrator probe: 0/%d segments changed — skipping full orchestrator attempt",
+                     probe_size)
 
     # --- Attempt 2: Direct Ollama with dedicated translation model ---
     translation_model = settings.OLLAMA_TRANSLATION_MODEL
@@ -312,13 +327,16 @@ async def translate_segments_with_fallback(
     if source_language in ("auto", "") and segments:
         source_name = "the original language"
 
+    # Use smaller batches for the fallback model — small models handle
+    # fewer segments more reliably, especially for CJK→English translation
+    fallback_batch_size = 10
     translated = []
-    total_batches = (len(segments) + batch_size - 1) // batch_size
+    total_batches = (len(segments) + fallback_batch_size - 1) // fallback_batch_size
     consecutive_failures = 0
-    MAX_CONSECUTIVE_BATCH_FAILURES = 3
+    MAX_CONSECUTIVE_BATCH_FAILURES = 5  # more tolerance — don't abort early
 
-    for batch_idx, batch_start in enumerate(range(0, len(segments), batch_size)):
-        batch = segments[batch_start : batch_start + batch_size]
+    for batch_idx, batch_start in enumerate(range(0, len(segments), fallback_batch_size)):
+        batch = segments[batch_start : batch_start + fallback_batch_size]
 
         seg_texts = [{"index": i, "text": seg.text} for i, seg in enumerate(batch)]
         prompt = TRANSLATION_PROMPT.format(
@@ -329,7 +347,7 @@ async def translate_segments_with_fallback(
         )
 
         batch_success = False
-        for attempt in range(2):
+        for attempt in range(3):  # 3 attempts per batch for fallback
             try:
                 response = await _translate_batch_via_ollama(prompt, translation_model, timeout=180.0)
                 translations = _parse_translation_response(response)
@@ -355,7 +373,7 @@ async def translate_segments_with_fallback(
                     "Ollama fallback translation: %d consecutive batch failures — aborting",
                     consecutive_failures,
                 )
-                remaining_start = batch_start + batch_size
+                remaining_start = batch_start + fallback_batch_size
                 translated.extend(segments[remaining_start:])
                 break
         else:

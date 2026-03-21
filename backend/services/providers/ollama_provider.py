@@ -262,11 +262,11 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         consecutive_failures = 0
         MAX_CONSECUTIVE_FAILURES = 5  # bail out if Ollama fails this many times in a row
 
-        # Skip quick scan if adaptive frame rate already reduced count —
-        # the tier system samples fewer frames for longer videos, so the quick
-        # scan just wastes API calls and over-filters with small models.
-        QUICK_SCAN_THRESHOLD = 3  # small models compress scores to 3-5 range
-        skip_quick_scan = total <= 200
+        # Skip quick scan entirely for Ollama — small vision models (moondream,
+        # llava:7b) compress their score range to 1-4 for most content, causing the
+        # threshold filter to reject 99% of frames. The detailed analysis on all
+        # frames is more reliable and avoids the 2x API call overhead.
+        skip_quick_scan = True
 
         if skip_quick_scan:
             logger.info(

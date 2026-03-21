@@ -2488,7 +2488,7 @@ export default function Analysis() {
                   </a>
                 </div>
                 <TranscriptViewer
-                  transcript={job.transcript}
+                  transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
                   currentTime={videoCurrentTime}
                   onSeek={handleSeek}
                   jobId={jobId}
