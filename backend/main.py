@@ -7,7 +7,6 @@ import threading
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -478,46 +477,48 @@ async def serve_file(job_id: str, path: str, request: Request):
     return FileResponse(file_path, media_type=content_type)
 
 
-# Serve frontend static files
+# Serve frontend static files — checked at request time so the app works
+# even when the frontend is built *after* the server starts (e.g. dev
+# docker-compose volume-mounts ./frontend/dist:/app/static).
 static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
-_assets_dir = os.path.join(static_dir, "assets")
-if os.path.isdir(_assets_dir):
-    app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
 
-if os.path.isdir(static_dir) and os.path.isfile(os.path.join(static_dir, "index.html")):
-    @app.get("/{path:path}")
-    async def serve_spa(path: str):
-        # Serve index.html for all non-API, non-asset routes (SPA routing)
+
+@app.get("/{path:path}")
+async def serve_spa(path: str):
+    # If the frontend hasn't been built yet, return a helpful JSON message.
+    index_path = os.path.join(static_dir, "index.html")
+    if not os.path.isfile(index_path):
+        return JSONResponse(
+            {"message": "ClipAI API running. Frontend not built yet — run 'npm run build' in frontend/."}
+        )
+
+    # Serve static files (assets, etc.) if they exist on disk.
+    if path:
         file_path = os.path.join(static_dir, path)
-        if path and os.path.isfile(file_path):
+        if os.path.isfile(file_path):
             return FileResponse(file_path)
 
-        # Inject site customisation (title, favicon) into index.html so
-        # user settings persist visually across restarts without a flash.
-        index_path = os.path.join(static_dir, "index.html")
-        try:
-            from backend.routers.settings import _load_site_config
-            cfg = _load_site_config()
-            if cfg.get("title") or cfg.get("favicon"):
-                with open(index_path, "r") as f:
-                    html = f.read()
-                if cfg.get("title"):
-                    html = html.replace(
-                        "<title>ClipAI \u2014 Video Intelligence</title>",
-                        f"<title>{cfg['title']}</title>",
-                    )
-                if cfg.get("favicon"):
-                    import re
-                    html = re.sub(
-                        r'<link rel="icon"[^>]*/>',
-                        f'<link rel="icon" href="/api/site-uploads/{cfg["favicon"]}" />',
-                        html,
-                    )
-                return Response(content=html, media_type="text/html")
-        except Exception:
-            pass
-        return FileResponse(index_path)
-else:
-    @app.get("/")
-    async def root():
-        return {"message": "ClipAI API running. Frontend not built yet — run 'npm run build' in frontend/."}
+    # Inject site customisation (title, favicon) into index.html so
+    # user settings persist visually across restarts without a flash.
+    try:
+        from backend.routers.settings import _load_site_config
+        cfg = _load_site_config()
+        if cfg.get("title") or cfg.get("favicon"):
+            with open(index_path, "r") as f:
+                html = f.read()
+            if cfg.get("title"):
+                html = html.replace(
+                    "<title>ClipAI \u2014 Video Intelligence</title>",
+                    f"<title>{cfg['title']}</title>",
+                )
+            if cfg.get("favicon"):
+                import re
+                html = re.sub(
+                    r'<link rel="icon"[^>]*/>',
+                    f'<link rel="icon" href="/api/site-uploads/{cfg["favicon"]}" />',
+                    html,
+                )
+            return Response(content=html, media_type="text/html")
+    except Exception:
+        pass
+    return FileResponse(index_path)
