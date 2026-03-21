@@ -142,10 +142,11 @@ class OllamaTierOverrides:
 
 
 OLLAMA_TIER_OVERRIDES = {
-    "short":    OllamaTierOverrides(240, 30, 300, "single",      0, 1, 3000, 1000, True),
-    "medium":   OllamaTierOverrides(240, 45, 360, "map_reduce",  5, 1, 2500,  800, True),
-    "long":     OllamaTierOverrides(300, 60, 420, "map_reduce",  8, 1, 2500,  800, True),
-    "marathon": OllamaTierOverrides(300, 60, 480, "map_reduce", 10, 1, 2000,  600, True),
+    #                           window  overlap  timeout  summary   chunk  conc  tx_ch  sc_ch  seq
+    "short":    OllamaTierOverrides(240,  30, 300, "single",       0, 1, 3000, 1000, True),
+    "medium":   OllamaTierOverrides(420,  60, 360, "map_reduce",   8, 1, 2500,  800, True),
+    "long":     OllamaTierOverrides(600,  90, 420, "map_reduce",  10, 1, 2500,  800, True),
+    "marathon": OllamaTierOverrides(900, 120, 480, "map_reduce",  15, 1, 2000,  600, True),
 }
 
 

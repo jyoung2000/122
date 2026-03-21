@@ -636,6 +636,8 @@ class ChunkedClipDetectionMixin:
             sequential: If True, process windows one at a time (for Ollama/VRAM safety).
                         If False, process up to 2 concurrently.
         """
+        import time as _time
+
         # Build window list
         windows: list[tuple[float, float]] = []
         window_start = 0.0
@@ -695,11 +697,37 @@ class ChunkedClipDetectionMixin:
 
         if sequential:
             # Process one window at a time (Ollama / VRAM safety)
+            # Total elapsed guard: don't let clip detection run forever
+            max_clip_phase_time = max(1200, video_duration * 2)  # 2x video length, min 20 min
+            # Per-window timeout: generous but prevents individual windows from hanging
+            per_window_timeout = 300.0  # 5 min per window
+            clip_phase_start = _time.monotonic()
+
             for i, (ws, we) in enumerate(windows):
                 cancel_check = kwargs.get("cancel_check")
                 if cancel_check:
                     cancel_check()
-                await _process_window(i, ws, we)
+
+                # Check total elapsed time
+                elapsed = _time.monotonic() - clip_phase_start
+                if elapsed > max_clip_phase_time:
+                    _mixin_logger.warning(
+                        "Clip detection phase exceeded %ds — stopping after %d/%d windows (%d clips)",
+                        int(max_clip_phase_time), i, len(windows), len(collected_clips),
+                    )
+                    break
+
+                try:
+                    await asyncio.wait_for(
+                        _process_window(i, ws, we),
+                        timeout=per_window_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    _mixin_logger.warning(
+                        "Window %d/%d timed out after %ds — moving to next window",
+                        i + 1, len(windows), int(per_window_timeout),
+                    )
+                    continue
         else:
             # Concurrent with semaphore
             sem = asyncio.Semaphore(2)

@@ -261,7 +261,19 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         interesting_indices = set(range(total))  # default: all frames
         consecutive_failures = 0
         MAX_CONSECUTIVE_FAILURES = 5  # bail out if Ollama fails this many times in a row
-        if total > 10:
+
+        # Skip quick scan if adaptive frame rate already reduced count —
+        # the tier system samples fewer frames for longer videos, so the quick
+        # scan just wastes API calls and over-filters with small models.
+        QUICK_SCAN_THRESHOLD = 3  # small models compress scores to 3-5 range
+        skip_quick_scan = total <= 200
+
+        if skip_quick_scan:
+            logger.info(
+                "Ollama: skipping quick scan — adaptive sampling already reduced to %d frames",
+                total,
+            )
+        elif total > 10:
             # Stage 1: Quick scan to identify visually interesting frames
             quick_scores = []
             for fi, frame in enumerate(frames):
@@ -297,15 +309,32 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                         quick_scores.extend([5] * (total - len(quick_scores)))
                         break
 
-            # Keep frames scoring 5+ and always include first and last
+            # Keep frames scoring at or above threshold, always include first and last
             interesting_indices = {0, total - 1}
             for i, score in enumerate(quick_scores):
-                if score >= 5:
+                if score >= QUICK_SCAN_THRESHOLD:
                     interesting_indices.add(i)
+
+            # Minimum scene guarantee: at least 1 scene per 5 minutes of video
+            if frames:
+                video_duration = frames[-1].timestamp - frames[0].timestamp
+                min_scenes = max(10, int(video_duration / 300))
+                original_count = len(interesting_indices)
+                if len(interesting_indices) < min_scenes:
+                    step = max(1, total // min_scenes)
+                    for i in range(0, total, step):
+                        interesting_indices.add(i)
+                    logger.info(
+                        "Ollama: quick scan only found %d interesting frames, "
+                        "padded to %d with even sampling (min=%d for %.0f min video)",
+                        original_count, len(interesting_indices),
+                        min_scenes, video_duration / 60,
+                    )
 
             skipped = total - len(interesting_indices)
             if skipped > 0:
-                logger.info("Two-stage vision: skipping %d/%d low-interest frames", skipped, total)
+                logger.info("Two-stage vision: skipping %d/%d low-interest frames (threshold=%d)",
+                            skipped, total, QUICK_SCAN_THRESHOLD)
 
         # Stage 2: Full analysis with concurrency limiter
         sem = asyncio.Semaphore(VISION_CONCURRENCY)
@@ -522,11 +551,26 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         dur_max = int(max_duration) if max_duration else 300
         num_clips = clip_count or settings.MAX_CLIP_CANDIDATES
 
+        # Detect sparse scene data and adjust prompt accordingly
+        scenes_per_minute = len(scenes) / max(1, video_duration / 60)
+        sparse_scene_hint = ""
+        if scenes_per_minute < 0.5:
+            logger.warning(
+                "Scene data is sparse (%.1f scenes/min) — clip detection will rely primarily on transcript",
+                scenes_per_minute,
+            )
+            sparse_scene_hint = (
+                "\nNOTE: Scene/visual data is limited for this video. "
+                "Prioritize transcript signals (dialogue energy, speaker dynamics, "
+                "emotional peaks, topic changes) over visual correlation.\n"
+            )
+
         system = (
             instruction + "\n"
             f"Each clip MUST be {dur_min}-{dur_max} seconds long.\n"
             "The main subject/speaker MUST stay in focus for the entire clip.\n"
             "Do NOT combine different scenes or unrelated topics into one clip.\n"
+            f"{sparse_scene_hint}"
             "Return ONLY valid JSON."
         )
 

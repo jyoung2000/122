@@ -347,6 +347,15 @@ class AIOrchestrator:
                         timeout=chunk_timeout,
                         job_id=job_id, skip_circuit_breaker=True,
                     )
+                    # Broadcast chunk progress so the user sees activity
+                    if self._ws_broadcast and job_id:
+                        try:
+                            await self._ws_broadcast(job_id, {
+                                "type": "status",
+                                "message": f"Summary: chunk {idx + 1}/{len(chunks)} complete...",
+                            })
+                        except Exception:
+                            pass
                     return f"[{time_label}] {result.strip()}"
                 except Exception as e:
                     logger.warning("[%s] Chunk %d summary failed: %s", job_id, idx, e)
