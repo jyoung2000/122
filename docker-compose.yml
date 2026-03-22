@@ -11,9 +11,6 @@ services:
       - ./data/logs:/data/logs
       - ./data/fonts:/data/fonts
       - whisper_models:/root/.cache/huggingface
-      # Mount source code for live updates without rebuilding the image
-      - ./backend:/app/backend
-      - ./frontend/dist:/app/static
     environment:
       - PYTHONUNBUFFERED=1
       - NVIDIA_VISIBLE_DEVICES=all
