@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 
@@ -754,6 +755,45 @@ class ToggleOllamaRequest(BaseModel):
     enabled: bool
 
 
+def _pull_ollama_models_background(models: list[str] | None = None):
+    """Pull Ollama models in a background thread.
+
+    If no models are specified, pulls the configured vision, text, and
+    translation models.  This is called when Ollama is toggled on or when
+    models are saved, so the models are ready by the time the user tries
+    to use them.
+    """
+    if models is None:
+        models = []
+        for m in (settings.OLLAMA_VISION_MODEL, settings.OLLAMA_TEXT_MODEL,
+                  settings.OLLAMA_TRANSLATION_MODEL):
+            if m and m not in models:
+                models.append(m)
+
+    if not models:
+        return
+
+    def _do_pull():
+        import httpx as _httpx
+        host = settings.OLLAMA_HOST
+        for model in models:
+            try:
+                logger.info("Background pull: requesting %s from Ollama...", model)
+                resp = _httpx.post(
+                    f"{host}/api/pull",
+                    json={"name": model},
+                    timeout=_httpx.Timeout(connect=10, read=1800, write=10, pool=10),
+                )
+                if resp.status_code == 200:
+                    logger.info("Background pull: %s ready", model)
+                else:
+                    logger.warning("Background pull: %s returned %d", model, resp.status_code)
+            except Exception as exc:
+                logger.warning("Background pull: %s failed (%s)", model, exc)
+
+    threading.Thread(target=_do_pull, daemon=True, name="ollama-bg-pull").start()
+
+
 @router.post("/providers/ollama/toggle")
 async def toggle_ollama(req: ToggleOllamaRequest):
     """Add or remove Ollama from the fallback chain."""
@@ -771,6 +811,13 @@ async def toggle_ollama(req: ToggleOllamaRequest):
         _upsert_env_var(env_path, "AI_FALLBACK_CHAIN", settings.AI_FALLBACK_CHAIN)
 
     _persist_user_settings()
+
+    # When Ollama is enabled, pull configured models in the background
+    # so they're ready when the user needs them.  The startup pull only
+    # fires if Ollama was already in the chain at boot time.
+    if req.enabled:
+        _pull_ollama_models_background()
+
     return {
         "status": "saved",
         "ollama_enabled": "ollama" in chain,
@@ -1261,13 +1308,14 @@ async def available_models():
             text.append({**entry, **_estimate_speed(mid, "text", False)})
 
     # Add Ollama local models if Ollama is in the chain and reachable
+    _VISION_FAMILIES = {"llava", "moondream", "bakllava", "minicpm-v", "llava-llama3", "llava-phi3", "nanollava"}
     if "ollama" in settings.active_provider_chain:
+        _ollama_seen_ids: set[str] = set()
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 resp = await client.get(f"{settings.OLLAMA_HOST}/api/tags")
                 if resp.status_code == 200:
                     ollama_data = resp.json()
-                    _VISION_FAMILIES = {"llava", "moondream", "bakllava", "minicpm-v", "llava-llama3", "llava-phi3", "nanollava"}
                     for m in ollama_data.get("models", []):
                         model_name = m.get("name", "")
                         model_family = model_name.split(":")[0].lower()
@@ -1303,12 +1351,47 @@ async def available_models():
                             "quality": "good",
                         }
 
+                        _ollama_seen_ids.add(f"ollama/{model_name}")
                         if has_vision:
                             vision.append(entry)
                         # All models can do text
                         text.append(entry)
         except Exception as e:
             logger.warning("Failed to fetch Ollama models for available list: %s", e)
+
+        # Always show the configured default models even if they haven't been
+        # pulled yet (e.g. Ollama was just toggled on and pulls are in progress).
+        # This lets the user select them in the dropdown immediately.
+        _defaults = [
+            (settings.OLLAMA_VISION_MODEL, True),   # (model_name, is_vision)
+            (settings.OLLAMA_TEXT_MODEL, False),
+        ]
+        for _def_name, _def_is_vision in _defaults:
+            if not _def_name:
+                continue
+            _def_id = f"ollama/{_def_name}"
+            if _def_id in _ollama_seen_ids:
+                continue  # Already listed from /api/tags
+            _def_family = _def_name.split(":")[0].lower()
+            _is_vision = _def_is_vision or any(vf in _def_family for vf in _VISION_FAMILIES)
+            _def_entry = {
+                "id": _def_id,
+                "name": f"{_def_name} (Ollama Local — pulling...)",
+                "provider": "ollama",
+                "is_free": True,
+                "cost_per_hour": 0,
+                "context_length": 0,
+                "created": int(time.time()),
+                "desc": "LOCAL — FREE — downloading...",
+                "speed": "balanced",
+                "est_time_display": "varies by GPU",
+                "quality_score": 3,
+                "quality": "good",
+            }
+            if _is_vision:
+                vision.append(_def_entry)
+            text.append(_def_entry)
+            _ollama_seen_ids.add(_def_id)
 
     # Sort: free first, then newer + cheaper towards the top
     # Within free models: newest first.  Within paid: newest first, then cheapest.
@@ -1420,6 +1503,16 @@ async def save_models(req: SaveModelsRequest):
 
     _invalidate_status_cache()
     _persist_user_settings()
+
+    # Pull any newly selected Ollama models in the background
+    if has_ollama_models:
+        pull_models = []
+        if req.vision_model and req.vision_model.startswith("ollama/"):
+            pull_models.append(req.vision_model[len("ollama/"):])
+        if req.text_model and req.text_model.startswith("ollama/"):
+            pull_models.append(req.text_model[len("ollama/"):])
+        if pull_models:
+            _pull_ollama_models_background(pull_models)
 
     # Return the currently active models.
     # If the user just saved Ollama models, reflect those regardless of chain order.
