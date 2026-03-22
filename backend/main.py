@@ -353,10 +353,6 @@ try:
     clipai_mcp = FastMCP(
         name="ClipAI",
         stateless_http=True,
-        description=(
-            "Video intelligence platform — upload videos, analyze content, "
-            "generate viral clips with subtitles and SEO metadata"
-        ),
     )
 
     # Import and register MCP tools
@@ -480,8 +476,15 @@ async def serve_file(job_id: str, path: str, request: Request):
 
 # Serve frontend static files
 static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
-if os.path.isdir(static_dir):
-    app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
+_assets_dir = os.path.join(static_dir, "assets")
+if os.path.isdir(static_dir) and os.path.isdir(_assets_dir):
+    app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
+elif os.path.isdir(static_dir):
+    logger.warning(
+        "Frontend assets directory not found at %s — "
+        "run 'cd frontend && npm run build' or rebuild the Docker image",
+        _assets_dir,
+    )
 
     @app.get("/{path:path}")
     async def serve_spa(path: str):
