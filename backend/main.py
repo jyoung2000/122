@@ -477,14 +477,10 @@ async def serve_file(job_id: str, path: str, request: Request):
 # Serve frontend static files
 static_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static")
 _assets_dir = os.path.join(static_dir, "assets")
-if os.path.isdir(static_dir) and os.path.isdir(_assets_dir):
+_index_path = os.path.join(static_dir, "index.html")
+
+if os.path.isdir(static_dir) and os.path.isdir(_assets_dir) and os.path.isfile(_index_path):
     app.mount("/assets", StaticFiles(directory=_assets_dir), name="assets")
-elif os.path.isdir(static_dir):
-    logger.warning(
-        "Frontend assets directory not found at %s — "
-        "run 'cd frontend && npm run build' or rebuild the Docker image",
-        _assets_dir,
-    )
 
     @app.get("/{path:path}")
     async def serve_spa(path: str):
@@ -496,6 +492,12 @@ elif os.path.isdir(static_dir):
         # Inject site customisation (title, favicon) into index.html so
         # user settings persist visually across restarts without a flash.
         index_path = os.path.join(static_dir, "index.html")
+        if not os.path.isfile(index_path):
+            return Response(
+                content='{"error": "Frontend not built. Run: docker compose build clipai-app"}',
+                media_type="application/json",
+                status_code=503,
+            )
         try:
             from backend.routers.settings import _load_site_config
             cfg = _load_site_config()
@@ -519,6 +521,21 @@ elif os.path.isdir(static_dir):
             pass
         return FileResponse(index_path)
 else:
+    if os.path.isdir(static_dir):
+        logger.warning(
+            "Frontend not built — %s exists but index.html or assets/ missing. "
+            "Run 'cd frontend && npm run build' or rebuild the Docker image.",
+            static_dir,
+        )
+
     @app.get("/")
     async def root():
-        return {"message": "ClipAI API running. Frontend not built yet."}
+        return {"message": "ClipAI API running. Frontend not built — rebuild the Docker image with: docker compose build clipai-app"}
+
+    @app.get("/{path:path}")
+    async def spa_fallback(path: str):
+        return Response(
+            content='{"error": "Frontend not built. Rebuild with: docker compose build --no-cache clipai-app"}',
+            media_type="application/json",
+            status_code=503,
+        )
