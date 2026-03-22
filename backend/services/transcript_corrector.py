@@ -221,6 +221,7 @@ async def correct_transcript(
     orchestrator: AIOrchestrator,
     batch_size: int | None = None,
     job_id: str = "",
+    language: str = "",
 ) -> list[TranscriptSegment]:
     """Correct transcript text using the user's configured AI text model.
 
@@ -263,10 +264,13 @@ async def correct_transcript(
         inner_timeout, _MAX_CONCURRENCY,
     )
 
-    # Detect transcript language and select the appropriate correction prompt
-    _detected_lang = _detect_transcript_language(segments)
+    # Use Whisper's detected language if provided, fall back to heuristic
+    _detected_lang = language.lower().strip() if language else ""
+    if not _detected_lang:
+        _detected_lang = _detect_transcript_language(segments)
     _correction_prompt_template = _get_correction_prompt(_detected_lang)
-    logger.info("Transcript correction: detected language=%s", _detected_lang)
+    logger.info("Transcript correction: language=%s (source=%s)",
+                _detected_lang, "whisper" if language else "heuristic")
 
     corrected = list(segments)  # Copy to avoid mutating input
     total_batches = -(-len(segments) // batch_size)  # ceiling division
@@ -383,5 +387,71 @@ async def correct_transcript(
                 "Transcript correction: %d/%d batches succeeded (probe + %d concurrent)",
                 succeeded + 1, total_batches, len(tasks),
             )
+
+    # ── Second pass: contextual correction with sliding window ──
+    # Each batch includes surrounding segments as read-only context.
+    # This fixes cross-segment errors (broken sentences, pronoun resolution).
+    if _detected_lang in ("en", "") and first_batch_result is not False:
+        _CONTEXT_PROMPT = """You are a transcript refinement assistant. Review these segments WITH their surrounding context and fix cross-segment issues.
+
+Rules:
+1. Fix sentences that were split across segments (ensure both halves are grammatically complete)
+2. Fix inconsistent proper noun spelling across segments
+3. Fix pronoun ambiguity ONLY if the previous context makes it obvious
+4. DO NOT merge or split segments — return exactly {count} corrected strings
+5. DO NOT change content that is already correct
+6. Return ONLY a JSON array of {count} strings
+
+Context (DO NOT include in output — for reference only):
+{context}
+
+Segments to refine:
+{segments_json}
+
+Return a JSON array of {count} refined strings."""
+
+        context_batch_size = min(10, batch_size or 10)
+        for batch_start in range(0, len(corrected), context_batch_size):
+            batch_end = min(batch_start + context_batch_size, len(corrected))
+            batch = corrected[batch_start:batch_end]
+
+            ctx_before = corrected[max(0, batch_start - 3):batch_start]
+            ctx_after = corrected[batch_end:min(len(corrected), batch_end + 3)]
+            context_lines = []
+            for s in ctx_before:
+                context_lines.append(f"[BEFORE] {s.text}")
+            for s in ctx_after:
+                context_lines.append(f"[AFTER] {s.text}")
+
+            seg_texts = [{"index": i, "text": s.text} for i, s in enumerate(batch)]
+            prompt = _CONTEXT_PROMPT.format(
+                count=len(batch),
+                context="\n".join(context_lines) if context_lines else "(start/end of transcript)",
+                segments_json=json.dumps(seg_texts, ensure_ascii=False, indent=2),
+            )
+
+            try:
+                response = await asyncio.wait_for(
+                    orchestrator.text_completion(
+                        prompt, timeout=inner_timeout, job_id=job_id,
+                        skip_circuit_breaker=True,
+                    ),
+                    timeout=outer_timeout,
+                )
+                refinements = _parse_correction_response(response, len(batch))
+                if refinements:
+                    for i, new_text in enumerate(refinements):
+                        if isinstance(new_text, str) and new_text.strip():
+                            idx = batch_start + i
+                            old_text = corrected[idx].text
+                            if new_text.strip() != old_text:
+                                corrected[idx] = corrected[idx].model_copy(
+                                    update={"text": new_text.strip()}
+                                )
+                                if corrected[idx].words:
+                                    corrected[idx] = _realign_word_timestamps(corrected[idx], old_text)
+                    logger.info("Context refinement batch %d-%d succeeded", batch_start, batch_end - 1)
+            except Exception as e:
+                logger.debug("Context refinement batch %d failed (non-critical): %s", batch_start, e)
 
     return corrected

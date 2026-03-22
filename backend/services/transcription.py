@@ -263,10 +263,18 @@ def _get_whisper_model():
             if device == "cuda":
                 model_kwargs["device_index"] = device_index
 
-            # Auto-upgrade model when GPU is available and user hasn't explicitly chosen
+            # Auto-upgrade model when GPU is available and user hasn't explicitly chosen.
+            # Prefer large-v3 (most accurate) over turbo (faster but ~5% less accurate).
+            # Fall back to turbo if VRAM < 6GB (large-v3 needs ~4-5GB VRAM).
             if device == "cuda" and settings.WHISPER_MODEL == "small":
-                settings.WHISPER_MODEL = "large-v3-turbo"
-                logger.info("Auto-upgraded Whisper model to large-v3-turbo (GPU detected)")
+                gpus = _enumerate_gpus_nvidia_smi()
+                vram_mb = gpus[0]["vram_mb"] if gpus else 0
+                if vram_mb >= 6000:
+                    settings.WHISPER_MODEL = "large-v3"
+                    logger.info("Auto-upgraded Whisper model to large-v3 (GPU detected, %dMB VRAM)", vram_mb)
+                else:
+                    settings.WHISPER_MODEL = "large-v3-turbo"
+                    logger.info("Auto-upgraded Whisper model to large-v3-turbo (GPU detected, %dMB VRAM — insufficient for large-v3)", vram_mb)
 
             logger.info(
                 "Loading Whisper model: %s (device=%s, compute=%s%s)",
@@ -286,10 +294,10 @@ def _get_whisper_model():
                     )
                     device = "cpu"
                     compute_type = "int8"
-                    # Downgrade model for CPU — large-v3-turbo is too slow on CPU
-                    if settings.WHISPER_MODEL == "large-v3-turbo":
+                    # Downgrade model for CPU — large models are too slow on CPU
+                    if settings.WHISPER_MODEL in ("large-v3", "large-v3-turbo"):
                         settings.WHISPER_MODEL = "small"
-                        logger.info("Downgraded Whisper model to 'small' for CPU fallback (large-v3-turbo too slow on CPU)")
+                        logger.info("Downgraded Whisper model to 'small' for CPU fallback (large models too slow on CPU)")
                     whisper_device_info.update({"device": device, "compute_type": compute_type})
                     _whisper_model = WhisperModel(
                         settings.WHISPER_MODEL,
@@ -548,6 +556,9 @@ def _transcribe_sync(
         # Temperature fallback: if a segment fails quality checks at temp 0.0,
         # retry with progressively more randomness.
         "temperature": [0.0, 0.2, 0.4, 0.6, 0.8, 1.0],
+        # Reset previous-text context when temp > 0.5 (failed segment).
+        # Prevents hallucinated text from poisoning the next segment.
+        "prompt_reset_on_temperature": 0.5,
     }
     if settings.WHISPER_VAD_FILTER:
         transcribe_kwargs["vad_parameters"] = {
@@ -571,7 +582,35 @@ def _transcribe_sync(
     )
     logger.info(f"Whisper options: {opts}")
 
-    segments_iter, info = model.transcribe(audio_path, **transcribe_kwargs)
+    # ── Audio preprocessing for accuracy ──
+    # Normalize volume so Whisper gets consistent input levels.
+    # Whisper was trained on -20 LUFS audio; quiet recordings or loud
+    # ones with clipping both degrade accuracy.
+    preprocessed_path = audio_path
+    try:
+        import subprocess
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            preprocessed_path = tmp.name
+        cmd = [
+            "ffmpeg", "-y", "-i", audio_path,
+            "-af", "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-ar", "16000",  # Whisper expects 16kHz
+            "-ac", "1",      # Mono
+            preprocessed_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode != 0:
+            logger.warning("Audio preprocessing failed, using original: %s",
+                           result.stderr[-200:] if result.stderr else "unknown error")
+            preprocessed_path = audio_path
+        else:
+            logger.info("Audio preprocessed: normalized to -16 LUFS, 16kHz mono")
+    except Exception as e:
+        logger.warning("Audio preprocessing skipped: %s", e)
+        preprocessed_path = audio_path
+
+    segments_iter, info = model.transcribe(preprocessed_path, **transcribe_kwargs)
     detected_lang = info.language
     _last_detected_language["lang"] = detected_lang
     logger.info(f"Detected language: {detected_lang} (prob={info.language_probability:.2f})")
@@ -641,19 +680,38 @@ def _transcribe_sync(
     if not raw_segments:
         return []
 
-    # Try pyannote diarization first, fall back to pause-based heuristic
-    speaker_map = _diarize_audio(audio_path)
-    if speaker_map:
-        logger.info("Speaker detection: NEURAL mode (pyannote diarization)")
-        transcript_segments = _assign_speakers_from_diarization(raw_segments, speaker_map)
-        _last_diarization_method["method"] = "neural"
-    else:
-        logger.info("Speaker detection: HEURISTIC mode (pause-based) — set HF_AUTH_TOKEN for neural diarization")
-        transcript_segments = _assign_speakers(raw_segments)
-        _last_diarization_method["method"] = "heuristic"
+    # ── Skip speaker diarization during initial transcription ──
+    # All segments assigned to "Speaker 1" for maximum subtitle accuracy.
+    # Diarization runs in post-processing when the user specifies speaker count
+    # via POST /api/jobs/{job_id}/diarize — this gives the AI better guidance
+    # and avoids diarization errors contaminating the initial transcript.
+    transcript_segments = []
+    for seg in raw_segments:
+        words = None
+        if seg.get("words"):
+            words = [WordTimestamp(**w) for w in seg["words"]]
+        transcript_segments.append(TranscriptSegment(
+            start=round(seg["start"], 2),
+            end=round(seg["end"], 2),
+            text=seg["text"],
+            speaker="Speaker 1",
+            words=words,
+            confidence=seg.get("confidence"),
+            avg_logprob=seg.get("avg_logprob"),
+            no_speech_prob=seg.get("no_speech_prob"),
+        ))
 
-    speaker_set = set(s.speaker for s in transcript_segments)
-    logger.info(f"Transcription complete: {len(transcript_segments)} segments, {len(speaker_set)} speakers detected")
+    _last_diarization_method["method"] = "deferred"
+
+    # Clean up preprocessed audio
+    if preprocessed_path != audio_path:
+        try:
+            import os as _os
+            _os.unlink(preprocessed_path)
+        except OSError:
+            pass
+
+    logger.info(f"Transcription complete: {len(transcript_segments)} segments (diarization deferred to post)")
     return transcript_segments
 
 
@@ -1044,6 +1102,91 @@ def _diarize_audio(audio_path: str):
     except Exception as e:
         logger.warning("Diarization failed: %s — falling back to pause-based", e)
         return None
+
+
+async def diarize_transcript_post(
+    audio_path: str,
+    segments: list[TranscriptSegment],
+    num_speakers: int = 0,
+) -> list[TranscriptSegment]:
+    """Run speaker diarization on an existing transcript (post-processing).
+
+    Called when the user requests diarization after reviewing the transcript.
+    The user can specify the exact number of speakers for better accuracy.
+
+    Args:
+        audio_path: Path to the audio file (for pyannote analysis).
+        segments: Existing transcript segments (all "Speaker 1").
+        num_speakers: Expected number of speakers (0 = auto-detect).
+
+    Returns:
+        Updated TranscriptSegment[] with speaker labels assigned.
+    """
+    import asyncio
+    import functools
+
+    # Convert segments to raw_segments format for speaker assignment
+    raw_segments = []
+    for seg in segments:
+        word_list = None
+        if seg.words:
+            word_list = [{"start": w.start, "end": w.end, "word": w.word} for w in seg.words]
+        raw_segments.append({
+            "start": seg.start,
+            "end": seg.end,
+            "text": seg.text,
+            "words": word_list,
+            "confidence": seg.confidence,
+            "avg_logprob": seg.avg_logprob,
+            "no_speech_prob": seg.no_speech_prob,
+        })
+
+    # Try pyannote first (best quality)
+    if settings.DIARIZATION_ENABLED and settings.HF_AUTH_TOKEN:
+        pipeline = _get_diarization_pipeline()
+        if pipeline:
+            try:
+                loop = asyncio.get_running_loop()
+
+                def _run_pyannote():
+                    diarize_kwargs = {"audio": audio_path}
+                    if num_speakers > 0:
+                        diarize_kwargs["min_speakers"] = num_speakers
+                        diarize_kwargs["max_speakers"] = num_speakers
+                    elif settings.DIARIZATION_MIN_SPEAKERS > 1:
+                        diarize_kwargs["min_speakers"] = settings.DIARIZATION_MIN_SPEAKERS
+                    if settings.DIARIZATION_MAX_SPEAKERS > 0 and num_speakers == 0:
+                        diarize_kwargs["max_speakers"] = settings.DIARIZATION_MAX_SPEAKERS
+
+                    diarization = pipeline(**diarize_kwargs)
+                    speaker_map = {}
+                    for turn, _, speaker in diarization.itertracks(yield_label=True):
+                        speaker_map[(turn.start, turn.end)] = speaker
+                    return speaker_map
+
+                speaker_map = await loop.run_in_executor(_transcription_executor, _run_pyannote)
+
+                if speaker_map:
+                    result = _assign_speakers_from_diarization(raw_segments, speaker_map)
+                    num_detected = len(set(s.speaker for s in result))
+                    logger.info(
+                        "Post-processing diarization (pyannote): %d speakers detected "
+                        "(requested: %s)",
+                        num_detected, num_speakers if num_speakers > 0 else "auto",
+                    )
+                    return result
+            except Exception as e:
+                logger.warning("Post-processing pyannote diarization failed: %s", e)
+
+    # Fallback: heuristic speaker assignment
+    result = _assign_speakers(raw_segments)
+    num_detected = len(set(s.speaker for s in result))
+    logger.info(
+        "Post-processing diarization (heuristic): %d speakers detected "
+        "(requested: %s)",
+        num_detected, num_speakers if num_speakers > 0 else "auto",
+    )
+    return result
 
 
 def _assign_speakers_from_diarization(

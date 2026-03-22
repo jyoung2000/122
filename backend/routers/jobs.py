@@ -440,6 +440,68 @@ async def refresh_word_timestamps(job_id: str):
     }
 
 
+# --- Post-processing diarization ---
+
+class DiarizeRequest(BaseModel):
+    num_speakers: int = 0  # 0 = auto-detect, >0 = exact count
+
+
+@router.post("/jobs/{job_id}/diarize")
+async def diarize_job(job_id: str, req: DiarizeRequest):
+    """Run speaker diarization on an existing transcript (post-processing).
+
+    The user specifies how many speakers are in the video. The system
+    runs pyannote (if available) or the heuristic speaker assigner to
+    label each segment with a speaker identity.
+    """
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.transcript:
+        raise HTTPException(status_code=400, detail="No transcript to diarize")
+
+    # Find the audio file
+    audio_path = None
+    upload_dir = f"/data/uploads/{job_id}"
+    for ext in ["wav", "mp3", "m4a", "aac", "ogg", "flac"]:
+        matches = glob.glob(f"{upload_dir}/*.{ext}")
+        if matches:
+            audio_path = matches[0]
+            break
+    # Also check for extracted audio from video
+    if not audio_path:
+        extracted = os.path.join(upload_dir, "audio.wav")
+        if os.path.isfile(extracted):
+            audio_path = extracted
+
+    if not audio_path:
+        raise HTTPException(
+            status_code=400,
+            detail="Audio file not found — re-upload the video to enable diarization"
+        )
+
+    from backend.services.transcription import diarize_transcript_post
+
+    try:
+        diarized = await diarize_transcript_post(
+            audio_path=audio_path,
+            segments=job.transcript,
+            num_speakers=req.num_speakers,
+        )
+
+        await database.update_job_status(job_id, transcript=list(diarized))
+
+        speaker_set = set(s.speaker for s in diarized)
+        return {
+            "status": "ok",
+            "speakers_detected": len(speaker_set),
+            "speakers_requested": req.num_speakers if req.num_speakers > 0 else "auto",
+            "segments_updated": len(diarized),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Diarization failed: {str(e)[:200]}")
+
+
 # --- Scene management ---
 
 class AddSceneRequest(BaseModel):

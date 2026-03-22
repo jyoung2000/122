@@ -488,6 +488,11 @@ export default function Analysis() {
   const [inlineActivePreset, setInlineActivePreset] = useState('');
   const fullVideoExporting = encoding.tasks[`${jobId}_0`]?.status === 'encoding';
 
+  // Speaker detection (post-processing diarization)
+  const [diarizeNumSpeakers, setDiarizeNumSpeakers] = useState(0);
+  const [diarizeLoading, setDiarizeLoading] = useState(false);
+  const [diarizeResult, setDiarizeResult] = useState('');
+
   // Fetch presets on mount so the preset bar is available from the start
   useEffect(() => {
     fetch('/api/clip-presets')
@@ -495,6 +500,30 @@ export default function Analysis() {
       .then(data => { if (Array.isArray(data)) setClipPresets(data); })
       .catch(() => {});
   }, []);
+
+  const handleRunDiarization = useCallback(async () => {
+    setDiarizeLoading(true);
+    setDiarizeResult('');
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/diarize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ num_speakers: diarizeNumSpeakers }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setDiarizeResult(`Detected ${data.speakers_detected} speaker${data.speakers_detected !== 1 ? 's' : ''}`);
+        fetchJob();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || 'Diarization failed', 'error');
+      }
+    } catch (e) {
+      showToast('Diarization request failed', 'error');
+    } finally {
+      setDiarizeLoading(false);
+    }
+  }, [jobId, diarizeNumSpeakers]);
 
   const fetchJobRetryRef = useRef(0);
   const fetchJob = useCallback(async () => {
@@ -2487,6 +2516,56 @@ export default function Analysis() {
                     &#x2B07; SRT (no speakers)
                   </a>
                 </div>
+                {/* Speaker Detection (post-processing diarization) */}
+                <div style={{
+                  padding: '12px 16px', background: 'var(--bg-panel)',
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                  marginBottom: 16,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                      Speaker Detection
+                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>Speakers:</label>
+                      <select
+                        value={diarizeNumSpeakers}
+                        onChange={(e) => setDiarizeNumSpeakers(parseInt(e.target.value))}
+                        style={{
+                          padding: '4px 8px', fontSize: 12, background: 'var(--bg-base)',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                          color: 'var(--text-primary)',
+                        }}
+                      >
+                        <option value={0}>Auto-detect</option>
+                        {[1,2,3,4,5,6,7,8,9,10].map(n => (
+                          <option key={n} value={n}>{n} speaker{n > 1 ? 's' : ''}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <button
+                      onClick={handleRunDiarization}
+                      disabled={diarizeLoading}
+                      style={{
+                        padding: '6px 16px', fontSize: 12, fontWeight: 600,
+                        background: 'var(--accent-cyan)', color: 'var(--bg-base)',
+                        border: 'none', borderRadius: 'var(--radius-sm)',
+                        opacity: diarizeLoading ? 0.5 : 1, cursor: diarizeLoading ? 'default' : 'pointer',
+                      }}
+                    >
+                      {diarizeLoading ? 'Detecting...' : 'Run Speaker Detection'}
+                    </button>
+                    {diarizeResult && (
+                      <span style={{ fontSize: 11, color: 'var(--success)' }}>
+                        {diarizeResult}
+                      </span>
+                    )}
+                  </div>
+                  <p style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 6, marginBottom: 0 }}>
+                    Analyzes the audio to identify who is speaking. Specify the exact number of speakers for best accuracy.
+                  </p>
+                </div>
+
                 <TranscriptViewer
                   transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
                   currentTime={videoCurrentTime}

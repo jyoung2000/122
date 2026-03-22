@@ -167,8 +167,12 @@ async def _background_post_processing(job_id: str, transcript: list, orchestrato
             _per_batch = 150 if _polish_info.get("is_thinking") else 90
             _correction_timeout = max(120, min(600, _per_batch + (_remaining_waves * _per_batch) + 30))
 
+            # Get Whisper's detected language for the correction prompt
+            from backend.services.transcription import _last_detected_language
+            whisper_lang = _last_detected_language.get("lang", "")
+
             polished = await asyncio.wait_for(
-                correct_transcript(transcript, orchestrator, job_id=job_id),
+                correct_transcript(transcript, orchestrator, job_id=job_id, language=whisper_lang),
                 timeout=_correction_timeout,
             )
             await database.update_job_status(job_id, transcript=list(polished))
@@ -681,9 +685,14 @@ async def _run_analysis_inner(job_id: str):
         speaker_count = len(set(s.speaker for s in result))
         from backend.services.transcription import _last_diarization_method
         diar_method = _last_diarization_method.get("method", "heuristic")
-        diar_label = "neural (pyannote)" if diar_method == "neural" else "heuristic (pause-based)"
+        if diar_method == "deferred":
+            diar_label = "speaker detection deferred to post-processing"
+        elif diar_method == "neural":
+            diar_label = f"{speaker_count} speaker{'s' if speaker_count != 1 else ''} detected via neural (pyannote)"
+        else:
+            diar_label = f"{speaker_count} speaker{'s' if speaker_count != 1 else ''} detected via heuristic (pause-based)"
         await _update_branch_progress("transcription", 100, JobStatus.TRANSCRIBING,
-            f"Transcribed {len(result)} segments \u2014 {speaker_count} speaker{'s' if speaker_count != 1 else ''} detected via {diar_label}")
+            f"Transcribed {len(result)} segments \u2014 {diar_label}")
         return result
 
     # ── Branch B: Base64 encoding + AI scene analysis ──
