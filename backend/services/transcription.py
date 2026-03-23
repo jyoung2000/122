@@ -264,25 +264,25 @@ def _get_whisper_model():
                 model_kwargs["device_index"] = device_index
 
             # Auto-upgrade model when GPU is available and user hasn't explicitly chosen.
-            # Prefer large-v3 (most accurate) over turbo (faster but ~5% less accurate).
-            # Fall back to turbo if VRAM >= 4.5GB. Keep 'small' on <=4GB GPUs
-            # where large-v3-turbo risks CUDA OOM on complex audio segments.
+            # VRAM-aware: large-v3-turbo needs ~3GB VRAM in float16. On 4GB GPUs,
+            # this leaves <1GB headroom and crashes on complex audio segments
+            # (multilingual, music, overlapping speakers cause transient VRAM spikes).
             if device == "cuda" and settings.WHISPER_MODEL == "small":
                 gpus = _enumerate_gpus_nvidia_smi()
                 vram_mb = gpus[0]["vram_mb"] if gpus else 0
-                if vram_mb >= 6000:
+                if vram_mb >= 8000:
                     settings.WHISPER_MODEL = "large-v3"
-                    logger.info("Auto-upgraded Whisper model to large-v3 (GPU detected, %dMB VRAM)", vram_mb)
-                elif vram_mb >= 4500:
+                    logger.info("Auto-upgraded Whisper to large-v3 (%dMB VRAM)", vram_mb)
+                elif vram_mb >= 6000:
                     settings.WHISPER_MODEL = "large-v3-turbo"
-                    logger.info("Auto-upgraded Whisper model to large-v3-turbo (GPU detected, %dMB VRAM)", vram_mb)
+                    logger.info("Auto-upgraded Whisper to large-v3-turbo (%dMB VRAM)", vram_mb)
                 else:
-                    # 4GB or less: large-v3-turbo risks CUDA OOM on complex audio.
-                    # Keep 'small' which only needs ~500MB VRAM, leaving room for
-                    # other processes (FFmpeg NVDEC, etc.) sharing the GPU.
+                    # 4GB or less: keep 'small' (~500MB VRAM) to avoid CUDA OOM.
+                    # large-v3-turbo crashed at 4:31 on a 113-min Japanese video
+                    # in production — 18 segments collected then lost.
                     logger.info(
-                        "Keeping Whisper model 'small' — only %dMB VRAM available "
-                        "(large-v3-turbo needs ~3GB, too risky on 4GB GPUs)",
+                        "Keeping Whisper 'small' — %dMB VRAM insufficient for "
+                        "large-v3-turbo (needs ~3GB, risks CUDA OOM on complex audio)",
                         vram_mb,
                     )
 
@@ -534,7 +534,7 @@ async def transcribe_audio(
             return task.result()
         except Exception as e:
             # Whisper crashed mid-transcription (CUDA OOM, segfault, etc.)
-            # Check if partial segments were collected before the crash.
+            # Try to recover partial segments collected before the crash.
             with lock:
                 partial = list(progress_state.get("raw_segments", []))
             if partial:
@@ -545,14 +545,28 @@ async def transcribe_audio(
                 )
                 partial = _filter_hallucinations(partial)
                 if partial:
+                    result_segs = []
+                    for seg in partial:
+                        words = None
+                        if seg.get("words"):
+                            words = [WordTimestamp(**w) for w in seg["words"]]
+                        result_segs.append(TranscriptSegment(
+                            start=round(seg["start"], 2),
+                            end=round(seg["end"], 2),
+                            text=seg["text"],
+                            speaker="Speaker 1",
+                            words=words,
+                            confidence=seg.get("confidence"),
+                            avg_logprob=seg.get("avg_logprob"),
+                            no_speech_prob=seg.get("no_speech_prob"),
+                        ))
                     _last_diarization_method["method"] = "deferred"
                     logger.info(
-                        "Partial transcription recovered: %d segments covering %.1fs of audio",
-                        len(partial),
-                        partial[-1].get("end", 0) if partial else 0,
+                        "Recovered %d segments covering %.1fs of audio",
+                        len(result_segs),
+                        result_segs[-1].end if result_segs else 0,
                     )
-                    return _assign_speakers(partial)
-            # No partial segments available — re-raise the original error
+                    return result_segs
             logger.error("Whisper crashed with no recoverable segments: %s", str(e)[:200])
             raise
 

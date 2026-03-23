@@ -1111,28 +1111,28 @@ async def _run_analysis_inner(job_id: str):
     _log_gpu_memory(job_id, "before clip detection")
     cancel_check()
 
-    # ── Early exit: if no transcript data, skip AI clip detection ──
-    # Without transcript, the AI has no dialogue, timestamps, or content
-    # to find clips in. Running dozens of windows on empty prompts wastes
-    # hours of CPU time for guaranteed 0 clips.
-    _skip_clip_detection = False
-    real_scenes = [s for s in scenes if "failed" not in s.description.lower() and "skipped" not in s.description.lower()]
+    # ── Early exit: skip clip detection when there's no data to analyze ──
+    # Without transcript, the AI has nothing to find clips in. Running 46 windows
+    # of empty prompts wastes hours of CPU time for guaranteed 0 clips.
+    # This saved 224 minutes in production on a 113-min video where Whisper crashed.
+    real_scenes = [s for s in scenes if "failed" not in s.description.lower()
+                   and "skipped" not in s.description.lower()
+                   and "vision analysis skipped" not in s.description.lower()]
     if not transcript and len(real_scenes) < 10:
         logger.warning(
-            "[%s] Skipping clip detection: 0 transcript segments and only %d real scenes. "
-            "The AI has no content to analyze. Check Whisper logs for transcription errors.",
+            "[%s] Skipping clip detection: 0 transcript segments, %d useful scenes. "
+            "Nothing for the AI to analyze. Check Whisper logs for transcription errors.",
             job_id, len(real_scenes),
         )
         clips = []
         clips_provider = "skipped (no transcript)"
-        _skip_clip_detection = True
         await _update_progress(
             job_id, JobStatus.DETECTING_CLIPS, 95,
-            f"Clip detection skipped — no transcript data available "
-            f"(Whisper may have failed, check logs). {len(real_scenes)} scenes only.",
+            "Clip detection skipped — no transcript data available. "
+            "Check logs for Whisper errors.",
         )
+    else:
 
-    if not _skip_clip_detection:
         # Reset again before clip detection — summary generation may have
         # had transient failures that shouldn't block clip detection.
         orchestrator.reset_circuit_breaker()
@@ -1140,7 +1140,6 @@ async def _run_analysis_inner(job_id: str):
         _clips_start = _time.monotonic()
         _clips_phase_start[0] = _clips_start  # For phase-aware ETA
 
-    if not _skip_clip_detection:
         # Scale clip count with video duration — use tier if available
         dynamic_clip_count = tier.max_clip_candidates
         logger.info(

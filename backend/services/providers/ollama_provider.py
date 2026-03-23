@@ -311,6 +311,30 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         # Detect available VRAM first
         await self._detect_vram()
 
+        # Warn if user-selected models are too large for available VRAM
+        if self._available_vram_mb > 0 and self._available_vram_mb <= 4500:
+            large_vision = ["llava:7b", "llava:13b", "llava-v1.6"]
+            large_text = ["llama3.1:8b", "llama3:8b", "mistral:7b", "gemma:7b",
+                         "deepseek:7b", "qwen2.5:7b"]
+            vision_lower = self._vision_model.lower()
+            text_lower = self._text_model.lower()
+            for pattern in large_vision:
+                if pattern in vision_lower:
+                    logger.warning(
+                        "VRAM WARNING: Vision model '%s' (~4GB) exceeds %dMB VRAM — "
+                        "will run on CPU (very slow). Recommend: moondream:1.8b (~1GB)",
+                        self._vision_model, self._available_vram_mb,
+                    )
+                    break
+            for pattern in large_text:
+                if pattern in text_lower:
+                    logger.warning(
+                        "VRAM WARNING: Text model '%s' (~4GB) exceeds %dMB VRAM — "
+                        "will run on CPU (slow). Recommend: qwen2.5:3b-instruct (~1.8GB)",
+                        self._text_model, self._available_vram_mb,
+                    )
+                    break
+
         vision_num_gpu = self._get_num_gpu(self._vision_model)
         text_num_gpu = self._get_num_gpu(self._text_model)
 
@@ -703,25 +727,74 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
     ) -> list[SceneDescription]:
         total = len(frames)
 
-        # ── CPU Vision Gate: skip frame-by-frame AI analysis when impractical ──
-        # Large vision models (llava:7b+) on CPU take 3-6 minutes per frame.
-        # For videos with many frames, this means hours of processing for minimal gain.
-        if total > 30 and self._force_cpu:
-            model_lower = self._vision_model.lower()
-            slow_on_cpu = any(p in model_lower for p in ["llava:7b", "llava:13b", "llava-v1.6"])
-            if slow_on_cpu:
+        # ── Speed gate: test first frame, skip if impractically slow ──
+        # On Sandy Bridge CPU with llava:7b, each frame takes 360s+ (timeout).
+        # Detect this early and limit frames rather than wasting 30+ minutes.
+        _speed_limited_indices = None
+        if total > 10 and frames[0].base64:
+            import time as _t
+            await self._ensure_model_active(self._vision_model)
+            t0 = _t.monotonic()
+            try:
+                test_result = await asyncio.wait_for(
+                    self._call_vision(
+                        'Describe this image in one sentence. Return JSON: '
+                        '{"description": "text", "importance_score": 5, "subject_x": 50}',
+                        frames[0].base64,
+                    ),
+                    timeout=120.0,
+                )
+                elapsed = _t.monotonic() - t0
+                logger.info(
+                    "Ollama vision speed test: %.1fs for 1 frame (model=%s)",
+                    elapsed, self._vision_model,
+                )
+
+                if elapsed > 90:
+                    # Impractically slow — cap to 20 evenly-spaced frames
+                    max_frames = 20
+                    logger.warning(
+                        "Ollama vision too slow (%.0fs/frame) — reducing %d→%d frames "
+                        "(est. %.0f min vs %.0f hours full set)",
+                        elapsed, total, max_frames,
+                        (max_frames * elapsed) / 60, (total * elapsed) / 3600,
+                    )
+                    step = max(1, total // max_frames)
+                    keep = set()
+                    for i in range(0, total, step):
+                        keep.add(i)
+                    keep.add(0)
+                    keep.add(total - 1)
+                    _speed_limited_indices = keep
+                elif elapsed > 30 and total > 60:
+                    # Moderate speed — cap to 60 frames
+                    max_frames = 60
+                    step = max(1, total // max_frames)
+                    keep = set()
+                    for i in range(0, total, step):
+                        keep.add(i)
+                    keep.add(0)
+                    keep.add(total - 1)
+                    _speed_limited_indices = keep
+                    logger.info(
+                        "Ollama vision moderate speed (%.0fs/frame) — reduced %d→%d frames",
+                        elapsed, total, len(keep),
+                    )
+
+            except asyncio.TimeoutError:
                 logger.warning(
-                    "Ollama vision: %s on CPU with %d frames would take %.0f+ hours — "
-                    "skipping AI vision, using timestamp-based scene descriptions instead. "
-                    "For faster analysis, switch to moondream:1.8b in Settings.",
-                    self._vision_model, total, (total * 300) / 3600,
+                    "Ollama vision speed test timed out (>120s, model=%s) — "
+                    "generating timestamp-based descriptions instead. "
+                    "Consider switching to moondream:1.8b for faster vision.",
+                    self._vision_model,
                 )
                 scenes = []
                 for i, frame in enumerate(frames):
+                    mins = int(frame.timestamp // 60)
+                    secs = int(frame.timestamp % 60)
                     scenes.append(SceneDescription(
                         timestamp=frame.timestamp,
-                        description=f"Frame at {int(frame.timestamp // 60)}:{int(frame.timestamp % 60):02d} "
-                                    f"(vision analysis skipped — model too slow on CPU)",
+                        description=f"Frame at {mins}:{secs:02d} (vision skipped — model too slow on CPU)",
                         importance_score=5,
                         thumbnail_path=frame.path,
                         subject_x=50,
@@ -729,6 +802,8 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                     if progress_callback:
                         await progress_callback(i + 1, total)
                 return scenes
+            except Exception as e:
+                logger.warning("Vision speed test failed (%s) — proceeding with all frames", e)
 
         await self._ensure_model_active(self._vision_model)
         instruction = custom_prompt if custom_prompt else DEFAULT_FRAME_ANALYSIS_PROMPT
@@ -835,6 +910,12 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                             skipped, total, QUICK_SCAN_THRESHOLD)
 
         # Stage 2: Full analysis with concurrency limiter
+
+        # Apply speed-limited frame set if the speed gate detected slow inference
+        if _speed_limited_indices is not None:
+            interesting_indices = _speed_limited_indices
+            logger.info("Using speed-limited frame set: %d of %d frames", len(interesting_indices), total)
+
         sem = asyncio.Semaphore(VISION_CONCURRENCY)
         scenes: list[Optional[SceneDescription]] = [None] * total
         completed = 0

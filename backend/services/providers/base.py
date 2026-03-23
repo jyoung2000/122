@@ -820,21 +820,21 @@ class ChunkedClipDetectionMixin:
             windows.append((window_start, window_end))
             window_start += step
 
-        # ── Ollama window cap: limit total windows to prevent CPU grinding ──
-        # On CPU inference at ~2-3 tok/s, each window takes 2-5 minutes.
-        # More than 12 windows means hours of clip detection.
+        # ── Cap window count for sequential (Ollama) mode ──
+        # On CPU inference at 2-4 tok/s, each window takes 2-5 minutes.
+        # 46 windows = 3.7 hours of clip detection (observed in production).
+        # Cap at 12 windows, evenly sampled to cover the full video.
         MAX_SEQUENTIAL_WINDOWS = 12
         if sequential and len(windows) > MAX_SEQUENTIAL_WINDOWS:
-            original_count = len(windows)
+            original = len(windows)
             step_size = max(1, len(windows) // MAX_SEQUENTIAL_WINDOWS)
             sampled = [windows[i] for i in range(0, len(windows), step_size)]
-            # Always include the last window
             if sampled[-1] != windows[-1]:
                 sampled.append(windows[-1])
             windows = sampled[:MAX_SEQUENTIAL_WINDOWS]
             _mixin_logger.info(
-                "Capped sequential windows: %d → %d (prevents hours of CPU inference)",
-                original_count, len(windows),
+                "Capped sequential windows: %d → %d (covering full %.0fs video)",
+                original, len(windows), video_duration,
             )
 
         collected_clips: list[ClipCandidate] = []
