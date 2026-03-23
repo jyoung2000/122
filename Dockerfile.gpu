@@ -16,7 +16,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV NVIDIA_VISIBLE_DEVICES=all
 ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
 # Ensure CUDA libraries are on the library path for ctranslate2/faster-whisper
-ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:/usr/local/lib/python3.11/dist-packages/nvidia/cublas/lib:/usr/local/lib/python3.11/dist-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
 # Auto-enable GPU acceleration at startup
 ENV GPU_ACCELERATION_ENABLED=true
 
@@ -109,7 +109,12 @@ COPY backend/requirements.txt .
 RUN pip3 install --upgrade pip && \
     pip3 install --no-cache-dir -r requirements.txt && \
     pip3 install --no-cache-dir nvidia-cublas-cu12 nvidia-cudnn-cu12==9.* && \
-    pip3 install --no-cache-dir pyannote.audio>=3.1.0 torch>=2.0.0
+    pip3 install --no-cache-dir pyannote.audio>=3.1.0 torch>=2.0.0 && \
+    # Register pip-installed NVIDIA libs so ctranslate2/torch can find them at runtime
+    # (path varies by Python version — 3.10 on Ubuntu 22.04, 3.11 if installed from apt)
+    python3 -c "import nvidia.cublas; print(nvidia.cublas.__path__[0] + '/lib')" >> /etc/ld.so.conf.d/nvidia-pip.conf && \
+    python3 -c "import nvidia.cudnn; print(nvidia.cudnn.__path__[0] + '/lib')" >> /etc/ld.so.conf.d/nvidia-pip.conf && \
+    ldconfig
 
 # Copy backend source
 COPY backend/ ./backend/

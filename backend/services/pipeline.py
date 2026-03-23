@@ -467,10 +467,13 @@ async def _run_analysis_inner(job_id: str):
             est_windows * tier.per_call_timeout_base + 900
         )
         _B64_ENCODE_TIMEOUT = max(300, int(vid_minutes * 10))
-        # Parent timeout for transcription+scene: scale with video length
+        # Parent timeout for transcription+scene: scale with video length.
+        # GPU Whisper runs ~10-30x real-time, but CPU fallback (int8 small)
+        # can be ~0.5-1x real-time. Use generous multiplier to avoid killing
+        # long transcriptions that fell back to CPU.
         _trans_scene_timeout = max(
-            900,  # Minimum 15 minutes
-            int(vid_minutes * 8)  # ~8x real-time for transcription + sequential vision
+            1800,  # Minimum 30 minutes
+            int(vid_minutes * 150)  # ~2.5min per min of video (covers CPU fallback + vision)
         )
         logger.info(
             "[%s] Ollama-scaled timeouts: extraction=%ds, summary_clip=%ds, "
@@ -481,7 +484,7 @@ async def _run_analysis_inner(job_id: str):
     else:
         _SUMMARY_CLIP_TIMEOUT = max(900, int(vid_minutes * 120))
         _B64_ENCODE_TIMEOUT = max(300, int(vid_minutes * 10))
-        _trans_scene_timeout = max(600, int(vid_minutes * 5))
+        _trans_scene_timeout = max(1800, int(vid_minutes * 150))
     logger.info(
         "[%s] Adaptive timeouts: extraction=%ds, summary_clip=%ds, b64=%ds (%.1f min video)",
         job_id, _EXTRACTION_TIMEOUT, _SUMMARY_CLIP_TIMEOUT, _B64_ENCODE_TIMEOUT, vid_minutes,
