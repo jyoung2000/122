@@ -149,6 +149,28 @@ OLLAMA_TIER_OVERRIDES = {
     "marathon": OllamaTierOverrides(180,  30, 420, "map_reduce",   5, 1, 1500,  400, True),
 }
 
+# Model recommendations based on available VRAM
+OLLAMA_VRAM_PROFILES = {
+    "4gb": {
+        "vision": "moondream:1.8b",
+        "text": "qwen2.5:3b-instruct",
+        "translation": "qwen2.5:3b",
+        "notes": "GTX 1650 / 4GB — fastest models that fit in VRAM",
+    },
+    "6gb": {
+        "vision": "llava:7b-v1.6-q4_0",
+        "text": "qwen2.5:7b-instruct-q4_0",
+        "translation": "qwen2.5:3b",
+        "notes": "RTX 2060 / 6GB — good balance of speed and quality",
+    },
+    "8gb+": {
+        "vision": "llava:13b-v1.6-q4_0",
+        "text": "llama3.1:8b-instruct-q4_0",
+        "translation": "qwen2.5:7b",
+        "notes": "RTX 3060+ / 8GB+ — highest quality local models",
+    },
+}
+
 
 def apply_ollama_overrides(tier: VideoDurationTier, is_ollama: bool) -> VideoDurationTier:
     """Return a modified tier with Ollama-appropriate settings if Ollama is active."""

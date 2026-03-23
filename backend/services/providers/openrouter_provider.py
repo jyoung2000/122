@@ -11,7 +11,7 @@ from backend.config import settings
 from backend.models import (
     FrameData, SceneDescription, TranscriptSegment, VideoSummary, ClipCandidate, ClipSEO,
 )
-from backend.services.providers.base import AIProvider, ChunkedClipDetectionMixin, ProviderError, ProviderRateLimitError, extract_json, extract_description_fallback, normalize_seo_data, build_fallback_summary, has_real_summary_content, build_summary_from_transcript
+from backend.services.providers.base import AIProvider, ChunkedClipDetectionMixin, ProviderError, ProviderRateLimitError, extract_json, extract_partial_clips, extract_description_fallback, normalize_seo_data, build_fallback_summary, has_real_summary_content, build_summary_from_transcript
 from backend.services.prompts import DEFAULT_FRAME_ANALYSIS_PROMPT, DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT, DEFAULT_SUMMARY_PROMPT
 from backend.services.transcript_utils import analyze_transcript_energy, correlate_scenes_with_transcript, derive_content_guidance
 
@@ -739,9 +739,14 @@ class OpenRouterProvider(ChunkedClipDetectionMixin, AIProvider):
             summary_overhead, existing_overhead,
         )
 
-        transcript_text = self._condense_transcript_proportional(
-            transcript, max_chars=transcript_budget, hot_zones=hot_zones,
-        )
+        if hot_zones:
+            transcript_text = self._condense_transcript_hot_zone_first(
+                transcript, max_chars=transcript_budget, hot_zones=hot_zones,
+            )
+        else:
+            transcript_text = self._condense_transcript_proportional(
+                transcript, max_chars=transcript_budget, hot_zones=hot_zones,
+            )
         scene_text = self._condense_scenes(scenes, max_chars=scene_budget)
 
         # Use user-specified duration range or defaults
@@ -909,6 +914,37 @@ class OpenRouterProvider(ChunkedClipDetectionMixin, AIProvider):
                     f"Attempt {attempt + 1}: Invalid JSON from model: {e}\n"
                     f"Raw response (first 500 chars): {raw[:500]}"
                 )
+                # Try to salvage clips from partial/truncated JSON
+                partial_clips_data = extract_partial_clips(raw)
+                if partial_clips_data:
+                    salvaged = []
+                    for c in partial_clips_data:
+                        try:
+                            st = float(c.get("start_time", 0))
+                            et = float(c.get("end_time", 0))
+                            duration = et - st if et > st else float(c.get("duration", 0))
+                            if 15 <= duration <= 600:
+                                salvaged.append(ClipCandidate(
+                                    id=c.get("id", len(salvaged) + 1),
+                                    title=c.get("title", "Untitled"),
+                                    start_time=st, end_time=et,
+                                    duration=round(duration, 1),
+                                    viral_score=max(1, min(100, int(float(c.get("viral_score", 50))))),
+                                    viral_score_reasoning=str(c.get("viral_score_reasoning", "")),
+                                    clip_type=str(c.get("clip_type", "highlight")),
+                                    platform=str(c.get("platform", "both")),
+                                    suggested_caption=str(c.get("suggested_caption", "")),
+                                    hook_text=str(c.get("hook_text", "")),
+                                    why_this_works=str(c.get("why_this_works", "")),
+                                ))
+                        except (KeyError, ValueError):
+                            continue
+                    if salvaged:
+                        logger.warning(
+                            "Attempt %d: Salvaged %d clips from partial JSON response",
+                            attempt + 1, len(salvaged),
+                        )
+                        return salvaged
                 continue
             except Exception as e:
                 logger.warning(
