@@ -355,7 +355,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 "messages": [{"role": "user", "content": "test"}],
                 "stream": False,
                 "options": options,
-            })
+            }, timeout=120.0)
             if resp.status_code == 500 and self._is_oom_error(resp.text[:500]):
                 logger.warning(
                     "Vision model %s OOM during warmup — forcing CPU-only for all models",
@@ -370,7 +370,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                     "messages": [{"role": "user", "content": "test"}],
                     "stream": False,
                     "options": options,
-                })
+                }, timeout=120.0)
         except Exception as e:
             error_str = str(e)
             if self._is_oom_error(error_str):
@@ -385,7 +385,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 await self._client.post(f"{self._host}/api/generate", json={
                     "model": self._vision_model,
                     "keep_alive": 0,
-                })
+                }, timeout=10.0)
             except Exception:
                 pass
 
@@ -399,7 +399,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 "messages": [{"role": "user", "content": "test"}],
                 "stream": False,
                 "options": options,
-            })
+            }, timeout=120.0)
             if resp.status_code == 500 and self._is_oom_error(resp.text[:500]):
                 logger.warning("Text model %s OOM during warmup — forcing CPU-only", self._text_model)
                 self._force_cpu = True
