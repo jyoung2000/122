@@ -25,6 +25,83 @@ from backend.services.clip_boundary_snapper import snap_all_clips
 
 logger = logging.getLogger(__name__)
 
+
+def _log_gpu_memory(job_id: str, label: str):
+    """Log current GPU memory state for VRAM debugging."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            free_mb, total_mb = [x / (1024 * 1024) for x in torch.cuda.mem_get_info()]
+            used_mb = total_mb - free_mb
+            logger.info(
+                "[%s] GPU VRAM [%s]: %.0f MB used / %.0f MB total (%.0f MB free)",
+                job_id, label, used_mb, total_mb, free_mb,
+            )
+    except Exception:
+        pass  # Non-critical — don't break pipeline if GPU query fails
+
+
+async def _release_whisper_vram(job_id: str):
+    """Release Whisper model from VRAM so Ollama can use the GPU.
+
+    On a 4GB GTX 1650, Whisper large-v3-turbo occupies ~3GB VRAM.
+    Without explicit release, Ollama gets only ~465MB — not enough
+    for any vision or text model, causing repeated SIGABRT/SIGSEGV
+    crashes from cudaMalloc failures.
+
+    This is only needed when Ollama shares the same physical GPU
+    (both containers get --gpus all in docker-compose.gpu.yml).
+    """
+    try:
+        from backend.services.transcription import _whisper_model, _model_lock
+        import gc
+
+        # Check if Whisper is loaded before doing anything
+        if _whisper_model is None:
+            logger.debug("[%s] Whisper model not loaded — nothing to release", job_id)
+            return
+
+        # Clear the cached model reference so it gets garbage collected
+        from backend.services import transcription as _trans_mod
+        with _trans_mod._model_lock:
+            _trans_mod._whisper_model = None
+
+        # Force garbage collection to release the GPU tensors
+        gc.collect()
+
+        # Release CUDA memory back to the driver
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+                # Log how much VRAM is now free
+                free_mb = torch.cuda.mem_get_info()[0] / (1024 * 1024)
+                total_mb = torch.cuda.mem_get_info()[1] / (1024 * 1024)
+                logger.info(
+                    "[%s] Whisper VRAM released — GPU memory: %.0f MB free / %.0f MB total",
+                    job_id, free_mb, total_mb,
+                )
+        except ImportError:
+            pass  # torch not available — ctranslate2 manages its own memory
+        except Exception as e:
+            logger.debug("[%s] torch.cuda.empty_cache failed (non-critical): %s", job_id, e)
+
+        # Also try ctranslate2's memory release (used by faster-whisper)
+        try:
+            import ctranslate2
+            # ctranslate2 doesn't have explicit memory release, but deleting the
+            # model and running gc.collect() releases the CUDA allocations
+        except ImportError:
+            pass
+
+        logger.info("[%s] Whisper model unloaded from VRAM for Ollama", job_id)
+
+    except Exception as e:
+        logger.warning("[%s] Failed to release Whisper VRAM (non-critical): %s", job_id, e)
+
+
 # Dedicated thread pool for base64 frame encoding so it never competes
 # with the default executor or the Whisper transcription pool.
 _b64_executor = ThreadPoolExecutor(max_workers=8, thread_name_prefix="b64enc")
@@ -403,6 +480,7 @@ async def _run_analysis_inner(job_id: str):
     cancel_check()
     await _update_progress(job_id, JobStatus.EXTRACTING_FRAMES, 2, "Extracting video metadata...")
     logger.info("[%s] Pipeline started — video: %s", job_id, video_path)
+    _log_gpu_memory(job_id, "pipeline start")
     async with _stage_timer(job_id, "metadata"):
         try:
             metadata = await asyncio.wait_for(
@@ -776,7 +854,19 @@ async def _run_analysis_inner(job_id: str):
         except CancelledError:
             raise
         except Exception as e:
-            logger.exception("[%s] Scene analysis failed, continuing with empty scenes", job_id)
+            error_str = str(e)
+            if any(p in error_str.lower() for p in ["out of memory", "cudamalloc", "ggml_assert", "sigabrt"]):
+                logger.warning(
+                    "[%s] Scene analysis failed due to GPU memory — "
+                    "continuing with empty scenes. Consider using smaller Ollama models "
+                    "(e.g., moondream:1.8b for vision, qwen2.5:3b for text) or adding "
+                    "more VRAM. Error: %s",
+                    job_id, error_str[:200],
+                )
+                # Don't count OOM as a circuit breaker failure — it's a hardware limitation
+                orchestrator.reset_circuit_breaker()
+            else:
+                logger.exception("[%s] Scene analysis failed, continuing with empty scenes", job_id)
             scenes_result = []
             provider = "none"
 
@@ -863,6 +953,16 @@ async def _run_analysis_inner(job_id: str):
                     logger.info("[%s] Pre-computed %d transcript-only hot zones for frame triage", job_id, len(pre_hot_zones))
                 except Exception as e:
                     logger.warning("[%s] Hot zone pre-scoring failed (non-fatal): %s", job_id, e)
+
+            # Release Whisper VRAM before Ollama loads its models
+            await _release_whisper_vram(job_id)
+            _log_gpu_memory(job_id, "after Whisper release")
+            await _update_progress(
+                job_id, JobStatus.ANALYZING_SCENES, 40,
+                "Released transcription GPU memory — preparing scene analysis...",
+            )
+            # Brief pause to let CUDA driver reclaim memory across containers
+            await asyncio.sleep(2)
 
             try:
                 scene_result = await asyncio.wait_for(
@@ -1008,6 +1108,7 @@ async def _run_analysis_inner(job_id: str):
         summary_text += hot_zone_text
 
     # Step 6: Clip detection with summary context
+    _log_gpu_memory(job_id, "before clip detection")
     cancel_check()
 
     # Reset again before clip detection — summary generation may have

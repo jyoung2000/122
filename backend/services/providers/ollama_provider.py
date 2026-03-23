@@ -137,6 +137,10 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             timeout=httpx.Timeout(600.0, connect=15.0),
             limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
         )
+        # Track whether we need CPU-only mode due to VRAM constraints
+        self._force_cpu: bool = False
+        self._vram_checked: bool = False
+        self._available_vram_mb: int = 0
 
     async def close(self):
         """Close the shared HTTP client. Call when provider is no longer needed."""
@@ -153,6 +157,114 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 logger.info("Unloaded Ollama model from VRAM: %s", model)
             except Exception as e:
                 logger.debug("Failed to unload Ollama model %s: %s", model, e)
+
+    async def _detect_vram(self) -> int:
+        """Detect available GPU VRAM in MB via nvidia-smi.
+
+        Returns available VRAM in MB, or 0 if detection fails.
+        Caches the result since VRAM doesn't change mid-run.
+        """
+        if self._vram_checked:
+            return self._available_vram_mb
+
+        self._vram_checked = True
+
+        # Method 1: Ask Ollama for GPU info via /api/ps
+        try:
+            resp = await self._client.get(f"{self._host}/api/ps", timeout=5.0)
+            if resp.status_code == 200:
+                pass  # Ollama /api/ps doesn't directly report free VRAM
+        except Exception:
+            pass
+
+        # Method 2: Use nvidia-smi from the app container (if available)
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                free_mb = int(result.stdout.strip().split('\n')[0])
+                self._available_vram_mb = free_mb
+                logger.info("Detected %d MB free VRAM via nvidia-smi", free_mb)
+                return free_mb
+        except Exception:
+            pass
+
+        return self._available_vram_mb
+
+    def _get_num_gpu(self, model_name: str) -> int:
+        """Determine how many layers to offload to GPU.
+
+        Returns 0 for CPU-only (when VRAM is insufficient),
+        or -1 for auto (let Ollama decide, works when VRAM is ample).
+
+        On a 4GB GTX 1650:
+        - llava:7b (3.83 GiB + 595 MiB CLIP projector) -> NEVER fits -> num_gpu=0
+        - llama3.1:8b (4.33 GiB model) -> NEVER fits fully -> num_gpu=0
+        - moondream:1.8b (~1 GiB) -> fits with ~2.5GB free -> num_gpu=-1
+        - qwen2.5:3b (~1.8 GiB) -> fits with ~1.5GB free -> num_gpu=-1
+        """
+        if self._force_cpu:
+            return 0
+
+        # Models known to exceed 4GB VRAM — always force CPU
+        model_lower = model_name.lower()
+        large_models = ["llava:7b", "llava:13b", "llama3", "llama3.1:8b", "mistral:7b",
+                        "gemma:7b", "deepseek:7b", "phi3:14b", "qwen2.5:7b"]
+        for pattern in large_models:
+            if pattern in model_lower:
+                logger.info("Model %s known to exceed 4GB VRAM — forcing num_gpu=0 (CPU)", model_name)
+                return 0
+
+        # Small models that fit in 4GB VRAM
+        small_models = ["moondream", "qwen2.5:3b", "qwen2.5:1.5b", "qwen2.5:0.5b",
+                        "phi3:mini", "gemma:2b", "tinyllama", "llava:v1.6-mistral-7b"]
+        for pattern in small_models:
+            if pattern in model_lower:
+                return -1  # Let Ollama auto-decide
+
+        # Unknown model — check available VRAM
+        if self._available_vram_mb > 0 and self._available_vram_mb < 2000:
+            logger.info(
+                "Only %d MB VRAM available — forcing num_gpu=0 for unknown model %s",
+                self._available_vram_mb, model_name,
+            )
+            return 0
+
+        # Default: let Ollama try GPU, and we'll catch OOM in the retry logic
+        return -1
+
+    def _is_oom_error(self, error_text: str) -> bool:
+        """Check if an error response indicates CUDA out-of-memory."""
+        oom_patterns = [
+            "out of memory",
+            "cudaMalloc failed",
+            "GGML_ASSERT(buffer) failed",
+            "failed to allocate CUDA",
+            "CUDA error",
+            "SIGABRT",
+            "SIGSEGV",
+        ]
+        error_lower = error_text.lower() if error_text else ""
+        return any(p.lower() in error_lower for p in oom_patterns)
+
+    async def _unload_model(self, model_name: str):
+        """Unload a model from Ollama to free VRAM/RAM before loading another.
+
+        Critical on 4GB GPUs where only one model can be resident at a time.
+        Uses keep_alive=0 which tells Ollama to immediately unload the model.
+        """
+        try:
+            await self._client.post(
+                f"{self._host}/api/generate",
+                json={"model": model_name, "keep_alive": 0},
+                timeout=10.0,
+            )
+            logger.debug("Unloaded Ollama model: %s", model_name)
+        except Exception as e:
+            logger.debug("Failed to unload model %s (non-critical): %s", model_name, e)
 
     async def _ensure_capabilities(self):
         """Lazy-detect model capabilities on first use."""
@@ -191,40 +303,132 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         return self._text_model
 
     async def warmup(self):
-        """Pre-load models into VRAM to avoid cold start on first analysis."""
+        """Pre-load models with VRAM-aware offloading to avoid cold start OOM.
+
+        On 4GB GPUs, this is where we detect that large models need CPU-only
+        mode, BEFORE the first real analysis call can crash.
+        """
+        # Detect available VRAM first
+        await self._detect_vram()
+
+        vision_num_gpu = self._get_num_gpu(self._vision_model)
+        text_num_gpu = self._get_num_gpu(self._text_model)
+
+        logger.info(
+            "Ollama warmup: vision=%s (num_gpu=%s), text=%s (num_gpu=%s), force_cpu=%s",
+            self._vision_model, vision_num_gpu,
+            self._text_model, text_num_gpu,
+            self._force_cpu,
+        )
+
         try:
-            # Load vision model
-            await self._client.post(f"{self._host}/api/chat", json={
+            # Warm up vision model
+            options = {"num_predict": 1}
+            if vision_num_gpu >= 0:
+                options["num_gpu"] = vision_num_gpu
+            resp = await self._client.post(f"{self._host}/api/chat", json={
                 "model": self._vision_model,
                 "messages": [{"role": "user", "content": "test"}],
                 "stream": False,
-                "options": {"num_predict": 1},
+                "options": options,
             })
-            # Load text model
-            await self._client.post(f"{self._host}/api/chat", json={
+            if resp.status_code == 500 and self._is_oom_error(resp.text[:500]):
+                logger.warning(
+                    "Vision model %s OOM during warmup — forcing CPU-only for all models",
+                    self._vision_model,
+                )
+                self._force_cpu = True
+                # Retry with CPU
+                options["num_gpu"] = 0
+                await asyncio.sleep(3)
+                await self._client.post(f"{self._host}/api/chat", json={
+                    "model": self._vision_model,
+                    "messages": [{"role": "user", "content": "test"}],
+                    "stream": False,
+                    "options": options,
+                })
+        except Exception as e:
+            error_str = str(e)
+            if self._is_oom_error(error_str):
+                logger.warning("Vision model OOM during warmup — forcing CPU-only: %s", error_str[:150])
+                self._force_cpu = True
+            else:
+                logger.warning("Ollama vision warmup failed (non-fatal): %s", e)
+
+        try:
+            # Warm up text model (unload vision first to free VRAM)
+            try:
+                await self._client.post(f"{self._host}/api/generate", json={
+                    "model": self._vision_model,
+                    "keep_alive": 0,
+                })
+            except Exception:
+                pass
+
+            options = {"num_predict": 1}
+            if text_num_gpu >= 0:
+                options["num_gpu"] = text_num_gpu
+            if self._force_cpu:
+                options["num_gpu"] = 0
+            resp = await self._client.post(f"{self._host}/api/chat", json={
                 "model": self._text_model,
                 "messages": [{"role": "user", "content": "test"}],
                 "stream": False,
-                "options": {"num_predict": 1},
+                "options": options,
             })
-            logger.info("Ollama models warmed up: vision=%s, text=%s",
-                        self._vision_model, self._text_model)
+            if resp.status_code == 500 and self._is_oom_error(resp.text[:500]):
+                logger.warning("Text model %s OOM during warmup — forcing CPU-only", self._text_model)
+                self._force_cpu = True
         except Exception as e:
-            logger.warning("Ollama warmup failed (non-fatal): %s", e)
+            error_str = str(e)
+            if self._is_oom_error(error_str):
+                logger.warning("Text model OOM during warmup — forcing CPU-only: %s", error_str[:150])
+                self._force_cpu = True
+            else:
+                logger.warning("Ollama text warmup failed (non-fatal): %s", e)
+
+        mode = "CPU-only (num_gpu=0)" if self._force_cpu else "GPU-assisted"
+        logger.info(
+            "Ollama models warmed up: vision=%s, text=%s, mode=%s",
+            self._vision_model, self._text_model, mode,
+        )
 
     def _get_effective_ctx(self, model_name: str) -> int:
-        """Return context length safe for available VRAM (GTX 1650 = 4GB)."""
+        """Return context length safe for available VRAM.
+
+        On GTX 1650 (4GB), VRAM is the bottleneck:
+        - KV cache at 4096 context for an 8B model = ~512 MiB
+        - KV cache at 2048 context for an 8B model = ~256 MiB
+
+        When running in CPU-only mode (num_gpu=0), context can be larger
+        since KV cache goes to system RAM. But we still cap it to avoid
+        excessive prompt sizes that slow generation.
+        """
+        if self._force_cpu:
+            # CPU mode — system RAM is plentiful, can use larger context
+            # But still cap to avoid extremely slow generation
+            model_lower = model_name.lower()
+            if "llava" in model_lower or "vision" in model_lower or "moondream" in model_lower:
+                return 2048  # Vision prompts are short
+            elif any(s in model_lower for s in ["3b", "1b", "0.5b"]):
+                return 8192
+            elif any(s in model_lower for s in ["7b", "8b"]):
+                return 4096
+            return 4096
+
+        # GPU mode — VRAM is the bottleneck
         detected = self._model_ctx.get(model_name, 0)
         if detected > 0:
-            return min(detected, 8192)
+            return min(detected, 4096)  # Hard cap at 4096 for GPU mode
+
         model_lower = model_name.lower()
-        if "llava" in model_lower or "vision" in model_lower:
+        if "llava" in model_lower or "vision" in model_lower or "moondream" in model_lower:
             return 2048
-        elif any(s in model_lower for s in ["7b", "8b"]):
-            return 4096
         elif any(s in model_lower for s in ["3b", "1b", "0.5b"]):
-            return 8192
-        return 4096
+            return 4096
+        elif any(s in model_lower for s in ["7b", "8b"]):
+            return 2048  # Reduced from 4096 to save VRAM
+        return 2048
 
     async def _detect_capabilities(self):
         """Probe Ollama for model capabilities to adapt prompt sizing."""
@@ -243,42 +447,93 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             logger.warning("Ollama capability detection failed: %s", e)
 
     async def _call_vision(self, prompt: str, image_base64: str) -> str:
-        """Send ONE frame at a time to the vision model via /api/chat.
+        """Send ONE frame to the vision model with VRAM-aware GPU offloading.
 
-        Vision inference with llava:7b is very slow on CPU (~3-5 min per frame).
-        On GPU (GTX 1650) it's ~15-30s. Use a generous timeout to handle both cases.
+        On 4GB GPUs, the CLIP vision encoder (595 MiB for llava:7b) often
+        causes cudaMalloc OOM. We detect this and retry with num_gpu=0
+        (CPU-only) to avoid crashing the Ollama runner process.
         """
         await self._ensure_capabilities()
-        # Vision inference is the slowest operation — llava:7b on CPU can take 3-5 min
-        # per frame. The image encoding + prompt eval + generation all need time.
         vision_timeout = 360.0  # 6 minutes — enough for CPU inference
-        try:
-            response = await self._client.post(
-                f"{self._host}/api/chat",
-                json={
-                    "model": self._vision_model,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": prompt,
-                            "images": [image_base64],
-                        }
-                    ],
-                    "stream": False,
-                    "options": {
-                        "num_ctx": self._get_effective_ctx(self._vision_model),
+
+        num_gpu = self._get_num_gpu(self._vision_model)
+
+        for attempt in range(2):  # At most 2 attempts: GPU then CPU
+            try:
+                options = {
+                    "num_ctx": self._get_effective_ctx(self._vision_model),
+                }
+                if num_gpu >= 0:
+                    options["num_gpu"] = num_gpu
+                # On second attempt (after OOM), always force CPU
+                if attempt == 1:
+                    options["num_gpu"] = 0
+                    logger.info("Retrying vision call with num_gpu=0 (CPU-only) after OOM")
+
+                response = await self._client.post(
+                    f"{self._host}/api/chat",
+                    json={
+                        "model": self._vision_model,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": prompt,
+                                "images": [image_base64],
+                            }
+                        ],
+                        "stream": False,
+                        "options": options,
                     },
-                },
-                timeout=vision_timeout,
-            )
-            response.raise_for_status()
-            data = response.json()
-            self._total_tokens += data.get("prompt_eval_count", 0) + data.get("eval_count", 0)
-            return data.get("message", {}).get("content", "")
-        except httpx.TimeoutException:
-            raise ProviderError(f"Ollama vision timeout after {vision_timeout}s (model={self._vision_model}) — consider using a GPU")
-        except Exception as e:
-            raise ProviderError(f"Ollama vision error: {e}")
+                    timeout=vision_timeout,
+                )
+
+                # Check for OOM in error response
+                if response.status_code == 500:
+                    error_text = response.text[:500]
+                    if self._is_oom_error(error_text) and attempt == 0:
+                        logger.warning(
+                            "Ollama vision OOM on attempt %d (model=%s) — "
+                            "retrying with CPU-only. Error: %s",
+                            attempt + 1, self._vision_model, error_text[:200],
+                        )
+                        self._force_cpu = True
+                        # Brief pause for Ollama to recover from the crash
+                        await asyncio.sleep(3)
+                        continue
+                    # Non-OOM 500 or second attempt 500 — raise
+                    response.raise_for_status()
+
+                response.raise_for_status()
+                data = response.json()
+                self._total_tokens += data.get("prompt_eval_count", 0) + data.get("eval_count", 0)
+                return data.get("message", {}).get("content", "")
+
+            except httpx.TimeoutException:
+                raise ProviderError(
+                    f"Ollama vision timeout after {vision_timeout}s "
+                    f"(model={self._vision_model}) — consider using a smaller model"
+                )
+            except httpx.HTTPStatusError as e:
+                error_text = e.response.text[:500] if e.response else ""
+                if self._is_oom_error(error_text) and attempt == 0:
+                    logger.warning(
+                        "Ollama vision HTTP error with OOM pattern — retrying CPU-only: %s",
+                        error_text[:200],
+                    )
+                    self._force_cpu = True
+                    await asyncio.sleep(3)
+                    continue
+                raise ProviderError(f"Ollama vision error: {e}")
+            except Exception as e:
+                error_str = str(e)
+                if self._is_oom_error(error_str) and attempt == 0:
+                    logger.warning("Ollama vision OOM — retrying CPU-only: %s", error_str[:200])
+                    self._force_cpu = True
+                    await asyncio.sleep(3)
+                    continue
+                raise ProviderError(f"Ollama vision error: {e}")
+
+        raise ProviderError(f"Ollama vision failed after 2 attempts (model={self._vision_model})")
 
     async def _call_text(self, prompt: str, system: str = "", max_tokens: int = 4096,
                          timeout: float = 90.0, json_mode: bool = False,
@@ -290,110 +545,154 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         as long as chunks keep arriving, eliminating false timeouts entirely.
         """
         await self._ensure_capabilities()
-        try:
-            messages = []
-            if system:
-                messages.append({"role": "system", "content": system})
-            messages.append({"role": "user", "content": prompt})
 
-            # Compute minimum viable timeout for local hardware
-            prompt_tokens = (len(prompt) + len(system)) // 4
-            eval_time = prompt_tokens / 500  # ~500 tok/s prompt eval on GTX 1650
-            gen_time = max_tokens / 12       # ~12 tok/s generation
-            min_timeout = eval_time + gen_time + 30
-            effective_timeout = max(timeout, min_timeout)
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
 
-            # Stall timeout: max seconds between chunks before we consider it stuck
-            stall_timeout = max(60.0, effective_timeout * 0.3)
+        # Compute minimum viable timeout for local hardware
+        prompt_tokens = (len(prompt) + len(system)) // 4
+        eval_time = prompt_tokens / 500  # ~500 tok/s prompt eval on GTX 1650
+        gen_time = max_tokens / 12       # ~12 tok/s generation
+        min_timeout = eval_time + gen_time + 30
+        effective_timeout = max(timeout, min_timeout)
 
-            payload = {
-                "model": self._text_model,
-                "messages": messages,
-                "stream": True,
-                "options": {
-                    "num_predict": max_tokens,
-                    "num_ctx": self._get_effective_ctx(self._text_model),
-                    "temperature": 0.3,
-                },
-            }
-            if json_mode:
-                payload["format"] = "json"
+        # Stall timeout: max seconds between chunks before we consider it stuck
+        stall_timeout = max(60.0, effective_timeout * 0.3)
 
-            logger.debug(
-                "Ollama _call_text (streaming): model=%s, prompt_len=%d, system_len=%d, "
-                "effective_timeout=%.0fs, stall_timeout=%.0fs",
-                self._text_model, len(prompt), len(system), effective_timeout, stall_timeout,
-            )
+        num_gpu = self._get_num_gpu(self._text_model)
 
-            collected_text = []
-            total_prompt_tokens = 0
-            total_eval_tokens = 0
-            token_count = 0
+        payload = {
+            "model": self._text_model,
+            "messages": messages,
+            "stream": True,
+            "options": {
+                "num_predict": max_tokens,
+                "num_ctx": self._get_effective_ctx(self._text_model),
+                "temperature": 0.3,
+            },
+        }
+        # VRAM-aware GPU offloading
+        if num_gpu >= 0:
+            payload["options"]["num_gpu"] = num_gpu
+        if json_mode:
+            payload["format"] = "json"
 
-            async with self._client.stream(
-                "POST",
-                f"{self._host}/api/chat",
-                json=payload,
-                timeout=httpx.Timeout(effective_timeout, connect=15.0, read=stall_timeout),
-            ) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+        logger.debug(
+            "Ollama _call_text (streaming): model=%s, prompt_len=%d, system_len=%d, "
+            "effective_timeout=%.0fs, stall_timeout=%.0fs, num_gpu=%s",
+            self._text_model, len(prompt), len(system), effective_timeout, stall_timeout, num_gpu,
+        )
 
-                    msg = chunk.get("message", {})
-                    content = msg.get("content", "")
-                    if content:
-                        collected_text.append(content)
-                        token_count += 1
+        for attempt in range(2):  # At most 2 attempts: GPU then CPU
+            try:
+                # On second attempt (after OOM), force CPU
+                if attempt == 1:
+                    payload["options"]["num_gpu"] = 0
+                    logger.info("Retrying text call with num_gpu=0 (CPU-only) after OOM")
 
-                        # Emit progress every ~200 tokens
-                        if generation_progress and token_count % 200 == 0:
-                            try:
-                                await generation_progress(token_count, max_tokens)
-                            except Exception:
-                                pass
+                collected_text = []
+                total_prompt_tokens = 0
+                total_eval_tokens = 0
+                token_count = 0
 
-                    if chunk.get("done", False):
-                        total_prompt_tokens = chunk.get("prompt_eval_count", 0)
-                        total_eval_tokens = chunk.get("eval_count", 0)
-                        break
+                async with self._client.stream(
+                    "POST",
+                    f"{self._host}/api/chat",
+                    json=payload,
+                    timeout=httpx.Timeout(effective_timeout, connect=15.0, read=stall_timeout),
+                ) as response:
+                    # Check for OOM crash in Ollama's response
+                    if response.status_code == 500:
+                        error_text = (await response.aread()).decode("utf-8", errors="replace")[:500]
+                        if self._is_oom_error(error_text) and attempt == 0:
+                            logger.warning(
+                                "Ollama text OOM (model=%s) — switching to CPU-only: %s",
+                                self._text_model, error_text[:200],
+                            )
+                            self._force_cpu = True
+                            await asyncio.sleep(3)
+                            continue
+                        raise httpx.HTTPStatusError(
+                            f"Server error 500", request=response.request, response=response
+                        )
 
-            self._total_tokens += total_prompt_tokens + total_eval_tokens
-            result = "".join(collected_text)
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
 
-            if not result:
-                logger.warning("Ollama streaming returned empty response for model=%s", self._text_model)
-            else:
-                logger.debug(
-                    "Ollama streaming complete: %d chars, %d prompt_tokens, %d eval_tokens",
-                    len(result), total_prompt_tokens, total_eval_tokens,
-                )
+                        msg = chunk.get("message", {})
+                        content = msg.get("content", "")
+                        if content:
+                            collected_text.append(content)
+                            token_count += 1
 
-                # Record speed measurement for dynamic timeout calculation
-                if total_eval_tokens > 0 and token_count > 0:
-                    record_speed_measurement(
-                        self._text_model, total_prompt_tokens, total_eval_tokens,
-                        token_count / 12.0  # rough elapsed estimate
+                            # Emit progress every ~200 tokens
+                            if generation_progress and token_count % 200 == 0:
+                                try:
+                                    await generation_progress(token_count, max_tokens)
+                                except Exception:
+                                    pass
+
+                        if chunk.get("done", False):
+                            total_prompt_tokens = chunk.get("prompt_eval_count", 0)
+                            total_eval_tokens = chunk.get("eval_count", 0)
+                            break
+
+                self._total_tokens += total_prompt_tokens + total_eval_tokens
+                result = "".join(collected_text)
+
+                if not result:
+                    logger.warning("Ollama streaming returned empty response for model=%s", self._text_model)
+                else:
+                    logger.debug(
+                        "Ollama streaming complete: %d chars, %d prompt_tokens, %d eval_tokens",
+                        len(result), total_prompt_tokens, total_eval_tokens,
                     )
 
-            return result
+                    # Record speed measurement for dynamic timeout calculation
+                    if total_eval_tokens > 0 and token_count > 0:
+                        record_speed_measurement(
+                            self._text_model, total_prompt_tokens, total_eval_tokens,
+                            token_count / 12.0  # rough elapsed estimate
+                        )
 
-        except httpx.ReadTimeout:
-            raise ProviderError(
-                f"Ollama text stalled (no data for {stall_timeout:.0f}s) — "
-                f"model={self._text_model}, the model may be overloaded"
-            )
-        except httpx.TimeoutException:
-            raise ProviderError(f"Ollama text timeout after {effective_timeout:.0f}s (model={self._text_model})")
-        except httpx.HTTPStatusError as e:
-            raise ProviderError(f"Ollama HTTP {e.response.status_code}: {e.response.text[:200]}")
-        except Exception as e:
-            raise ProviderError(f"Ollama text error ({type(e).__name__}): {e}")
+                return result
+
+            except httpx.ReadTimeout:
+                raise ProviderError(
+                    f"Ollama text stalled (no data for {stall_timeout:.0f}s) — "
+                    f"model={self._text_model}, the model may be overloaded"
+                )
+            except httpx.TimeoutException:
+                raise ProviderError(f"Ollama text timeout after {effective_timeout:.0f}s (model={self._text_model})")
+            except httpx.HTTPStatusError as e:
+                error_text = e.response.text[:500] if e.response else ""
+                if self._is_oom_error(error_text) and attempt == 0:
+                    logger.warning(
+                        "Ollama text HTTP error with OOM pattern — retrying CPU-only: %s",
+                        error_text[:200],
+                    )
+                    self._force_cpu = True
+                    await asyncio.sleep(3)
+                    continue
+                raise ProviderError(f"Ollama HTTP {e.response.status_code}: {e.response.text[:200]}")
+            except Exception as e:
+                error_str = str(e)
+                if self._is_oom_error(error_str) and attempt == 0:
+                    logger.warning("Ollama text OOM — retrying CPU-only: %s", error_str[:200])
+                    self._force_cpu = True
+                    await asyncio.sleep(3)
+                    continue
+                raise ProviderError(f"Ollama text error ({type(e).__name__}): {e}")
+
+        raise ProviderError(f"Ollama text failed after 2 attempts (model={self._text_model})")
 
     async def text_complete(self, prompt: str, max_tokens: int = 4096, timeout: int | None = None) -> str:
         return await self._call_text(prompt, max_tokens=max_tokens)
@@ -614,6 +913,8 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         cancel_check=None,
         custom_prompt=None,
     ) -> VideoSummary:
+        # Unload vision model before text-heavy summary generation
+        await self._unload_model(self._vision_model)
         await self._ensure_model_active(self._text_model)
         instruction = custom_prompt if custom_prompt else DEFAULT_SUMMARY_PROMPT
         transcript_text = "\n".join(
@@ -663,6 +964,8 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         tier=None,
         _partial_results: Optional[list] = None,
     ) -> list[ClipCandidate]:
+        # Unload vision model before text-heavy clip detection
+        await self._unload_model(self._vision_model)
         # For videos > 5 min, use multi-pass detection via mixin (sequential for VRAM safety)
         if video_duration > 300:
             logger.info("Ollama: video %.0fs (>5min) — using sequential multi-pass clip detection", video_duration)
