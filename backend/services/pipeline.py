@@ -1111,114 +1111,116 @@ async def _run_analysis_inner(job_id: str):
     _log_gpu_memory(job_id, "before clip detection")
     cancel_check()
 
-    # Reset again before clip detection — summary generation may have
-    # had transient failures that shouldn't block clip detection.
-    orchestrator.reset_circuit_breaker()
-
-    _clips_start = _time.monotonic()
-    _clips_phase_start[0] = _clips_start  # For phase-aware ETA
-
-    # Scale clip count with video duration — use tier if available
-    dynamic_clip_count = tier.max_clip_candidates
-    logger.info(
-        "[%s] Dynamic clip count: %d (%.0f min video, default=%d)",
-        job_id, dynamic_clip_count, vid_minutes, settings.MAX_CLIP_CANDIDATES,
-    )
-
-    clip_detection_task = None
-    _clips_max_pct = [78]  # Track highest progress seen (never go backward)
-
-    async def _clip_progress(phase: str, info: dict):
-        """Progress callback from multi-pass clip detection."""
-        elapsed = int(_time.monotonic() - _clips_start)
-
-        if phase == "pass1_start":
-            n_windows = info.get("windows", 1)
-            msg = f"Pass 1: scanning {n_windows} window{'s' if n_windows > 1 else ''}..."
-            pct = 78
-        elif phase == "pass1_window_done":
-            idx = info.get("window_idx", 1)
-            total = info.get("window_total", 1)
-            clips_so_far = info.get("clips_so_far", 0)
-            msg = f"Pass 1: window {idx}/{total} done ({clips_so_far} clips so far)..."
-            pct = 78 + int((idx / max(total, 1)) * 12)  # 78-90%
-        elif phase == "pass1_done":
-            n_clips = info.get("clips", 0)
-            msg = f"Pass 1 found {n_clips} clips — checking coverage..."
-            pct = 90
-        elif phase == "pass2_start":
-            n_gaps = info.get("gaps", 0)
-            msg = f"Pass 2: sweeping {n_gaps} gap{'s' if n_gaps != 1 else ''} for hidden moments..."
-            pct = 91
-        elif phase == "pass2_gap":
-            idx = info.get("gap_idx", 1)
-            total = info.get("gap_total", 1)
-            start = info.get("start", 0)
-            end = info.get("end", 0)
-            msg = f"Pass 2: scanning gap {idx}/{total} ({start:.0f}-{end:.0f}s)..."
-            pct = 91 + int((idx / max(total, 1)) * 3)  # 91-94%
-        elif phase == "pass3_merge":
-            raw = info.get("raw", 0)
-            msg = f"Merging {raw} candidates..."
-            pct = 94
-        else:
-            msg = f"Identifying viral moments... ({elapsed}s elapsed)"
-            pct = min(94, 78 + elapsed // 15)
-
-        # Never go backward
-        pct = max(pct, _clips_max_pct[0])
-        _clips_max_pct[0] = pct
-
+    # ── Early exit: if no transcript data, skip AI clip detection ──
+    # Without transcript, the AI has no dialogue, timestamps, or content
+    # to find clips in. Running dozens of windows on empty prompts wastes
+    # hours of CPU time for guaranteed 0 clips.
+    _skip_clip_detection = False
+    real_scenes = [s for s in scenes if "failed" not in s.description.lower() and "skipped" not in s.description.lower()]
+    if not transcript and len(real_scenes) < 10:
+        logger.warning(
+            "[%s] Skipping clip detection: 0 transcript segments and only %d real scenes. "
+            "The AI has no content to analyze. Check Whisper logs for transcription errors.",
+            job_id, len(real_scenes),
+        )
+        clips = []
+        clips_provider = "skipped (no transcript)"
+        _skip_clip_detection = True
         await _update_progress(
-            job_id, JobStatus.DETECTING_CLIPS, min(95, pct),
-            f"{msg}{_pipeline_eta(min(95, pct))}",
+            job_id, JobStatus.DETECTING_CLIPS, 95,
+            f"Clip detection skipped — no transcript data available "
+            f"(Whisper may have failed, check logs). {len(real_scenes)} scenes only.",
         )
 
-    async def _clips_heartbeat():
-        await asyncio.sleep(10)
-        while True:
-            try:
-                cancel_check()
-            except Exception:
-                if clip_detection_task and not clip_detection_task.done():
-                    clip_detection_task.cancel()
-                raise
-            elapsed = int(_time.monotonic() - _clips_start)
-            hb_pct = min(94, 78 + elapsed // 15)
-            # Only update if heartbeat would ADVANCE progress (never regress)
-            if hb_pct > _clips_max_pct[0]:
-                _clips_max_pct[0] = hb_pct
-                await _update_progress(
-                    job_id, JobStatus.DETECTING_CLIPS, hb_pct,
-                    f"Identifying viral moments... ({elapsed}s elapsed){_pipeline_eta(hb_pct)}",
-                )
-            await asyncio.sleep(8)
+    if not _skip_clip_detection:
+        # Reset again before clip detection — summary generation may have
+        # had transient failures that shouldn't block clip detection.
+        orchestrator.reset_circuit_breaker()
 
-    heartbeat_task = asyncio.create_task(_clips_heartbeat())
-    try:
-        try:
-            clip_detection_task = asyncio.ensure_future(
-                orchestrator.detect_viral_clips(
-                    transcript, scenes, metadata["duration"], job_id,
-                    video_summary=summary_text,
-                    hot_zones=hot_zones,
-                    progress_callback=_clip_progress,
-                    clip_count=dynamic_clip_count,
-                    tier=tier,
-                )
+        _clips_start = _time.monotonic()
+        _clips_phase_start[0] = _clips_start  # For phase-aware ETA
+
+    if not _skip_clip_detection:
+        # Scale clip count with video duration — use tier if available
+        dynamic_clip_count = tier.max_clip_candidates
+        logger.info(
+            "[%s] Dynamic clip count: %d (%.0f min video, default=%d)",
+            job_id, dynamic_clip_count, vid_minutes, settings.MAX_CLIP_CANDIDATES,
+        )
+
+        clip_detection_task = None
+        _clips_max_pct = [78]  # Track highest progress seen (never go backward)
+
+        async def _clip_progress(phase: str, info: dict):
+            """Progress callback from multi-pass clip detection."""
+            elapsed = int(_time.monotonic() - _clips_start)
+
+            if phase == "pass1_start":
+                n_windows = info.get("windows", 1)
+                msg = f"Pass 1: scanning {n_windows} window{'s' if n_windows > 1 else ''}..."
+                pct = 78
+            elif phase == "pass1_window_done":
+                idx = info.get("window_idx", 1)
+                total = info.get("window_total", 1)
+                clips_so_far = info.get("clips_so_far", 0)
+                msg = f"Pass 1: window {idx}/{total} done ({clips_so_far} clips so far)..."
+                pct = 78 + int((idx / max(total, 1)) * 12)  # 78-90%
+            elif phase == "pass1_done":
+                n_clips = info.get("clips", 0)
+                msg = f"Pass 1 found {n_clips} clips — checking coverage..."
+                pct = 90
+            elif phase == "pass2_start":
+                n_gaps = info.get("gaps", 0)
+                msg = f"Pass 2: sweeping {n_gaps} gap{'s' if n_gaps != 1 else ''} for hidden moments..."
+                pct = 91
+            elif phase == "pass2_gap":
+                idx = info.get("gap_idx", 1)
+                total = info.get("gap_total", 1)
+                start = info.get("start", 0)
+                end = info.get("end", 0)
+                msg = f"Pass 2: scanning gap {idx}/{total} ({start:.0f}-{end:.0f}s)..."
+                pct = 91 + int((idx / max(total, 1)) * 3)  # 91-94%
+            elif phase == "pass3_merge":
+                raw = info.get("raw", 0)
+                msg = f"Merging {raw} candidates..."
+                pct = 94
+            else:
+                msg = f"Identifying viral moments... ({elapsed}s elapsed)"
+                pct = min(94, 78 + elapsed // 15)
+
+            # Never go backward
+            pct = max(pct, _clips_max_pct[0])
+            _clips_max_pct[0] = pct
+
+            await _update_progress(
+                job_id, JobStatus.DETECTING_CLIPS, min(95, pct),
+                f"{msg}{_pipeline_eta(min(95, pct))}",
             )
-            clips, clips_provider = await asyncio.wait_for(
-                clip_detection_task,
-                timeout=_SUMMARY_CLIP_TIMEOUT,
-            )
-        except AllProvidersFailedError:
-            # All providers failed on first attempt — wait briefly for any
-            # transient rate limits to clear and retry once.
-            logger.warning("[%s] All providers failed for clip detection — retrying in 10s", job_id)
-            orchestrator.reset_circuit_breaker()
+
+        async def _clips_heartbeat():
             await asyncio.sleep(10)
+            while True:
+                try:
+                    cancel_check()
+                except Exception:
+                    if clip_detection_task and not clip_detection_task.done():
+                        clip_detection_task.cancel()
+                    raise
+                elapsed = int(_time.monotonic() - _clips_start)
+                hb_pct = min(94, 78 + elapsed // 15)
+                # Only update if heartbeat would ADVANCE progress (never regress)
+                if hb_pct > _clips_max_pct[0]:
+                    _clips_max_pct[0] = hb_pct
+                    await _update_progress(
+                        job_id, JobStatus.DETECTING_CLIPS, hb_pct,
+                        f"Identifying viral moments... ({elapsed}s elapsed){_pipeline_eta(hb_pct)}",
+                    )
+                await asyncio.sleep(8)
+
+        heartbeat_task = asyncio.create_task(_clips_heartbeat())
+        try:
             try:
-                clips, clips_provider = await asyncio.wait_for(
+                clip_detection_task = asyncio.ensure_future(
                     orchestrator.detect_viral_clips(
                         transcript, scenes, metadata["duration"], job_id,
                         video_summary=summary_text,
@@ -1226,29 +1228,50 @@ async def _run_analysis_inner(job_id: str):
                         progress_callback=_clip_progress,
                         clip_count=dynamic_clip_count,
                         tier=tier,
-                    ),
+                    )
+                )
+                clips, clips_provider = await asyncio.wait_for(
+                    clip_detection_task,
                     timeout=_SUMMARY_CLIP_TIMEOUT,
                 )
-            except Exception:
-                logger.exception("[%s] Clip detection retry also failed", job_id)
-                clips = []
-                clips_provider = "none"
-    except asyncio.TimeoutError:
-        logger.error("[%s] Clip detection timed out", job_id)
-        clips = []
-        clips_provider = "none"
-    except CancelledError:
-        raise
-    except Exception as e:
-        logger.exception("[%s] Clip detection failed", job_id)
-        clips = []
-        clips_provider = "none"
-    finally:
-        heartbeat_task.cancel()
-        try:
-            await heartbeat_task
-        except (asyncio.CancelledError, CancelledError):
-            pass
+            except AllProvidersFailedError:
+                # All providers failed on first attempt — wait briefly for any
+                # transient rate limits to clear and retry once.
+                logger.warning("[%s] All providers failed for clip detection — retrying in 10s", job_id)
+                orchestrator.reset_circuit_breaker()
+                await asyncio.sleep(10)
+                try:
+                    clips, clips_provider = await asyncio.wait_for(
+                        orchestrator.detect_viral_clips(
+                            transcript, scenes, metadata["duration"], job_id,
+                            video_summary=summary_text,
+                            hot_zones=hot_zones,
+                            progress_callback=_clip_progress,
+                            clip_count=dynamic_clip_count,
+                            tier=tier,
+                        ),
+                        timeout=_SUMMARY_CLIP_TIMEOUT,
+                    )
+                except Exception:
+                    logger.exception("[%s] Clip detection retry also failed", job_id)
+                    clips = []
+                    clips_provider = "none"
+        except asyncio.TimeoutError:
+            logger.error("[%s] Clip detection timed out", job_id)
+            clips = []
+            clips_provider = "none"
+        except CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("[%s] Clip detection failed", job_id)
+            clips = []
+            clips_provider = "none"
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except (asyncio.CancelledError, CancelledError):
+                pass
 
     await _update_progress(
         job_id, JobStatus.DETECTING_CLIPS, 95,

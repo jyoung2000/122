@@ -701,9 +701,37 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         self, frames: list[FrameData], custom_prompt: Optional[str] = None,
         cancel_check=None, progress_callback=None,
     ) -> list[SceneDescription]:
+        total = len(frames)
+
+        # ── CPU Vision Gate: skip frame-by-frame AI analysis when impractical ──
+        # Large vision models (llava:7b+) on CPU take 3-6 minutes per frame.
+        # For videos with many frames, this means hours of processing for minimal gain.
+        if total > 30 and self._force_cpu:
+            model_lower = self._vision_model.lower()
+            slow_on_cpu = any(p in model_lower for p in ["llava:7b", "llava:13b", "llava-v1.6"])
+            if slow_on_cpu:
+                logger.warning(
+                    "Ollama vision: %s on CPU with %d frames would take %.0f+ hours — "
+                    "skipping AI vision, using timestamp-based scene descriptions instead. "
+                    "For faster analysis, switch to moondream:1.8b in Settings.",
+                    self._vision_model, total, (total * 300) / 3600,
+                )
+                scenes = []
+                for i, frame in enumerate(frames):
+                    scenes.append(SceneDescription(
+                        timestamp=frame.timestamp,
+                        description=f"Frame at {int(frame.timestamp // 60)}:{int(frame.timestamp % 60):02d} "
+                                    f"(vision analysis skipped — model too slow on CPU)",
+                        importance_score=5,
+                        thumbnail_path=frame.path,
+                        subject_x=50,
+                    ))
+                    if progress_callback:
+                        await progress_callback(i + 1, total)
+                return scenes
+
         await self._ensure_model_active(self._vision_model)
         instruction = custom_prompt if custom_prompt else DEFAULT_FRAME_ANALYSIS_PROMPT
-        total = len(frames)
 
         # Two-stage vision: fast scan to identify interesting frames, then detailed analysis
         interesting_indices = set(range(total))  # default: all frames

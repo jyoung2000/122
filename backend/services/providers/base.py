@@ -820,6 +820,23 @@ class ChunkedClipDetectionMixin:
             windows.append((window_start, window_end))
             window_start += step
 
+        # ── Ollama window cap: limit total windows to prevent CPU grinding ──
+        # On CPU inference at ~2-3 tok/s, each window takes 2-5 minutes.
+        # More than 12 windows means hours of clip detection.
+        MAX_SEQUENTIAL_WINDOWS = 12
+        if sequential and len(windows) > MAX_SEQUENTIAL_WINDOWS:
+            original_count = len(windows)
+            step_size = max(1, len(windows) // MAX_SEQUENTIAL_WINDOWS)
+            sampled = [windows[i] for i in range(0, len(windows), step_size)]
+            # Always include the last window
+            if sampled[-1] != windows[-1]:
+                sampled.append(windows[-1])
+            windows = sampled[:MAX_SEQUENTIAL_WINDOWS]
+            _mixin_logger.info(
+                "Capped sequential windows: %d → %d (prevents hours of CPU inference)",
+                original_count, len(windows),
+            )
+
         collected_clips: list[ClipCandidate] = []
         progress_callback = kwargs.get("progress_callback")
 
@@ -888,15 +905,27 @@ class ChunkedClipDetectionMixin:
                     )
                     break
 
+                # Adaptive per-window timeout: empty/sparse windows bail fast
+                window_segs = [
+                    seg for seg in transcript
+                    if seg.start >= ws - overlap_duration / 2
+                    and seg.end <= we + overlap_duration / 2
+                ]
+                if len(window_segs) < 3:
+                    this_window_timeout = 90.0  # 90s for near-empty windows
+                    _mixin_logger.debug("Window %d: sparse (%d segs) — 90s timeout", i + 1, len(window_segs))
+                else:
+                    this_window_timeout = per_window_timeout
+
                 try:
                     await asyncio.wait_for(
                         _process_window(i, ws, we),
-                        timeout=per_window_timeout,
+                        timeout=this_window_timeout,
                     )
                 except asyncio.TimeoutError:
                     _mixin_logger.warning(
                         "Window %d/%d timed out after %ds — moving to next window",
-                        i + 1, len(windows), int(per_window_timeout),
+                        i + 1, len(windows), int(this_window_timeout),
                     )
                     continue
         else:
