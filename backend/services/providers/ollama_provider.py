@@ -1075,12 +1075,24 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
     ) -> list[ClipCandidate]:
         # Unload vision model before text-heavy clip detection
         await self._unload_model(self._vision_model)
+        await self._ensure_model_active(self._text_model)
         # For videos > 5 min, use multi-pass detection via mixin (sequential for VRAM safety)
         if video_duration > 300:
             logger.info("Ollama: video %.0fs (>5min) — using sequential multi-pass clip detection", video_duration)
             if tier:
                 from backend.config import apply_ollama_overrides
                 tier = apply_ollama_overrides(tier, is_ollama=True)
+            # CPU-forced models are extremely slow (1-3 tok/s on Sandy Bridge).
+            # Even 12 windows × 90s timeout = 18 min of mostly-wasted time.
+            # Widen windows so fewer are needed to cover the video.
+            if self._force_cpu and tier:
+                from dataclasses import replace as _replace
+                # Double window size → roughly halves window count
+                tier = _replace(tier, window_duration=tier.window_duration * 2)
+                logger.info(
+                    "CPU-forced model — widened windows to %.0fs to reduce timeout waste",
+                    tier.window_duration,
+                )
             return await self._multi_pass_clip_detection(
                 transcript, scenes, video_duration,
                 tier=tier, sequential=True,
