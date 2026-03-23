@@ -203,6 +203,51 @@ def _score_speakers(transcript: list[TranscriptSegment], start: float, end: floa
     return min(100, score), signals[:2]
 
 
+def score_hot_zones_transcript_only(
+    transcript: list[TranscriptSegment],
+    video_duration: float,
+    window_size: float = WINDOW_SIZE,
+    overlap: float = WINDOW_OVERLAP,
+) -> list[HotZone]:
+    """Pre-score hot zones using only transcript data (no scenes or audio needed).
+
+    Used for frame triage BEFORE scene analysis runs. Produces rough hot zone
+    estimates good enough for deciding which frames to analyze in detail.
+    Re-scored with full data (scenes + audio) later in the pipeline.
+    """
+    if video_duration <= 0:
+        return []
+
+    zones = []
+    window_start = 0.0
+
+    while window_start < video_duration:
+        window_end = min(window_start + window_size, video_duration)
+
+        transcript_score, transcript_signals = _score_transcript(transcript, window_start, window_end)
+        speaker_score, speaker_signals = _score_speakers(transcript, window_start, window_end)
+
+        # Without audio/scene data, weight transcript and speakers more heavily
+        composite = transcript_score * 0.65 + speaker_score * 0.35
+        signals = transcript_signals + speaker_signals
+
+        zones.append(HotZone(
+            start=window_start,
+            end=window_end,
+            composite_score=round(composite, 1),
+            audio_score=0.0,
+            transcript_score=round(transcript_score, 1),
+            scene_score=0.0,
+            speaker_score=round(speaker_score, 1),
+            signals=signals,
+        ))
+
+        window_start += window_size - overlap
+
+    zones.sort(key=lambda z: z.composite_score, reverse=True)
+    return zones
+
+
 def format_hot_zones_for_prompt(zones: list[HotZone], top_n: int = 15) -> str:
     """Format top hot zones for injection into AI clip detection prompt."""
     if not zones:

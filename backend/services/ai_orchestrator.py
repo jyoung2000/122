@@ -302,12 +302,14 @@ class AIOrchestrator:
             return VideoSummary(**fb), "fallback"
 
         video_end = max(s.end for s in transcript)
+        chunk_overlap = 30.0  # 30 second overlap between chunks
         chunks: list[tuple[float, float, list[TranscriptSegment], list[SceneDescription]]] = []
         t = 0.0
         while t < video_end:
             chunk_end = min(t + chunk_seconds, video_end)
-            chunk_segs = [s for s in transcript if s.start >= t and s.end <= chunk_end + 5]
-            chunk_scenes = [s for s in scenes if t <= s.timestamp <= chunk_end]
+            # Extend segment selection by overlap into adjacent chunks
+            chunk_segs = [s for s in transcript if s.start >= t - chunk_overlap and s.end <= chunk_end + chunk_overlap]
+            chunk_scenes = [s for s in scenes if t - chunk_overlap <= s.timestamp <= chunk_end + chunk_overlap]
             chunks.append((t, chunk_end, chunk_segs, chunk_scenes))
             t = chunk_end
 

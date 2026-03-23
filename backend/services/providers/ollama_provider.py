@@ -36,6 +36,71 @@ VISION_CONCURRENCY = 1
 
 logger = logging.getLogger(__name__)
 
+# ── Dynamic timeout & speed measurement ─────────────────────────────
+_measured_speeds: dict[str, dict] = {}  # model_name -> {"eval_tok_s": float, "gen_tok_s": float, "samples": int}
+
+# Hot zones set by pipeline before calling analyze_frames (for frame triage)
+_current_hot_zones: list = []
+
+
+def compute_dynamic_timeout(
+    prompt_chars: int,
+    max_tokens: int,
+    provider_name: str,
+    model_name: str = "",
+    is_vision: bool = False,
+) -> float:
+    """Calculate timeout based on actual measured hardware speed."""
+    DEFAULT_SPEEDS = {
+        "ollama": {"eval_tok_s": 400, "gen_tok_s": 12},
+        "openrouter": {"eval_tok_s": 50000, "gen_tok_s": 200},
+        "gemini": {"eval_tok_s": 50000, "gen_tok_s": 200},
+        "groq": {"eval_tok_s": 100000, "gen_tok_s": 800},
+        "anthropic": {"eval_tok_s": 50000, "gen_tok_s": 150},
+    }
+
+    if model_name and model_name in _measured_speeds:
+        speeds = _measured_speeds[model_name]
+    else:
+        speeds = DEFAULT_SPEEDS.get(provider_name, DEFAULT_SPEEDS["ollama"])
+
+    prompt_tokens = prompt_chars // 4
+    eval_time = prompt_tokens / speeds["eval_tok_s"]
+    gen_time = max_tokens / speeds["gen_tok_s"]
+
+    buffer = 30.0 if provider_name == "ollama" else 10.0
+    timeout = (eval_time + gen_time) * 1.2 + buffer
+
+    if is_vision:
+        timeout *= 4
+
+    return max(60.0, timeout)
+
+
+def record_speed_measurement(model_name: str, prompt_tokens: int, eval_tokens: int, elapsed: float):
+    """Record actual inference speed for future timeout calculations."""
+    if elapsed <= 0 or eval_tokens <= 0:
+        return
+
+    gen_tok_s = eval_tokens / elapsed
+    eval_tok_s = prompt_tokens / max(0.1, elapsed * 0.15)
+
+    if model_name not in _measured_speeds:
+        _measured_speeds[model_name] = {"eval_tok_s": eval_tok_s, "gen_tok_s": gen_tok_s, "samples": 1}
+    else:
+        existing = _measured_speeds[model_name]
+        n = existing["samples"]
+        alpha = min(0.3, 1.0 / (n + 1))
+        existing["eval_tok_s"] = existing["eval_tok_s"] * (1 - alpha) + eval_tok_s * alpha
+        existing["gen_tok_s"] = existing["gen_tok_s"] * (1 - alpha) + gen_tok_s * alpha
+        existing["samples"] = n + 1
+
+    logger.debug(
+        "Speed measurement for %s: gen=%.1f tok/s, eval=%.1f tok/s (sample %d)",
+        model_name, gen_tok_s, eval_tok_s,
+        _measured_speeds[model_name]["samples"],
+    )
+
 
 def _truncate_at_boundary(text: str, max_chars: int) -> str:
     """Truncate text at the nearest sentence/segment boundary before max_chars."""
@@ -94,6 +159,24 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         if not self._capabilities_detected:
             await self._detect_capabilities()
             self._capabilities_detected = True
+
+    async def _ensure_model_active(self, model_name: str):
+        """Ensure a specific model is loaded, unloading the other if needed.
+
+        On 4GB VRAM GPUs, only one model can be resident at a time.
+        Explicitly unloading before loading prevents OOM crashes.
+        """
+        other_model = self._text_model if model_name == self._vision_model else self._vision_model
+        if other_model == model_name:
+            return
+        try:
+            await self._client.post(f"{self._host}/api/generate", json={
+                "model": other_model,
+                "keep_alive": 0,
+            }, timeout=10.0)
+            logger.debug("VRAM swap: unloaded %s before loading %s", other_model, model_name)
+        except Exception:
+            pass
 
     @property
     def supports_vision(self) -> bool:
@@ -198,7 +281,14 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             raise ProviderError(f"Ollama vision error: {e}")
 
     async def _call_text(self, prompt: str, system: str = "", max_tokens: int = 4096,
-                         timeout: float = 90.0, json_mode: bool = False) -> str:
+                         timeout: float = 90.0, json_mode: bool = False,
+                         generation_progress=None) -> str:
+        """Text completion with streaming to prevent HTTP timeout death spiral.
+
+        Instead of waiting for the full response (which can take 5+ minutes on
+        slow hardware), we stream token-by-token. The HTTP connection stays alive
+        as long as chunks keep arriving, eliminating false timeouts entirely.
+        """
         await self._ensure_capabilities()
         try:
             messages = []
@@ -207,17 +297,19 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             messages.append({"role": "user", "content": prompt})
 
             # Compute minimum viable timeout for local hardware
-            # ~500 tok/s prompt eval on GTX 1650, ~12 tok/s generation
             prompt_tokens = (len(prompt) + len(system)) // 4
-            eval_time = prompt_tokens / 500
-            gen_time = max_tokens / 12
-            min_timeout = eval_time + gen_time + 30  # 30s buffer for model loading
+            eval_time = prompt_tokens / 500  # ~500 tok/s prompt eval on GTX 1650
+            gen_time = max_tokens / 12       # ~12 tok/s generation
+            min_timeout = eval_time + gen_time + 30
             effective_timeout = max(timeout, min_timeout)
+
+            # Stall timeout: max seconds between chunks before we consider it stuck
+            stall_timeout = max(60.0, effective_timeout * 0.3)
 
             payload = {
                 "model": self._text_model,
                 "messages": messages,
-                "stream": False,
+                "stream": True,
                 "options": {
                     "num_predict": max_tokens,
                     "num_ctx": self._get_effective_ctx(self._text_model),
@@ -226,22 +318,78 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             }
             if json_mode:
                 payload["format"] = "json"
-            logger.debug("Ollama _call_text (chat): model=%s, prompt_len=%d, system_len=%d, timeout=%.0fs (min=%.0fs)",
-                         self._text_model, len(prompt), len(system), effective_timeout, min_timeout)
-            response = await self._client.post(
+
+            logger.debug(
+                "Ollama _call_text (streaming): model=%s, prompt_len=%d, system_len=%d, "
+                "effective_timeout=%.0fs, stall_timeout=%.0fs",
+                self._text_model, len(prompt), len(system), effective_timeout, stall_timeout,
+            )
+
+            collected_text = []
+            total_prompt_tokens = 0
+            total_eval_tokens = 0
+            token_count = 0
+
+            async with self._client.stream(
+                "POST",
                 f"{self._host}/api/chat",
                 json=payload,
-                timeout=effective_timeout,
-            )
-            response.raise_for_status()
-            data = response.json()
-            self._total_tokens += data.get("prompt_eval_count", 0) + data.get("eval_count", 0)
-            result = data.get("message", {}).get("content", "")
+                timeout=httpx.Timeout(effective_timeout, connect=15.0, read=stall_timeout),
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if not line.strip():
+                        continue
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    msg = chunk.get("message", {})
+                    content = msg.get("content", "")
+                    if content:
+                        collected_text.append(content)
+                        token_count += 1
+
+                        # Emit progress every ~200 tokens
+                        if generation_progress and token_count % 200 == 0:
+                            try:
+                                await generation_progress(token_count, max_tokens)
+                            except Exception:
+                                pass
+
+                    if chunk.get("done", False):
+                        total_prompt_tokens = chunk.get("prompt_eval_count", 0)
+                        total_eval_tokens = chunk.get("eval_count", 0)
+                        break
+
+            self._total_tokens += total_prompt_tokens + total_eval_tokens
+            result = "".join(collected_text)
+
             if not result:
-                logger.warning("Ollama returned empty response for model=%s", self._text_model)
+                logger.warning("Ollama streaming returned empty response for model=%s", self._text_model)
+            else:
+                logger.debug(
+                    "Ollama streaming complete: %d chars, %d prompt_tokens, %d eval_tokens",
+                    len(result), total_prompt_tokens, total_eval_tokens,
+                )
+
+                # Record speed measurement for dynamic timeout calculation
+                if total_eval_tokens > 0 and token_count > 0:
+                    record_speed_measurement(
+                        self._text_model, total_prompt_tokens, total_eval_tokens,
+                        token_count / 12.0  # rough elapsed estimate
+                    )
+
             return result
+
+        except httpx.ReadTimeout:
+            raise ProviderError(
+                f"Ollama text stalled (no data for {stall_timeout:.0f}s) — "
+                f"model={self._text_model}, the model may be overloaded"
+            )
         except httpx.TimeoutException:
-            raise ProviderError(f"Ollama text timeout after {timeout}s (model={self._text_model})")
+            raise ProviderError(f"Ollama text timeout after {effective_timeout:.0f}s (model={self._text_model})")
         except httpx.HTTPStatusError as e:
             raise ProviderError(f"Ollama HTTP {e.response.status_code}: {e.response.text[:200]}")
         except Exception as e:
@@ -254,6 +402,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         self, frames: list[FrameData], custom_prompt: Optional[str] = None,
         cancel_check=None, progress_callback=None,
     ) -> list[SceneDescription]:
+        await self._ensure_model_active(self._vision_model)
         instruction = custom_prompt if custom_prompt else DEFAULT_FRAME_ANALYSIS_PROMPT
         total = len(frames)
 
@@ -261,6 +410,28 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         interesting_indices = set(range(total))  # default: all frames
         consecutive_failures = 0
         MAX_CONSECUTIVE_FAILURES = 5  # bail out if Ollama fails this many times in a row
+
+        # Hot-zone frame triage: skip expensive vision on cold-zone frames
+        if total > 20 and _current_hot_zones:
+            hot_frame_indices = {0, total - 1}
+            # Structural frames: at least 20 evenly-spaced
+            structural_step = max(1, total // 20)
+            for i in range(0, total, structural_step):
+                hot_frame_indices.add(i)
+            # Top 60% of hot zones get frame analysis
+            top_zones = sorted(_current_hot_zones, key=lambda z: z.composite_score, reverse=True)
+            cutoff = max(1, int(len(top_zones) * 0.6))
+            for zone in top_zones[:cutoff]:
+                for fi, frame in enumerate(frames):
+                    if zone.start - 5 <= frame.timestamp <= zone.end + 5:
+                        hot_frame_indices.add(fi)
+            cold_count = total - len(hot_frame_indices)
+            if cold_count > 0:
+                logger.info(
+                    "Ollama frame triage: %d/%d frames in hot zones (skipping %d cold-zone frames)",
+                    len(hot_frame_indices), total, cold_count,
+                )
+                interesting_indices = hot_frame_indices
 
         # Skip quick scan entirely for Ollama — small vision models (moondream,
         # llava:7b) compress their score range to 1-4 for most content, causing the
@@ -270,8 +441,8 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
 
         if skip_quick_scan:
             logger.info(
-                "Ollama: skipping quick scan — adaptive sampling already reduced to %d frames",
-                total,
+                "Ollama: skipping quick scan — %d frames to analyze",
+                len(interesting_indices),
             )
         elif total > 10:
             # Stage 1: Quick scan to identify visually interesting frames
@@ -422,6 +593,18 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
 
         # Run with concurrency limiter (sequential when VISION_CONCURRENCY=1)
         await asyncio.gather(*[_analyze_one(i, f) for i, f in enumerate(frames)])
+
+        # Fill in cold-zone frames with synthetic descriptions
+        for fi, frame in enumerate(frames):
+            if scenes[fi] is None and fi not in interesting_indices:
+                scenes[fi] = SceneDescription(
+                    timestamp=frame.timestamp,
+                    description=f"Frame at {frame.timestamp:.0f}s (analysis skipped — low-priority region)",
+                    importance_score=3,
+                    thumbnail_path=frame.path,
+                    subject_x=50,
+                )
+
         return [s for s in scenes if s is not None]
 
     async def generate_summary(
@@ -431,6 +614,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         cancel_check=None,
         custom_prompt=None,
     ) -> VideoSummary:
+        await self._ensure_model_active(self._text_model)
         instruction = custom_prompt if custom_prompt else DEFAULT_SUMMARY_PROMPT
         transcript_text = "\n".join(
             f"[{s.start:.1f}-{s.end:.1f}] {s.speaker}: {s.text}" for s in transcript
@@ -522,6 +706,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         progress_callback=None,
         **kwargs,
     ) -> list[ClipCandidate]:
+        await self._ensure_model_active(self._text_model)
         instruction = custom_prompt if custom_prompt else DEFAULT_VIRAL_CLIP_PROMPT
 
         # Context-aware budget calculation based on detected model context
@@ -537,10 +722,15 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         enrichment_budget = int(content_budget * 0.1)
         summary_budget = int(content_budget * 0.1)
 
-        # Use proportional condensation from mixin — ensures full video coverage
-        transcript_text = self._condense_transcript_proportional(
-            transcript, max_chars=transcript_budget, hot_zones=hot_zones,
-        )
+        # Use hot-zone-first condensation when available for better AI attention allocation
+        if hot_zones:
+            transcript_text = self._condense_transcript_hot_zone_first(
+                transcript, max_chars=transcript_budget, hot_zones=hot_zones,
+            )
+        else:
+            transcript_text = self._condense_transcript_proportional(
+                transcript, max_chars=transcript_budget, hot_zones=hot_zones,
+            )
 
         scene_text = "\n".join(
             f"[{s.timestamp:.0f}s] {s.description[:80]}" for s in scenes
@@ -629,8 +819,20 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         for attempt in range(3):
             if cancel_check:
                 cancel_check()
+            # Progress callback for streaming visibility
+            async def _gen_progress(tokens_done, tokens_total):
+                if progress_callback:
+                    try:
+                        pct = min(95, int((tokens_done / max(tokens_total, 1)) * 100))
+                        await progress_callback("generating", {"tokens": tokens_done, "pct": pct})
+                    except Exception:
+                        pass
+
             # Use longer timeout for clip detection — local models are slow
-            raw = await self._call_text(prompt, system=system, max_tokens=4096, timeout=110.0, json_mode=True)
+            raw = await self._call_text(
+                prompt, system=system, max_tokens=4096, timeout=110.0,
+                json_mode=True, generation_progress=_gen_progress,
+            )
             if not raw or not raw.strip():
                 logger.warning("Attempt %d: Ollama returned empty response for clip detection", attempt + 1)
                 continue

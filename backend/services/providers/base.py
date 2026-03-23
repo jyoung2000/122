@@ -357,6 +357,46 @@ def normalize_seo_data(data: dict) -> dict:
     return data
 
 
+def extract_partial_clips(raw: str) -> list[dict]:
+    """Extract complete clip objects from a potentially truncated JSON response.
+
+    When a timeout fires mid-generation, we may have a partial JSON response.
+    This function extracts the complete clip objects and discards truncated ones.
+    """
+    text = re.sub(r'<(?:think|reasoning)>.*?</(?:think|reasoning)>', '', raw, flags=re.DOTALL)
+
+    clips_match = re.search(r'"clips"\s*:\s*\[', text)
+    if not clips_match:
+        return []
+
+    clips = []
+    pos = clips_match.end()
+    brace_depth = 0
+    obj_start = None
+
+    for i in range(pos, len(text)):
+        ch = text[i]
+        if ch == '{' and brace_depth == 0:
+            obj_start = i
+            brace_depth = 1
+        elif ch == '{':
+            brace_depth += 1
+        elif ch == '}':
+            brace_depth -= 1
+            if brace_depth == 0 and obj_start is not None:
+                try:
+                    obj_text = text[obj_start:i + 1]
+                    obj = json.loads(_fix_json_newlines(obj_text))
+                    clips.append(obj)
+                except json.JSONDecodeError:
+                    pass
+                obj_start = None
+        elif ch == ']' and brace_depth == 0:
+            break
+
+    return clips
+
+
 class ProviderError(Exception):
     pass
 
@@ -618,6 +658,137 @@ class ChunkedClipDetectionMixin:
                 result_lines.append(f"[{b_start:.0f}-{b_end:.0f}s] (content condensed)")
 
         return "\n".join(result_lines)
+
+    @staticmethod
+    def _condense_transcript_hot_zone_first(
+        transcript: list[TranscriptSegment],
+        max_chars: int = 12000,
+        hot_zones=None,
+    ) -> str:
+        """Hot-zone-first condensation: full detail for hot zones, minimal for cold.
+
+        Three tiers:
+        - HOT (composite_score > 50): Full transcript lines, uncondensed
+        - WARM (composite_score 20-50): Standard proportional condensation
+        - COLD (composite_score < 20): Single-line timestamp range placeholder
+        """
+        if not transcript:
+            return "(no transcript)"
+
+        if not hot_zones:
+            return ChunkedClipDetectionMixin._condense_transcript_proportional(
+                transcript, max_chars=max_chars, hot_zones=hot_zones,
+            )
+
+        hot_threshold = 50
+        warm_threshold = 20
+
+        video_end = max(s.end for s in transcript)
+        tier_map = {}
+        hot_zones_sorted = sorted(hot_zones, key=lambda z: z.composite_score, reverse=True)
+        for z in hot_zones_sorted:
+            tier = "hot" if z.composite_score >= hot_threshold else ("warm" if z.composite_score >= warm_threshold else "cold")
+            for t in range(int(z.start), min(int(z.end) + 1, int(video_end) + 1)):
+                if t not in tier_map:
+                    tier_map[t] = tier
+
+        hot_segs = []
+        warm_segs = []
+        cold_ranges = []
+        cold_start = None
+
+        for seg in transcript:
+            seg_tier = tier_map.get(int(seg.start), "cold")
+            if seg_tier == "hot":
+                if cold_start is not None:
+                    cold_ranges.append((cold_start, seg.start))
+                    cold_start = None
+                hot_segs.append(seg)
+            elif seg_tier == "warm":
+                if cold_start is not None:
+                    cold_ranges.append((cold_start, seg.start))
+                    cold_start = None
+                warm_segs.append(seg)
+            else:
+                if cold_start is None:
+                    cold_start = seg.start
+        if cold_start is not None:
+            cold_ranges.append((cold_start, video_end))
+
+        hot_budget = int(max_chars * 0.60)
+        warm_budget = int(max_chars * 0.30)
+        cold_budget = int(max_chars * 0.10)
+
+        hot_lines = []
+        hot_used = 0
+        for seg in hot_segs:
+            line = f"[{seg.start:.0f}-{seg.end:.0f}] {seg.speaker}: {seg.text}"
+            if hot_used + len(line) + 1 <= hot_budget:
+                hot_lines.append(line)
+                hot_used += len(line) + 1
+
+        warm_lines = []
+        warm_used = 0
+        for seg in warm_segs:
+            text = seg.text[:100] if len(seg.text) > 100 else seg.text
+            line = f"[{seg.start:.0f}-{seg.end:.0f}] {seg.speaker}: {text}"
+            if warm_used + len(line) + 1 <= warm_budget:
+                warm_lines.append(line)
+                warm_used += len(line) + 1
+
+        cold_lines = []
+        for cs, ce in cold_ranges:
+            line = f"[{cs:.0f}-{ce:.0f}s] (low-engagement region — {ce-cs:.0f}s of content condensed)"
+            cold_lines.append(line)
+        cold_text = "\n".join(cold_lines[:10])
+        if len(cold_text) > cold_budget:
+            cold_text = cold_text[:cold_budget]
+
+        return "\n".join(hot_lines + warm_lines + [cold_text])
+
+    @staticmethod
+    def _deduplicate_thematic(clips: list[ClipCandidate], max_similar: int = 2) -> list[ClipCandidate]:
+        """Remove thematically duplicate clips that cover the same topic.
+
+        Uses title similarity (Jaccard on words) to detect clips describing
+        the same moment from different windows' perspectives.
+        Keeps the highest-scoring version of each theme.
+        """
+        if len(clips) <= 1:
+            return clips
+
+        def _word_set(text: str) -> set:
+            words = set()
+            for w in text.lower().split():
+                cleaned = ''.join(c for c in w if c.isalnum())
+                if cleaned and len(cleaned) > 2:
+                    words.add(cleaned)
+            return words
+
+        def _jaccard(a: set, b: set) -> float:
+            if not a or not b:
+                return 0.0
+            return len(a & b) / len(a | b)
+
+        sorted_clips = sorted(clips, key=lambda c: c.viral_score, reverse=True)
+        kept = []
+
+        for clip in sorted_clips:
+            clip_words = _word_set(clip.title + " " + (clip.hook_text or ""))
+            similar_count = 0
+            for existing in kept:
+                existing_words = _word_set(existing.title + " " + (existing.hook_text or ""))
+                if _jaccard(clip_words, existing_words) > 0.5:
+                    similar_count += 1
+            if similar_count < max_similar:
+                kept.append(clip)
+            else:
+                _mixin_logger.info(
+                    "Thematic dedup: dropping '%s' (score=%d) — %d similar clips already kept",
+                    clip.title, clip.viral_score, similar_count,
+                )
+
+        return kept
 
     async def _windowed_clip_detection(
         self,
@@ -925,11 +1096,12 @@ class ChunkedClipDetectionMixin:
                         elif isinstance(result, BaseException):
                             _mixin_logger.warning("Pass 2 gap failed: %s", result)
 
-        # Pass 3: Merge, deduplicate, sort by score
+        # Pass 3: Merge, deduplicate (time overlap + thematic), sort by score
         if progress_callback:
             await progress_callback("pass3_merge", {"raw": len(all_clips)})
         raw_count = len(all_clips)
         all_clips = self._deduplicate_clips(all_clips, max_overlap=0.4)
+        all_clips = self._deduplicate_thematic(all_clips, max_similar=2)
         all_clips.sort(key=lambda c: c.viral_score, reverse=True)
 
         if len(all_clips) > num_clips:

@@ -457,15 +457,31 @@ async def _run_analysis_inner(job_id: str):
         tier.max_clip_candidates, tier.max_gaps_pass2, is_ollama_primary,
     )
 
-    # Adaptive timeouts based on video duration + provider type
+    # Adaptive timeouts based on video duration + provider type + tier
     _EXTRACTION_TIMEOUT = max(600, int(vid_minutes * 60))
     if is_ollama_primary:
         est_windows = max(1, int(metadata["duration"] / tier.window_duration)) if tier.window_duration > 0 else 1
-        _SUMMARY_CLIP_TIMEOUT = max(1200, est_windows * tier.per_call_timeout_base + 600)
-        logger.info("[%s] Ollama-scaled clip timeout: %ds (%d windows)", job_id, _SUMMARY_CLIP_TIMEOUT, est_windows)
+        # Ollama timeouts: generous because local inference is slow but reliable
+        _SUMMARY_CLIP_TIMEOUT = max(
+            1800,  # Minimum 30 minutes for any video
+            est_windows * tier.per_call_timeout_base + 900
+        )
+        _B64_ENCODE_TIMEOUT = max(300, int(vid_minutes * 10))
+        # Parent timeout for transcription+scene: scale with video length
+        _trans_scene_timeout = max(
+            900,  # Minimum 15 minutes
+            int(vid_minutes * 8)  # ~8x real-time for transcription + sequential vision
+        )
+        logger.info(
+            "[%s] Ollama-scaled timeouts: extraction=%ds, summary_clip=%ds, "
+            "trans_scene=%ds, b64=%ds (%d est. windows, %.1f min video)",
+            job_id, _EXTRACTION_TIMEOUT, _SUMMARY_CLIP_TIMEOUT,
+            _trans_scene_timeout, _B64_ENCODE_TIMEOUT, est_windows, vid_minutes,
+        )
     else:
         _SUMMARY_CLIP_TIMEOUT = max(900, int(vid_minutes * 120))
-    _B64_ENCODE_TIMEOUT = max(300, int(vid_minutes * 10))
+        _B64_ENCODE_TIMEOUT = max(300, int(vid_minutes * 10))
+        _trans_scene_timeout = max(600, int(vid_minutes * 5))
     logger.info(
         "[%s] Adaptive timeouts: extraction=%ds, summary_clip=%ds, b64=%ds (%.1f min video)",
         job_id, _EXTRACTION_TIMEOUT, _SUMMARY_CLIP_TIMEOUT, _B64_ENCODE_TIMEOUT, vid_minutes,
@@ -816,7 +832,7 @@ async def _run_analysis_inner(job_id: str):
     # On a 4GB GPU, concurrent execution pushes both to CPU (~3x slower).
     # With cloud providers, run concurrently since there's no VRAM contention.
     _uses_local_gpu = "ollama" in settings.active_provider_chain
-    _trans_scene_timeout = max(600, audio_duration * 5)
+    # _trans_scene_timeout was already computed in the adaptive timeout block above
 
     if _uses_local_gpu:
         logger.info("[%s] Sequential mode: transcription first, then scene analysis (local GPU)", job_id)
@@ -832,6 +848,18 @@ async def _run_analysis_inner(job_id: str):
             except Exception as e:
                 logger.exception("[%s] Transcription branch failed", job_id)
                 trans_result = e
+
+            # Pre-compute transcript-only hot zones for frame triage
+            # (runs before scene analysis so Ollama can skip cold-zone frames)
+            if not isinstance(trans_result, BaseException) and trans_result:
+                try:
+                    from backend.services.hot_zone_scorer import score_hot_zones_transcript_only
+                    import backend.services.providers.ollama_provider as _ollama_mod
+                    pre_hot_zones = score_hot_zones_transcript_only(trans_result, metadata["duration"])
+                    _ollama_mod._current_hot_zones = pre_hot_zones
+                    logger.info("[%s] Pre-computed %d transcript-only hot zones for frame triage", job_id, len(pre_hot_zones))
+                except Exception as e:
+                    logger.warning("[%s] Hot zone pre-scoring failed (non-fatal): %s", job_id, e)
 
             try:
                 scene_result = await asyncio.wait_for(
