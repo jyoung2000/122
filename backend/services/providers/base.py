@@ -823,8 +823,13 @@ class ChunkedClipDetectionMixin:
         # ── Cap window count for sequential (Ollama) mode ──
         # On CPU inference at 2-4 tok/s, each window takes 2-5 minutes.
         # 46 windows = 3.7 hours of clip detection (observed in production).
-        # Cap at 12 windows, evenly sampled to cover the full video.
-        MAX_SEQUENTIAL_WINDOWS = 12
+        # Scale cap by video length: ≤2hr→8, ≤4hr→10, >4hr→12.
+        if video_duration <= 7200:
+            MAX_SEQUENTIAL_WINDOWS = 8
+        elif video_duration <= 14400:
+            MAX_SEQUENTIAL_WINDOWS = 10
+        else:
+            MAX_SEQUENTIAL_WINDOWS = 12
         if sequential and len(windows) > MAX_SEQUENTIAL_WINDOWS:
             original = len(windows)
             step_size = max(1, len(windows) // MAX_SEQUENTIAL_WINDOWS)
@@ -839,6 +844,13 @@ class ChunkedClipDetectionMixin:
 
         collected_clips: list[ClipCandidate] = []
         progress_callback = kwargs.get("progress_callback")
+
+        # Emit accurate window count AFTER capping
+        if progress_callback:
+            try:
+                await progress_callback("pass1_start", {"windows": len(windows)})
+            except Exception:
+                pass
 
         async def _process_window(idx: int, w_start: float, w_end: float):
             window_transcript = [
@@ -1012,21 +1024,15 @@ class ChunkedClipDetectionMixin:
 
         all_clips: list[ClipCandidate] = []
 
-        # Pass 1: windowed scan
-        if progress_callback:
-            step = window_dur - overlap_dur
-            if step <= 0:
-                step = window_dur
-            _wcount = max(1, int((video_duration + step - 1) / step))
-            await progress_callback("pass1_start", {"windows": _wcount})
-
+        # Pass 1: windowed scan (pass1_start callback fires inside _windowed_clip_detection
+        # after the window cap is applied, so it reports the accurate count)
         pass1_clips = await self._windowed_clip_detection(
             transcript, scenes, video_duration,
             window_duration=window_dur, overlap_duration=overlap_dur,
             _partial_results=_partial_results,
             sequential=sequential,
             custom_prompt=custom_prompt, cancel_check=cancel_check,
-            clip_count=max(8, num_clips),
+            clip_count=5,  # Cap per-window to reduce token output (5 × N windows → dedup)
             min_duration=min_duration, max_duration=max_duration,
             video_summary=video_summary, existing_clips=existing_clips,
             progress_callback=progress_callback,

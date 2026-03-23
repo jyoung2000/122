@@ -750,7 +750,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                     elapsed, self._vision_model,
                 )
 
-                if elapsed > 90:
+                if elapsed > 60:
                     # Impractically slow — cap to 20 evenly-spaced frames
                     max_frames = 20
                     logger.warning(
@@ -759,27 +759,32 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                         elapsed, total, max_frames,
                         (max_frames * elapsed) / 60, (total * elapsed) / 3600,
                     )
-                    step = max(1, total // max_frames)
-                    keep = set()
-                    for i in range(0, total, step):
-                        keep.add(i)
-                    keep.add(0)
-                    keep.add(total - 1)
-                    _speed_limited_indices = keep
-                elif elapsed > 30 and total > 60:
-                    # Moderate speed — cap to 60 frames
-                    max_frames = 60
-                    step = max(1, total // max_frames)
-                    keep = set()
-                    for i in range(0, total, step):
-                        keep.add(i)
-                    keep.add(0)
-                    keep.add(total - 1)
-                    _speed_limited_indices = keep
+                elif elapsed > 15:
+                    # Moderate speed — cap to 80 frames (~7.5 min at 5.6s/frame)
+                    max_frames = 80
                     logger.info(
-                        "Ollama vision moderate speed (%.0fs/frame) — reduced %d→%d frames",
-                        elapsed, total, len(keep),
+                        "Ollama vision moderate speed (%.0fs/frame) — reducing %d→%d frames",
+                        elapsed, total, max_frames,
                     )
+                elif elapsed > 5 and total > 200:
+                    # Normal speed but too many frames — cap to 150
+                    # 150 frames × 5.6s ≈ 14 min (vs 29 min for 472)
+                    max_frames = 150
+                    logger.info(
+                        "Vision OK (%.1fs/frame) but %d frames is excessive — reducing to %d",
+                        elapsed, total, max_frames,
+                    )
+                else:
+                    max_frames = None
+
+                if max_frames is not None and total > max_frames:
+                    step = max(1, total // max_frames)
+                    keep = set()
+                    for i in range(0, total, step):
+                        keep.add(i)
+                    keep.add(0)
+                    keep.add(total - 1)
+                    _speed_limited_indices = keep
 
             except asyncio.TimeoutError:
                 logger.warning(

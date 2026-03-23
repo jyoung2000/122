@@ -322,6 +322,16 @@ async def extract_frames(
 
     rate = sample_rate or settings.FRAME_SAMPLE_RATE
 
+    # For long videos (>30 min), enforce a minimum 30s interval to avoid
+    # extracting 400+ frames that overwhelm vision analysis downstream.
+    # 113-min video: 1 frame/30s ≈ 226 frames (vs 472 at 1/14.4s).
+    if video_duration and video_duration > 1800 and rate < 30:
+        logger.info(
+            "Long video (%.0fs) — raising frame interval from %ds to 30s",
+            video_duration, rate,
+        )
+        rate = 30
+
     # Adjust sample rate to avoid over-extraction (extracting 100+ frames then
     # discarding 40% wastes I/O time). Scene detection adds ~30-40% bonus
     # frames on top of interval-based frames, so set the interval so that

@@ -436,16 +436,46 @@ async def _run_analysis_inner(job_id: str):
         return _time.monotonic() - _pipeline_start
 
     _clips_phase_start = [0.0]  # mutable; set when clip detection starts
+    # Scene analysis phase-local tracking for accurate ETA
+    _scene_phase_start = [0.0]  # set when scene analysis begins
+    _scene_recent_timestamps: list[float] = []  # timestamps of recent frame completions
+
+    def _format_remaining(total_remaining: float) -> str:
+        if total_remaining < 60:
+            return f" — ~{int(total_remaining)}s remaining"
+        m, s = divmod(int(total_remaining), 60)
+        return f" — ~{m}m {s}s remaining"
 
     def _pipeline_eta(current_pct):
         """Estimate remaining time based on progress.
 
-        Uses phase-local estimation during clip detection (78-95%) to avoid
-        the nonsensical ETA drift from global rate + capped progress.
+        Uses phase-local estimation during scene analysis (15-62%) and clip
+        detection (78-95%) to avoid nonsensical ETA drift from global rate.
         """
         if current_pct <= 2:
             return ""
         elapsed = _pipeline_elapsed()
+
+        # During scene analysis (15-62%), use sliding window ETA
+        if 15 < current_pct < 62 and _scene_phase_start[0] > 0:
+            now = _time.monotonic()
+            _scene_recent_timestamps.append(now)
+            # Keep last 15 timestamps for sliding window average
+            if len(_scene_recent_timestamps) > 15:
+                _scene_recent_timestamps[:] = _scene_recent_timestamps[-15:]
+            if len(_scene_recent_timestamps) >= 3:
+                window = _scene_recent_timestamps
+                recent_elapsed = window[-1] - window[0]
+                recent_steps = len(window) - 1
+                if recent_elapsed > 0:
+                    recent_rate = recent_steps / recent_elapsed  # pct-steps per sec
+                    # Map current_pct to remaining pct in scene phase
+                    phase_remaining_pct = 62 - current_pct
+                    # Estimate remaining using recent rate (steps map roughly to pct)
+                    scene_remaining = phase_remaining_pct / max(0.001, recent_rate)
+                    # Add estimate for remaining phases (clip detection + saving)
+                    total_remaining = scene_remaining + 120  # rough estimate for later phases
+                    return _format_remaining(total_remaining)
 
         # During clip detection (78-95%), use phase-local ETA
         if 78 <= current_pct <= 95 and _clips_phase_start[0] > 0:
@@ -459,10 +489,7 @@ async def _run_analysis_inner(job_id: str):
                 # Not enough data yet — rough estimate from video duration
                 vid_min = metadata["duration"] / 60 if metadata.get("duration") else 10
                 total_remaining = max(60, vid_min * 8)
-            if total_remaining < 60:
-                return f" — ~{int(total_remaining)}s remaining"
-            m, s = divmod(int(total_remaining), 60)
-            return f" — ~{m}m {s}s remaining"
+            return _format_remaining(total_remaining)
 
         # Default: global pipeline rate
         if elapsed <= 0:
@@ -471,10 +498,7 @@ async def _run_analysis_inner(job_id: str):
         if rate <= 0:
             return ""
         remaining = max(0, (100 - current_pct) / rate)
-        if remaining < 60:
-            return f" — ~{int(remaining)}s remaining"
-        m, s = divmod(int(remaining), 60)
-        return f" — ~{m}m {s}s remaining"
+        return _format_remaining(remaining)
 
     # Step 1 — Video Metadata (0-5%)
     cancel_check()
@@ -837,6 +861,7 @@ async def _run_analysis_inner(job_id: str):
             "Analyzing scenes with AI...")
 
         _scene_start = _time.monotonic()
+        _scene_phase_start[0] = _scene_start
 
         async def _scene_progress(frames_done, frames_total, provider_name):
             pct = int((frames_done / max(frames_total, 1)) * 100)
