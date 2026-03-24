@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from typing import Optional
 
 import httpx
@@ -433,7 +434,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             # But still cap to avoid extremely slow generation
             model_lower = model_name.lower()
             if "llava" in model_lower or "vision" in model_lower or "moondream" in model_lower:
-                return 2048  # Vision prompts are short
+                return 4096  # Needs room for image embedding + full response
             elif any(s in model_lower for s in ["3b", "1b", "0.5b"]):
                 return 8192
             elif any(s in model_lower for s in ["7b", "8b"]):
@@ -447,7 +448,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
 
         model_lower = model_name.lower()
         if "llava" in model_lower or "vision" in model_lower or "moondream" in model_lower:
-            return 2048
+            return 4096  # Moondream needs room for image tokens + response
         elif any(s in model_lower for s in ["3b", "1b", "0.5b"]):
             return 4096
         elif any(s in model_lower for s in ["7b", "8b"]):
@@ -594,7 +595,9 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             "options": {
                 "num_predict": max_tokens,
                 "num_ctx": self._get_effective_ctx(self._text_model),
-                "temperature": 0.3,
+                "temperature": 0.5,  # Small models need more diversity to avoid repetitive descriptions
+                "top_p": 0.9,        # Better variety in sampling
+                "repeat_penalty": 1.15,  # Penalize repetitive phrasing
             },
         }
         # VRAM-aware GPU offloading
@@ -736,12 +739,16 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             await self._ensure_model_active(self._vision_model)
             t0 = _t.monotonic()
             try:
+                # Use the ACTUAL prompt for speed testing (not a simplified version)
+                # The real prompt is 3-4x longer and triggers different tokenization
+                test_prompt = (
+                    "Describe what you see in this video frame in 1-2 sentences. "
+                    "Focus on: who/what is visible, the setting, any text on screen. "
+                    "Be specific and factual — only describe what is ACTUALLY VISIBLE."
+                    + _VISION_JSON_SUFFIX
+                )
                 test_result = await asyncio.wait_for(
-                    self._call_vision(
-                        'Describe this image in one sentence. Return JSON: '
-                        '{"description": "text", "importance_score": 5, "subject_x": 50}',
-                        frames[0].base64,
-                    ),
+                    self._call_vision(test_prompt, frames[0].base64),
                     timeout=120.0,
                 )
                 elapsed = _t.monotonic() - t0
@@ -811,7 +818,16 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 logger.warning("Vision speed test failed (%s) — proceeding with all frames", e)
 
         await self._ensure_model_active(self._vision_model)
-        instruction = custom_prompt if custom_prompt else DEFAULT_FRAME_ANALYSIS_PROMPT
+        # Use simplified prompt for small local models — they can't reason about
+        # "social media potential" or "spectacle" but CAN describe what's visible
+        if custom_prompt:
+            instruction = custom_prompt
+        else:
+            instruction = (
+                "Describe what you see in this video frame in 1-2 sentences. "
+                "Focus on: who/what is visible, the setting, any text on screen. "
+                "Be specific and factual — only describe what is ACTUALLY VISIBLE."
+            )
 
         # Two-stage vision: fast scan to identify interesting frames, then detailed analysis
         interesting_indices = set(range(total))  # default: all frames
@@ -832,6 +848,18 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 for fi, frame in enumerate(frames):
                     if zone.start - 5 <= frame.timestamp <= zone.end + 5:
                         hot_frame_indices.add(fi)
+            # ALSO include frames that were extracted via scene detection (not just interval).
+            # These frames exist because FFmpeg detected a visual change — they're worth analyzing
+            # even if the transcript is quiet at that moment.
+            if len(frames) > 1:
+                avg_interval = (frames[-1].timestamp - frames[0].timestamp) / max(len(frames) - 1, 1)
+                for fi in range(1, len(frames)):
+                    gap = frames[fi].timestamp - frames[fi - 1].timestamp
+                    # If gap is significantly shorter than average, it was triggered by scene change
+                    if gap < avg_interval * 0.5:
+                        hot_frame_indices.add(fi)
+                        hot_frame_indices.add(fi - 1)
+
             cold_count = total - len(hot_frame_indices)
             if cold_count > 0:
                 logger.info(
@@ -927,6 +955,10 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         stage2_consecutive_failures = 0
         stage2_aborted = False
 
+        # Track previous description for temporal context
+        _prev_descriptions: list[str] = []  # last N descriptions for context
+        _CONTEXT_WINDOW = 3  # number of previous descriptions to include
+
         async def _analyze_one(fi: int, frame: FrameData):
             nonlocal completed, stage2_consecutive_failures, stage2_aborted
             async with sem:
@@ -938,7 +970,29 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                         await progress_callback(completed, total)
                     return
 
-                prompt = instruction + _VISION_JSON_SUFFIX
+                # Build temporal context from previous descriptions
+                temporal_context = ""
+                if _prev_descriptions:
+                    recent = _prev_descriptions[-_CONTEXT_WINDOW:]
+                    ctx_lines = []
+                    for pd in recent:
+                        ctx_lines.append(f"  - {pd[:120]}")
+                    temporal_context = (
+                        "\n\nPREVIOUS FRAMES (for temporal context — do NOT repeat these, "
+                        "describe what is NEW or DIFFERENT in THIS frame):\n"
+                        + "\n".join(ctx_lines) + "\n"
+                    )
+
+                # Simplified prompt for small vision models
+                ollama_vision_prompt = (
+                    "Describe what you see in this video frame in 1-2 sentences. "
+                    "Focus on: who/what is visible, the setting, any text on screen, "
+                    "and the overall mood. Be specific and factual — only describe "
+                    "what is ACTUALLY VISIBLE, do not infer or imagine what might be happening."
+                    f"{temporal_context}"
+                )
+
+                prompt = ollama_vision_prompt + _VISION_JSON_SUFFIX
                 try:
                     raw = await self._call_vision(prompt, frame.base64)
                     # Try JSON parsing first (preferred — extracts subject_x)
@@ -975,6 +1029,39 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                                     break
                             except ValueError:
                                 continue
+                    # ── Quality validation ──
+                    if description:
+                        # Strip JSON fragments
+                        if description.startswith('{') or description.startswith('['):
+                            description = re.sub(r'[{}\[\]":]', ' ', description)
+                            description = re.sub(r'\s+', ' ', description).strip()
+
+                        # Strip markdown code fences
+                        if description.startswith('```'):
+                            description = description.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
+
+                        # Reject obviously bad descriptions
+                        if len(description) < 5 or description.lower() in (
+                            "analysis failed", "error", "none", "n/a", "null",
+                            "analysis failed (local ai)",
+                        ):
+                            description = f"Frame at {frame.timestamp:.0f}s — visual content present but description unavailable"
+                            importance = 5
+
+                        # Truncate extremely long descriptions (hallucination indicator)
+                        if len(description) > 500:
+                            cut = description.rfind('. ', 0, 400)
+                            if cut > 200:
+                                description = description[:cut + 1]
+                            else:
+                                description = description[:400] + "..."
+
+                    # Store description for temporal context (only real descriptions)
+                    if description and len(description) > 10 and "failed" not in description.lower():
+                        _prev_descriptions.append(description)
+                        if len(_prev_descriptions) > _CONTEXT_WINDOW * 2:
+                            _prev_descriptions[:] = _prev_descriptions[-_CONTEXT_WINDOW:]
+
                     scenes[fi] = SceneDescription(
                         timestamp=frame.timestamp,
                         description=description,
@@ -985,21 +1072,33 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                     stage2_consecutive_failures = 0
                 except Exception as e:
                     logger.warning(f"Ollama frame analysis failed for {frame.timestamp}s: {e}")
-                    scenes[fi] = SceneDescription(
-                        timestamp=frame.timestamp,
-                        description="Analysis failed (local AI)",
-                        importance_score=5,
-                        thumbnail_path=frame.path,
-                        subject_x=50,
-                    )
                     stage2_consecutive_failures += 1
-                    if stage2_consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+
+                    # Exponential backoff before retry decisions
+                    if stage2_consecutive_failures >= 3:
+                        backoff_delay = min(10, stage2_consecutive_failures * 2)
+                        logger.info(
+                            "Ollama: %d consecutive failures, waiting %ds before continuing",
+                            stage2_consecutive_failures, backoff_delay,
+                        )
+                        await asyncio.sleep(backoff_delay)
+
+                    if stage2_consecutive_failures >= 10:  # Was 5 — more tolerance
                         logger.error(
                             "Ollama frame analysis: %d consecutive failures — aborting "
-                            "remaining frames with fallback descriptions",
+                            "remaining frames with interpolated descriptions",
                             stage2_consecutive_failures,
                         )
                         stage2_aborted = True
+                    else:
+                        # Use a placeholder that will be replaced by interpolation later
+                        scenes[fi] = SceneDescription(
+                            timestamp=frame.timestamp,
+                            description=f"Frame at {frame.timestamp:.0f}s — analysis temporarily unavailable",
+                            importance_score=5,
+                            thumbnail_path=frame.path,
+                            subject_x=50,
+                        )
                 completed += 1
                 if progress_callback:
                     await progress_callback(completed, total)
@@ -1007,15 +1106,47 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         # Run with concurrency limiter (sequential when VISION_CONCURRENCY=1)
         await asyncio.gather(*[_analyze_one(i, f) for i, f in enumerate(frames)])
 
-        # Fill in cold-zone frames with synthetic descriptions
+        # Fill in cold-zone frames with interpolated descriptions from nearest analyzed frames
         for fi, frame in enumerate(frames):
             if scenes[fi] is None and fi not in interesting_indices:
+                # Find nearest analyzed frame before and after
+                prev_desc = ""
+                next_desc = ""
+                for search_back in range(fi - 1, -1, -1):
+                    if scenes[search_back] is not None and search_back in interesting_indices:
+                        prev_desc = scenes[search_back].description
+                        break
+                for search_fwd in range(fi + 1, total):
+                    if scenes[search_fwd] is not None and search_fwd in interesting_indices:
+                        next_desc = scenes[search_fwd].description
+                        break
+
+                # Build interpolated description from neighbors
+                if prev_desc and next_desc:
+                    interp_desc = f"Continuation: {prev_desc[:150]}"
+                elif prev_desc:
+                    interp_desc = f"Continuation: {prev_desc[:150]}"
+                elif next_desc:
+                    interp_desc = f"Before: {next_desc[:150]}"
+                else:
+                    interp_desc = "No visual analysis available for this segment"
+
+                # Interpolate importance from neighbors
+                prev_imp = next((scenes[j].importance_score for j in range(fi - 1, -1, -1) if scenes[j]), 5)
+                next_imp = next((scenes[j].importance_score for j in range(fi + 1, total) if scenes[j]), 5)
+                interp_importance = max(2, (prev_imp + next_imp) // 2 - 1)
+
+                # Interpolate subject_x from neighbors
+                prev_sx = next((scenes[j].subject_x for j in range(fi - 1, -1, -1) if scenes[j]), 50)
+                next_sx = next((scenes[j].subject_x for j in range(fi + 1, total) if scenes[j]), 50)
+                interp_sx = (prev_sx + next_sx) // 2
+
                 scenes[fi] = SceneDescription(
                     timestamp=frame.timestamp,
-                    description=f"Frame at {frame.timestamp:.0f}s (analysis skipped — low-priority region)",
-                    importance_score=3,
+                    description=interp_desc,
+                    importance_score=interp_importance,
                     thumbnail_path=frame.path,
-                    subject_x=50,
+                    subject_x=interp_sx,
                 )
 
         return [s for s in scenes if s is not None]
@@ -1031,17 +1162,53 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         await self._unload_model(self._vision_model)
         await self._ensure_model_active(self._text_model)
         instruction = custom_prompt if custom_prompt else DEFAULT_SUMMARY_PROMPT
-        transcript_text = "\n".join(
-            f"[{s.start:.1f}-{s.end:.1f}] {s.speaker}: {s.text}" for s in transcript
+
+        # Dynamic context budget based on effective context length
+        ctx_tokens = self._get_effective_ctx(self._text_model)
+        overhead_tokens = 400  # prompt template + JSON format
+        output_reserve = min(800, ctx_tokens // 3)  # reserve 1/3 for output
+        available_tokens = ctx_tokens - overhead_tokens - output_reserve
+        content_budget = max(2000, available_tokens * 4)  # ~4 chars per token
+
+        transcript_budget = int(content_budget * 0.7)
+        scene_budget = int(content_budget * 0.3)
+
+        logger.info(
+            "Ollama summary budget: ctx=%d tokens, content=%d chars (transcript=%d, scenes=%d)",
+            ctx_tokens, content_budget, transcript_budget, scene_budget,
         )
-        scene_text = "\n".join(
-            f"[{s.timestamp:.1f}s] {s.description}" for s in scenes
-        ) if scenes else "No scene descriptions available."
+
+        # Use proportional condensation (samples evenly across video) instead of head-truncation
+        transcript_text = self._condense_transcript_proportional(
+            transcript, max_chars=transcript_budget,
+        )
+
+        # Condense scenes with importance weighting
+        if scenes:
+            # Sort by importance, take top scenes, then re-sort by timestamp
+            real_scenes = [s for s in scenes if "skipped" not in s.description.lower()
+                           and "continuation" not in s.description.lower()
+                           and len(s.description) > 20]
+            if real_scenes:
+                sorted_scenes = sorted(real_scenes, key=lambda s: s.importance_score, reverse=True)
+                top_scenes = sorted_scenes[:30]  # top 30 by importance
+                top_scenes.sort(key=lambda s: s.timestamp)  # re-sort chronologically
+                scene_text = "\n".join(
+                    f"[{s.timestamp:.0f}s] (imp={s.importance_score}) {s.description[:100]}"
+                    for s in top_scenes
+                )
+            else:
+                scene_text = "\n".join(
+                    f"[{s.timestamp:.0f}s] {s.description[:80]}" for s in scenes[:20]
+                )
+            scene_text = _truncate_at_boundary(scene_text, scene_budget)
+        else:
+            scene_text = "No scene descriptions available."
 
         prompt = (
             f"{instruction}\n\n"
-            f"TRANSCRIPT:\n{_truncate_at_boundary(transcript_text, 3000)}\n\n"
-            f"SCENES:\n{_truncate_at_boundary(scene_text, 1000)}\n\n"
+            f"TRANSCRIPT:\n{transcript_text}\n\n"
+            f"SCENES:\n{scene_text}\n\n"
             "Return ONLY valid JSON:\n"
             '{"overview": "<paragraph>", "key_topics": ["topic1", "topic2"], '
             '"tone": "<tone>", "estimated_audience": "<audience>", "content_category": "<category>"}'
@@ -1161,9 +1328,28 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 transcript, max_chars=transcript_budget, hot_zones=hot_zones,
             )
 
+        # Filter out synthetic/interpolated/failed scene descriptions
+        # that would mislead the clip detection AI
+        real_scenes = [
+            s for s in scenes
+            if s.description
+            and len(s.description) > 20
+            and "analysis skipped" not in s.description.lower()
+            and "analysis temporarily unavailable" not in s.description.lower()
+            and "visual content present but description unavailable" not in s.description.lower()
+            and not s.description.startswith("Frame at ")
+        ] if scenes else []
+        if not real_scenes and scenes:
+            # If ALL scenes are synthetic, keep the originals but note it
+            real_scenes = scenes
+            sparse_scene_hint = (
+                "\nNOTE: Scene visual descriptions are limited for this video. "
+                "Base your clip selections primarily on the TRANSCRIPT content.\n"
+            )
+
         scene_text = "\n".join(
-            f"[{s.timestamp:.0f}s] {s.description[:80]}" for s in scenes
-        ) if scenes else ""
+            f"[{s.timestamp:.0f}s] {s.description[:80]}" for s in real_scenes
+        ) if real_scenes else ""
         scene_text = _truncate_at_boundary(scene_text, scene_budget)
 
         dur_min = int(min_duration) if min_duration else 30
