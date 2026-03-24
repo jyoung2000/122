@@ -282,10 +282,76 @@ export function validateKeyboardShortcuts() {
 }
 
 /**
+ * Validate subtitle consistency between settings, timeline items, and export readiness.
+ * Returns violations when the state would cause preview/export mismatches.
+ */
+export function validateSubtitleConsistency(tracks, items, options = {}) {
+  const { settings, segments } = options;
+  const violations = [];
+
+  const subtitleTrack = tracks.find(t => t.type === 'subtitle');
+  const subtitleItems = items.filter(it => it.type === 'subtitle');
+  const trackVisible = subtitleTrack ? subtitleTrack.visible !== false : false;
+  const settingsEnabled = settings?.subtitlesEnabled ?? false;
+
+  // Check: settings says subs ON but no subtitle items exist
+  if (settingsEnabled && subtitleItems.length === 0) {
+    violations.push({
+      type: 'subtitle_missing_items',
+      severity: 'warning',
+      message: 'Subtitles are enabled in settings but no subtitle items exist on the timeline. Import a transcript first.',
+    });
+  }
+
+  // Check: settings says subs ON but track is hidden
+  if (settingsEnabled && !trackVisible) {
+    violations.push({
+      type: 'subtitle_track_hidden',
+      severity: 'error',
+      message: 'Subtitles are enabled in settings but the subtitle track is hidden. Subtitles will not appear in preview or export.',
+    });
+  }
+
+  // Check: track visible but settings says subs OFF
+  if (trackVisible && subtitleItems.length > 0 && !settingsEnabled) {
+    violations.push({
+      type: 'subtitle_settings_off',
+      severity: 'warning',
+      message: 'Subtitle items exist on the timeline but subtitles are disabled in settings. Toggle subtitles ON in clip settings to see them.',
+    });
+  }
+
+  // Check: subtitle items with empty text
+  const emptyItems = subtitleItems.filter(it => !it.subtitleText || it.subtitleText.trim() === '');
+  if (emptyItems.length > 0) {
+    violations.push({
+      type: 'subtitle_empty_text',
+      severity: 'warning',
+      message: `${emptyItems.length} subtitle item(s) have empty text and will render as blank.`,
+    });
+  }
+
+  // Check: per-segment subtitle override inconsistency
+  if (segments && segments.length > 0) {
+    const segsWithSubsOn = segments.filter(s => s.subtitlesEnabled !== false);
+    const segsWithSubsOff = segments.filter(s => s.subtitlesEnabled === false);
+    if (!settingsEnabled && segsWithSubsOn.length > 0 && segsWithSubsOff.length > 0) {
+      violations.push({
+        type: 'subtitle_mixed_segments',
+        severity: 'info',
+        message: `Mixed subtitle visibility: ${segsWithSubsOn.length} segments ON, ${segsWithSubsOff.length} OFF. Export will respect per-segment settings.`,
+      });
+    }
+  }
+
+  return violations;
+}
+
+/**
  * Run all validation checks and return a summary.
  */
 export function runEditorQA(tracks, items, options = {}) {
-  const { selectedItemId, currentTime } = options;
+  const { selectedItemId, currentTime, settings, segments } = options;
 
   const results = {
     trackCompatibility: validateTrackCompatibility(tracks, items),
@@ -294,6 +360,7 @@ export function runEditorQA(tracks, items, options = {}) {
     itemProperties: validateItemProperties(items),
     selectedItemPanel: selectedItemId ? validateSelectedItemPanel(items, selectedItemId) : [],
     layerRendering: currentTime != null ? validateLayerRendering(tracks, items, currentTime) : [],
+    subtitleConsistency: validateSubtitleConsistency(tracks, items, { settings, segments }),
   };
 
   const allViolations = [
@@ -303,6 +370,7 @@ export function runEditorQA(tracks, items, options = {}) {
     ...results.itemProperties,
     ...results.selectedItemPanel,
     ...results.layerRendering,
+    ...results.subtitleConsistency,
   ];
 
   const errors = allViolations.filter(v => v.severity === 'error');

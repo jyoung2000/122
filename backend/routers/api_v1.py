@@ -497,6 +497,32 @@ async def export_clip(job_id: str, clip_id: int, body: ExportClipBody = ExportCl
         _err("CLIP_NOT_FOUND", f"Clip {clip_id} not found", 404)
 
     s = body.settings or ClipSettingsBody()
+    # Build SubtitleSettings from individual fields if any are provided
+    sub_kwargs = {}
+    if s.subtitle_font is not None:
+        sub_kwargs["font"] = s.subtitle_font
+    if s.subtitle_font_size is not None:
+        sub_kwargs["size"] = s.subtitle_font_size
+    if s.subtitle_font_color is not None:
+        sub_kwargs["font_color"] = s.subtitle_font_color
+    if s.subtitle_stroke_color is not None:
+        sub_kwargs["outline_color"] = s.subtitle_stroke_color
+    if s.subtitle_stroke_width is not None:
+        sub_kwargs["outline_width"] = s.subtitle_stroke_width
+    if s.subtitle_position is not None:
+        sub_kwargs["position"] = s.subtitle_position
+    if s.subtitle_background_enabled is not None:
+        sub_kwargs["background_enabled"] = s.subtitle_background_enabled
+    if s.subtitle_background_color is not None:
+        sub_kwargs["background_color"] = s.subtitle_background_color
+    if s.subtitle_background_opacity is not None:
+        sub_kwargs["background_opacity"] = int(s.subtitle_background_opacity)
+    if s.active_word_highlight is not None:
+        sub_kwargs["active_word_enabled"] = s.active_word_highlight
+    if s.highlight_color is not None:
+        sub_kwargs["active_word_color"] = s.highlight_color
+    subtitle_settings = SubtitleSettings(**sub_kwargs) if sub_kwargs else None
+
     export_req = ExportRequest(
         start=s.start_time or clip.start_time,
         end=s.end_time or clip.end_time,
@@ -504,6 +530,7 @@ async def export_clip(job_id: str, clip_id: int, body: ExportClipBody = ExportCl
         clip_title=clip.title,
         aspect_ratio=s.aspect_ratio or "9:16",
         subtitles_enabled=s.subtitles_enabled if s.subtitles_enabled is not None else True,
+        subtitle_settings=subtitle_settings,
         export_quality=s.export_quality or "1080p",
     )
 

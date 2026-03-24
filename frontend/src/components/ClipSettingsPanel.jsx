@@ -2,43 +2,11 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { outlineTextShadow } from '../utils/textOutline';
 import { sanitizeSubtitleSettings } from '../utils/sanitizeJob';
 import useResponsive from '../hooks/useResponsive';
+import { DEFAULT_CLIP_SETTINGS } from '../utils/defaultSettings';
 
 const STORAGE_KEY = 'clipai_clip_settings';
 
-const DEFAULT_SETTINGS = {
-  clipCount: 12,
-  minDuration: 30,
-  maxDuration: 300,
-  aspectRatio: null,
-  subtitlesEnabled: false,
-  subtitleFont: 'DM Sans',
-  subtitleSize: 30,
-  subtitleFontWeight: 700,
-  subtitleFontColor: '#FFFFFF',
-  subtitlePosition: 'bottom',
-  speakerColors: {},
-  subtitleBgEnabled: false,
-  subtitleBgColor: '#000000',
-  subtitleBgOpacity: 75,
-  subtitleBgRadius: 0,
-  subtitleOutlineColor: '#000000',
-  subtitleOutlineOpacity: 100,
-  subtitleOutlineWidth: 2,
-  showSpeakerLabels: false,
-  subtitleMaxWidth: 90,
-  subtitleOffsetV: 4,
-  subtitleMaxWords: 0,
-  activeWordEnabled: false,
-  activeWordColor: '#FFD700',
-  activeWordOutlineColor: '#000000',
-  activeWordBgColor: '#000000',
-  activeWordBgOpacity: 0,
-  activeWordBgRadius: 4,
-  useSpeakerColors: true,
-  exportQuality: '1080p',
-  playbackVolume: 100,
-  playbackSpeed: 1.0,
-};
+const DEFAULT_SETTINGS = DEFAULT_CLIP_SETTINGS;
 
 const ASPECT_RATIOS = [
   { value: null, label: 'Original', desc: 'Source aspect ratio' },
@@ -182,7 +150,16 @@ function getAspectDimensions(ratio) {
 function loadSettings() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) return { ...DEFAULT_SETTINGS, ...sanitizeSubtitleSettings(JSON.parse(saved)) };
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      // Migration: old default was subtitlesEnabled=false, new default is true.
+      // Only override if the stored value was the old default AND no subtitle
+      // settings were customized (meaning user never touched subtitle settings).
+      if (parsed.subtitlesEnabled === false && !parsed.subtitleFont) {
+        parsed.subtitlesEnabled = true;
+      }
+      return { ...DEFAULT_SETTINGS, ...sanitizeSubtitleSettings(parsed) };
+    }
   } catch {}
   return { ...DEFAULT_SETTINGS };
 }

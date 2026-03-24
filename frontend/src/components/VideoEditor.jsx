@@ -262,8 +262,11 @@ export default function VideoEditor({
   // Runs when tracks/items/selection change (NOT on every playhead frame update)
   useEffect(() => {
     if (!timelineTracks.length || !timelineStoreItems.length) return;
+    const storeSegments = useTimelineStore.getState().segments;
     const qa = runEditorQA(timelineTracks, timelineStoreItems, {
       selectedItemId: storeSelectedItemId,
+      settings,
+      segments: storeSegments,
     });
     if (qa.errors.length > 0) {
       // Auto-fix track compatibility violations
@@ -280,7 +283,7 @@ export default function VideoEditor({
     if (process.env.NODE_ENV === 'development' && qa.violations.length > 0) {
       console.warn('[EditorQA]', qa.summary, qa.violations);
     }
-  }, [timelineTracks, timelineStoreItems, updateTimelineItem, storeSelectedItemId]);
+  }, [timelineTracks, timelineStoreItems, updateTimelineItem, storeSelectedItemId, settings]);
 
   // Initialize timeline store when clip data changes
   const addItem = useTimelineStore((s) => s.addItem);
@@ -335,6 +338,27 @@ export default function VideoEditor({
     multiTrackInitialized.current = true;
     lastInitClipEnd.current = effectiveEnd;
   }, [src, clipStart, clipEnd, initFromClip, recovered, timelineStoreItems.length, transcript, addItem]);
+
+  // ── Sync: settings.subtitlesEnabled → timeline track visibility ──
+  // The settings toggle is the PRIMARY control for subtitle visibility.
+  // The timeline track eye icon follows it. This ensures the user always
+  // sees consistent behavior regardless of which control they use.
+  const toggleTrackVisibility = useTimelineStore((s) => s.toggleTrackVisibility);
+  useEffect(() => {
+    const subTrack = timelineTracks.find(t => t.type === 'subtitle');
+    if (!subTrack) return;
+
+    const trackVisible = subTrack.visible !== false;
+    const settingsEnabled = settings?.subtitlesEnabled ?? true;
+
+    // Sync: if settings says ON but track is hidden, show the track
+    // If settings says OFF but track is visible, hide the track
+    if (settingsEnabled && !trackVisible) {
+      toggleTrackVisibility(subTrack.id);
+    } else if (!settingsEnabled && trackVisible) {
+      toggleTrackVisibility(subTrack.id);
+    }
+  }, [settings?.subtitlesEnabled, timelineTracks, toggleTrackVisibility]);
 
   // ── Subtitle sync refs (shared by forward and reverse sync effects) ──
   const subtitleSyncTimerRef = useRef(null);
@@ -3389,6 +3413,11 @@ export default function VideoEditor({
                     }
                   }}
                   onItemSelect={() => setShowProperties(true)}
+                  onSubtitleVisibilityChange={(visible) => {
+                    if (onSettingsChange) {
+                      onSettingsChange({ ...settings, subtitlesEnabled: visible });
+                    }
+                  }}
                 />
               </div>
             </div>

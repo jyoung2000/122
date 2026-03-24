@@ -9,6 +9,7 @@ import { computeClipSubjectX } from '../utils/subjectTracking';
 import sanitizeJob, { sanitizeSubtitleSettings } from '../utils/sanitizeJob';
 import useTimelineStore from '../stores/timelineStore';
 import { buildOverlayPayload, buildVideoEffectsPayload, mapSubtitleSettings } from '../utils/buildExportPayload';
+import { DEFAULT_CLIP_SETTINGS } from '../utils/defaultSettings';
 
 function formatDuration(seconds) {
   if (!seconds) return '-';
@@ -80,37 +81,7 @@ const FONT_WEIGHTS = [
   { value: 700, label: 'Bold' },
 ];
 
-const DEFAULT_SETTINGS = {
-  aspectRatio: null,
-  subtitlesEnabled: false,
-  subtitleFont: 'DM Sans',
-  subtitleSize: 30,
-  subtitleFontWeight: 700,
-  subtitleFontColor: '#FFFFFF',
-  subtitlePosition: 'bottom',
-  useSpeakerColors: true,
-  speakerColors: {},
-  subtitleBgEnabled: false,
-  subtitleBgColor: '#000000',
-  subtitleBgOpacity: 75,
-  subtitleBgRadius: 0,
-  subtitleOutlineColor: '#000000',
-  subtitleOutlineOpacity: 100,
-  subtitleOutlineWidth: 2,
-  showSpeakerLabels: false,
-  subtitleMaxWidth: 90,
-  subtitleOffsetV: 4,
-  subtitleMaxWords: 0,
-  activeWordEnabled: false,
-  activeWordColor: '#FFD700',
-  activeWordOutlineColor: '#000000',
-  activeWordBgColor: '#000000',
-  activeWordBgOpacity: 0,
-  activeWordBgRadius: 4,
-  exportQuality: '1080p',
-  playbackVolume: 100,
-  playbackSpeed: 1.0,
-};
+const DEFAULT_SETTINGS = DEFAULT_CLIP_SETTINGS;
 
 function loadExportSettings() {
   try {
@@ -869,9 +840,11 @@ export default function ViralClips() {
     };
     if (cs.aspectRatio) body.aspect_ratio = cs.aspectRatio;
     const globalSubsOn = cs.subtitlesEnabled || false;
-    body.subtitles_enabled = globalSubsOn;
+    const anySegmentSubsOn = useTimelineStore.getState().segments?.some(s => s.subtitlesEnabled !== false) || false;
+    const needsSubs = globalSubsOn || anySegmentSubsOn;
+    body.subtitles_enabled = needsSubs;
     body.global_subtitles_enabled = globalSubsOn;
-    if (globalSubsOn) {
+    if (needsSubs) {
       body.subtitle_settings = mapSubtitleSettings(cs);
     }
     // Include playback volume/speed if non-default

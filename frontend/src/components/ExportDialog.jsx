@@ -101,9 +101,17 @@ export default function ExportDialog({
           exportPayload.aspect_ratio = settings.aspectRatio;
         }
         const globalSubsOn = settings.subtitlesEnabled || false;
-        exportPayload.subtitles_enabled = globalSubsOn;
+        // Check if any segment has per-segment subtitle overrides
+        const storeStateForSubs = useTimelineStore.getState();
+        const anySegmentSubsOn = storeStateForSubs.segments?.some(s => s.subtitlesEnabled !== false) || false;
+        const needsSubtitleSettings = globalSubsOn || anySegmentSubsOn;
+
+        exportPayload.subtitles_enabled = needsSubtitleSettings;
         exportPayload.global_subtitles_enabled = globalSubsOn;
-        if (globalSubsOn) {
+        // ALWAYS send subtitle_settings when ANY subtitle rendering is needed
+        // (global ON, or any per-segment override ON). Without settings, the
+        // backend uses hardcoded defaults that won't match the preview.
+        if (needsSubtitleSettings) {
           exportPayload.subtitle_settings = mapSubtitleSettings(settings);
         }
       }
