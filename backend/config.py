@@ -36,6 +36,7 @@ class Settings(BaseSettings):
 
     # Analysis settings
     WHISPER_MODEL: str = "small"  # Auto-upgraded to large-v3-turbo when GPU detected
+    WHISPER_MODEL_USER_SET: bool = False  # True when user explicitly chose a model in UI
     WHISPER_BEAM_SIZE: int = 5    # beam search for better accuracy (was 1/greedy)
     WHISPER_VAD_FILTER: bool = True    # skip silence — major speedup
     FRAME_SAMPLE_RATE: int = 10        # seconds between frames (lower=more detail, slower)

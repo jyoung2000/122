@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 _whisper_model = None
 _model_lock = threading.Lock()
+_loaded_model_name = None   # Tracks which model is currently in the singleton
 
 # Stores the last detected language from Whisper auto-detection so the
 # pipeline can read it after transcription completes.
@@ -172,15 +173,54 @@ def _get_gpu_name_from_sysfs() -> str:
     return ""
 
 
+def _cleanup_old_model():
+    """Release CUDA memory held by the current Whisper model.
+
+    Must be called WITH _model_lock held. Handles the case where
+    CTranslate2/PyTorch CUDA allocations linger after Python del.
+    """
+    global _whisper_model
+    old = _whisper_model
+    _whisper_model = None
+
+    # Explicitly delete the model object to trigger CTranslate2's C++ destructor
+    try:
+        del old
+    except Exception:
+        pass
+
+    # Force Python GC to run CTranslate2 destructor immediately
+    import gc
+    gc.collect()
+    gc.collect()  # Second pass for reference cycles
+
+    # Release PyTorch CUDA cache (CTranslate2 uses PyTorch under the hood)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+            free_mb = torch.cuda.mem_get_info()[0] / (1024 * 1024)
+            logger.info("CUDA memory released after model cleanup — %.0fMB free", free_mb)
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug("CUDA cleanup after model switch: %s", e)
+
+
 def reload_model():
     """Force-reload the Whisper model on the next transcription call.
 
-    Called when GPU acceleration is toggled so the model can move
-    between CPU and CUDA without restarting the server.
+    Called when the model selection changes or GPU acceleration is toggled
+    so the model can switch size/device without restarting the server.
+    Properly cleans up CUDA memory from the old model.
     """
-    global _whisper_model
+    global _whisper_model, _loaded_model_name
     with _model_lock:
+        if _whisper_model is not None:
+            _cleanup_old_model()
         _whisper_model = None
+        _loaded_model_name = None
     logger.info("Whisper model cache cleared — will reload on next use")
 
 
@@ -193,8 +233,15 @@ def reload_diarization():
 
 
 def _get_whisper_model():
-    global _whisper_model, whisper_device_info
+    global _whisper_model, whisper_device_info, _loaded_model_name
     with _model_lock:
+        # Reload if model is not loaded OR if settings changed since last load
+        if _whisper_model is not None and _loaded_model_name != settings.WHISPER_MODEL:
+            logger.info(
+                "Whisper model mismatch: loaded='%s' but settings='%s' — reloading",
+                _loaded_model_name, settings.WHISPER_MODEL,
+            )
+            _cleanup_old_model()
         if _whisper_model is None:
             from faster_whisper import WhisperModel
 
@@ -268,7 +315,9 @@ def _get_whisper_model():
             # VRAM-aware: large-v3-turbo needs ~3GB VRAM in float16. On 4GB GPUs,
             # this leaves <1GB headroom and crashes on complex audio segments
             # (multilingual, music, overlapping speakers cause transient VRAM spikes).
-            if device == "cuda" and settings.WHISPER_MODEL == "small":
+            # Skip if user explicitly selected a model in the UI (WHISPER_MODEL_USER_SET).
+            if (device == "cuda" and settings.WHISPER_MODEL == "small"
+                    and not getattr(settings, 'WHISPER_MODEL_USER_SET', False)):
                 gpus = _enumerate_gpus_nvidia_smi()
                 vram_mb = gpus[0]["vram_mb"] if gpus else 0
                 if vram_mb >= 8000:
@@ -362,6 +411,8 @@ def _get_whisper_model():
                     "Whisper model '%s' loaded on CPU (int8) — GPU not used for transcription",
                     settings.WHISPER_MODEL,
                 )
+
+            _loaded_model_name = settings.WHISPER_MODEL
     return _whisper_model
 
 

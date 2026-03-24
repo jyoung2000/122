@@ -1446,9 +1446,20 @@ async def save_models(req: SaveModelsRequest):
     env_path = _find_env_file()
 
     if req.transcript_model:
+        old_model = settings.WHISPER_MODEL
         settings.WHISPER_MODEL = req.transcript_model
+        settings.WHISPER_MODEL_USER_SET = True  # Mark as explicitly chosen by user
         if env_path:
             _upsert_env_var(env_path, "WHISPER_MODEL", req.transcript_model)
+        # Force reload if model changed — without this, the _whisper_model
+        # singleton holds the old model and _get_whisper_model() returns it.
+        if req.transcript_model != old_model:
+            from backend.services.transcription import reload_model as reload_whisper
+            reload_whisper()
+            logger.info(
+                "Whisper model changed: '%s' → '%s' — model will reload on next use",
+                old_model, req.transcript_model,
+            )
 
     if req.vision_model:
         if req.vision_model.startswith("ollama/"):
