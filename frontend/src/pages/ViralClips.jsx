@@ -6,6 +6,9 @@ import ClipSettingsPanel from '../components/ClipSettingsPanel';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
+import sanitizeJob, { sanitizeSubtitleSettings } from '../utils/sanitizeJob';
+import useTimelineStore from '../stores/timelineStore';
+import { buildOverlayPayload, buildVideoEffectsPayload, mapSubtitleSettings } from '../utils/buildExportPayload';
 
 function formatDuration(seconds) {
   if (!seconds) return '-';
@@ -73,8 +76,8 @@ const SETTINGS_KEY = 'clipai_clip_settings';
 const OVERRIDES_KEY = 'clipai_viral_clip_overrides';
 
 const FONT_WEIGHTS = [
-  { value: 'normal', label: 'Normal' },
-  { value: 'bold', label: 'Bold' },
+  { value: 400, label: 'Regular' },
+  { value: 700, label: 'Bold' },
 ];
 
 const DEFAULT_SETTINGS = {
@@ -82,7 +85,7 @@ const DEFAULT_SETTINGS = {
   subtitlesEnabled: false,
   subtitleFont: 'DM Sans',
   subtitleSize: 30,
-  subtitleFontWeight: 'bold',
+  subtitleFontWeight: 700,
   subtitleFontColor: '#FFFFFF',
   subtitlePosition: 'bottom',
   useSpeakerColors: true,
@@ -103,13 +106,16 @@ const DEFAULT_SETTINGS = {
   activeWordOutlineColor: '#000000',
   activeWordBgColor: '#000000',
   activeWordBgOpacity: 0,
+  activeWordBgRadius: 4,
   exportQuality: '1080p',
+  playbackVolume: 100,
+  playbackSpeed: 1.0,
 };
 
 function loadExportSettings() {
   try {
     const saved = localStorage.getItem(SETTINGS_KEY);
-    if (saved) return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+    if (saved) return { ...DEFAULT_SETTINGS, ...sanitizeSubtitleSettings(JSON.parse(saved)) };
   } catch {}
   return { ...DEFAULT_SETTINGS };
 }
@@ -256,7 +262,7 @@ function SubtitleSettingsEditor({ values, onChange, speakerList, customFonts, co
             <div style={labelStyle}>Weight</div>
             <div style={{ display: 'flex', gap: 4 }}>
               {FONT_WEIGHTS.map((w) => (
-                <button key={w.value} onClick={() => set('subtitleFontWeight', w.value)} style={radioStyle(values.subtitleFontWeight === w.value)}>
+                <button key={w.value} onClick={() => set('subtitleFontWeight', w.value)} style={radioStyle((typeof values.subtitleFontWeight === 'number' ? values.subtitleFontWeight : (values.subtitleFontWeight === 'bold' ? 700 : 400)) === w.value)}>
                   {w.label}
                 </button>
               ))}
@@ -497,6 +503,15 @@ function SubtitleSettingsEditor({ values, onChange, speakerList, customFonts, co
                       onChange={(e) => set('activeWordBgOpacity', parseInt(e.target.value))}
                       style={{ width: '100%', accentColor: 'var(--accent-cyan)' }} />
                   </div>
+                  <div style={{ flex: 1, minWidth: 100 }}>
+                    <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 4 }}>
+                      Radius: <span style={{ color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>{values.activeWordBgRadius ?? 4}px</span>
+                    </div>
+                    <input type="range" min="0" max="20" step="1"
+                      value={values.activeWordBgRadius ?? 4}
+                      onChange={(e) => set('activeWordBgRadius', parseInt(e.target.value))}
+                      style={{ width: '100%', accentColor: 'var(--accent-cyan)' }} />
+                  </div>
                 </div>
               </div>
             )}
@@ -511,6 +526,9 @@ function SubtitleSettingsEditor({ values, onChange, speakerList, customFonts, co
 export default function ViralClips() {
   const { isMobile } = useResponsive();
   const encoding = useEncodingManager();
+  // Multi-track editor timeline state (global zustand store, populated if user edited in VideoEditor)
+  const timelineItems = useTimelineStore((s) => s.items);
+  const timelineMediaLibrary = useTimelineStore((s) => s.mediaLibrary);
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({ minScore: 0, platform: 'all', sort: 'viral_score', clipType: 'all', source: 'all' });
@@ -566,6 +584,7 @@ export default function ViralClips() {
         withClips.map((j) =>
           fetch(`/api/jobs/${j.job_id}`)
             .then((r) => r.ok ? r.json() : null)
+            .then((d) => d ? sanitizeJob(d) : null)
             .catch(() => null)
         )
       );
@@ -577,6 +596,46 @@ export default function ViralClips() {
   }, []);
 
   useEffect(() => { fetchJobs(); }, [fetchJobs]);
+
+  // ── Server-first subtitle settings persistence ──
+  // Load settings from the most recently updated job that has subtitle_settings
+  const settingsLoadedFromServer = useRef(false);
+  const skipNextServerSave = useRef(false);
+  useEffect(() => {
+    if (!jobs || jobs.length === 0) return;
+    // Find the most recently updated job with subtitle_settings
+    const withSettings = jobs
+      .filter((j) => j.subtitle_settings && Object.keys(j.subtitle_settings).length > 0)
+      .sort((a, b) => (b.updated_at || '').localeCompare(a.updated_at || ''));
+    if (withSettings.length > 0 && !settingsLoadedFromServer.current) {
+      const serverSettings = sanitizeSubtitleSettings(withSettings[0].subtitle_settings);
+      skipNextServerSave.current = true;
+      setSettings((prev) => ({ ...prev, ...serverSettings }));
+      settingsLoadedFromServer.current = true;
+    }
+  }, [jobs]);
+
+  // Debounced save settings to all loaded jobs (server is source of truth)
+  const saveSettingsTimerRef = useRef(null);
+  useEffect(() => {
+    if (skipNextServerSave.current) {
+      skipNextServerSave.current = false;
+      return;
+    }
+    if (!jobs || jobs.length === 0) return;
+    if (saveSettingsTimerRef.current) clearTimeout(saveSettingsTimerRef.current);
+    saveSettingsTimerRef.current = setTimeout(() => {
+      // Save to all loaded jobs so settings are consistent everywhere
+      jobs.forEach((j) => {
+        fetch(`/api/jobs/${j.job_id}/subtitle-settings`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(settings),
+        }).catch(() => {});
+      });
+    }, 800);
+    return () => { if (saveSettingsTimerRef.current) clearTimeout(saveSettingsTimerRef.current); };
+  }, [settings, jobs]);
 
   // --- Per-clip override helpers ---
   // Key must be unique per clip — include start_time as a guard against
@@ -612,7 +671,7 @@ export default function ViralClips() {
   const previewTranscript = useMemo(() => {
     if (!previewClip) return [];
     const job = jobs.find((j) => j.job_id === previewClip.jobId);
-    return job?.transcript || [];
+    return job?.translated_transcript?.length ? job.translated_transcript : (job?.transcript || []);
   }, [previewClip, jobs]);
 
   const previewSourceDims = useMemo(() => {
@@ -698,7 +757,7 @@ export default function ViralClips() {
                 const sx = (jd.scenes || []).map((s) => s.subject_x);
                 if (sx.some((v) => v !== 50)) {
                   clearInterval(poll);
-                  setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? jd : j));
+                  setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? sanitizeJob(jd) : j));
                   setPreviewKey((k) => k + 1);
                   setCenterSubjectState('done');
                   setTrackingApplied(true);
@@ -713,7 +772,7 @@ export default function ViralClips() {
             fetch(`/api/jobs/${previewClip.jobId}`, { cache: 'no-store' })
               .then((jr) => jr.ok ? jr.json() : null)
               .then((jd) => {
-                if (jd) setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? jd : j));
+                if (jd) setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? sanitizeJob(jd) : j));
               })
               .catch(() => {});
             setPreviewKey((k) => k + 1);
@@ -764,7 +823,7 @@ export default function ViralClips() {
                 const nowHasWords = (jd.transcript || []).some((s) => s.words && s.words.length > 0);
                 if (nowHasWords) {
                   clearInterval(poll);
-                  setJobs((prev) => prev.map((j) => j.job_id === job.job_id ? jd : j));
+                  setJobs((prev) => prev.map((j) => j.job_id === job.job_id ? sanitizeJob(jd) : j));
                   showToast('Word timestamps ready — active word highlighting is now accurate', 'success');
                 }
               } catch { /* ignore */ }
@@ -809,34 +868,50 @@ export default function ViralClips() {
       export_quality: quality,
     };
     if (cs.aspectRatio) body.aspect_ratio = cs.aspectRatio;
-    body.subtitles_enabled = cs.subtitlesEnabled || false;
-    if (cs.subtitlesEnabled) {
-      body.subtitle_settings = {
-        font: cs.subtitleFont || 'DM Sans',
-        size: cs.subtitleSize ?? 30,
-        font_weight: cs.subtitleFontWeight || 'bold',
-        font_color: cs.subtitleFontColor || '#FFFFFF',
-        position: cs.subtitlePosition || 'bottom',
-        speaker_colors: cs.speakerColors || {},
-        use_speaker_colors: cs.useSpeakerColors ?? true,
-        background_enabled: cs.subtitleBgEnabled ?? false,
-        background_color: cs.subtitleBgColor || '#000000',
-        background_opacity: cs.subtitleBgOpacity ?? 75,
-        background_radius: cs.subtitleBgRadius ?? 0,
-        outline_color: cs.subtitleOutlineColor || '#000000',
-        outline_opacity: cs.subtitleOutlineOpacity ?? 100,
-        outline_width: cs.subtitleOutlineWidth ?? 2,
-        show_speaker_labels: cs.showSpeakerLabels ?? false,
-        max_width: cs.subtitleMaxWidth ?? 90,
-        offset_v: cs.subtitleOffsetV ?? 4,
-        max_words: cs.subtitleMaxWords ?? 0,
-        active_word_enabled: cs.activeWordEnabled ?? false,
-        active_word_color: cs.activeWordColor || '#FFD700',
-        active_word_outline_color: cs.activeWordOutlineColor || '#000000',
-        active_word_bg_color: cs.activeWordBgColor || '#000000',
-        active_word_bg_opacity: cs.activeWordBgOpacity ?? 0,
-      };
+    const globalSubsOn = cs.subtitlesEnabled || false;
+    body.subtitles_enabled = globalSubsOn;
+    body.global_subtitles_enabled = globalSubsOn;
+    if (globalSubsOn) {
+      body.subtitle_settings = mapSubtitleSettings(cs);
     }
+    // Include playback volume/speed if non-default
+    if (cs.playbackVolume != null && cs.playbackVolume !== 100) body.volume = cs.playbackVolume / 100;
+    if (cs.playbackSpeed != null && cs.playbackSpeed !== 1.0) body.speed = cs.playbackSpeed;
+
+    // Include multi-track editor video effects + transform so export matches preview
+    const videoEffects = buildVideoEffectsPayload(timelineItems);
+    if (videoEffects) body.video_effects = videoEffects;
+
+    // Build overlay arrays via shared utility (consistent filtering + validation)
+    const overlays = buildOverlayPayload({
+      timelineItems,
+      mediaLibrary: timelineMediaLibrary,
+      clipStart: clip.start_time,
+      tracks: useTimelineStore.getState().tracks,
+    });
+    if (overlays.textOverlays.length > 0) body.text_overlays = overlays.textOverlays;
+    if (overlays.imageOverlays.length > 0) body.image_overlays = overlays.imageOverlays;
+    if (overlays.shapeOverlays.length > 0) body.shape_overlays = overlays.shapeOverlays;
+    if (overlays.audioOverlays.length > 0) body.audio_overlays = overlays.audioOverlays;
+    if (overlays.compositingOrder?.length > 0) {
+      body.overlay_compositing_order = overlays.compositingOrder;
+    }
+    if (overlays.warnings.length > 0) {
+      for (const w of overlays.warnings) console.warn(`[Export] ${w}`);
+    }
+
+    // Diagnostic logging: full export payload for debugging overlay/settings issues
+    console.log('[ViralClips Export] clip:', clip.id, 'payload:', JSON.stringify({
+      aspect_ratio: body.aspect_ratio,
+      subtitles_enabled: body.subtitles_enabled,
+      subtitle_settings: body.subtitle_settings ? 'YES' : 'NO',
+      video_effects: body.video_effects ? 'YES' : 'NO',
+      text_overlays: body.text_overlays?.length || 0,
+      image_overlays: body.image_overlays?.length || 0,
+      shape_overlays: body.shape_overlays?.length || 0,
+      audio_overlays: body.audio_overlays?.length || 0,
+    }));
+
     encoding.startExport(jobId, clip.id, clip.title || `Clip ${clip.id}`, body);
     showToast(`Exporting "${clip.title || `Clip ${clip.id}`}" at ${quality}...`, 'info');
   };
@@ -1078,7 +1153,7 @@ export default function ViralClips() {
                 <span style={{ fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)', background: 'var(--accent-cyan-dim)', padding: '2px 6px', borderRadius: 3 }}>SUBS</span>
               )}
               {!clipSettingsOpen && settings.aspectRatio && (
-                <span style={{ fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--accent-amber)', background: 'rgba(245,158,11,0.1)', padding: '2px 6px', borderRadius: 3 }}>{settings.aspectRatio}</span>
+                <span style={{ fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--accent-amber)', background: 'rgba(245,158,11,0.1)', padding: '2px 6px', borderRadius: 3 }}>{String(settings.aspectRatio || '')}</span>
               )}
             </span>
             <span style={{ fontSize: 14, color: 'var(--text-muted)', transition: 'transform 0.2s ease', transform: clipSettingsOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}>
@@ -1376,10 +1451,10 @@ export default function ViralClips() {
                   </span>
                   <div style={{ textAlign: 'right' }}>
                     <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: clip.clip_focus ? 'var(--success)' : scoreColor }}>
-                      {clip.viral_score}
+                      {String(clip.focus_relevance || clip.viral_score || '')}
                     </div>
                     <div style={{ fontSize: 10, color: clip.clip_focus ? 'var(--success)' : 'var(--text-secondary)', textTransform: 'uppercase' }}>
-                      {clip.clip_focus ? 'FOCUS' : '/100'}
+                      {clip.clip_focus ? String(clip.focus_tier || 'FOCUS') : '/100'}
                     </div>
                   </div>
                 </div>
@@ -1437,7 +1512,7 @@ export default function ViralClips() {
                     onMouseEnter={(e) => e.target.style.borderBottomColor = 'var(--accent-cyan)'}
                     onMouseLeave={(e) => e.target.style.borderBottomColor = 'transparent'}
                   >
-                    {clip.title}
+                    {String(clip.title || '')}
                     <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 6, opacity: 0.6 }}>&#x270E;</span>
                   </h4>
                 )}
@@ -1450,16 +1525,25 @@ export default function ViralClips() {
                     ({formatDuration(clip.duration)})
                   </span>
                   <span className={`badge ${clip.platform === 'tiktok' ? 'badge-cyan' : clip.platform === 'youtube_shorts' ? 'badge-red' : 'badge-gray'}`}>
-                    {clip.platform.replace('_', ' ')}
+                    {String(clip.platform || '').replace('_', ' ')}
                   </span>
-                  <span className="badge badge-gray">{clip.clip_type}</span>
+                  <span className="badge badge-gray">{String(clip.clip_type || '')}</span>
                   {clip.clip_focus && (
                     <span className="badge" style={{
                       background: 'var(--success-dim, rgba(52,199,89,0.12))',
                       color: 'var(--success)',
                       border: '1px solid var(--success)',
                     }}>
-                      Focus: {clip.clip_focus}
+                      Focus: {String(clip.clip_focus || '')}
+                    </span>
+                  )}
+                  {clip.focus_relevance != null && (
+                    <span className="badge" style={{
+                      background: clip.focus_tier === 'strong' ? 'rgba(52,199,89,0.15)' : clip.focus_tier === 'moderate' ? 'rgba(255,214,0,0.15)' : 'rgba(142,142,147,0.15)',
+                      color: clip.focus_tier === 'strong' ? 'var(--success)' : clip.focus_tier === 'moderate' ? 'var(--accent-amber)' : 'var(--text-secondary)',
+                      border: `1px solid ${clip.focus_tier === 'strong' ? 'var(--success)' : clip.focus_tier === 'moderate' ? 'var(--accent-amber)' : 'var(--text-secondary)'}`,
+                    }}>
+                      Relevance: {clip.focus_relevance}/100
                     </span>
                   )}
                 </div>
@@ -1479,7 +1563,7 @@ export default function ViralClips() {
                       lineHeight: 1.4,
                     }}>
                       <span style={{ fontWeight: 600, color: 'var(--text-secondary)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.03em' }}>Detected subject: </span>
-                      {best.description.length > 120 ? best.description.slice(0, 120) + '...' : best.description}
+                      {String(best.description || '').length > 120 ? String(best.description).slice(0, 120) + '...' : String(best.description || '')}
                     </div>
                   );
                 })()}
@@ -1487,17 +1571,17 @@ export default function ViralClips() {
                 <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
                   {clip.suggested_caption && (
                     <div style={{ marginBottom: 4 }}>
-                      <strong style={{ color: 'var(--text-primary)' }}>Caption:</strong> {clip.suggested_caption}
+                      <strong style={{ color: 'var(--text-primary)' }}>Caption:</strong> {String(clip.suggested_caption || '')}
                     </div>
                   )}
                   {clip.hook_text && (
                     <div style={{ marginBottom: 4 }}>
-                      <strong style={{ color: 'var(--text-primary)' }}>Hook:</strong> {clip.hook_text}
+                      <strong style={{ color: 'var(--text-primary)' }}>Hook:</strong> {String(clip.hook_text || '')}
                     </div>
                   )}
                   {clip.why_this_works && (
                     <div>
-                      <strong style={{ color: 'var(--text-primary)' }}>Why it works:</strong> {clip.why_this_works}
+                      <strong style={{ color: 'var(--text-primary)' }}>Why it works:</strong> {String(clip.why_this_works || '')}
                     </div>
                   )}
                 </div>
@@ -1526,7 +1610,7 @@ export default function ViralClips() {
                       <span style={{ marginLeft: 6, fontSize: 9, color: 'var(--accent-cyan)' }}>SUBS</span>
                     )}
                     {isCustom && clipSettings.aspectRatio && (
-                      <span style={{ marginLeft: 6, fontSize: 9, color: 'var(--accent-amber)' }}>{clipSettings.aspectRatio}</span>
+                      <span style={{ marginLeft: 6, fontSize: 9, color: 'var(--accent-amber)' }}>{String(clipSettings.aspectRatio || '')}</span>
                     )}
                   </span>
                   <span style={{ fontSize: 12 }}>{isEditing ? '\u25B4' : '\u25BE'}</span>
@@ -1783,6 +1867,8 @@ export default function ViralClips() {
             subtitlesEnabled={previewClipSettings.subtitlesEnabled || false}
             subtitleSettings={previewClipSettings}
             transcript={previewTranscript}
+            initialVolume={previewClipSettings.playbackVolume}
+            initialSpeed={previewClipSettings.playbackSpeed}
             onClose={() => { setPreviewClip(null); setCenterSubjectState('idle'); setTrackingApplied(false); }}
           />
           {/* Tracking-applied indicator — flashes when subject tracking updates */}
@@ -1840,7 +1926,7 @@ export default function ViralClips() {
                           const sx = (jd.scenes || []).map((s) => s.subject_x);
                           if (sx.some((v) => v !== 50)) {
                             clearInterval(poll);
-                            setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? jd : j));
+                            setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? sanitizeJob(jd) : j));
                             setPreviewKey((k) => k + 1);
                             finishSuccess('Subject centered');
                           }
@@ -1851,7 +1937,7 @@ export default function ViralClips() {
                       const jr = await fetch(`/api/jobs/${previewClip.jobId}`, { cache: 'no-store' });
                       if (jr.ok) {
                         const jd = await jr.json();
-                        setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? jd : j));
+                        setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? sanitizeJob(jd) : j));
                         setPreviewKey((k) => k + 1);
                       }
                       finishSuccess(data.per_scene
@@ -1910,7 +1996,7 @@ export default function ViralClips() {
                           const nonDefault = sx.some((v) => v !== 50);
                           if (nonDefault) {
                             clearInterval(poll);
-                            setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? jd : j));
+                            setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? sanitizeJob(jd) : j));
                             setPreviewKey((k) => k + 1);
                             setTrackingApplied(true);
                             showToast('Subject tracking updated', 'success');

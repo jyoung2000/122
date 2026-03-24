@@ -4,6 +4,7 @@ import ModelBrowser from '../components/ModelBrowser';
 import CostTracker from '../components/CostTracker';
 import { showToast } from '../components/Toast';
 import useResponsive from '../hooks/useResponsive';
+import { loadAllPresets, deletePreset as deleteTrackPreset, renamePreset as renameTrackPreset } from '../utils/trackPresets';
 
 const FONT_ACCEPT = '.ttf,.otf,.woff,.woff2,.eot,.TTF,.OTF,.WOFF,.WOFF2,.EOT';
 
@@ -24,7 +25,7 @@ const dropdownStyle = {
   paddingRight: 28,
 };
 
-const TAB_NAME_TO_INDEX = { 'ai-provider': 0, prompts: 1, fonts: 2, presets: 3, advanced: 4, 'usage-costs': 5 };
+const TAB_NAME_TO_INDEX = { 'ai-provider': 0, prompts: 1, fonts: 2, presets: 3, advanced: 4, 'usage-costs': 5, 'api-access': 6, 'about': 7 };
 
 export default function Settings() {
   const { isMobile } = useResponsive();
@@ -67,9 +68,14 @@ export default function Settings() {
   const [transSaved, setTransSaved] = useState({ beam_size: 1, vad_filter: true, frame_sample_rate: 10 });
   const [transSaving, setTransSaving] = useState(false);
 
+  // FFmpeg encoding settings
+  const [ffmpegThreads, setFfmpegThreads] = useState(4);
+  const [ffmpegThreadsSaved, setFfmpegThreadsSaved] = useState(4);
+  const [ffmpegThreadsSaving, setFfmpegThreadsSaving] = useState(false);
+
   // Prompt customization state
-  const [prompts, setPrompts] = useState({ frame_analysis: '', viral_clip_detection: '', subject_tracking: '' });
-  const [promptDefaults, setPromptDefaults] = useState({ frame_analysis: '', viral_clip_detection: '', subject_tracking: '' });
+  const [prompts, setPrompts] = useState({ frame_analysis: '', viral_clip_detection: '', subject_tracking: '', summary: '', seo: '' });
+  const [promptDefaults, setPromptDefaults] = useState({ frame_analysis: '', viral_clip_detection: '', subject_tracking: '', summary: '', seo: '' });
   const [promptsSaving, setPromptsSaving] = useState(false);
   const [promptsLoaded, setPromptsLoaded] = useState(false);
 
@@ -87,11 +93,112 @@ export default function Settings() {
   const [editingPresetId, setEditingPresetId] = useState(null);
   const [editPresetName, setEditPresetName] = useState('');
 
+  // Track preset management state
+  const [trackPresets, setTrackPresets] = useState([]);
+  const [editingTrackPresetId, setEditingTrackPresetId] = useState(null);
+  const [editTrackPresetName, setEditTrackPresetName] = useState('');
+
+  // API Access state
+  const [apiKey, setApiKey] = useState('');
+  const [apiKeyMasked, setApiKeyMasked] = useState('');
+  const [apiKeyRevealed, setApiKeyRevealed] = useState(false);
+  const [apiKeyLoading, setApiKeyLoading] = useState(false);
+  const [apiKeyRegenerating, setApiKeyRegenerating] = useState(false);
+  const [apiTestResult, setApiTestResult] = useState(null);
+  const [apiTesting, setApiTesting] = useState(false);
+
+  // Site customisation state
+  const [siteTitle, setSiteTitle] = useState('');
+  const [siteFavicon, setSiteFavicon] = useState(null); // filename from server
+  const [siteLogo, setSiteLogo] = useState(null);       // filename from server
+  const [siteSaving, setSiteSaving] = useState(false);
+  const faviconInputRef = useRef(null);
+  const logoInputRef = useRef(null);
+
+  // GPU Hardware Acceleration toggle
+  const [gpuEnabled, setGpuEnabled] = useState(false);
+  const [gpuSaving, setGpuSaving] = useState(false);
+  const [gpuInfo, setGpuInfo] = useState(null);
+  const [gpuLoading, setGpuLoading] = useState(false);
+
+  // Client-side GPU (browser) state
+  const [clientGpuEnabled, setClientGpuEnabled] = useState(false);
+  const [clientGpuInfo, setClientGpuInfo] = useState(null);
+  const [clientGpuScanning, setClientGpuScanning] = useState(false);
+  const [selectedClientGpuId, setSelectedClientGpuId] = useState('');
+  const [clientWhisperEnabled, setClientWhisperEnabled] = useState(true);
+  const [clientEncodingEnabled, setClientEncodingEnabled] = useState(true);
+
   // Load provider statuses
   useEffect(() => {
     fetch('/api/providers/status')
       .then((r) => r.json())
       .then(setStatuses)
+      .catch(() => {});
+  }, []);
+
+  // Load GPU acceleration state
+  useEffect(() => {
+    fetch('/api/gpu-acceleration')
+      .then((r) => r.json())
+      .then((data) => {
+        setGpuEnabled(data.enabled);
+        setGpuInfo(data.detected);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Load client GPU preferences and scan browser GPUs
+  useEffect(() => {
+    const saved = localStorage.getItem('clipai_client_gpu');
+    let savedGpuId = '';
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        setClientGpuEnabled(parsed.enabled || false);
+        savedGpuId = parsed.selectedGpuId || '';
+        setSelectedClientGpuId(savedGpuId);
+        setClientWhisperEnabled(parsed.whisperEnabled ?? true);
+        setClientEncodingEnabled(parsed.encodingEnabled ?? true);
+      } catch { /* ignore corrupt data */ }
+    }
+
+    (async () => {
+      setClientGpuScanning(true);
+      try {
+        const { scanClientGPU } = await import('../utils/clientGpu.js');
+        const info = await scanClientGPU();
+        setClientGpuInfo(info);
+        if (!savedGpuId && info.recommended) {
+          setSelectedClientGpuId(info.recommended.id);
+        }
+      } catch (e) {
+        console.warn('Client GPU scan failed:', e);
+        // CRITICAL: Set a fallback so the toggle isn't permanently disabled.
+        // Without this, clientGpuInfo stays null and the toggle is greyed out
+        // with no error message, leaving users unable to enable GPU processing.
+        setClientGpuInfo({
+          webgpuSupported: !!(typeof navigator !== 'undefined' && navigator?.gpu),
+          webcodecSupported: typeof VideoEncoder !== 'undefined',
+          gpus: [],
+          webcodecs: { h264HardwareEncode: false, hevcHardwareEncode: false, h264Decode: false, hevcDecode: false },
+          recommended: null,
+          scanErrors: [e?.message || 'GPU scan failed — check browser console for details'],
+        });
+      }
+      setClientGpuScanning(false);
+    })();
+  }, []);
+
+  // Load site customisation
+  useEffect(() => {
+    fetch('/api/site-config')
+      .then((r) => r.json())
+      .then((cfg) => {
+        if (cfg.title) setSiteTitle(cfg.title);
+        if (cfg.favicon) setSiteFavicon(cfg.favicon);
+        if (cfg.logo) setSiteLogo(cfg.logo);
+      })
       .catch(() => {});
   }, []);
 
@@ -103,6 +210,11 @@ export default function Settings() {
       .catch(() => {});
   }, []);
 
+  // Load track presets from localStorage
+  useEffect(() => {
+    setTrackPresets(loadAllPresets());
+  }, []);
+
   // Load transcription settings
   useEffect(() => {
     fetch('/api/transcription/settings')
@@ -111,6 +223,18 @@ export default function Settings() {
         const s = { beam_size: data.beam_size ?? 1, vad_filter: data.vad_filter ?? true, frame_sample_rate: data.frame_sample_rate ?? 10 };
         setTransSettings(s);
         setTransSaved(s);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Load FFmpeg encoding settings
+  useEffect(() => {
+    fetch('/api/encoding/settings')
+      .then((r) => r.json())
+      .then((data) => {
+        const t = data.threads ?? 4;
+        setFfmpegThreads(t);
+        setFfmpegThreadsSaved(t);
       })
       .catch(() => {});
   }, []);
@@ -142,6 +266,62 @@ export default function Settings() {
       .then(setCustomFonts)
       .catch(() => {});
   }, []);
+
+  // Load API key when API Access tab is selected
+  useEffect(() => {
+    if (settingsTab === 6 && !apiKey) {
+      setApiKeyLoading(true);
+      fetch('/api/v1/auth/current-key')
+        .then((r) => r.json())
+        .then((envelope) => {
+          if (envelope.success && envelope.data) {
+            setApiKey(envelope.data.key);
+            setApiKeyMasked(envelope.data.masked);
+          }
+        })
+        .catch(() => showToast('Failed to load API key', 'error'))
+        .finally(() => setApiKeyLoading(false));
+    }
+  }, [settingsTab]);
+
+  const handleRegenerateApiKey = async () => {
+    if (!confirm('Regenerate API key? The current key will be permanently invalidated.')) return;
+    setApiKeyRegenerating(true);
+    try {
+      const res = await fetch('/api/v1/auth/regenerate-key', { method: 'POST' });
+      const envelope = await res.json();
+      if (envelope.success && envelope.data) {
+        setApiKey(envelope.data.key);
+        setApiKeyMasked(envelope.data.masked);
+        setApiKeyRevealed(false);
+        showToast('API key regenerated', 'success');
+      } else {
+        showToast('Failed to regenerate key', 'error');
+      }
+    } catch { showToast('Failed to regenerate key', 'error'); }
+    setApiKeyRegenerating(false);
+  };
+
+  const handleTestApiConnection = async () => {
+    setApiTesting(true);
+    setApiTestResult(null);
+    try {
+      const res = await fetch('/api/v1/health', {
+        headers: { 'Authorization': `Bearer ${apiKey}` },
+      });
+      const data = await res.json();
+      if (data.success) {
+        setApiTestResult({ status: 'success', message: 'Connection successful' });
+        showToast('API connection test passed', 'success');
+      } else {
+        setApiTestResult({ status: 'error', message: 'Unexpected response' });
+      }
+    } catch {
+      setApiTestResult({ status: 'error', message: 'Connection failed' });
+      showToast('API connection test failed', 'error');
+    }
+    setApiTesting(false);
+  };
 
   const handleFontUpload = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -192,12 +372,13 @@ export default function Settings() {
     loadAvailableModels();
   }, []);
 
-  // Reload models when provider status changes
+  // Reload models when provider status changes (including Ollama toggle)
   useEffect(() => {
     const hasProvider = statuses.openrouter?.status === 'configured' || statuses.openrouter?.status === 'connected'
-      || statuses.anthropic?.status === 'configured' || statuses.gemini?.status === 'configured';
+      || statuses.anthropic?.status === 'configured' || statuses.gemini?.status === 'configured'
+      || statuses._active?.ollama_enabled;
     if (hasProvider) loadAvailableModels();
-  }, [statuses.openrouter?.status, statuses.anthropic?.status, statuses.gemini?.status]);
+  }, [statuses.openrouter?.status, statuses.anthropic?.status, statuses.gemini?.status, statuses._active?.ollama_enabled]);
 
   // Save & test a provider key
   const handleSaveKey = async (providerName) => {
@@ -282,9 +463,15 @@ export default function Settings() {
       });
       if (res.ok) {
         const data = await res.json();
-        setCurrentModels(data);
-        setPendingModels(data);
-        fetch('/api/providers/status').then((r) => r.json()).then(setStatuses).catch(() => {});
+        // Refresh status, then reload models so the UI reflects the saved state.
+        // Do this sequentially to avoid the status-change useEffect from racing
+        // and overwriting the just-saved models with stale data.
+        try {
+          const statusRes = await fetch('/api/providers/status');
+          if (statusRes.ok) setStatuses(await statusRes.json());
+        } catch {}
+        // Now reload available models — the server now knows Ollama is primary
+        await loadAvailableModels();
         showToast('Models saved successfully', 'success');
       }
     } catch {
@@ -307,10 +494,12 @@ export default function Settings() {
         body: JSON.stringify(body),
       });
       if (res.ok) {
-        const data = await res.json();
-        setCurrentModels(data);
-        setPendingModels(data);
-        fetch('/api/providers/status').then((r) => r.json()).then(setStatuses).catch(() => {});
+        // Refresh status first, then reload models to avoid race condition
+        try {
+          const statusRes = await fetch('/api/providers/status');
+          if (statusRes.ok) setStatuses(await statusRes.json());
+        } catch {}
+        await loadAvailableModels();
         showToast('Model saved', 'success');
       }
     } catch {
@@ -358,6 +547,24 @@ export default function Settings() {
     finally { setTransSaving(false); }
   };
 
+  const handleSaveFfmpegThreads = async (val) => {
+    setFfmpegThreadsSaving(true);
+    try {
+      const res = await fetch('/api/encoding/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ threads: val }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setFfmpegThreads(data.threads);
+        setFfmpegThreadsSaved(data.threads);
+        showToast(`FFmpeg threads set to ${data.threads === 0 ? 'auto' : data.threads}`, 'success');
+      }
+    } catch { showToast('Failed to save FFmpeg thread setting', 'error'); }
+    finally { setFfmpegThreadsSaving(false); }
+  };
+
   // Prompt handlers
   const handleSavePrompts = async () => {
     setPromptsSaving(true);
@@ -401,6 +608,78 @@ export default function Settings() {
     finally { setSubjectTrackingSaving(false); }
   };
 
+  const handleToggleGpu = async (enabled) => {
+    setGpuSaving(true);
+    setGpuLoading(true);
+    try {
+      const res = await fetch('/api/gpu-acceleration', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setGpuEnabled(data.enabled);
+        setGpuInfo(data.detected);
+        if (enabled && data.detected?.vendor !== 'none') {
+          showToast(`GPU acceleration enabled — ${data.detected.gpu_name} (${data.detected.encoder})`, 'success');
+        } else if (enabled && data.detected?.vendor === 'none') {
+          showToast('GPU acceleration enabled but no compatible GPU detected — using CPU', 'warning');
+        } else {
+          showToast('GPU acceleration disabled — using CPU encoding', 'success');
+        }
+      }
+    } catch { showToast('Failed to update GPU acceleration', 'error'); }
+    finally { setGpuSaving(false); setGpuLoading(false); }
+  };
+
+  const handleSaveClientGpu = (overrides = {}) => {
+    const state = {
+      enabled: overrides.enabled ?? clientGpuEnabled,
+      selectedGpuId: overrides.selectedGpuId ?? selectedClientGpuId,
+      whisperEnabled: overrides.whisperEnabled ?? clientWhisperEnabled,
+      encodingEnabled: overrides.encodingEnabled ?? clientEncodingEnabled,
+    };
+    // Include GPU name so other components (Layout top bar) can display it
+    const gpuId = state.selectedGpuId;
+    const selectedGpu = clientGpuInfo?.gpus?.find(g => g.id === gpuId);
+    state.selectedGpuName = selectedGpu?.name || '';
+    localStorage.setItem('clipai_client_gpu', JSON.stringify(state));
+    window.dispatchEvent(new Event('clientgpu-changed'));
+
+    // Report selected GPU to the server so FFmpeg can use the right device
+    if (selectedGpu) {
+      fetch('/api/client-gpu-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          webgpu_supported: clientGpuInfo?.webgpuSupported || false,
+          webcodec_supported: clientGpuInfo?.webcodecSupported || false,
+          gpu_name: selectedGpu.name || '',
+          gpu_vendor: selectedGpu.vendor || '',
+          estimated_vram_mb: selectedGpu.estimatedVRAM_MB || 0,
+          whisper_capable: selectedGpu.whisperCapable || false,
+          h264_hardware_encode: clientGpuInfo?.webcodecs?.h264HardwareEncode || false,
+          hevc_hardware_encode: clientGpuInfo?.webcodecs?.hevcHardwareEncode || false,
+          gpu_index: selectedGpu.serverIndex || '0',
+          gpu_backend: selectedGpu.backend || '',
+        }),
+      }).catch(() => {});
+    }
+  };
+
+  const handleToggleClientGpu = (enabled) => {
+    setClientGpuEnabled(enabled);
+    handleSaveClientGpu({ enabled });
+    if (enabled && clientGpuInfo?.gpus?.length > 0) {
+      showToast(`Client GPU enabled — ${clientGpuInfo.recommended?.name || 'GPU detected'}`, 'success');
+    } else if (enabled) {
+      showToast('Client GPU enabled but no WebGPU-compatible GPU found', 'warning');
+    } else {
+      showToast('Client GPU disabled — processing will use the server', 'success');
+    }
+  };
+
   const handleRenamePreset = async (presetId) => {
     const name = editPresetName.trim();
     if (!name) return;
@@ -442,7 +721,7 @@ export default function Settings() {
     URL.revokeObjectURL(url);
   };
 
-  const SETTINGS_TABS = ['AI Provider', 'Prompts', 'Fonts', 'Presets', 'Advanced', 'Usage & Costs'];
+  const SETTINGS_TABS = ['AI Provider', 'Prompts', 'Fonts', 'Presets', 'Advanced', 'Usage & Costs', 'API Access', 'About'];
   const active = statuses._active || {};
 
   // Model dropdown renderer
@@ -728,6 +1007,7 @@ export default function Settings() {
                             ...prev,
                             _active: { ...prev._active, ollama_enabled: enabled, fallback_chain: data.chain },
                           }));
+                          loadAvailableModels();
                         }
                       } catch {
                         showToast('Failed to toggle Ollama', 'error');
@@ -751,15 +1031,107 @@ export default function Settings() {
                 )}
               </div>
               <p style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4, margin: 0 }}>
-                No API key needed — runs models locally.
-                {!statuses._active?.ollama_enabled && ' Toggle on to add Ollama as a fallback provider.'}
-                {statuses._active?.ollama_enabled && statuses.ollama?.models_loaded?.length > 0 && (
-                  <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 10, marginTop: 4 }}>
-                    Models: {statuses.ollama.models_loaded.join(', ')}
-                  </span>
+                No API key needed — runs models locally on your GPU.
+                {!statuses._active?.ollama_enabled && ' Toggle on to use Ollama as your primary AI provider.'}
+                {statuses._active?.ollama_enabled && (
+                  <>
+                    <span style={{ display: 'block', color: 'var(--success)', fontWeight: 600, marginTop: 4 }}>
+                      Primary provider — Ollama models will be tried first.
+                    </span>
+                    {statuses.ollama?.models_loaded?.length > 0 && (
+                      <span style={{ display: 'block', fontFamily: 'var(--font-mono)', fontSize: 10, marginTop: 4 }}>
+                        Available: {statuses.ollama.models_loaded.join(', ')}
+                      </span>
+                    )}
+                  </>
                 )}
               </p>
             </div>
+
+            {/* Speaker Detection — HuggingFace token for pyannote neural diarization */}
+            {(() => {
+              const hfName = 'huggingface';
+              const hfSt = statuses[hfName]?.status || 'not_configured';
+              const hfUp = hfSt === 'connected' || hfSt === 'configured';
+              const hfBusy = providerSaving[hfName] || providerTesting[hfName];
+              const hfResult = providerResults[hfName];
+              return (
+                <div style={{
+                  background: 'var(--bg-panel)', border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-md)', padding: isMobile ? '12px' : '12px 16px',
+                  boxShadow: 'var(--shadow-sm)',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <div style={{
+                      width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
+                      background: hfSt === 'connected' ? 'var(--success)' : hfUp ? 'var(--accent-cyan)' : hfSt === 'invalid_key' ? 'var(--danger)' : 'var(--text-muted)',
+                    }} />
+                    <span style={{ fontSize: 13, fontWeight: 600, flex: 1 }}>Speaker Detection</span>
+                    <span style={{ fontSize: 10, color: hfUp ? 'var(--success)' : 'var(--text-muted)', fontWeight: 600 }}>
+                      {hfUp ? 'Neural diarization active' : 'Heuristic mode'}
+                    </span>
+                  </div>
+                  <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.5 }}>
+                    Without a token, speaker detection uses pause-based heuristics.
+                    Add a HuggingFace token to enable <strong style={{ color: 'var(--text-secondary)' }}>pyannote neural diarization</strong> —
+                    accurately identifies who is speaking with unlimited speakers.
+                  </p>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10, lineHeight: 1.6, paddingLeft: 8, borderLeft: '2px solid var(--border)' }}>
+                    <div>1. Create a free account at <a href="https://huggingface.co/join" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>huggingface.co</a></div>
+                    <div>2. Get a token at <a href="https://huggingface.co/settings/tokens" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>Settings &gt; Access Tokens</a></div>
+                    <div>3. Accept model terms at <a href="https://huggingface.co/pyannote/speaker-diarization-3.1" target="_blank" rel="noopener noreferrer" style={{ color: 'var(--accent-cyan)', textDecoration: 'none' }}>pyannote/speaker-diarization-3.1</a></div>
+                  </div>
+                  <div style={{ display: 'flex', gap: 6, flexDirection: isMobile ? 'column' : 'row' }}>
+                    <input
+                      type="password"
+                      placeholder="hf_..."
+                      value={providerKeys[hfName] || ''}
+                      onChange={(e) => setProviderKeys((p) => ({ ...p, [hfName]: e.target.value }))}
+                      onKeyDown={(e) => e.key === 'Enter' && handleSaveKey(hfName)}
+                      style={{
+                        flex: 1, padding: '7px 10px', background: 'var(--bg-base)',
+                        border: `1px solid ${hfUp ? 'var(--success)' : 'var(--border)'}`,
+                        borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-mono)',
+                        boxSizing: 'border-box',
+                      }}
+                    />
+                    <button
+                      onClick={() => handleSaveKey(hfName)}
+                      disabled={hfBusy || !(providerKeys[hfName] || '').trim()}
+                      style={{
+                        padding: '7px 14px', background: 'var(--accent-cyan)', color: 'var(--bg-base)',
+                        border: 'none', borderRadius: 'var(--radius-sm)', fontSize: 11, fontWeight: 600,
+                        opacity: hfBusy || !(providerKeys[hfName] || '').trim() ? 0.5 : 1, whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {providerSaving[hfName] ? 'Saving...' : 'Save & Test'}
+                    </button>
+                    {hfUp && (
+                      <button
+                        onClick={() => handleTestProvider(hfName)}
+                        disabled={hfBusy}
+                        style={{
+                          padding: '7px 10px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 11,
+                          opacity: hfBusy ? 0.5 : 1, whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {providerTesting[hfName] ? '...' : 'Test'}
+                      </button>
+                    )}
+                  </div>
+                  {hfResult && (
+                    <div style={{
+                      marginTop: 8, padding: '6px 10px', borderRadius: 'var(--radius-sm)', fontSize: 11, lineHeight: 1.5,
+                      background: hfResult.status === 'connected' ? 'var(--success-dim)' : hfResult.status === 'invalid_key' ? 'var(--danger-dim)' : 'var(--amber-dim)',
+                      color: hfResult.status === 'connected' ? 'var(--success)' : hfResult.status === 'invalid_key' ? 'var(--danger)' : 'var(--accent-amber)',
+                    }}>
+                      {hfResult.message}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           {/* ── Model Selection Section ── */}
@@ -1061,6 +1433,86 @@ export default function Settings() {
                 </div>
               </div>
 
+              {/* Video Summary Prompt */}
+              <div style={{ marginBottom: 28 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <h4 style={{ fontSize: 13, margin: 0, color: 'var(--text-primary)' }}>Video Summary</h4>
+                  <button
+                    onClick={() => setPrompts((prev) => ({ ...prev, summary: promptDefaults.summary }))}
+                    disabled={prompts.summary === promptDefaults.summary}
+                    style={{
+                      padding: '3px 10px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                      border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 11,
+                      opacity: prompts.summary === promptDefaults.summary ? 0.4 : 1,
+                    }}
+                  >
+                    Reset to Default
+                  </button>
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.5 }}>
+                  Controls how the AI summarizes your video — the overview, topics, tone, audience, and category.
+                  Write in a conversational style to get natural, human-readable summaries.
+                </p>
+                <textarea
+                  value={prompts.summary}
+                  onChange={(e) => setPrompts((prev) => ({ ...prev, summary: e.target.value }))}
+                  rows={8}
+                  style={{
+                    width: '100%', minHeight: 120, maxHeight: 400, padding: '10px 12px', resize: 'vertical',
+                    background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                    color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-mono)', lineHeight: 1.6, boxSizing: 'border-box',
+                  }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                    {prompts.summary.length.toLocaleString()} / 10,000
+                  </span>
+                  {prompts.summary !== promptDefaults.summary && (
+                    <span style={{ fontSize: 10, color: 'var(--accent-amber)' }}>Modified</span>
+                  )}
+                </div>
+              </div>
+
+              {/* SEO / Tags Prompt */}
+              <div style={{ marginBottom: 28 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+                  <h4 style={{ fontSize: 13, margin: 0, color: 'var(--text-primary)' }}>SEO / Titles &amp; Tags</h4>
+                  <button
+                    onClick={() => setPrompts((prev) => ({ ...prev, seo: promptDefaults.seo }))}
+                    disabled={prompts.seo === promptDefaults.seo}
+                    style={{
+                      padding: '3px 10px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                      border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 11,
+                      opacity: prompts.seo === promptDefaults.seo ? 0.4 : 1,
+                    }}
+                  >
+                    Reset to Default
+                  </button>
+                </div>
+                <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8, lineHeight: 1.5 }}>
+                  Controls how the AI generates clip titles, descriptions, hashtags, and platform tips.
+                  Write in a casual, authentic style to get natural social media captions instead of robotic marketing copy.
+                </p>
+                <textarea
+                  value={prompts.seo}
+                  onChange={(e) => setPrompts((prev) => ({ ...prev, seo: e.target.value }))}
+                  rows={8}
+                  style={{
+                    width: '100%', minHeight: 120, maxHeight: 400, padding: '10px 12px', resize: 'vertical',
+                    background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                    color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-mono)', lineHeight: 1.6, boxSizing: 'border-box',
+                  }}
+                />
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                    {prompts.seo.length.toLocaleString()} / 10,000
+                  </span>
+                  {prompts.seo !== promptDefaults.seo && (
+                    <span style={{ fontSize: 10, color: 'var(--accent-amber)' }}>Modified</span>
+                  )}
+                </div>
+              </div>
+
               {/* Viral Algorithm Section */}
               <div ref={viralAlgorithmRef} style={{
                 background: 'var(--bg-panel)', border: '1px solid var(--border)',
@@ -1160,11 +1612,11 @@ export default function Settings() {
                 </button>
                 <button
                   onClick={handleResetAllPrompts}
-                  disabled={promptsSaving || (prompts.frame_analysis === promptDefaults.frame_analysis && prompts.viral_clip_detection === promptDefaults.viral_clip_detection && prompts.subject_tracking === promptDefaults.subject_tracking)}
+                  disabled={promptsSaving || (prompts.frame_analysis === promptDefaults.frame_analysis && prompts.viral_clip_detection === promptDefaults.viral_clip_detection && prompts.subject_tracking === promptDefaults.subject_tracking && prompts.summary === promptDefaults.summary && prompts.seo === promptDefaults.seo)}
                   style={{
                     padding: '8px 16px', background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
                     border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)', fontSize: 12,
-                    opacity: (promptsSaving || (prompts.frame_analysis === promptDefaults.frame_analysis && prompts.viral_clip_detection === promptDefaults.viral_clip_detection && prompts.subject_tracking === promptDefaults.subject_tracking)) ? 0.4 : 1,
+                    opacity: (promptsSaving || (prompts.frame_analysis === promptDefaults.frame_analysis && prompts.viral_clip_detection === promptDefaults.viral_clip_detection && prompts.subject_tracking === promptDefaults.subject_tracking && prompts.summary === promptDefaults.summary && prompts.seo === promptDefaults.seo)) ? 0.4 : 1,
                   }}
                 >
                   Reset All to Defaults
@@ -1367,6 +1819,105 @@ export default function Settings() {
               ))}
             </div>
           )}
+
+          {/* ── Track Property Presets ── */}
+          <h3 style={{ fontSize: 14, marginBottom: 8, marginTop: 32, color: 'var(--text-secondary)' }}>Track Property Presets</h3>
+          <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 20, lineHeight: 1.6 }}>
+            Manage saved track property presets. These are saved locally and can be applied to matching track types in the video editor.
+          </p>
+          {trackPresets.length === 0 ? (
+            <div style={{
+              textAlign: 'center', padding: '32px 16px', color: 'var(--text-muted)',
+              fontSize: 12, border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+              background: 'var(--bg-panel)',
+            }}>
+              No track presets saved yet. Save presets from the Properties panel in the video editor.
+            </div>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {trackPresets.map((p) => (
+                <div key={p.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 12,
+                  padding: '10px 14px', background: 'var(--bg-panel)',
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                  flexWrap: 'wrap',
+                }}>
+                  {editingTrackPresetId === p.id ? (
+                    <div style={{ flex: 1, minWidth: 200, display: 'flex', gap: 6, alignItems: 'center' }}>
+                      <input
+                        type="text" value={editTrackPresetName}
+                        onChange={(e) => setEditTrackPresetName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            renameTrackPreset(p.id, editTrackPresetName);
+                            setTrackPresets(loadAllPresets());
+                            setEditingTrackPresetId(null);
+                            showToast('Preset renamed');
+                          }
+                          if (e.key === 'Escape') setEditingTrackPresetId(null);
+                        }}
+                        autoFocus
+                        style={{
+                          flex: 1, padding: '4px 8px', fontSize: 13,
+                          background: 'var(--bg-elevated)', color: 'var(--accent-cyan)',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                          fontFamily: 'var(--font-mono)', outline: 'none',
+                        }}
+                      />
+                      <button
+                        onClick={() => {
+                          renameTrackPreset(p.id, editTrackPresetName);
+                          setTrackPresets(loadAllPresets());
+                          setEditingTrackPresetId(null);
+                          showToast('Preset renamed');
+                        }}
+                        style={{
+                          padding: '4px 10px', fontSize: 11,
+                          background: 'var(--accent-cyan)', color: 'var(--bg-base)',
+                          border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                        }}
+                      >
+                        Save
+                      </button>
+                    </div>
+                  ) : (
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>{p.name}</div>
+                      <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', marginTop: 2 }}>
+                        {p.type} | {p.createdAt ? new Date(p.createdAt).toLocaleDateString() : ''}
+                      </div>
+                    </div>
+                  )}
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button
+                      onClick={() => { setEditingTrackPresetId(p.id); setEditTrackPresetName(p.name); }}
+                      style={{
+                        padding: '4px 10px', fontSize: 11, background: 'var(--bg-elevated)',
+                        color: 'var(--text-secondary)', border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                      }}
+                    >
+                      Rename
+                    </button>
+                    <button
+                      onClick={() => {
+                        deleteTrackPreset(p.id);
+                        setTrackPresets(loadAllPresets());
+                        showToast('Preset deleted');
+                      }}
+                      style={{
+                        padding: '4px 10px', fontSize: 11, background: 'var(--danger-dim)',
+                        color: 'var(--danger)', border: '1px solid var(--danger)',
+                        borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -1374,6 +1925,724 @@ export default function Settings() {
       {settingsTab === 4 && (
         <div>
           <div style={{ maxWidth: isMobile ? '100%' : 480 }}>
+
+            {/* ── GPU Hardware Acceleration ── */}
+            <div style={{ marginBottom: 32 }}>
+              <h3 style={{ fontSize: 14, marginBottom: 16, color: 'var(--text-secondary)' }}>GPU Hardware Acceleration</h3>
+
+              {/* Toggle row */}
+              <div style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '12px 16px', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+              }}>
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>Enable GPU Acceleration</span>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                    Uses your GPU for faster video encoding, decoding, and transcription.
+                    Requires a compatible NVIDIA, AMD, or Intel GPU passed through to the container.
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleToggleGpu(!gpuEnabled)}
+                  disabled={gpuSaving}
+                  style={{
+                    width: 44, height: 24, borderRadius: 12, border: 'none', position: 'relative',
+                    background: gpuEnabled ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+                    cursor: gpuSaving ? 'default' : 'pointer', flexShrink: 0, marginLeft: 16,
+                    transition: 'background 0.2s', opacity: gpuSaving ? 0.5 : 1,
+                  }}
+                >
+                  <div style={{
+                    position: 'absolute', top: 3, left: gpuEnabled ? 23 : 3,
+                    width: 18, height: 18, borderRadius: '50%', background: 'var(--nav-active-icon-text)',
+                    transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }} />
+                </button>
+              </div>
+
+              {/* Status text */}
+              <div style={{
+                marginTop: 8, fontSize: 10, fontFamily: 'var(--font-mono)',
+                color: gpuEnabled ? 'var(--accent-cyan)' : 'var(--text-muted)',
+              }}>
+                {gpuSaving ? 'Detecting GPU...' :
+                 gpuEnabled ? 'Enabled — GPU will be used for encoding, decoding, and transcription' :
+                 'Disabled — using CPU for all processing'}
+              </div>
+
+              {/* GPU Info Card — shown when enabled */}
+              {gpuEnabled && gpuInfo && (
+                <div style={{
+                  marginTop: 12, padding: '12px 16px',
+                  background: gpuInfo.vendor !== 'none' ? 'rgba(0, 217, 255, 0.05)' : 'rgba(255, 165, 0, 0.05)',
+                  border: `1px solid ${gpuInfo.vendor !== 'none' ? 'rgba(0, 217, 255, 0.2)' : 'rgba(255, 165, 0, 0.2)'}`,
+                  borderRadius: 'var(--radius-sm)',
+                }}>
+                  {gpuLoading ? (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                      Scanning for GPU hardware...
+                    </div>
+                  ) : gpuInfo.vendor !== 'none' ? (
+                    /* GPU detected — show details */
+                    <div style={{ display: 'grid', gap: 6 }}>
+                      {/* All detected GPUs */}
+                      {gpuInfo.gpus?.length > 0 ? (
+                        <>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>
+                            Detected GPUs ({gpuInfo.gpus.length})
+                          </div>
+                          {gpuInfo.gpus.map((gpu, i) => (
+                            <div key={i} style={{
+                              display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                              fontSize: 12, padding: '4px 8px',
+                              background: 'rgba(255, 255, 255, 0.03)', borderRadius: 4,
+                            }}>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{String(gpu.name || '')}</span>
+                              <span style={{
+                                fontSize: 10, padding: '1px 6px', borderRadius: 3,
+                                fontFamily: 'var(--font-mono)',
+                                background: gpu.vendor === 'nvidia' ? 'rgba(118, 185, 0, 0.15)' : 'rgba(0, 114, 198, 0.15)',
+                                color: gpu.vendor === 'nvidia' ? '#76b900' : '#0072c6',
+                              }}>
+                                {String(gpu.vendor || '').toUpperCase()} · {gpu.type === 'discrete' ? 'Discrete' : gpu.type === 'integrated' ? 'Integrated' : 'GPU'}
+                                {gpu.vram_mb > 0 ? ` · ${gpu.vram_mb} MB` : ''}
+                              </span>
+                            </div>
+                          ))}
+                          {/* GPU device selector for FFmpeg — shown when multiple GPUs available */}
+                          {gpuInfo.gpus.length > 1 && (
+                            <div style={{ marginTop: 8 }}>
+                              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Select GPU for Encoding</div>
+                              <select
+                                defaultValue={gpuInfo.gpus[0]?.index || '0'}
+                                onChange={async (e) => {
+                                  try {
+                                    await fetch('/api/client-gpu-report', {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({
+                                        gpu_index: e.target.value,
+                                        gpu_name: gpuInfo.gpus.find(g => g.index === e.target.value)?.name || '',
+                                        gpu_vendor: gpuInfo.gpus.find(g => g.index === e.target.value)?.vendor || '',
+                                      }),
+                                    });
+                                    showToast(`GPU ${e.target.value} selected for encoding`, 'success');
+                                  } catch { showToast('Failed to update GPU selection', 'error'); }
+                                }}
+                                style={{
+                                  width: '100%', padding: '6px 10px', fontSize: 12,
+                                  fontFamily: 'var(--font-mono)',
+                                  background: 'var(--bg-base)', color: 'var(--text-primary)',
+                                  border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                                }}
+                              >
+                                {gpuInfo.gpus.map((gpu) => (
+                                  <option key={gpu.index} value={gpu.index}>
+                                    GPU {gpu.index}: {gpu.name} ({gpu.vendor.toUpperCase()}{gpu.vram_mb > 0 ? ` · ${gpu.vram_mb} MB` : ''})
+                                  </option>
+                                ))}
+                              </select>
+                            </div>
+                          )}
+                        </>
+                      ) : (
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                          <span style={{ color: 'var(--text-muted)' }}>GPU</span>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{String(gpuInfo.gpu_name || '')}</span>
+                        </div>
+                      )}
+                      {/* Active encoder/decoder info */}
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginTop: 4 }}>
+                        <span style={{ color: 'var(--text-muted)' }}>Video Encoder</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--success)' }}>{String(gpuInfo.encoder || '')}</span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                        <span style={{ color: 'var(--text-muted)' }}>Video Decoder</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', color: gpuInfo.decoder ? 'var(--success)' : 'var(--text-muted)' }}>
+                          {String(gpuInfo.decoder || 'N/A')}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                        <span style={{ color: 'var(--text-muted)' }}>Whisper (Transcription)</span>
+                        <span style={{ fontFamily: 'var(--font-mono)', color: (gpuInfo.cuda_available || gpuInfo.vendor === 'apple') ? 'var(--success)' : 'var(--text-muted)' }}>
+                          {gpuInfo.cuda_available ? 'CUDA (GPU)' : gpuInfo.vendor === 'apple' ? 'Core ML (GPU)' : 'CPU'}
+                        </span>
+                      </div>
+                      {gpuInfo.driver_version && (
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                          <span style={{ color: 'var(--text-muted)' }}>Driver</span>
+                          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{String(gpuInfo.driver_version || '')}</span>
+                        </div>
+                      )}
+                      {/* GPU Issues / Setup Guidance */}
+                      {gpuInfo.gpu_issues && gpuInfo.gpu_issues.length > 0 && (
+                        <div style={{
+                          marginTop: 10, padding: '8px 10px',
+                          background: 'rgba(255, 159, 10, 0.08)',
+                          border: '1px solid rgba(255, 159, 10, 0.2)',
+                          borderRadius: 'var(--radius-sm)',
+                        }}>
+                          <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--warning)', marginBottom: 4 }}>
+                            GPU detected but not fully available for encoding
+                          </div>
+                          {gpuInfo.gpu_issues.map((issue, i) => (
+                            <div key={i} style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.5, marginBottom: 2 }}>
+                              {'• '}{issue}
+                            </div>
+                          ))}
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.5, marginTop: 6, borderTop: '1px solid rgba(255,159,10,0.1)', paddingTop: 6 }}>
+                            <strong>Docker GPU Passthrough Setup:</strong><br/>
+                            {'1. '}Install nvidia-container-toolkit on host:<br/>
+                            <code style={{ fontSize: 9, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3, display: 'inline-block', marginLeft: 12 }}>
+                              apt install nvidia-container-toolkit && systemctl restart docker
+                            </code><br/>
+                            {'2. '}Run with GPU access:<br/>
+                            <code style={{ fontSize: 9, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3, display: 'inline-block', marginLeft: 12 }}>
+                              docker run --gpus all --runtime=nvidia ...
+                            </code><br/>
+                            {'3. '}Use a CUDA-enabled image with FFmpeg NVENC support
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    /* No GPU detected — show setup instructions */
+                    <div>
+                      <div style={{ fontSize: 12, color: 'var(--warning)', marginBottom: 6, fontWeight: 600 }}>
+                        No compatible GPU detected
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                        To use GPU acceleration:<br/>
+                        {'• '}Pass your GPU to the container via <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>docker-compose.gpu.yml</code><br/>
+                        {'• '}NVIDIA: Install nvidia-container-toolkit on the host<br/>
+                        {'• '}Intel/AMD: Pass <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>/dev/dri</code> device to the container<br/>
+                        {'• '}macOS (Apple Silicon): Run natively (not Docker) — VideoToolbox requires direct macOS access<br/>
+                        {'• '}Rebuild with <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>Dockerfile.gpu</code> for hardware encoder support (Linux/NVIDIA)
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* ── Client GPU (Browser) ── */}
+            <div style={{ marginBottom: 32 }}>
+              <h3 style={{ fontSize: 14, marginBottom: 4, color: 'var(--text-secondary)' }}>Client GPU (Browser)</h3>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.5 }}>
+                Use your desktop PC's GPU directly through Chrome for transcription and video encoding.
+                This uses WebGPU and WebCodecs APIs — processing happens in your browser, not on the server.
+              </p>
+
+              {/* Main toggle */}
+              <div style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                padding: '12px 16px', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+              }}>
+                <div style={{ flex: 1 }}>
+                  <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>Enable Client-Side GPU Processing</span>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
+                    Leverages your local GPU via Chrome WebGPU for Whisper transcription
+                    and WebCodecs for hardware video encoding (NVENC/VideoToolbox/VAAPI).
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleToggleClientGpu(!clientGpuEnabled)}
+                  disabled={clientGpuScanning || (!clientGpuInfo && !clientGpuEnabled)}
+                  style={{
+                    width: 44, height: 24, borderRadius: 12, border: 'none', position: 'relative',
+                    background: clientGpuEnabled ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+                    cursor: (clientGpuScanning || (!clientGpuInfo && !clientGpuEnabled)) ? 'default' : 'pointer',
+                    flexShrink: 0, marginLeft: 16,
+                    transition: 'background 0.2s',
+                    opacity: (clientGpuScanning || (!clientGpuInfo && !clientGpuEnabled)) ? 0.5 : 1,
+                  }}
+                >
+                  <div style={{
+                    position: 'absolute', top: 3, left: clientGpuEnabled ? 23 : 3,
+                    width: 18, height: 18, borderRadius: '50%', background: 'var(--nav-active-icon-text)',
+                    transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }} />
+                </button>
+              </div>
+
+              {/* Status line */}
+              <div style={{
+                marginTop: 8, fontSize: 10, fontFamily: 'var(--font-mono)',
+                color: clientGpuScanning ? 'var(--text-muted)' :
+                       clientGpuEnabled ? 'var(--accent-cyan)' :
+                       clientGpuInfo?.gpus?.length > 0 ? 'var(--success)' :
+                       'var(--text-muted)',
+              }}>
+                {clientGpuScanning ? 'Scanning browser GPU capabilities...' :
+                 clientGpuEnabled ? `Enabled — using ${clientGpuInfo?.gpus?.find(g => g.id === selectedClientGpuId)?.name || 'detected GPU'}` :
+                 clientGpuInfo?.gpus?.length > 0 ? `${clientGpuInfo.gpus.length} GPU(s) detected — toggle on to enable` :
+                 'Disabled — all processing runs on the server'}
+              </div>
+
+              {/* Detected GPUs summary — shown before toggle enabled so user can see what was found */}
+              {!clientGpuScanning && !clientGpuEnabled && clientGpuInfo?.gpus?.length > 0 && (
+                <div style={{
+                  marginTop: 12, padding: '12px 16px',
+                  background: 'rgba(0, 217, 255, 0.05)',
+                  border: '1px solid rgba(0, 217, 255, 0.2)',
+                  borderRadius: 'var(--radius-sm)',
+                }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Detected GPUs</div>
+                  <div style={{ display: 'grid', gap: 6 }}>
+                    {clientGpuInfo.gpus.map(gpu => (
+                      <div key={gpu.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                        <span style={{ color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' }}>{String(gpu.name || '')}</span>
+                        <span style={{
+                          fontSize: 10, padding: '1px 6px', borderRadius: 3,
+                          background: gpu.backend === 'webgpu' ? 'rgba(0, 217, 255, 0.15)' :
+                                     gpu.backend === 'server-detected' ? 'rgba(118, 185, 0, 0.15)' : 'rgba(255, 255, 255, 0.08)',
+                          color: gpu.backend === 'webgpu' ? 'var(--accent-cyan)' :
+                                 gpu.backend === 'server-detected' ? '#76b900' : 'var(--text-muted)',
+                          fontFamily: 'var(--font-mono)',
+                        }}>
+                          {gpu.backend === 'webgpu' ? 'WebGPU' : gpu.backend === 'webgpu-software' ? 'Software' : gpu.backend === 'server-detected' ? 'Server' : 'WebGL'}
+                          {' · '}{gpu.type === 'discrete' ? 'Discrete' : gpu.type === 'integrated' ? 'Integrated' : gpu.type === 'software' ? 'Software' : 'GPU'}
+                          {gpu.estimatedVRAM_MB > 0 ? ` · ${gpu.estimatedVRAM_MB} MB` : ''}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  {clientGpuInfo.webcodecs?.h264HardwareEncode && (
+                    <div style={{ marginTop: 8, fontSize: 10, color: 'var(--success)', fontFamily: 'var(--font-mono)' }}>
+                      H.264 hardware encoding available via WebCodecs
+                    </div>
+                  )}
+                  {!clientGpuInfo.webgpuSupported && (
+                    <div style={{ marginTop: 8, fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                      WebGPU not available — Whisper transcription will use CPU. Video encoding can still use hardware via WebCodecs.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* WebGPU Not Supported — browser setup instructions (only when no GPUs detected at all) */}
+              {!clientGpuScanning && clientGpuInfo && !clientGpuInfo.webgpuSupported && clientGpuInfo.gpus?.length === 0 && (
+                <div style={{
+                  marginTop: 12, padding: '14px 16px',
+                  background: 'rgba(255, 165, 0, 0.06)',
+                  border: '1px solid rgba(255, 165, 0, 0.25)',
+                  borderRadius: 'var(--radius-sm)',
+                }}>
+                  <div style={{ fontSize: 13, color: 'var(--warning)', marginBottom: 10, fontWeight: 600 }}>
+                    WebGPU is not enabled in your browser
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.7, marginBottom: 12 }}>
+                    Client-side GPU processing requires WebGPU, a modern browser API for GPU compute.
+                    Follow the steps below for your browser to enable it.
+                  </div>
+
+                  {/* Chrome */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 600, marginBottom: 4 }}>
+                      Google Chrome (Recommended)
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                      {'1. '}Update to <strong style={{ color: 'var(--text-secondary)' }}>Chrome 113+</strong> (WebGPU is enabled by default on Windows and macOS)<br/>
+                      {'2. '}Visit <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>chrome://gpu</code> and
+                      look for <strong style={{ color: 'var(--text-secondary)' }}>"WebGPU: Hardware accelerated"</strong><br/>
+                      {'3. '}If it says "Disabled" or "Software only", go to <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>chrome://flags/#enable-unsafe-webgpu</code> and set it to <strong style={{ color: 'var(--text-secondary)' }}>Enabled</strong><br/>
+                      {'4. '}Relaunch Chrome and reload this page
+                    </div>
+                  </div>
+
+                  {/* Chrome on Linux */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 600, marginBottom: 4 }}>
+                      Chrome on Linux
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                      WebGPU on Linux requires extra flags:<br/>
+                      {'1. '}Enable <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>chrome://flags/#enable-unsafe-webgpu</code><br/>
+                      {'2. '}Enable <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>chrome://flags/#enable-vulkan</code> (WebGPU uses Vulkan on Linux)<br/>
+                      {'3. '}Ensure your GPU drivers support Vulkan (NVIDIA 470+, Mesa 21.0+ for AMD/Intel)<br/>
+                      {'4. '}Relaunch Chrome with: <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--text-secondary)' }}>google-chrome --enable-features=Vulkan,UseSkiaRenderer</code>
+                    </div>
+                  </div>
+
+                  {/* Edge */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 600, marginBottom: 4 }}>
+                      Microsoft Edge
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                      {'1. '}Update to <strong style={{ color: 'var(--text-secondary)' }}>Edge 113+</strong><br/>
+                      {'2. '}Visit <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>edge://flags/#enable-unsafe-webgpu</code> and set to <strong style={{ color: 'var(--text-secondary)' }}>Enabled</strong><br/>
+                      {'3. '}Relaunch Edge and reload this page
+                    </div>
+                  </div>
+
+                  {/* Firefox */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 600, marginBottom: 4 }}>
+                      Firefox
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                      {'1. '}Update to <strong style={{ color: 'var(--text-secondary)' }}>Firefox 141+</strong> (Nightly has the best support)<br/>
+                      {'2. '}Go to <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>about:config</code><br/>
+                      {'3. '}Set <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--text-secondary)' }}>dom.webgpu.enabled</code> to <strong style={{ color: 'var(--text-secondary)' }}>true</strong><br/>
+                      {'4. '}Restart Firefox and reload this page<br/>
+                      <span style={{ fontSize: 10, color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                        Note: Firefox WebGPU support is experimental and may have limited compatibility.
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Safari */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 600, marginBottom: 4 }}>
+                      Safari (macOS)
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                      {'1. '}Update to <strong style={{ color: 'var(--text-secondary)' }}>Safari 18+</strong> (macOS Sequoia) — WebGPU is enabled by default<br/>
+                      {'2. '}On older versions: Safari {'>'} Settings {'>'} Advanced {'>'} check "Show features for web developers"<br/>
+                      {'3. '}Then: Develop menu {'>'} Feature Flags {'>'} enable <strong style={{ color: 'var(--text-secondary)' }}>WebGPU</strong><br/>
+                      <span style={{ fontSize: 10, color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                        Note: Chrome is recommended for best WebGPU + WebCodecs support.
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* General troubleshooting */}
+                  <div style={{
+                    padding: '8px 12px', background: 'var(--bg-elevated)',
+                    borderRadius: 'var(--radius-sm)', fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6,
+                  }}>
+                    <strong style={{ color: 'var(--text-secondary)' }}>Troubleshooting:</strong><br/>
+                    {'• '}Make sure your GPU drivers are up to date (NVIDIA GeForce Experience / AMD Adrenalin / Intel Arc Control)<br/>
+                    {'• '}Verify hardware acceleration is on: Chrome Settings {'>'} System {'>'} "Use hardware acceleration when available"<br/>
+                    {'• '}In <code style={{ fontSize: 10, background: 'var(--bg-base)', padding: '1px 4px', borderRadius: 3 }}>chrome://gpu</code>, check that "Graphics Feature Status" shows "Hardware accelerated" for most features<br/>
+                    {'• '}Virtual machines, remote desktop, and some enterprise policies may block WebGPU<br/>
+                    {'• '}After enabling flags, you must fully relaunch the browser (not just refresh)
+                  </div>
+
+                  {/* Rescan button */}
+                  <button
+                    onClick={async () => {
+                      setClientGpuScanning(true);
+                      try {
+                        const { scanClientGPU } = await import('../utils/clientGpu.js');
+                        const info = await scanClientGPU();
+                        setClientGpuInfo(info);
+                        if (info.gpus.length > 0) {
+                          showToast(`Found ${info.gpus.length} GPU(s): ${info.gpus.map(g => g.name).join(', ')}`, 'success');
+                        } else if (info.webgpuSupported) {
+                          showToast(`WebGPU available but no adapters returned${info.scanErrors ? ' — ' + info.scanErrors[0] : ''}`, 'warning');
+                        } else {
+                          showToast('WebGPU still not available — check the instructions above', 'warning');
+                        }
+                      } catch (e) {
+                        showToast(`GPU scan failed: ${e?.message || 'unknown error'}`, 'error');
+                        setClientGpuInfo({
+                          webgpuSupported: !!navigator?.gpu,
+                          gpus: [],
+                          webcodecs: { h264HardwareEncode: false, hevcHardwareEncode: false, h264Decode: false, hevcDecode: false },
+                          recommended: null,
+                          scanErrors: [e?.message || 'Scan failed'],
+                        });
+                      }
+                      setClientGpuScanning(false);
+                    }}
+                    disabled={clientGpuScanning}
+                    style={{
+                      marginTop: 12, padding: '6px 16px', fontSize: 11,
+                      fontFamily: 'var(--font-mono)',
+                      background: 'var(--bg-panel)', color: 'var(--accent-cyan)',
+                      border: '1px solid var(--accent-cyan)', borderRadius: 'var(--radius-sm)',
+                      cursor: 'pointer', opacity: clientGpuScanning ? 0.5 : 1,
+                    }}
+                  >
+                    {clientGpuScanning ? 'Scanning...' : 'Rescan after enabling WebGPU'}
+                  </button>
+                </div>
+              )}
+
+              {/* GPU Details + Selection (when enabled) */}
+              {clientGpuEnabled && clientGpuInfo && (
+                <div style={{
+                  marginTop: 12, padding: '12px 16px',
+                  background: clientGpuInfo.gpus.length > 0 ? 'rgba(0, 217, 255, 0.05)' : 'rgba(255, 165, 0, 0.05)',
+                  border: `1px solid ${clientGpuInfo.gpus.length > 0 ? 'rgba(0, 217, 255, 0.2)' : 'rgba(255, 165, 0, 0.2)'}`,
+                  borderRadius: 'var(--radius-sm)',
+                }}>
+                  {clientGpuScanning ? (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                      Scanning GPUs...
+                    </div>
+                  ) : clientGpuInfo.gpus.length > 0 ? (
+                    <div style={{ display: 'grid', gap: 10 }}>
+                      {/* GPU selector — always shown so user can pick their preferred GPU */}
+                      <div>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                          Select GPU for Passthrough ({clientGpuInfo.gpus.length} detected)
+                        </div>
+                        <select
+                          value={selectedClientGpuId}
+                          onChange={(e) => {
+                            setSelectedClientGpuId(e.target.value);
+                            handleSaveClientGpu({ selectedGpuId: e.target.value });
+                          }}
+                          style={{
+                            width: '100%', padding: '6px 10px', fontSize: 12,
+                            fontFamily: 'var(--font-mono)',
+                            background: 'var(--bg-base)', color: 'var(--text-primary)',
+                            border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                          }}
+                        >
+                          {clientGpuInfo.gpus.map(gpu => (
+                            <option key={gpu.id} value={gpu.id}>
+                              {gpu.name} ({gpu.type === 'discrete' ? 'Discrete' : gpu.type === 'integrated' ? 'Integrated' : gpu.type === 'software' ? 'Software' : 'GPU'}
+                              {gpu.backend === 'server-detected' ? ' · Server' : ''}
+                              {gpu.estimatedVRAM_MB > 0 ? ` · ${gpu.estimatedVRAM_MB} MB` : ''})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {/* Selected GPU info */}
+                      {(() => {
+                        const gpu = clientGpuInfo.gpus.find(g => g.id === selectedClientGpuId) || clientGpuInfo.gpus[0];
+                        if (!gpu) return null;
+                        return (
+                          <div style={{ display: 'grid', gap: 6 }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                              <span style={{ color: 'var(--text-muted)' }}>GPU</span>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>{String(gpu.name || '')}</span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                              <span style={{ color: 'var(--text-muted)' }}>Type</span>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>
+                                {gpu.type === 'discrete' ? 'Discrete GPU' : gpu.type === 'integrated' ? 'Integrated GPU' : 'GPU'}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                              <span style={{ color: 'var(--text-muted)' }}>Backend</span>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: gpu.backend === 'webgpu' ? 'var(--success)' : 'var(--text-muted)' }}>
+                                {gpu.backend === 'webgpu' ? 'WebGPU' : 'WebGL only'}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                              <span style={{ color: 'var(--text-muted)' }}>FP16 Shaders</span>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: gpu.hasFP16 ? 'var(--success)' : 'var(--text-muted)' }}>
+                                {gpu.hasFP16 ? 'Supported (2-3x ML speedup)' : 'Not available'}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                              <span style={{ color: 'var(--text-muted)' }}>Whisper Ready</span>
+                              <span style={{ fontFamily: 'var(--font-mono)', color: gpu.whisperCapable ? 'var(--success)' : 'var(--warning)' }}>
+                                {gpu.whisperCapable ? 'Yes' : gpu.backend === 'webgl-only' ? 'No (requires WebGPU)' : 'No (insufficient buffer size)'}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                      {/* WebCodecs capabilities */}
+                      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 4 }}>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>WebCodecs (Video Encoding)</div>
+                        <div style={{ display: 'grid', gap: 4 }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                            <span style={{ color: 'var(--text-muted)' }}>H.264 Hardware Encode</span>
+                            <span style={{ fontFamily: 'var(--font-mono)', color: clientGpuInfo.webcodecs.h264HardwareEncode ? 'var(--success)' : 'var(--text-muted)' }}>
+                              {clientGpuInfo.webcodecs.h264HardwareEncode ? 'Hardware Accelerated' : 'Software only'}
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+                            <span style={{ color: 'var(--text-muted)' }}>H.265/HEVC Hardware Encode</span>
+                            <span style={{ fontFamily: 'var(--font-mono)', color: clientGpuInfo.webcodecs.hevcHardwareEncode ? 'var(--success)' : 'var(--text-muted)' }}>
+                              {clientGpuInfo.webcodecs.hevcHardwareEncode ? 'Supported' : 'Not available'}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Task toggles */}
+                      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 8, marginTop: 4 }}>
+                        <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Client-Side Tasks</div>
+
+                        {/* Whisper toggle */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                          <div>
+                            <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>Transcription (Whisper WebGPU)</span>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                              Runs Whisper speech-to-text in your browser via Transformers.js
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              const val = !clientWhisperEnabled;
+                              setClientWhisperEnabled(val);
+                              handleSaveClientGpu({ whisperEnabled: val });
+                            }}
+                            style={{
+                              width: 36, height: 20, borderRadius: 10, border: 'none', position: 'relative',
+                              background: clientWhisperEnabled ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+                              cursor: 'pointer', flexShrink: 0, marginLeft: 12, transition: 'background 0.2s',
+                            }}
+                          >
+                            <div style={{
+                              position: 'absolute', top: 2, left: clientWhisperEnabled ? 18 : 2,
+                              width: 16, height: 16, borderRadius: '50%', background: 'var(--nav-active-icon-text)',
+                              transition: 'left 0.2s', boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+                            }} />
+                          </button>
+                        </div>
+
+                        {/* Encoding toggle */}
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                          <div>
+                            <span style={{ fontSize: 12, color: 'var(--text-primary)' }}>Video Encoding (WebCodecs)</span>
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>
+                              Uses H.264 hardware encoding in the browser for clip export (NVENC/VideoToolbox/VAAPI)
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => {
+                              const val = !clientEncodingEnabled;
+                              setClientEncodingEnabled(val);
+                              handleSaveClientGpu({ encodingEnabled: val });
+                            }}
+                            style={{
+                              width: 36, height: 20, borderRadius: 10, border: 'none', position: 'relative',
+                              background: clientEncodingEnabled ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+                              cursor: 'pointer', flexShrink: 0, marginLeft: 12, transition: 'background 0.2s',
+                            }}
+                          >
+                            <div style={{
+                              position: 'absolute', top: 2, left: clientEncodingEnabled ? 18 : 2,
+                              width: 16, height: 16, borderRadius: '50%', background: 'var(--nav-active-icon-text)',
+                              transition: 'left 0.2s', boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+                            }} />
+                          </button>
+                        </div>
+                      </div>
+
+                      {/* Rescan button */}
+                      <button
+                        onClick={async () => {
+                          setClientGpuScanning(true);
+                          try {
+                            const { scanClientGPU } = await import('../utils/clientGpu.js');
+                            const info = await scanClientGPU();
+                            setClientGpuInfo(info);
+                            showToast(`Found ${info.gpus.length} GPU(s): ${info.gpus.map(g => g.name).join(', ')}`, 'success');
+                          } catch (e) { showToast(`GPU scan failed: ${e?.message || 'unknown error'}`, 'error'); }
+                          setClientGpuScanning(false);
+                        }}
+                        disabled={clientGpuScanning}
+                        style={{
+                          marginTop: 4, padding: '4px 12px', fontSize: 10,
+                          fontFamily: 'var(--font-mono)',
+                          background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {clientGpuScanning ? 'Scanning...' : 'Rescan GPUs'}
+                      </button>
+                    </div>
+                  ) : (
+                    /* WebGPU available but no GPU adapter returned */
+                    <div>
+                      <div style={{ fontSize: 12, color: 'var(--warning)', marginBottom: 8, fontWeight: 600 }}>
+                        No WebGPU-compatible GPU adapter detected
+                      </div>
+                      {clientGpuInfo?.scanErrors?.length > 0 && (
+                        <div style={{
+                          marginBottom: 10, padding: '8px 10px',
+                          background: 'rgba(255, 100, 100, 0.08)',
+                          border: '1px solid rgba(255, 100, 100, 0.2)',
+                          borderRadius: 'var(--radius-sm)',
+                        }}>
+                          <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4, fontWeight: 600 }}>Scan errors:</div>
+                          {clientGpuInfo.scanErrors.map((err, i) => (
+                            <div key={i} style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--warning)', lineHeight: 1.5 }}>
+                              {err}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.7 }}>
+                        WebGPU is supported by your browser but no GPU adapter was returned. This usually means:<br/><br/>
+                        <strong style={{ color: 'var(--text-secondary)' }}>Driver Issues</strong><br/>
+                        {'• '}Update your GPU drivers to the latest version (NVIDIA GeForce Experience, AMD Adrenalin, or Intel Arc Control)<br/>
+                        {'• '}NVIDIA: requires driver version 470+ for Vulkan/WebGPU support<br/>
+                        {'• '}AMD: requires Mesa 21.0+ on Linux or latest Adrenalin on Windows<br/><br/>
+                        <strong style={{ color: 'var(--text-secondary)' }}>Hardware Acceleration Disabled</strong><br/>
+                        {'• '}Check Chrome Settings {'>'} System {'>'} ensure "Use hardware acceleration when available" is ON<br/>
+                        {'• '}Visit <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--accent-cyan)' }}>chrome://gpu</code> and
+                        verify "WebGPU" shows "Hardware accelerated" (not "Disabled" or "Software only")<br/><br/>
+                        <strong style={{ color: 'var(--text-secondary)' }}>Environment Issues</strong><br/>
+                        {'• '}Remote desktop sessions (RDP, VNC, Parsec) may not expose the GPU to the browser<br/>
+                        {'• '}Virtual machines need GPU passthrough configured<br/>
+                        {'• '}Some enterprise group policies disable GPU access in the browser<br/>
+                        {'• '}On Linux, ensure Vulkan is working: run <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--text-secondary)' }}>vulkaninfo</code> in a terminal<br/><br/>
+                        <strong style={{ color: 'var(--text-secondary)' }}>Debugging</strong><br/>
+                        {'• '}Open browser DevTools (F12) {'>'} Console tab to see detailed GPU detection logs<br/>
+                        {'• '}Try running in the Console: <code style={{ fontSize: 10, background: 'var(--bg-elevated)', padding: '2px 6px', borderRadius: 3, color: 'var(--text-secondary)' }}>await navigator.gpu.requestAdapter()</code> to test WebGPU directly
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* ── FFmpeg Threads ── */}
+            <div style={{ marginBottom: 32 }}>
+              <h3 style={{ fontSize: 14, marginBottom: 4, color: 'var(--text-secondary)' }}>FFmpeg Threads</h3>
+              <p style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 16, lineHeight: 1.5 }}>
+                Controls how many CPU threads FFmpeg uses during video export.
+                Lower values use less memory (safer for containers), higher values export faster.
+              </p>
+
+              <div style={{
+                padding: '12px 16px', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontSize: 13, color: 'var(--text-primary)' }}>Thread Count</span>
+                  <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
+                    {ffmpegThreads === 0 ? 'Auto (all cores)' : ffmpegThreads}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>0</span>
+                  <input
+                    type="range"
+                    min="0"
+                    max="16"
+                    step="1"
+                    value={ffmpegThreads}
+                    onChange={(e) => setFfmpegThreads(parseInt(e.target.value))}
+                    style={{ flex: 1, accentColor: 'var(--accent-cyan)' }}
+                  />
+                  <span style={{ fontSize: 10, color: 'var(--text-muted)', flexShrink: 0 }}>16</span>
+                </div>
+                <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'block', marginTop: 4 }}>
+                  0 = auto (uses all cores — may cause out-of-memory in containers). Recommended: 2–4 for Docker.
+                </span>
+                {ffmpegThreads !== ffmpegThreadsSaved && (
+                  <button
+                    onClick={() => handleSaveFfmpegThreads(ffmpegThreads)}
+                    disabled={ffmpegThreadsSaving}
+                    style={{
+                      marginTop: 8, padding: '4px 14px', background: 'var(--accent-cyan)',
+                      color: 'var(--bg-base)', border: 'none', borderRadius: 'var(--radius-sm)',
+                      fontSize: 11, fontWeight: 600, cursor: 'pointer',
+                    }}
+                  >
+                    {ffmpegThreadsSaving ? 'Saving...' : 'Save'}
+                  </button>
+                )}
+              </div>
+            </div>
+
             <h3 style={{ fontSize: 14, marginBottom: 16, color: 'var(--text-secondary)' }}>Model Override</h3>
             <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>
               Browse all OpenRouter models and select custom overrides.
@@ -1394,7 +2663,7 @@ export default function Settings() {
             <div style={{ display: 'grid', gap: 12 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
                 <span style={{ fontSize: 13 }}>Whisper Model</span>
-                <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{currentModels.transcript_model || 'base'}</span>
+                <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{String(currentModels.transcript_model || 'base')}</span>
               </div>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 12px', background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)' }}>
                 <span style={{ fontSize: 13 }}>Beam Size</span>
@@ -1457,12 +2726,470 @@ export default function Settings() {
                 <span style={{ fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{(statuses._active?.fallback_chain || ['openrouter', 'gemini', 'groq']).join(' \u2192 ')}</span>
               </div>
             </div>
+
           </div>
         </div>
       )}
 
-      {/* ═══════ Tab 4: Usage & Costs ═══════ */}
+      {/* ═══════ Tab 5: Usage & Costs ═══════ */}
       {settingsTab === 5 && <CostTracker />}
+
+      {/* ═══════ Tab 6: API Access ═══════ */}
+      {settingsTab === 6 && (
+        <div style={{ maxWidth: isMobile ? '100%' : 640 }}>
+
+          {/* API Key Section */}
+          <div style={{ marginBottom: 24 }}>
+            <h3 style={{ fontSize: 15, marginBottom: 12 }}>API Key</h3>
+            <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 12 }}>
+              Use this key to authenticate requests to the REST API (<code style={{ fontSize: 11, background: 'var(--bg-elevated)', padding: '1px 4px', borderRadius: 3 }}>/api/v1/*</code>).
+            </p>
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '10px 12px', background: 'var(--bg-panel)',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+            }}>
+              {apiKeyLoading ? (
+                <span style={{ fontSize: 12, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }}>Loading...</span>
+              ) : (
+                <code style={{
+                  flex: 1, fontSize: 12, fontFamily: 'var(--font-mono)',
+                  color: 'var(--accent-cyan)', wordBreak: 'break-all',
+                  userSelect: apiKeyRevealed ? 'all' : 'none',
+                }}>
+                  {apiKeyRevealed ? apiKey : apiKeyMasked}
+                </code>
+              )}
+              <button
+                onClick={() => setApiKeyRevealed(!apiKeyRevealed)}
+                style={{
+                  padding: '4px 10px', fontSize: 11, background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                  color: 'var(--text-secondary)', cursor: 'pointer', whiteSpace: 'nowrap',
+                }}
+              >
+                {apiKeyRevealed ? 'Hide' : 'Reveal'}
+              </button>
+              <button
+                onClick={() => { navigator.clipboard.writeText(apiKey); showToast('API key copied', 'success'); }}
+                style={{
+                  padding: '4px 10px', fontSize: 11, background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                  color: 'var(--text-secondary)', cursor: 'pointer', whiteSpace: 'nowrap',
+                }}
+              >
+                Copy
+              </button>
+            </div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+              <button
+                onClick={handleRegenerateApiKey}
+                disabled={apiKeyRegenerating}
+                style={{
+                  padding: '6px 14px', fontSize: 12, fontWeight: 500,
+                  background: 'transparent', border: '1px solid var(--accent-amber)',
+                  borderRadius: 'var(--radius-sm)', color: 'var(--accent-amber)',
+                  cursor: apiKeyRegenerating ? 'not-allowed' : 'pointer', opacity: apiKeyRegenerating ? 0.5 : 1,
+                }}
+              >
+                {apiKeyRegenerating ? 'Regenerating...' : 'Regenerate Key'}
+              </button>
+            </div>
+          </div>
+
+          {/* Endpoints Section */}
+          <div style={{ marginBottom: 24 }}>
+            <h3 style={{ fontSize: 15, marginBottom: 12 }}>Endpoints</h3>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {[
+                { label: 'REST API', value: `${window.location.origin}/api/v1` },
+                { label: 'MCP Server', value: `${window.location.origin}/mcp` },
+                { label: 'Health Check', value: `${window.location.origin}/api/v1/health` },
+                { label: 'Agent Skill', value: `${window.location.origin}/api/v1/skill` },
+              ].map(({ label, value }) => (
+                <div key={label} style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                  padding: '8px 12px', background: 'var(--bg-panel)',
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                }}>
+                  <span style={{ fontSize: 13 }}>{label}</span>
+                  <code style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', wordBreak: 'break-all' }}>{value}</code>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Connection Test */}
+          <div style={{ marginBottom: 24 }}>
+            <h3 style={{ fontSize: 15, marginBottom: 12 }}>Connection Test</h3>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <button
+                onClick={handleTestApiConnection}
+                disabled={apiTesting}
+                style={{
+                  padding: '6px 14px', fontSize: 12, fontWeight: 500,
+                  background: 'var(--accent-cyan)', border: 'none',
+                  borderRadius: 'var(--radius-sm)', color: 'var(--bg-base)',
+                  cursor: apiTesting ? 'not-allowed' : 'pointer', opacity: apiTesting ? 0.5 : 1,
+                }}
+              >
+                {apiTesting ? 'Testing...' : 'Test Connection'}
+              </button>
+              {apiTestResult && (
+                <span style={{
+                  fontSize: 12,
+                  color: apiTestResult.status === 'success' ? 'var(--success)' : 'var(--error)',
+                }}>
+                  {apiTestResult.message}
+                </span>
+              )}
+            </div>
+          </div>
+
+          {/* Quick Start Snippets */}
+          <div style={{ marginBottom: 24 }}>
+            <h3 style={{ fontSize: 15, marginBottom: 12 }}>Quick Start</h3>
+
+            {/* cURL Example */}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>cURL</div>
+              <div style={{
+                position: 'relative', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                padding: '10px 12px', paddingRight: 60,
+              }}>
+                <pre style={{
+                  fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
+                  whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0,
+                }}>{`curl ${window.location.origin}/api/v1/health \\
+  -H "Authorization: Bearer ${apiKeyRevealed ? apiKey : '<your-key>'}"`.trim()}</pre>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(`curl ${window.location.origin}/api/v1/health -H "Authorization: Bearer ${apiKey}"`);
+                    showToast('Copied', 'success');
+                  }}
+                  style={{
+                    position: 'absolute', top: 6, right: 6,
+                    padding: '2px 8px', fontSize: 10, background: 'var(--bg-elevated)',
+                    border: '1px solid var(--border)', borderRadius: 3,
+                    color: 'var(--text-secondary)', cursor: 'pointer',
+                  }}
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+
+            {/* Python Example */}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>Python</div>
+              <div style={{
+                position: 'relative', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                padding: '10px 12px', paddingRight: 60,
+              }}>
+                <pre style={{
+                  fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
+                  whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0,
+                }}>{`import httpx
+
+client = httpx.Client(
+    base_url="${window.location.origin}/api/v1",
+    headers={"Authorization": "Bearer ${apiKeyRevealed ? apiKey : '<your-key>'}"}
+)
+
+# Check health
+resp = client.get("/health")
+print(resp.json())`.trim()}</pre>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(`import httpx\n\nclient = httpx.Client(\n    base_url="${window.location.origin}/api/v1",\n    headers={"Authorization": "Bearer ${apiKey}"}\n)\n\nresp = client.get("/health")\nprint(resp.json())`);
+                    showToast('Copied', 'success');
+                  }}
+                  style={{
+                    position: 'absolute', top: 6, right: 6,
+                    padding: '2px 8px', fontSize: 10, background: 'var(--bg-elevated)',
+                    border: '1px solid var(--border)', borderRadius: 3,
+                    color: 'var(--text-secondary)', cursor: 'pointer',
+                  }}
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+
+            {/* MCP Config Example */}
+            <div>
+              <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>MCP Client Config</div>
+              <div style={{
+                position: 'relative', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                padding: '10px 12px', paddingRight: 60,
+              }}>
+                <pre style={{
+                  fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)',
+                  whiteSpace: 'pre-wrap', wordBreak: 'break-all', margin: 0,
+                }}>{`{
+  "mcpServers": {
+    "clipai": {
+      "type": "streamable-http",
+      "url": "${window.location.origin}/mcp"
+    }
+  }
+}`.trim()}</pre>
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(JSON.stringify({ mcpServers: { clipai: { type: 'streamable-http', url: `${window.location.origin}/mcp` } } }, null, 2));
+                    showToast('Copied', 'success');
+                  }}
+                  style={{
+                    position: 'absolute', top: 6, right: 6,
+                    padding: '2px 8px', fontSize: 10, background: 'var(--bg-elevated)',
+                    border: '1px solid var(--border)', borderRadius: 3,
+                    color: 'var(--text-secondary)', cursor: 'pointer',
+                  }}
+                >
+                  Copy
+                </button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      )}
+
+      {/* ═══════ Tab 7: About ═══════ */}
+      {settingsTab === 7 && (
+        <div style={{ maxWidth: isMobile ? '100%' : 640 }}>
+
+          {/* Developer credit */}
+          <div style={{
+            padding: 24, borderRadius: 'var(--radius-md)', marginBottom: 28,
+            background: 'var(--bg-panel)', border: '1px solid var(--border)',
+            textAlign: 'center',
+          }}>
+            <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 6 }}>
+              Developed by Jalon Young
+            </div>
+            <p style={{ fontSize: 12, color: 'var(--text-secondary)', margin: '0 0 14px', lineHeight: 1.6 }}>
+              Full-stack engineer &amp; creator of ClipAI.
+            </p>
+            <a
+              href="https://jalonyoung.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                display: 'inline-block', padding: '8px 20px', fontSize: 12, fontWeight: 600,
+                fontFamily: 'var(--font-mono)', color: '#fff', background: 'var(--accent-cyan)',
+                borderRadius: 'var(--radius-sm)', textDecoration: 'none',
+              }}
+            >
+              jalonyoung.com
+            </a>
+          </div>
+
+          {/* Site Customisation */}
+          <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 16, color: 'var(--text-primary)' }}>
+            Site Customisation
+          </h3>
+
+          {/* Title */}
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--text-primary)' }}>
+              Site Title
+            </label>
+            <input
+              type="text"
+              value={siteTitle}
+              onChange={(e) => setSiteTitle(e.target.value)}
+              placeholder="ClipAI — Video Intelligence"
+              style={{
+                width: '100%', padding: '8px 12px', fontSize: 12, fontFamily: 'var(--font-mono)',
+                background: 'var(--bg-panel)', border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)', boxSizing: 'border-box',
+              }}
+            />
+          </div>
+
+          {/* Favicon */}
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--text-primary)' }}>
+              Favicon
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              {siteFavicon && (
+                <img
+                  src={`/api/site-uploads/${siteFavicon}`}
+                  alt="favicon"
+                  style={{ width: 28, height: 28, objectFit: 'contain', borderRadius: 4, border: '1px solid var(--border)' }}
+                />
+              )}
+              <input
+                ref={faviconInputRef}
+                type="file"
+                accept=".ico,.png,.svg,.jpg,.jpeg,.gif,.webp"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  setSiteSaving(true);
+                  const fd = new FormData();
+                  fd.append('favicon', file);
+                  fetch('/api/site-config', { method: 'POST', body: fd })
+                    .then((r) => r.json())
+                    .then((res) => {
+                      if (res.favicon) {
+                        setSiteFavicon(res.favicon);
+                        let link = document.querySelector("link[rel~='icon']");
+                        if (!link) { link = document.createElement('link'); link.rel = 'icon'; document.head.appendChild(link); }
+                        link.href = `/api/site-uploads/${res.favicon}`;
+                      }
+                      showToast('Favicon updated', 'success');
+                    })
+                    .catch(() => showToast('Upload failed', 'error'))
+                    .finally(() => setSiteSaving(false));
+                  e.target.value = '';
+                }}
+              />
+              <button
+                onClick={() => faviconInputRef.current?.click()}
+                disabled={siteSaving}
+                style={{
+                  padding: '6px 14px', fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-mono)',
+                  background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)', cursor: 'pointer',
+                }}
+              >
+                {siteFavicon ? 'Replace' : 'Upload'}
+              </button>
+              {siteFavicon && (
+                <button
+                  onClick={() => {
+                    setSiteSaving(true);
+                    const fd = new FormData();
+                    fd.append('remove_favicon', 'true');
+                    fetch('/api/site-config', { method: 'POST', body: fd })
+                      .then((r) => r.json())
+                      .then(() => {
+                        setSiteFavicon(null);
+                        const link = document.querySelector("link[rel~='icon']");
+                        if (link) link.href = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>C</text></svg>";
+                        showToast('Favicon removed', 'success');
+                      })
+                      .catch(() => showToast('Failed', 'error'))
+                      .finally(() => setSiteSaving(false));
+                  }}
+                  disabled={siteSaving}
+                  style={{
+                    padding: '6px 14px', fontSize: 11, fontFamily: 'var(--font-mono)',
+                    background: 'none', border: '1px solid var(--danger, #ff453a)',
+                    borderRadius: 'var(--radius-sm)', color: 'var(--danger, #ff453a)', cursor: 'pointer',
+                  }}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Logo */}
+          <div style={{ marginBottom: 28 }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, marginBottom: 6, color: 'var(--text-primary)' }}>
+              Logo
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              {siteLogo && (
+                <img
+                  src={`/api/site-uploads/${siteLogo}`}
+                  alt="logo"
+                  style={{ height: 36, maxWidth: 120, objectFit: 'contain', borderRadius: 4, border: '1px solid var(--border)' }}
+                />
+              )}
+              <input
+                ref={logoInputRef}
+                type="file"
+                accept=".png,.svg,.jpg,.jpeg,.gif,.webp"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  setSiteSaving(true);
+                  const fd = new FormData();
+                  fd.append('logo', file);
+                  fetch('/api/site-config', { method: 'POST', body: fd })
+                    .then((r) => r.json())
+                    .then((res) => {
+                      if (res.logo) setSiteLogo(res.logo);
+                      showToast('Logo updated', 'success');
+                    })
+                    .catch(() => showToast('Upload failed', 'error'))
+                    .finally(() => setSiteSaving(false));
+                  e.target.value = '';
+                }}
+              />
+              <button
+                onClick={() => logoInputRef.current?.click()}
+                disabled={siteSaving}
+                style={{
+                  padding: '6px 14px', fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-mono)',
+                  background: 'var(--bg-elevated)', border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)', cursor: 'pointer',
+                }}
+              >
+                {siteLogo ? 'Replace' : 'Upload'}
+              </button>
+              {siteLogo && (
+                <button
+                  onClick={() => {
+                    setSiteSaving(true);
+                    const fd = new FormData();
+                    fd.append('remove_logo', 'true');
+                    fetch('/api/site-config', { method: 'POST', body: fd })
+                      .then((r) => r.json())
+                      .then(() => { setSiteLogo(null); showToast('Logo removed', 'success'); })
+                      .catch(() => showToast('Failed', 'error'))
+                      .finally(() => setSiteSaving(false));
+                  }}
+                  disabled={siteSaving}
+                  style={{
+                    padding: '6px 14px', fontSize: 11, fontFamily: 'var(--font-mono)',
+                    background: 'none', border: '1px solid var(--danger, #ff453a)',
+                    borderRadius: 'var(--radius-sm)', color: 'var(--danger, #ff453a)', cursor: 'pointer',
+                  }}
+                >
+                  Remove
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Save title button */}
+          <button
+            onClick={() => {
+              setSiteSaving(true);
+              const fd = new FormData();
+              fd.append('title', siteTitle);
+              fetch('/api/site-config', { method: 'POST', body: fd })
+                .then((r) => r.json())
+                .then((res) => {
+                  if (res.title !== undefined) document.title = res.title || 'ClipAI — Video Intelligence';
+                  showToast('Site settings saved', 'success');
+                })
+                .catch(() => showToast('Save failed', 'error'))
+                .finally(() => setSiteSaving(false));
+            }}
+            disabled={siteSaving}
+            style={{
+              padding: '10px 28px', fontSize: 13, fontWeight: 600, fontFamily: 'var(--font-mono)',
+              background: 'var(--accent-cyan)', color: '#fff', border: 'none',
+              borderRadius: 'var(--radius-sm)', cursor: siteSaving ? 'wait' : 'pointer',
+              opacity: siteSaving ? 0.6 : 1,
+            }}
+          >
+            {siteSaving ? 'Saving...' : 'Save Title'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

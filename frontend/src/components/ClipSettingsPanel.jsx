@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { outlineTextShadow } from '../utils/textOutline';
+import { sanitizeSubtitleSettings } from '../utils/sanitizeJob';
 import useResponsive from '../hooks/useResponsive';
 
 const STORAGE_KEY = 'clipai_clip_settings';
@@ -11,7 +13,7 @@ const DEFAULT_SETTINGS = {
   subtitlesEnabled: false,
   subtitleFont: 'DM Sans',
   subtitleSize: 30,
-  subtitleFontWeight: 'bold',
+  subtitleFontWeight: 700,
   subtitleFontColor: '#FFFFFF',
   subtitlePosition: 'bottom',
   speakerColors: {},
@@ -31,8 +33,11 @@ const DEFAULT_SETTINGS = {
   activeWordOutlineColor: '#000000',
   activeWordBgColor: '#000000',
   activeWordBgOpacity: 0,
+  activeWordBgRadius: 4,
   useSpeakerColors: true,
   exportQuality: '1080p',
+  playbackVolume: 100,
+  playbackSpeed: 1.0,
 };
 
 const ASPECT_RATIOS = [
@@ -106,10 +111,46 @@ const SIZES = [
   { value: 40, label: 'L' },
 ];
 
-const FONT_WEIGHTS = [
-  { value: 'normal', label: 'Normal' },
-  { value: 'bold', label: 'Bold' },
+// Available font weights per font family
+const ALL_FONT_WEIGHTS = [
+  { value: 100, label: 'Thin' },
+  { value: 200, label: 'ExtraLight' },
+  { value: 300, label: 'Light' },
+  { value: 400, label: 'Regular' },
+  { value: 500, label: 'Medium' },
+  { value: 600, label: 'SemiBold' },
+  { value: 700, label: 'Bold' },
+  { value: 800, label: 'ExtraBold' },
+  { value: 900, label: 'Black' },
 ];
+const VARIABLE_FONTS = new Set([
+  'DM Sans', 'Montserrat', 'Open Sans', 'Roboto', 'Inter', 'Nunito',
+  'Oswald', 'Playfair Display', 'Lato',
+]);
+const STATIC_FONT_WEIGHTS = {
+  'Poppins': [400, 700],
+  'Bebas Neue': [400],
+  'Liberation Sans': [400, 700],
+  'Liberation Serif': [400, 700],
+  'Liberation Mono': [400, 700],
+  'DejaVu Sans': [400, 700],
+  'DejaVu Serif': [400, 700],
+  'DejaVu Sans Mono': [400, 700],
+  'FreeSans': [400, 700],
+};
+function getWeightOptionsForFont(fontFamily) {
+  if (VARIABLE_FONTS.has(fontFamily)) return ALL_FONT_WEIGHTS;
+  const weights = STATIC_FONT_WEIGHTS[fontFamily];
+  if (weights) return ALL_FONT_WEIGHTS.filter(w => weights.includes(w.value));
+  return ALL_FONT_WEIGHTS.filter(w => [400, 700].includes(w.value));
+}
+// Convert legacy string weights to numeric
+function normalizeWeight(w) {
+  if (typeof w === 'number') return w;
+  if (w === 'bold') return 700;
+  if (w === 'black') return 900;
+  return 400; // 'normal' and any other string
+}
 
 const POSITIONS = [
   { value: 'top', label: 'Top' },
@@ -141,7 +182,7 @@ function getAspectDimensions(ratio) {
 function loadSettings() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) return { ...DEFAULT_SETTINGS, ...JSON.parse(saved) };
+    if (saved) return { ...DEFAULT_SETTINGS, ...sanitizeSubtitleSettings(JSON.parse(saved)) };
   } catch {}
   return { ...DEFAULT_SETTINGS };
 }
@@ -152,12 +193,25 @@ function saveSettings(settings) {
   } catch {}
 }
 
-export default function ClipSettingsPanel({ speakers, speakerNames, videoResolution, onSettingsChange, onApplySettings, onPresetsLoaded }) {
+export default function ClipSettingsPanel({ speakers, speakerNames, videoResolution, onSettingsChange, onApplySettings, onPresetsLoaded, serverSettings, parentSettings }) {
   const { isMobile } = useResponsive();
   const [settings, setSettings] = useState(() => {
+    // Prefer server-provided settings over localStorage (server is source of truth)
+    if (serverSettings && Object.keys(serverSettings).length > 0) {
+      return { ...DEFAULT_SETTINGS, ...sanitizeSubtitleSettings(serverSettings) };
+    }
     const loaded = loadSettings();
     return loaded;
   });
+  const serverSettingsApplied = useRef(false);
+
+  // When serverSettings prop arrives (async from job fetch), apply it once
+  useEffect(() => {
+    if (serverSettings && Object.keys(serverSettings).length > 0 && !serverSettingsApplied.current) {
+      serverSettingsApplied.current = true;
+      setSettings(prev => ({ ...DEFAULT_SETTINGS, ...sanitizeSubtitleSettings(serverSettings) }));
+    }
+  }, [serverSettings]);
   const [customFonts, setCustomFonts] = useState([]);
   const [fontUploading, setFontUploading] = useState(false);
   const fontInputRef = useRef(null);
@@ -231,6 +285,18 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
     document.fonts.load(`400 16px "${font}"`).catch(() => {});
     document.fonts.load(`700 16px "${font}"`).catch(() => {});
   }, [settings.subtitleFont]);
+
+  // Sync subtitlesEnabled when toggled externally (e.g. Analysis toolbar button)
+  useEffect(() => {
+    if (parentSettings && parentSettings.subtitlesEnabled !== undefined) {
+      setSettings(prev => {
+        if (prev.subtitlesEnabled !== parentSettings.subtitlesEnabled) {
+          return { ...prev, subtitlesEnabled: parentSettings.subtitlesEnabled };
+        }
+        return prev;
+      });
+    }
+  }, [parentSettings?.subtitlesEnabled]);
 
   const update = (key, value) => {
     setSettings((prev) => ({ ...prev, [key]: value }));
@@ -428,7 +494,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
               >
                 <option value="">Load a preset...</option>
                 {presets.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
+                  <option key={p.id} value={p.id}>{String(p.name ?? '')}</option>
                 ))}
               </select>
               <button
@@ -543,6 +609,86 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                 </div>
               </div>
 
+              {/* Playback Volume */}
+              <div style={sectionStyle}>
+                <span style={labelStyle}>Playback Volume</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <button
+                    onClick={() => update('playbackVolume', settings.playbackVolume > 0 ? 0 : 100)}
+                    style={{
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      width: 32, height: 32, border: 'none', borderRadius: 'var(--radius-sm)',
+                      background: 'var(--bg-elevated)', color: 'var(--text-secondary)',
+                      cursor: 'pointer',
+                    }}
+                    title={settings.playbackVolume > 0 ? 'Mute' : 'Unmute'}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M11 5L6 9H2v6h4l5 4V5z" fill="currentColor" opacity="0.5" stroke="none" />
+                      {settings.playbackVolume === 0 ? (
+                        <>
+                          <line x1="23" y1="9" x2="17" y2="15" />
+                          <line x1="17" y1="9" x2="23" y2="15" />
+                        </>
+                      ) : settings.playbackVolume <= 100 ? (
+                        <path d="M15.54 8.46a5 5 0 010 7.07" />
+                      ) : (
+                        <>
+                          <path d="M15.54 8.46a5 5 0 010 7.07" />
+                          <path d="M19.07 4.93a10 10 0 010 14.14" />
+                        </>
+                      )}
+                    </svg>
+                  </button>
+                  <input
+                    type="range"
+                    min="0"
+                    max="200"
+                    step="1"
+                    value={settings.playbackVolume ?? 100}
+                    onChange={(e) => update('playbackVolume', parseInt(e.target.value))}
+                    style={{
+                      flex: 1,
+                      accentColor: (settings.playbackVolume ?? 100) > 100 ? '#FFD60A' : 'var(--accent-cyan)',
+                    }}
+                  />
+                  <span style={{
+                    fontSize: 11,
+                    fontFamily: 'var(--font-mono)',
+                    color: (settings.playbackVolume ?? 100) > 150 ? '#FFD60A' : 'var(--text-secondary)',
+                    minWidth: 36,
+                    textAlign: 'right',
+                  }}>
+                    {settings.playbackVolume ?? 100}%
+                  </span>
+                </div>
+              </div>
+
+              {/* Playback Speed */}
+              <div style={sectionStyle}>
+                <span style={labelStyle}>Playback Speed</span>
+                <div style={radioGroupStyle}>
+                  {[
+                    { value: 0.25, label: '0.25x' },
+                    { value: 0.5, label: '0.5x' },
+                    { value: 0.75, label: '0.75x' },
+                    { value: 1.0, label: '1x' },
+                    { value: 1.25, label: '1.25x' },
+                    { value: 1.5, label: '1.5x' },
+                    { value: 2.0, label: '2x' },
+                    { value: 4.0, label: '4x' },
+                  ].map((s) => (
+                    <button
+                      key={s.value}
+                      onClick={() => update('playbackSpeed', s.value)}
+                      style={radioBtnStyle((settings.playbackSpeed ?? 1.0) === s.value)}
+                    >
+                      {s.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               {/* Subtitles */}
               <div style={sectionStyle}>
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: settings.subtitlesEnabled ? 12 : 0 }}>
@@ -586,7 +732,17 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                       <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                         <select
                           value={settings.subtitleFont}
-                          onChange={(e) => update('subtitleFont', e.target.value)}
+                          onChange={(e) => {
+                            const newFont = e.target.value;
+                            update('subtitleFont', newFont);
+                            // Snap weight to closest available if current weight isn't supported
+                            const curWeight = normalizeWeight(settings.subtitleFontWeight);
+                            const available = getWeightOptionsForFont(newFont).map(w => w.value);
+                            if (!available.includes(curWeight)) {
+                              const closest = available.reduce((a, b) => Math.abs(b - curWeight) < Math.abs(a - curWeight) ? b : a);
+                              update('subtitleFontWeight', closest);
+                            }
+                          }}
                           style={{ flex: 1, padding: '6px 8px', borderRadius: 'var(--radius-sm)', fontSize: 12 }}
                         >
                           {BUILTIN_FONTS.map((f) => (
@@ -595,7 +751,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                           {customFonts.length > 0 && (
                             <optgroup label="Custom Fonts">
                               {customFonts.map((f) => (
-                                <option key={f.name} value={f.name} style={{ fontFamily: f.name }}>{f.name}</option>
+                                <option key={f.name} value={f.name} style={{ fontFamily: f.name }}>{String(f.name ?? '')}</option>
                               ))}
                             </optgroup>
                           )}
@@ -685,11 +841,11 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                     <div>
                       <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>Weight</div>
                       <div style={radioGroupStyle}>
-                        {FONT_WEIGHTS.map((w) => (
+                        {getWeightOptionsForFont(settings.subtitleFont).map((w) => (
                           <button
                             key={w.value}
                             onClick={() => update('subtitleFontWeight', w.value)}
-                            style={radioBtnStyle(settings.subtitleFontWeight === w.value)}
+                            style={radioBtnStyle(normalizeWeight(settings.subtitleFontWeight) === w.value)}
                           >
                             {w.label}
                           </button>
@@ -716,7 +872,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                           }}
                         />
                         <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
-                          {settings.subtitleFontColor}
+                            {String(settings.subtitleFontColor || '')}
                         </span>
                       </div>
                     </div>
@@ -742,7 +898,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                             }}
                           />
                           <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
-                            {settings.subtitleOutlineColor}
+                            {String(settings.subtitleOutlineColor || '')}
                           </span>
                         </div>
                       </div>
@@ -843,8 +999,8 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                       <div style={{ fontSize: 13, color: 'var(--text-primary)', marginBottom: 6 }}>Max Width</div>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <input
-                          type="range" min="50" max="100" step="5"
-                          value={Math.min(100, Math.max(50, settings.subtitleMaxWidth))}
+                          type="range" min="20" max="100" step="5"
+                          value={Math.min(100, Math.max(20, settings.subtitleMaxWidth))}
                           onChange={(e) => update('subtitleMaxWidth', parseInt(e.target.value))}
                           style={{ flex: 1, accentColor: 'var(--accent-cyan)' }}
                         />
@@ -972,7 +1128,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                                 }}
                               />
                               <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
-                                {settings.activeWordColor}
+                                {String(settings.activeWordColor || '')}
                               </span>
                             </div>
                           </div>
@@ -991,7 +1147,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                                 }}
                               />
                               <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>
-                                {settings.activeWordOutlineColor}
+                                {String(settings.activeWordOutlineColor || '')}
                               </span>
                             </div>
                           </div>
@@ -1025,6 +1181,23 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                                     type="number"
                                     value={settings.activeWordBgOpacity}
                                     onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v)) update('activeWordBgOpacity', v); }}
+                                    style={numInputStyle}
+                                  />
+                                </div>
+                              </div>
+                              <div>
+                                <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 4 }}>Radius</div>
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                                  <input
+                                    type="range" min="0" max="20" step="1"
+                                    value={Math.min(20, Math.max(0, settings.activeWordBgRadius ?? 4))}
+                                    onChange={(e) => update('activeWordBgRadius', parseInt(e.target.value))}
+                                    style={{ flex: 1, accentColor: 'var(--accent-cyan)' }}
+                                  />
+                                  <input
+                                    type="number"
+                                    value={settings.activeWordBgRadius ?? 4}
+                                    onChange={(e) => { const v = parseInt(e.target.value); if (!isNaN(v)) update('activeWordBgRadius', v); }}
                                     style={numInputStyle}
                                   />
                                 </div>
@@ -1085,7 +1258,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                                       background: 'var(--bg-elevated)',
                                     }}
                                   />
-                                  <span style={{ fontSize: 12, color }}>{displayName}</span>
+                                  <span style={{ fontSize: 12, color }}>{String(displayName || '')}</span>
                                 </div>
                               );
                             })}
@@ -1266,7 +1439,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                         padding: '1px 4px',
                         borderRadius: 2,
                       }}>
-                        {settings.aspectRatio}
+                        {String(settings.aspectRatio || '')}
                       </div>
                     </div>
                   )}
@@ -1284,11 +1457,12 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                     const olG = parseInt(olHex.substring(2, 4), 16) || 0;
                     const olB = parseInt(olHex.substring(4, 6), 16) || 0;
                     const scaledOlWidth = Math.max(0, Math.round(olWidth * previewScale));
+                    const olColorStr = `rgba(${olR},${olG},${olB},${olOpacity})`;
                     const outlineStyle = !settings.subtitleBgEnabled && scaledOlWidth > 0
                       ? {
-                          WebkitTextStroke: `${scaledOlWidth * 2}px rgba(${olR},${olG},${olB},${olOpacity})`,
+                          WebkitTextStroke: `${scaledOlWidth * 2}px ${olColorStr}`,
                           paintOrder: 'stroke fill',
-                          textShadow: `1px 1px 2px rgba(0,0,0,0.5)`,
+                          textShadow: outlineTextShadow(scaledOlWidth, olColorStr, '1px 1px 2px rgba(0,0,0,0.5)'),
                         }
                       : (!settings.subtitleBgEnabled
                           ? { textShadow: '1px 1px 2px rgba(0,0,0,0.7)' }
@@ -1316,7 +1490,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                         <div style={{
                           fontFamily: `"${settings.subtitleFont}", sans-serif`,
                           fontSize: fontSizePx,
-                          fontWeight: settings.subtitleFontWeight === 'bold' ? 700 : 400,
+                          fontWeight: normalizeWeight(settings.subtitleFontWeight),
                           color: (settings.useSpeakerColors ?? true) ? sampleColor1 : (settings.subtitleFontColor || '#FFFFFF'),
                           lineHeight: 1.4,
                           wordWrap: 'break-word',
@@ -1340,7 +1514,7 @@ export default function ClipSettingsPanel({ speakers, speakerNames, videoResolut
                           <div style={{
                             fontFamily: `"${settings.subtitleFont}", sans-serif`,
                             fontSize: fontSizePx,
-                            fontWeight: settings.subtitleFontWeight === 'bold' ? 700 : 400,
+                            fontWeight: normalizeWeight(settings.subtitleFontWeight),
                             color: (settings.useSpeakerColors ?? true) ? sampleColor2 : (settings.subtitleFontColor || '#FFFFFF'),
                             lineHeight: 1.4,
                             marginTop: 2,

@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
+import { sendNotification } from '../utils/notifications';
 
 const EncodingContext = createContext(null);
 
@@ -55,7 +56,8 @@ export function EncodingProvider({ children }) {
 
   const pushLog = useCallback((level, message, extra) => {
     const id = ++logIdRef.current;
-    const entry = { id, timestamp: Date.now(), level, message };
+    const safeMsg = typeof message === 'string' ? message : String(message ?? '');
+    const entry = { id, timestamp: Date.now(), level, message: safeMsg };
     if (extra) entry.extra = extra;
     setLogs((prev) => [entry, ...prev].slice(0, MAX_LOGS));
     return entry;
@@ -91,14 +93,28 @@ export function EncodingProvider({ children }) {
 
     pushLog('info', `Export started: ${clipTitle || `Clip ${clipId}`} [${quality}]`);
 
+    // Open WebSocket BEFORE sending POST so we don't miss any messages
+    // the backend broadcasts immediately after starting the export task.
+    _openWs(jobId, clipId, clipTitle);
+
+    console.log('[EncodingManager] Export payload keys:', Object.keys(exportBody || {}));
+    console.log('[EncodingManager] Export payload:', JSON.stringify(exportBody, null, 2)?.slice(0, 2000));
     fetch(apiEndpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(exportBody),
+      body: JSON.stringify(exportBody, (_, v) =>
+        typeof v === 'number' && !Number.isFinite(v) ? null : v
+      ),
     })
-      .then((res) => {
-        if (!res.ok) throw new Error(`Export request failed: ${res.status}`);
-        _openWs(jobId, clipId, clipTitle);
+      .then(async (res) => {
+        if (!res.ok) {
+          let detail = '';
+          try {
+            const body = await res.json();
+            detail = JSON.stringify(body.detail || body);
+          } catch (_) { /* ignore parse errors */ }
+          throw new Error(`Export request failed: ${res.status}${detail ? ` — ${detail}` : ''}`);
+        }
       })
       .catch((err) => {
         activeExportsRef.current.delete(exportId);
@@ -113,7 +129,6 @@ export function EncodingProvider({ children }) {
   }, [pushLog]);
 
   const _openWs = useCallback((jobId, clipId, clipTitle) => {
-    const exportId = `${jobId}_${clipId}`;
     if (wsRefs.current[jobId]) {
       return;
     }
@@ -125,11 +140,24 @@ export function EncodingProvider({ children }) {
     ws.onmessage = (evt) => {
       try {
         const msg = JSON.parse(evt.data);
+        // Coerce message to string to prevent React error #310
+        if (msg.message != null && typeof msg.message !== 'string') msg.message = String(msg.message);
         if (msg.type === 'status' && msg.status === 'exporting') {
+          // Update ALL encoding tasks for this job (not just one clip)
           setTasks((prev) => {
-            const task = prev[exportId];
-            if (!task) return prev;
-            return { ...prev, [exportId]: { ...task, message: msg.message || 'Encoding...' } };
+            const next = { ...prev };
+            let changed = false;
+            for (const key of Object.keys(next)) {
+              if (key.startsWith(`${jobId}_`) && next[key].status === 'encoding') {
+                next[key] = {
+                  ...next[key],
+                  message: msg.message || 'Encoding...',
+                  progress: msg.progress ?? next[key].progress ?? 0,
+                };
+                changed = true;
+              }
+            }
+            return changed ? next : prev;
           });
           pushLog('info', msg.message || 'Encoding...');
         } else if (msg.type === 'export_complete') {
@@ -149,17 +177,68 @@ export function EncodingProvider({ children }) {
             };
           });
           pushLog('success', msg.message || `Clip exported successfully`);
+          // Use the task's stored clipTitle (more reliable than closure-captured value
+          // since the WS may have been opened for a different clip on the same job)
+          const _completedTitle = (() => {
+            // Access tasks via setTasks to get current value
+            let t = null;
+            setTasks((prev) => { t = prev[completedExportId]; return prev; });
+            return t?.clipTitle || clipTitle || `Clip ${msg.clip_id}`;
+          })();
+          sendNotification('Export Complete', {
+            body: `${_completedTitle} is ready for download.`,
+            tag: `export-${jobId}-${msg.clip_id}`,
+          });
           if (msg.download_url && !recentDownloadsRef.current.has(msg.download_url)) {
             // Dedup: mark this URL so duplicate WS messages don't trigger
             // multiple browser downloads for the same file.
             recentDownloadsRef.current.add(msg.download_url);
             setTimeout(() => recentDownloadsRef.current.delete(msg.download_url), 10000);
-            const a = document.createElement('a');
-            a.href = msg.download_url;
-            a.download = '';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
+            // Auto-download: use a blob fetch so the browser saves
+            // immediately without a "Save As" dialog or title prompt.
+            // The download attribute with an explicit filename bypasses
+            // Content-Disposition: attachment which can trigger save dialogs.
+            const title = _completedTitle;
+            // Retrieve quality from the task object (stored at startExport time)
+            let exportQuality = '1080p';
+            setTasks((prev) => {
+              const task = prev[completedExportId];
+              if (task?.exportQuality) exportQuality = task.exportQuality;
+              return prev; // no mutation
+            });
+            const qualityTag = exportQuality.toUpperCase();
+            // Allow brackets in the regex so the [QUALITY] prefix survives
+            const safeName = title.replace(/[^a-zA-Z0-9_\-\s().\[\]]/g, '').trim() || 'clip';
+            const ext = (msg.download_url.split('.').pop() || 'mp4').split('?')[0];
+            const downloadName = `[${qualityTag}] ${safeName}.${ext}`;
+            fetch(msg.download_url)
+              .then((res) => {
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return res.blob();
+              })
+              .then((blob) => {
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = downloadName;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                setTimeout(() => URL.revokeObjectURL(url), 5000);
+                pushLog('info', `Auto-download started: ${downloadName}`);
+              })
+              .catch((err) => {
+                console.warn('[EncodingManager] Blob download failed, using direct link:', err);
+                pushLog('warning', `Blob download failed (${err.message}), trying direct link...`);
+                // Fallback: direct link click if blob fetch fails
+                const a = document.createElement('a');
+                a.href = msg.download_url;
+                a.download = downloadName;
+                a.target = '_blank';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+              });
           }
           _maybeCloseWs(jobId);
         } else if (msg.type === 'error') {
@@ -223,6 +302,7 @@ export function EncodingProvider({ children }) {
     ws.onmessage = (evt) => {
       try {
         const msg = JSON.parse(evt.data);
+        if (msg.message != null && typeof msg.message !== 'string') msg.message = String(msg.message);
         if (msg.type === 'status') {
           const level = msg.status === 'failed' ? 'error' : 'status';
           pushLog(level, `[${label}] ${msg.message || `Status: ${msg.status}`}`, {

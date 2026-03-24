@@ -67,13 +67,28 @@ DEFAULT_VIRAL_CLIP_PROMPT = (
     "viral-worthy, attention-grabbing moments in long-form content. Your job is "
     "to find segments that will perform best on TikTok, YouTube Shorts, and "
     "Instagram Reels.\n\n"
+    "DETECTION METHODOLOGY (follow this two-phase process):\n\n"
+    "PHASE 1 — SCAN: Read through the transcript and scene descriptions chronologically. "
+    "Identify ALL potential clip-worthy moments. Look for:\n"
+    " - Transcript energy spikes (exclamations, questions, rapid exchanges, laughter)\n"
+    " - High-importance visual moments (score 7+ in scene descriptions, marked with ★)\n"
+    " - Moments where strong dialogue COINCIDES with strong visuals\n"
+    " - Natural story arcs: setup → tension → payoff within a contained segment\n"
+    " - Speaker changes that mark the start or end of a distinct exchange\n\n"
+    "PHASE 2 — EVALUATE each candidate moment:\n"
+    " - Hook Test: Would the first 3 seconds make someone stop scrolling?\n"
+    " - Standalone Test: Does this clip make sense WITHOUT the rest of the video?\n"
+    " - Completion Test: Does the clip have a beginning, middle, and end?\n"
+    " - Coherence Test: Does the clip stay in ONE scene, ONE topic, ONE exchange?\n"
+    " - Share Test: Would someone send this to a friend or repost it?\n\n"
     "WHAT MAKES A VIRAL CLIP:\n"
     "- Strong hook in the first 3 seconds (question, bold claim, visual spectacle)\n"
     "- Emotional peaks: laughter, shock, awe, heartfelt moments\n"
     "- Visual spectacle: stunning visuals, cool effects, dramatic reveals\n"
     "- Quotable/shareable statements or hot takes\n"
     "- Complete micro-stories with setup + payoff\n"
-    "- Reaction-worthy moments that make viewers comment or share\n\n"
+    "- Reaction-worthy moments that make viewers comment or share\n"
+    "- When a visual peak (★ scene) coincides with strong transcript content, score that clip higher\n\n"
     "SCENE & SUBJECT COHERENCE (CRITICAL):\n"
     "- The main subject or speaker MUST stay in focus throughout the entire clip\n"
     "- NEVER cut across unrelated scenes or topics — the clip must feel like ONE moment\n"
@@ -81,9 +96,40 @@ DEFAULT_VIRAL_CLIP_PROMPT = (
     "- Avoid clips that start on one topic/scene and drift into a completely different one\n"
     "- The visual setting should remain consistent — don't span across location changes\n"
     "- Prefer segments where the camera stays on the main action without jarring cuts\n"
-    "- If scene descriptions show different settings at different timestamps, do NOT combine them into one clip"
+    "- If scene descriptions show different settings at different timestamps, do NOT combine them into one clip\n\n"
+    "BOUNDARY RULES:\n"
+    "- Start at natural speech boundaries — beginning of a sentence, after a pause, at a speaker change\n"
+    "- End at natural conclusions — punchlines, resolved thoughts, scene transitions\n"
+    "- Must work standalone without context from the full video"
 )
 
+
+DEFAULT_SUMMARY_PROMPT = (
+    "You are summarizing a video for a human audience. Write like a real person — "
+    "not a robot, not a press release. The summary should feel like something a "
+    "friend would say if you asked 'what was that video about?'\n\n"
+    "Based on the transcript and scene descriptions below, generate:\n\n"
+    "1. OVERVIEW — A natural, conversational paragraph (2-4 sentences) describing "
+    "what happens in the video. Mention the people, topics, and key moments. "
+    "Write in plain English — no jargon, no bullet points, no timestamps.\n"
+    "   Good: \"Two friends taste-test fast food burgers and get into a heated "
+    "debate about whether In-N-Out is overrated. Things get funny when one of "
+    "them accidentally spills sauce everywhere.\"\n"
+    "   Bad: \"This video features content creators engaging in a comparative "
+    "analysis of quick-service restaurant products.\"\n\n"
+    "2. KEY_TOPICS — 3-6 short, specific topics discussed or shown in the video. "
+    "Use natural phrases a person would say, not SEO keywords.\n"
+    "   Good: [\"fast food taste test\", \"In-N-Out vs Five Guys\", \"sauce disaster\"]\n"
+    "   Bad: [\"food\", \"review\", \"content\", \"discussion\"]\n\n"
+    "3. TONE — One or two words describing the vibe (e.g. \"funny and casual\", "
+    "\"serious\", \"educational\", \"chaotic energy\", \"wholesome\")\n\n"
+    "4. ESTIMATED_AUDIENCE — Who would watch this? Be specific.\n"
+    "   Good: \"foodies and fast food fans\"\n"
+    "   Bad: \"general\"\n\n"
+    "5. CONTENT_CATEGORY — A specific category.\n"
+    "   Good: \"food review\", \"tech unboxing\", \"comedy sketch\", \"fitness tutorial\"\n"
+    "   Bad: \"entertainment\", \"uncategorized\"\n"
+)
 
 DEFAULT_SEO_PROMPT = (
     "You write social media captions and tags like a real person — not a marketer, "
@@ -114,6 +160,8 @@ class PromptSet(BaseModel):
     frame_analysis: str = Field(default=DEFAULT_FRAME_ANALYSIS_PROMPT)
     viral_clip_detection: str = Field(default=DEFAULT_VIRAL_CLIP_PROMPT)
     subject_tracking: str = Field(default=DEFAULT_SUBJECT_TRACKING_PROMPT)
+    summary: str = Field(default=DEFAULT_SUMMARY_PROMPT)
+    seo: str = Field(default=DEFAULT_SEO_PROMPT)
 
 
 def load_prompts() -> PromptSet:
@@ -141,4 +189,6 @@ def get_defaults() -> PromptSet:
         frame_analysis=DEFAULT_FRAME_ANALYSIS_PROMPT,
         viral_clip_detection=DEFAULT_VIRAL_CLIP_PROMPT,
         subject_tracking=DEFAULT_SUBJECT_TRACKING_PROMPT,
+        summary=DEFAULT_SUMMARY_PROMPT,
+        seo=DEFAULT_SEO_PROMPT,
     )

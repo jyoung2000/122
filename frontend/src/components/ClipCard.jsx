@@ -151,7 +151,7 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
         <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
           <div style={{ textAlign: 'right' }}>
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, color: clip.clip_focus ? 'var(--success)' : scoreColor }}>
-              {clip.viral_score}
+              {typeof clip.viral_score === 'number' ? clip.viral_score : String(clip.viral_score ?? '')}
             </div>
             <div style={{ fontSize: 10, color: clip.clip_focus ? 'var(--success)' : 'var(--text-secondary)', textTransform: 'uppercase' }}>
               {clip.clip_focus ? 'FOCUS' : '/100'}
@@ -240,7 +240,7 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
           onMouseEnter={(e) => { if (jobId && onTimesChanged) e.currentTarget.style.borderBottomColor = 'var(--accent-cyan)'; }}
           onMouseLeave={(e) => { e.currentTarget.style.borderBottomColor = 'transparent'; }}
         >
-          {clip.title}
+          {String(clip.title || '')}
         </h4>
       )}
 
@@ -321,16 +321,16 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
         {!editingTimes && (
           <>
             <span className={`badge ${clip.platform === 'tiktok' ? 'badge-cyan' : clip.platform === 'youtube_shorts' ? 'badge-red' : 'badge-gray'}`}>
-              {clip.platform.replace('_', ' ')}
+              {String(clip.platform || '').replace('_', ' ')}
             </span>
-            <span className="badge badge-gray">{clip.clip_type}</span>
+            <span className="badge badge-gray">{String(clip.clip_type || '')}</span>
             {clip.clip_focus && (
               <span className="badge" style={{
                 background: 'var(--success-dim, rgba(52,199,89,0.12))',
                 color: 'var(--success)',
                 border: '1px solid var(--success)',
               }}>
-                Focus: {clip.clip_focus}
+                Focus: {String(clip.clip_focus || '')}
               </span>
             )}
           </>
@@ -351,17 +351,17 @@ export default function ClipCard({ clip, jobId, isBest, onPreview, onExport, onD
 
       <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 8 }}>
         <div style={{ marginBottom: 4 }}>
-          <strong style={{ color: 'var(--text-primary)' }}>Caption:</strong> {clip.suggested_caption}
+          <strong style={{ color: 'var(--text-primary)' }}>Caption:</strong> {String(clip.suggested_caption || '')}
         </div>
         <div style={{ marginBottom: 4 }}>
-          <strong style={{ color: 'var(--text-primary)' }}>Hook:</strong> {clip.hook_text}
+          <strong style={{ color: 'var(--text-primary)' }}>Hook:</strong> {String(clip.hook_text || '')}
         </div>
         <div style={{ marginBottom: 4 }}>
-          <strong style={{ color: 'var(--text-primary)' }}>Why it works:</strong> {clip.why_this_works}
+          <strong style={{ color: 'var(--text-primary)' }}>Why it works:</strong> {String(clip.why_this_works || '')}
         </div>
         {clip.viral_score_reasoning && (
           <div>
-            <strong style={{ color: 'var(--text-primary)' }}>Score reasoning:</strong> {clip.viral_score_reasoning}
+            <strong style={{ color: 'var(--text-primary)' }}>Score reasoning:</strong> {String(clip.viral_score_reasoning || '')}
           </div>
         )}
       </div>

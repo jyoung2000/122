@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 
 MAX_DIMENSION = 1568
 
+# After this many seconds with 0 frames produced, kill FFmpeg and retry
+# with a fallback strategy (no GPU / no scene detection).
+_STALL_TIMEOUT = 30   # Kill extraction if 0 frames after 30s (was 45)
+
 
 async def _run_subprocess_cancellable(
     cmd: list[str],
@@ -101,6 +105,28 @@ async def get_video_metadata(video_path: str) -> dict:
     if video_stream:
         w = video_stream.get("width", 0)
         h = video_stream.get("height", 0)
+
+        # Account for non-square pixels (SAR != 1:1).  Many cameras and
+        # encoding tools produce videos where coded dimensions differ from
+        # the actual display dimensions.  FFprobe reports SAR as "N:M";
+        # the display width = coded_width * (SAR_num / SAR_den).
+        sar_str = video_stream.get("sample_aspect_ratio", "1:1")
+        try:
+            sar_parts = sar_str.split(":")
+            sar_num = int(sar_parts[0])
+            sar_den = int(sar_parts[1]) if len(sar_parts) > 1 else 1
+            if sar_num > 0 and sar_den > 0 and sar_num != sar_den:
+                display_w = round(w * sar_num / sar_den)
+                # Ensure even dimensions for video encoding
+                display_w = display_w - (display_w % 2)
+                logger.info(
+                    "SAR correction: coded=%dx%d, SAR=%s, display=%dx%d",
+                    w, h, sar_str, display_w, h,
+                )
+                w = display_w
+        except (ValueError, IndexError, ZeroDivisionError):
+            pass  # Malformed SAR — keep coded dimensions
+
         resolution = f"{w}x{h}"
         r_frame_rate = video_stream.get("r_frame_rate", "0/1")
         try:
@@ -109,37 +135,96 @@ async def get_video_metadata(video_path: str) -> dict:
         except (ValueError, ZeroDivisionError):
             fps = 0.0
 
+    # Extract codec info for GPU compatibility checks
+    codec_name = ""
+    pix_fmt = ""
+    if video_stream:
+        codec_name = video_stream.get("codec_name", "")
+        pix_fmt = video_stream.get("pix_fmt", "")
+
     return {
         "duration": duration,
         "resolution": resolution,
         "fps": fps,
         "file_size_mb": file_size_mb,
+        "codec_name": codec_name,
+        "pix_fmt": pix_fmt,
     }
 
 
-async def extract_frames(
+def _build_scene_filter(rate: int) -> str:
+    """Build the hybrid scene detection + interval filter string.
+
+    Adaptive scene threshold: for long videos with high sample rates,
+    raise the threshold to avoid scene detection overwhelming the interval cap.
+    Standard rate=10 uses threshold 0.3.
+    rate=30+ uses threshold 0.45 (only major scene changes).
+    """
+    if rate >= 30:
+        threshold = 0.45  # Only major scene changes for long videos
+    elif rate >= 20:
+        threshold = 0.38
+    else:
+        threshold = 0.3  # Default for short/medium videos
+
+    return (
+        f"select='gt(scene\\,{threshold})+isnan(prev_selected_t)"
+        f"+gte(t-prev_selected_t\\,{rate})',"
+        f"scale='min(1024\\,iw)':'min(576\\,ih)':force_original_aspect_ratio=decrease,"
+        f"format=pix_fmts=yuvj420p"
+    )
+
+
+def _build_interval_filter(rate: int) -> str:
+    """Build a simple interval-only filter (no scene detection)."""
+    return (
+        f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{rate})',"
+        f"scale='min(1024\\,iw)':'min(576\\,ih)':force_original_aspect_ratio=decrease,"
+        f"format=pix_fmts=yuvj420p"
+    )
+
+
+def _get_gpu_decode_args() -> list[str]:
+    """Get GPU hardware decode args, logging any failures."""
+    try:
+        from backend.services.clip_exporter import _gpu_decode_args_for_filter
+        args = _gpu_decode_args_for_filter()
+        if args:
+            logger.info("GPU decode args for frame extraction: %s", " ".join(args))
+        return args
+    except Exception as e:
+        logger.warning("GPU decode args failed (falling back to CPU): %s", e)
+        return []
+
+
+async def _run_ffmpeg_extraction(
     video_path: str,
     output_dir: str,
-    sample_rate: Optional[int] = None,
-    cancel_check: Optional[Callable] = None,
-    progress_callback: Optional[Callable] = None,
-) -> list[FrameData]:
-    """Extract frames from video at given sample rate using FFmpeg."""
-    rate = sample_rate or settings.FRAME_SAMPLE_RATE
-    os.makedirs(output_dir, exist_ok=True)
+    vf_filter: str,
+    hw_dec: list[str],
+    cancel_check: Optional[Callable],
+    progress_callback: Optional[Callable],
+    label: str,
+) -> tuple[int, bytes]:
+    """Run a single FFmpeg extraction attempt with stall detection.
 
+    Returns (returncode, stderr).  Kills the process early if no frames
+    appear within _STALL_TIMEOUT seconds.
+    """
     cmd = [
         "ffmpeg", "-y",
         "-threads", "0",
+        *hw_dec,
         "-i", video_path,
-        "-an",  # skip audio decoding — only extracting video frames
-        "-vf", f"fps=1/{rate},scale='min(1024,iw)':'min(576,ih)':force_original_aspect_ratio=decrease",
+        "-an",
+        "-vf", vf_filter,
+        "-vsync", "vfr",
         "-q:v", "12",
+        "-frame_pts", "1",
         os.path.join(output_dir, "frame_%06d.jpg"),
     ]
 
-    logger.info("FFmpeg frame extraction command: %s", " ".join(cmd))
-    # Use a custom runner that also monitors output frame count for progress
+    logger.info("FFmpeg frame extraction (%s): %s", label, " ".join(cmd))
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -147,22 +232,41 @@ async def extract_frames(
     )
     comm_task = asyncio.ensure_future(proc.communicate())
 
-    # Poll for cancellation + progress while ffmpeg runs
     poll_count = 0
+    stall_polls = 0  # consecutive polls with 0 frames
     try:
         while not comm_task.done():
             await asyncio.sleep(1.0)
             poll_count += 1
             if cancel_check and not comm_task.done():
                 cancel_check()
-            # Report progress based on frames written so far
-            if progress_callback and poll_count % 3 == 0:
+            # Check frame count every 3 seconds
+            if poll_count % 3 == 0:
                 try:
                     frames_so_far = len([
                         f for f in os.listdir(output_dir)
                         if f.startswith("frame_") and f.endswith(".jpg")
                     ])
-                    await progress_callback(frames_so_far)
+                    if progress_callback:
+                        await progress_callback(frames_so_far)
+                    # Stall detection: if 0 frames for too long, abort
+                    if frames_so_far == 0:
+                        stall_polls += 1
+                        elapsed_stall = stall_polls * 3
+                        if elapsed_stall >= _STALL_TIMEOUT:
+                            logger.warning(
+                                "FFmpeg stall detected (%s): 0 frames after %ds — aborting",
+                                label, elapsed_stall,
+                            )
+                            proc.terminate()
+                            try:
+                                await asyncio.wait_for(proc.wait(), timeout=5.0)
+                            except asyncio.TimeoutError:
+                                proc.kill()
+                            comm_task.cancel()
+                            return -1, b"stall: 0 frames produced"
+                    else:
+                        stall_polls = 0  # reset once frames start appearing
                 except Exception:
                     pass
         _, stderr = comm_task.result()
@@ -175,21 +279,284 @@ async def extract_frames(
         comm_task.cancel()
         raise
 
-    if proc.returncode != 0:
-        logger.error(f"FFmpeg frame extraction failed: {stderr.decode()}")
+    return proc.returncode, stderr
+
+
+async def extract_frames(
+    video_path: str,
+    output_dir: str,
+    sample_rate: Optional[int] = None,
+    cancel_check: Optional[Callable] = None,
+    progress_callback: Optional[Callable] = None,
+    max_frames: Optional[int] = None,
+    video_duration: Optional[float] = None,
+    video_codec: Optional[str] = None,
+) -> list[FrameData]:
+    """Extract frames using scene detection + minimum interval fallback.
+
+    Strategy:
+    1. Scene detection (threshold 0.3) captures visual transitions
+    2. Minimum interval ensures coverage during static scenes
+    3. Maximum frame cap prevents API cost explosion on long videos
+    4. Adaptive frame count scales with video duration
+
+    Fallback chain (if earlier attempts produce 0 frames):
+    1. GPU decode + scene detection filter
+    2. CPU decode + scene detection filter (GPU may be incompatible)
+    3. CPU decode + interval-only filter (scene detection may be failing)
+    """
+    # Adaptive max_frames — no upper ceiling. Guarantees at least 3 frames/min
+    # for any video length, with 6 frames/min for shorter content:
+    #   0-60 min:  6 frames/min  (e.g. 10 min → 60, 60 min → 360)
+    #   60+ min:   3 frames/min  (e.g. 120 min → 540, 3 hrs → 720)
+    if max_frames is None:
+        if video_duration and video_duration > 0:
+            minutes = video_duration / 60
+            if minutes <= 60:
+                target = int(minutes * settings.FRAMES_PER_MINUTE)  # 6/min
+            else:
+                target = int(60 * settings.FRAMES_PER_MINUTE + (minutes - 60) * 3)
+            max_frames = max(settings.MIN_FRAMES, target)
+        else:
+            max_frames = 60  # fallback
+
+    rate = sample_rate or settings.FRAME_SAMPLE_RATE
+
+    # For long videos (>30 min), enforce a minimum 30s interval to avoid
+    # extracting 400+ frames that overwhelm vision analysis downstream.
+    # 113-min video: 1 frame/30s ≈ 226 frames (vs 472 at 1/14.4s).
+    if video_duration and video_duration > 1800 and rate < 30:
+        logger.info(
+            "Long video (%.0fs) — raising frame interval from %ds to 30s",
+            video_duration, rate,
+        )
+        rate = 30
+
+    # Adjust sample rate to avoid over-extraction (extracting 100+ frames then
+    # discarding 40% wastes I/O time). Scene detection adds ~30-40% bonus
+    # frames on top of interval-based frames, so set the interval so that
+    # total (interval + scene) ≈ max_frames.
+    if video_duration and video_duration > 0:
+        ideal_rate = int(video_duration * 1.35 / max_frames)
+        if ideal_rate > rate:
+            logger.info(
+                "Adaptive frame rate: default=%ds, ideal=%ds (%.0fs video, %d max frames)",
+                rate, ideal_rate, video_duration, max_frames,
+            )
+            rate = ideal_rate
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Get GPU decode args — but only if the codec is hardware-supported.
+    # NVIDIA NVDEC codec support by GPU generation:
+    #   All: h264, hevc, vp8, vp9, mpeg1video, mpeg2video, mpeg4, vc1
+    #   RTX 30xx+: av1
+    # When the codec isn't supported, skip GPU decode entirely to avoid
+    # FFmpeg churning through per-frame CUDA failures for minutes.
+    _NVDEC_SUPPORTED_CODECS = {
+        "h264", "hevc", "h265", "vp8", "vp9",
+        "mpeg1video", "mpeg2video", "mpeg4", "vc1",
+    }
+    _hw_dec = []
+    codec_lower = (video_codec or "").lower()
+    if codec_lower and codec_lower not in _NVDEC_SUPPORTED_CODECS:
+        logger.info(
+            "Skipping GPU decode: codec '%s' not in NVDEC supported set %s",
+            codec_lower, _NVDEC_SUPPORTED_CODECS,
+        )
+    else:
+        _hw_dec = _get_gpu_decode_args()
+        if _hw_dec and codec_lower:
+            logger.info("GPU decode enabled for codec '%s'", codec_lower)
+
+    scene_filter = _build_scene_filter(rate)
+    interval_filter = _build_interval_filter(rate)
+
+    # Build fallback chain: try progressively simpler extraction strategies
+    attempts = []
+    if _hw_dec:
+        # Attempt 1: GPU decode + scene detection
+        attempts.append((_hw_dec, scene_filter, "GPU+scene"))
+    # Attempt 2 (or 1 if no GPU): CPU decode + scene detection
+    attempts.append(([], scene_filter, "CPU+scene"))
+    # Attempt 3: CPU decode + interval-only (no scene detection at all)
+    attempts.append(([], interval_filter, "CPU+interval"))
+
+    # Quick-test GPU decode: if GPU args are present, run a 5-second probe
+    # to verify the GPU can actually decode this codec. This prevents the
+    # main extraction from churning for minutes on unsupported codecs that
+    # slip past the NVDEC_SUPPORTED_CODECS check.
+    if _hw_dec and attempts[0][2] == "GPU+scene":
+        quick_test_filter = _build_interval_filter(2)  # 1 frame every 2s
+        quick_cmd = [
+            "ffmpeg", "-y", "-threads", "0",
+            *_hw_dec,
+            "-t", "5",  # Only process first 5 seconds
+            "-i", video_path,
+            "-an", "-vf", quick_test_filter,
+            "-vsync", "vfr", "-q:v", "12",
+            os.path.join(output_dir, "gpu_test_%06d.jpg"),
+        ]
+        logger.info("GPU quick-test: probing first 5s with %s", " ".join(_hw_dec))
+        try:
+            qt_proc = await asyncio.create_subprocess_exec(
+                *quick_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, qt_stderr = await asyncio.wait_for(qt_proc.communicate(), timeout=15)
+            qt_frames = len([
+                f for f in os.listdir(output_dir)
+                if f.startswith("gpu_test_") and f.endswith(".jpg")
+            ])
+            # Clean up test frames
+            for f in os.listdir(output_dir):
+                if f.startswith("gpu_test_"):
+                    try:
+                        os.remove(os.path.join(output_dir, f))
+                    except OSError:
+                        pass
+
+            if qt_frames == 0 or qt_proc.returncode != 0:
+                stderr_preview = qt_stderr.decode(errors='replace')[:200] if qt_stderr else ""
+                logger.warning(
+                    "GPU quick-test failed: %d frames, rc=%d, stderr=%s — removing GPU from fallback chain",
+                    qt_frames, qt_proc.returncode, stderr_preview,
+                )
+                # Remove the GPU attempt from the chain
+                attempts = [a for a in attempts if a[2] != "GPU+scene"]
+            else:
+                logger.info("GPU quick-test passed: %d frames in 5s", qt_frames)
+        except asyncio.TimeoutError:
+            logger.warning("GPU quick-test timed out after 15s — removing GPU from fallback chain")
+            attempts = [a for a in attempts if a[2] != "GPU+scene"]
+            # Kill the timed-out process
+            try:
+                qt_proc.terminate()
+                await asyncio.wait_for(qt_proc.wait(), timeout=5)
+            except Exception:
+                qt_proc.kill()
+        except Exception as e:
+            logger.warning("GPU quick-test error: %s — removing GPU from fallback chain", e)
+            attempts = [a for a in attempts if a[2] != "GPU+scene"]
+
+    returncode = -1
+    stderr = b""
+    for hw_args, vf_filter, label in attempts:
+        # Clean up any frames from previous failed attempt
+        for old_frame in os.listdir(output_dir):
+            if old_frame.startswith("frame_") and old_frame.endswith(".jpg"):
+                try:
+                    os.remove(os.path.join(output_dir, old_frame))
+                except OSError:
+                    pass
+
+        returncode, stderr = await _run_ffmpeg_extraction(
+            video_path, output_dir, vf_filter, hw_args,
+            cancel_check, progress_callback, label,
+        )
+
+        # Check if this attempt produced frames
+        frame_count = len([
+            f for f in os.listdir(output_dir)
+            if f.startswith("frame_") and f.endswith(".jpg")
+        ])
+
+        if returncode == 0 and frame_count > 0:
+            logger.info(
+                "Frame extraction succeeded (%s): %d frames",
+                label, frame_count,
+            )
+            break
+
+        # Log the failure and try next strategy
+        if returncode == -1:
+            logger.warning(
+                "Frame extraction stalled (%s): 0 frames after %ds, trying next strategy",
+                label, _STALL_TIMEOUT,
+            )
+        elif returncode != 0:
+            logger.warning(
+                "Frame extraction failed (%s, rc=%d): %s — trying next strategy",
+                label, returncode, stderr.decode()[:300],
+            )
+        else:
+            logger.warning(
+                "Frame extraction produced 0 frames (%s, rc=0) — trying next strategy",
+                label,
+            )
+
+    if returncode != 0 and returncode != -1:
+        logger.error(f"FFmpeg frame extraction failed (all strategies): {stderr.decode()}")
         raise RuntimeError(f"FFmpeg failed: {stderr.decode()[:500]}")
 
-    # Collect extracted frames
+    # Collect extracted frames with actual timestamps from PTS
     frames = []
     frame_files = sorted(
         f for f in os.listdir(output_dir) if f.startswith("frame_") and f.endswith(".jpg")
     )
+
+    if not frame_files:
+        raise RuntimeError(
+            "FFmpeg extracted 0 frames from the video. The file may be too short, "
+            "contain only audio, or use an unsupported codec."
+        )
+
+    # If we got more frames than max, keep the most evenly spaced subset
+    was_capped = False
+    if len(frame_files) > max_frames:
+        original_count = len(frame_files)
+        step = len(frame_files) / max_frames
+        indices = [int(i * step) for i in range(max_frames)]
+        frame_files = [frame_files[i] for i in indices]
+        was_capped = True
+        logger.info("Capped frames from %d to %d", original_count, max_frames)
+
     for idx, fname in enumerate(frame_files):
         path = os.path.join(output_dir, fname)
-        timestamp = idx * rate
+        # For capped frames with known duration, estimate timestamps proportionally
+        if was_capped and video_duration and video_duration > 0:
+            timestamp = (idx / max(len(frame_files) - 1, 1)) * video_duration
+        else:
+            timestamp = idx * rate  # Fallback; will be refined below
         frames.append(FrameData(timestamp=float(timestamp), path=path))
 
-    logger.info("Frame extraction complete: %d frames from %s", len(frames), video_path)
+    # Refine timestamps using ffprobe on extracted frames (concurrent)
+    # Skip for large frame counts (>80) to avoid spawning too many ffprobe processes
+    async def _probe_frame_pts(frame_path: str) -> float | None:
+        probe_cmd = [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "frame=pts_time",
+            "-of", "csv=p=0", frame_path,
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *probe_cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+            if stdout.strip():
+                return float(stdout.strip())
+        except (asyncio.TimeoutError, ValueError, Exception):
+            pass
+        return None
+
+    if len(frames) <= 80:
+        try:
+            pts_results = await asyncio.gather(
+                *(_probe_frame_pts(frame.path) for frame in frames),
+                return_exceptions=True,
+            )
+            for frame, pts in zip(frames, pts_results):
+                if isinstance(pts, float):
+                    frame.timestamp = pts
+        except Exception as e:
+            logger.warning("Could not refine frame timestamps: %s", e)
+    else:
+        logger.info("Skipping per-frame ffprobe PTS refinement for %d frames (>80)", len(frames))
+
+    logger.info(
+        "Scene-aware extraction complete: %d frames from %s (scene detection + %ds interval)",
+        len(frames), video_path, rate,
+    )
     return frames
 
 

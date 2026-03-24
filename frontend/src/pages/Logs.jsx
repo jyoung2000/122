@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import useEncodingManager from '../hooks/useEncodingManager';
 import useResponsive from '../hooks/useResponsive';
+import ProgressBar from '../components/ProgressBar';
 
 function formatTime(ts) {
   if (!ts) return '';
@@ -93,22 +94,28 @@ export default function Logs() {
     setAllocationLoading(false);
   }, []);
 
-  const handleForceStop = async (jobId) => {
-    setForceActioning((p) => ({ ...p, [jobId]: 'stopping' }));
+  const handleForceStop = async (job) => {
+    const key = job.export_key || job.job_id;
+    setForceActioning((p) => ({ ...p, [key]: 'stopping' }));
     try {
-      await fetch(`/api/jobs/${jobId}/cancel`, { method: 'POST' });
+      if (job.type === 'export' && job.clip_id != null) {
+        await fetch(`/api/jobs/${job.job_id}/cancel-export/${job.clip_id}`, { method: 'POST' });
+      } else {
+        await fetch(`/api/jobs/${job.job_id}/cancel`, { method: 'POST' });
+      }
       await fetchAllocation();
     } catch {}
-    setForceActioning((p) => ({ ...p, [jobId]: null }));
+    setForceActioning((p) => ({ ...p, [key]: null }));
   };
 
-  const handleForceFail = async (jobId) => {
-    setForceActioning((p) => ({ ...p, [jobId]: 'failing' }));
+  const handleForceFail = async (job) => {
+    const key = job.export_key || job.job_id;
+    setForceActioning((p) => ({ ...p, [key]: 'failing' }));
     try {
-      await fetch(`/api/jobs/${jobId}/force-fail`, { method: 'POST' });
+      await fetch(`/api/jobs/${job.job_id}/force-fail`, { method: 'POST' });
       await fetchAllocation();
     } catch {}
-    setForceActioning((p) => ({ ...p, [jobId]: null }));
+    setForceActioning((p) => ({ ...p, [key]: null }));
   };
 
   // Tick to update elapsed time displays
@@ -428,8 +435,13 @@ export default function Logs() {
                         )}
                       </div>
                       <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                        {task.message}
+                        {typeof task.message === 'string' ? task.message : String(task.message ?? '')}
                       </div>
+                      {task.progress != null && task.status === 'encoding' && (
+                        <div style={{ marginTop: 4 }}>
+                          <ProgressBar progress={task.progress} variant="amber" />
+                        </div>
+                      )}
                     </div>
                     <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', flexShrink: 0 }}>
                       {elapsed(task.startedAt)}
@@ -528,7 +540,12 @@ export default function Logs() {
                             {task.exportQuality.toUpperCase()}
                           </span>
                         )}
-                        <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 8 }}>{task.message}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 8 }}>{typeof task.message === 'string' ? task.message : String(task.message ?? '')}</span>
+                        {task.progress != null && task.status === 'encoding' && (
+                          <div style={{ marginTop: 4 }}>
+                            <ProgressBar progress={task.progress} variant="amber" />
+                          </div>
+                        )}
                       </div>
                       {task.downloadUrl && (
                         <a
@@ -1009,7 +1026,7 @@ export default function Logs() {
                     color: LOG_LEVEL_COLORS[entry.level] || 'var(--text-secondary)',
                     wordBreak: 'break-word',
                   }}>
-                    {entry.message}
+                    {typeof entry.message === 'string' ? entry.message : String(entry.message ?? '')}
                   </span>
                 </div>
               ))
@@ -1110,28 +1127,28 @@ export default function Logs() {
                   )}
                   <div style={{ display: 'flex', gap: 8 }}>
                     <button
-                      onClick={() => handleForceStop(job.job_id)}
-                      disabled={!!forceActioning[job.job_id]}
+                      onClick={() => handleForceStop(job)}
+                      disabled={!!forceActioning[job.export_key || job.job_id]}
                       style={{
                         padding: '5px 12px', fontSize: 11, fontWeight: 600,
                         background: 'var(--amber-dim)', border: '1px solid var(--accent-amber)',
                         color: 'var(--accent-amber)', borderRadius: 'var(--radius-sm)',
-                        opacity: forceActioning[job.job_id] ? 0.5 : 1,
+                        opacity: forceActioning[job.export_key || job.job_id] ? 0.5 : 1,
                       }}
                     >
-                      {forceActioning[job.job_id] === 'stopping' ? 'Stopping...' : 'Force Stop'}
+                      {forceActioning[job.export_key || job.job_id] === 'stopping' ? 'Stopping...' : 'Force Stop'}
                     </button>
                     <button
-                      onClick={() => handleForceFail(job.job_id)}
-                      disabled={!!forceActioning[job.job_id]}
+                      onClick={() => handleForceFail(job)}
+                      disabled={!!forceActioning[job.export_key || job.job_id]}
                       style={{
                         padding: '5px 12px', fontSize: 11, fontWeight: 600,
                         background: 'var(--danger-dim)', border: '1px solid var(--danger)',
                         color: 'var(--danger)', borderRadius: 'var(--radius-sm)',
-                        opacity: forceActioning[job.job_id] ? 0.5 : 1,
+                        opacity: forceActioning[job.export_key || job.job_id] ? 0.5 : 1,
                       }}
                     >
-                      {forceActioning[job.job_id] === 'failing' ? 'Failing...' : 'Force Fail'}
+                      {forceActioning[job.export_key || job.job_id] === 'failing' ? 'Failing...' : 'Force Fail'}
                     </button>
                   </div>
                 </div>

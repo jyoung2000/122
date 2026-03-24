@@ -4,7 +4,7 @@ import logging
 import os
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -48,12 +48,17 @@ async def get_job(job_id: str):
     job = await database.load_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    return job.model_dump(mode="json")
+    data = job.model_dump(mode="json")
+    # Safety: ensure status is always a plain string (not enum remnant)
+    if "status" in data and not isinstance(data["status"], str):
+        data["status"] = str(data["status"])
+    return data
 
 
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_job(job_id: str):
-    """Cancel a running or queued job."""
+    """Cancel a running or queued job. Also cancels active exports/clip-generation
+    for jobs that are already in a terminal state."""
     job = await database.load_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -64,6 +69,33 @@ async def cancel_job(job_id: str):
 
     terminal = (JobStatus.COMPLETE, JobStatus.FAILED)
     if job.status in terminal:
+        # Job is terminal, but there may be active exports or clip tasks —
+        # try to cancel those before rejecting.
+        from backend.routers.clips import _active_export_tasks, _export_cancel_events
+        from backend.routers.clips import _active_clip_tasks, _clip_cancel_events
+
+        cancelled_something = False
+
+        cancel_evt = _clip_cancel_events.get(job_id)
+        if cancel_evt:
+            cancel_evt.set()
+        clip_task = _active_clip_tasks.pop(job_id, None)
+        if clip_task and not clip_task.done():
+            clip_task.cancel()
+            cancelled_something = True
+
+        for key in list(_active_export_tasks.keys()):
+            if key.startswith(f"{job_id}_"):
+                evt = _export_cancel_events.get(key)
+                if evt:
+                    evt.set()
+                t = _active_export_tasks.pop(key, None)
+                if t and not t.done():
+                    t.cancel()
+                    cancelled_something = True
+
+        if cancelled_something:
+            return {"job_id": job_id, "status": "cancelled"}
         raise HTTPException(status_code=409, detail=f"Job is already {job.status}")
 
     # For queued jobs not yet running, mark cancelled directly
@@ -172,9 +204,41 @@ async def rename_speakers(job_id: str, req: SpeakerRenameRequest):
 
 # --- Transcript editing ---
 
+class BulkUpdateSpeakerRequest(BaseModel):
+    segment_indices: list[int]
+    speaker: str
+
+
+@router.put("/jobs/{job_id}/transcript/bulk-update-speaker")
+async def bulk_update_speaker(job_id: str, req: BulkUpdateSpeakerRequest):
+    """Update the speaker for multiple transcript segments at once."""
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.transcript:
+        raise HTTPException(status_code=404, detail="No transcript")
+
+    updated = []
+    for idx in req.segment_indices:
+        if idx < 0 or idx >= len(job.transcript):
+            continue
+        seg = job.transcript[idx]
+        if isinstance(seg, dict):
+            seg = TranscriptSegment(**seg)
+        seg = seg.model_copy(update={"speaker": req.speaker})
+        job.transcript[idx] = seg
+        updated.append(idx)
+
+    if updated:
+        await database.save_job(job)
+    return {"job_id": job_id, "updated_indices": updated, "speaker": req.speaker}
+
+
 class UpdateTranscriptSegmentRequest(BaseModel):
     text: str | None = None
     speaker: str | None = None
+    start: float | None = None
+    end: float | None = None
 
 
 @router.put("/jobs/{job_id}/transcript/{segment_index}")
@@ -194,11 +258,15 @@ async def update_transcript_segment(job_id: str, segment_index: int, req: Update
         updates["text"] = req.text
     if req.speaker is not None:
         updates["speaker"] = req.speaker
+    if req.start is not None:
+        updates["start"] = req.start
+    if req.end is not None:
+        updates["end"] = req.end
     if updates:
         seg = seg.model_copy(update=updates)
         job.transcript[segment_index] = seg
         await database.save_job(job)
-    return {"job_id": job_id, "segment_index": segment_index, "text": seg.text, "speaker": seg.speaker}
+    return {"job_id": job_id, "segment_index": segment_index, "text": seg.text, "speaker": seg.speaker, "start": seg.start, "end": seg.end}
 
 
 @router.delete("/jobs/{job_id}/transcript/{segment_index}")
@@ -372,6 +440,68 @@ async def refresh_word_timestamps(job_id: str):
     }
 
 
+# --- Post-processing diarization ---
+
+class DiarizeRequest(BaseModel):
+    num_speakers: int = 0  # 0 = auto-detect, >0 = exact count
+
+
+@router.post("/jobs/{job_id}/diarize")
+async def diarize_job(job_id: str, req: DiarizeRequest):
+    """Run speaker diarization on an existing transcript (post-processing).
+
+    The user specifies how many speakers are in the video. The system
+    runs pyannote (if available) or the heuristic speaker assigner to
+    label each segment with a speaker identity.
+    """
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.transcript:
+        raise HTTPException(status_code=400, detail="No transcript to diarize")
+
+    # Find the audio file
+    audio_path = None
+    upload_dir = f"/data/uploads/{job_id}"
+    for ext in ["wav", "mp3", "m4a", "aac", "ogg", "flac"]:
+        matches = glob.glob(f"{upload_dir}/*.{ext}")
+        if matches:
+            audio_path = matches[0]
+            break
+    # Also check for extracted audio from video
+    if not audio_path:
+        extracted = os.path.join(upload_dir, "audio.wav")
+        if os.path.isfile(extracted):
+            audio_path = extracted
+
+    if not audio_path:
+        raise HTTPException(
+            status_code=400,
+            detail="Audio file not found — re-upload the video to enable diarization"
+        )
+
+    from backend.services.transcription import diarize_transcript_post
+
+    try:
+        diarized = await diarize_transcript_post(
+            audio_path=audio_path,
+            segments=job.transcript,
+            num_speakers=req.num_speakers,
+        )
+
+        await database.update_job_status(job_id, transcript=list(diarized))
+
+        speaker_set = set(s.speaker for s in diarized)
+        return {
+            "status": "ok",
+            "speakers_detected": len(speaker_set),
+            "speakers_requested": req.num_speakers if req.num_speakers > 0 else "auto",
+            "segments_updated": len(diarized),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Diarization failed: {str(e)[:200]}")
+
+
 # --- Scene management ---
 
 class AddSceneRequest(BaseModel):
@@ -475,6 +605,27 @@ async def delete_scene(job_id: str, scene_index: int):
     job.scenes.pop(scene_index)
     await database.save_job(job)
     return {"job_id": job_id, "scene_count": len(job.scenes)}
+
+
+# --- Subtitle settings (server is source of truth) ---
+
+@router.put("/jobs/{job_id}/subtitle-settings")
+async def save_subtitle_settings(job_id: str, request: Request):
+    """Save canonical subtitle settings for a job.
+
+    The server stores these so the browser never relies on potentially-stale
+    localStorage values.  On every export the frontend should read settings
+    from the job object (populated by GET /api/jobs/{job_id}) rather than
+    from local cache.
+    """
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    settings = await request.json()
+    job.subtitle_settings = settings
+    await database.save_job(job)
+    return {"job_id": job_id, "subtitle_settings": job.subtitle_settings}
 
 
 # --- Subject tracking re-center ---
@@ -760,6 +911,8 @@ async def get_allocation():
             parts = key.split("_", 1)
             active_jobs.append({
                 "job_id": parts[0] if len(parts) > 1 else key,
+                "clip_id": int(parts[1]) if len(parts) > 1 else 0,
+                "export_key": key,
                 "filename": f"Clip {parts[1]}" if len(parts) > 1 else key,
                 "status": "encoding",
                 "progress": None,
@@ -798,34 +951,26 @@ async def get_allocation():
 
 @router.post("/jobs/{job_id}/force-fail")
 async def force_fail_job(job_id: str):
-    """Force-fail a job to free up resources. Works on any non-terminal job."""
+    """Force-fail a job to free up resources. Works on any non-terminal job,
+    and also cancels active exports/clip-generation for already-terminal jobs."""
     job = await database.load_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    terminal = (JobStatus.COMPLETE, JobStatus.FAILED, JobStatus.CANCELLED)
-    if job.status in terminal:
-        raise HTTPException(status_code=409, detail=f"Job is already {job.status}")
-
-    # Signal cancellation and force the status to failed
-    request_cancel(job_id)
-    await database.update_job_status(
-        job_id,
-        status=JobStatus.FAILED,
-        progress_message="Force-failed by admin to free resources",
-    )
-
-    # Also cancel any related clip tasks
     from backend.routers.clips import _active_clip_tasks, _clip_cancel_events
     from backend.routers.clips import _active_export_tasks, _export_cancel_events
 
-    # Cancel clip generation
+    terminal = (JobStatus.COMPLETE, JobStatus.FAILED, JobStatus.CANCELLED)
+    cancelled_something = False
+
+    # Cancel clip generation tasks for this job
     cancel_evt = _clip_cancel_events.get(job_id)
     if cancel_evt:
         cancel_evt.set()
     clip_task = _active_clip_tasks.pop(job_id, None)
     if clip_task and not clip_task.done():
         clip_task.cancel()
+        cancelled_something = True
 
     # Cancel any exports for this job
     for key in list(_active_export_tasks.keys()):
@@ -836,5 +981,18 @@ async def force_fail_job(job_id: str):
             t = _active_export_tasks.pop(key, None)
             if t and not t.done():
                 t.cancel()
+                cancelled_something = True
+
+    if job.status in terminal and not cancelled_something:
+        raise HTTPException(status_code=409, detail=f"Job is already {job.status}")
+
+    # Signal analysis pipeline cancellation and mark failed (if not already terminal)
+    if job.status not in terminal:
+        request_cancel(job_id)
+        await database.update_job_status(
+            job_id,
+            status=JobStatus.FAILED,
+            progress_message="Force-failed by admin to free resources",
+        )
 
     return {"job_id": job_id, "status": "failed", "message": "Job force-failed"}

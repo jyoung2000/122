@@ -19,48 +19,7 @@ router = APIRouter(prefix="/api", tags=["upload"])
 
 ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm"}
 
-# Expected magic bytes at offset 0 for each format
-_MAGIC = {
-    "mkv": (0, b"\x1a\x45\xdf\xa3"),   # EBML header
-    "webm": (0, b"\x1a\x45\xdf\xa3"),  # EBML header
-    "avi": (0, b"RIFF"),               # RIFF container
-}
-# MP4/MOV: ftyp box — first 4 bytes are box size, bytes 4-7 are "ftyp"
-_FTYP_MAGIC = b"ftyp"
-
-
-def _validate_video_header(path: str, ext: str) -> str | None:
-    """Check the first bytes of a video file. Returns an error message or None."""
-    with open(path, "rb") as f:
-        header = f.read(12)
-
-    if len(header) < 8:
-        return "File is too small to be a valid video"
-
-    # Check for all-zeros header (common sign of incomplete download)
-    if header[:8] == b"\x00" * 8:
-        return (
-            "The file appears to be corrupt or an incomplete download — "
-            "the first bytes are all zeros. Please verify the file plays "
-            "correctly on your device before uploading."
-        )
-
-    # Format-specific checks
-    if ext in _MAGIC:
-        offset, magic = _MAGIC[ext]
-        if header[offset:offset + len(magic)] != magic:
-            return (
-                f"File header does not match expected {ext.upper()} format. "
-                "The file may be corrupt or mislabeled."
-            )
-    elif ext in ("mp4", "mov"):
-        if header[4:8] != _FTYP_MAGIC:
-            return (
-                f"File header does not match expected {ext.upper()} format. "
-                "The file may be corrupt or mislabeled."
-            )
-
-    return None
+from backend.services.video_validation import validate_video_header as _validate_video_header
 
 
 def _parse_content_type(header: str) -> tuple[str, str]:
@@ -97,7 +56,7 @@ async def _stream_multipart_to_disk(
     request: Request,
     boundary: str,
     video_path: str,
-) -> tuple[int, str, str]:
+) -> tuple[int, str, str, str]:
     """Stream multipart body directly to disk, bypassing SpooledTemporaryFile.
 
     Performance notes:
@@ -107,7 +66,7 @@ async def _stream_multipart_to_disk(
         disk I/O and can keep draining network data in parallel.
       - A 1 MB write buffer batches small safe-flushes into fewer syscalls.
 
-    Returns (total_bytes_written, original_filename, language).
+    Returns (total_bytes_written, original_filename, language, subtitle_language).
     """
     boundary_bytes = f"--{boundary}".encode()
     crlf = b"\r\n"
@@ -115,6 +74,7 @@ async def _stream_multipart_to_disk(
     buf = bytearray()
     filename = "video.mp4"
     language = ""
+    subtitle_language = ""
     total_bytes = 0
     out_file = None
     write_buf = bytearray()
@@ -202,6 +162,8 @@ async def _stream_multipart_to_disk(
                             field_data.extend(part_data)
                             if field_name == "language":
                                 language = field_data.decode("utf-8", errors="replace").strip()
+                            if field_name == "subtitle_language":
+                                subtitle_language = field_data.decode("utf-8", errors="replace").strip()
                             in_field_part = False
 
                         del buf[:next_bnd]
@@ -227,7 +189,7 @@ async def _stream_multipart_to_disk(
         if out_file:
             await out_file.close()
 
-    return total_bytes, filename, language
+    return total_bytes, filename, language, subtitle_language
 
 
 def _cleanup(path: str):
@@ -269,7 +231,7 @@ async def upload_video(
     tmp_path = os.path.join(job_dir, "video.tmp")
 
     try:
-        total_bytes, filename, language = await _stream_multipart_to_disk(
+        total_bytes, filename, language, subtitle_language = await _stream_multipart_to_disk(
             request, boundary, tmp_path,
         )
     except OSError as exc:
@@ -310,6 +272,7 @@ async def upload_video(
     logger.info(f"Upload accepted: {video_path} ({total_bytes} bytes)")
 
     lang = language.strip().lower() if language else ""
+    sub_lang = subtitle_language.strip().lower() if subtitle_language else ""
 
     now = datetime.now(timezone.utc).isoformat()
     job = JobResult(
@@ -318,6 +281,7 @@ async def upload_video(
         file_path=video_path,
         file_size_mb=round(total_bytes / (1024 * 1024), 2),
         language=lang,
+        subtitle_language=sub_lang,
         status=JobStatus.QUEUED,
         progress=0,
         progress_message="Uploaded, waiting for analysis",

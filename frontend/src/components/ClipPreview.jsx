@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
-import { buildSubjectKeyframes, smoothKeyframes, interpolateSubjectX, isDynamic, safeSubjectX } from '../utils/subjectTracking';
+import { processKeyframes, interpolateSubjectX, isDynamic, safeSubjectX, subjectXToCenterPct } from '../utils/subjectTracking';
+import { outlineTextShadow } from '../utils/textOutline';
 import useResponsive from '../hooks/useResponsive';
 
 // --- Constants replicated from backend ---
@@ -10,6 +11,37 @@ const ASPECT_RATIO_DIMS = {
   '1:1': [1080, 1080],
   '4:5': [1080, 1350],
 };
+
+// ── Builtin font URL map (mirrors ClipSettingsPanel) ─────────────────────
+const BUILTIN_FONT_FILES = {
+  'DM Sans': '/api/fonts/builtin/DMSans.ttf',
+  'Montserrat': '/api/fonts/builtin/Montserrat.ttf',
+  'Open Sans': '/api/fonts/builtin/OpenSans.ttf',
+  'Roboto': '/api/fonts/builtin/Roboto.ttf',
+  'Poppins': '/api/fonts/builtin/Poppins-Regular.ttf',
+  'Inter': '/api/fonts/builtin/Inter.ttf',
+  'Nunito': '/api/fonts/builtin/Nunito.ttf',
+  'Lato': '/api/fonts/builtin/Lato-Regular.ttf',
+  'Oswald': '/api/fonts/builtin/Oswald.ttf',
+  'Playfair Display': '/api/fonts/builtin/PlayfairDisplay.ttf',
+  'Bebas Neue': '/api/fonts/builtin/BebasNeue-Regular.ttf',
+  'Liberation Sans': '/api/fonts/builtin/LiberationSans-Regular.ttf',
+  'Liberation Serif': '/api/fonts/builtin/LiberationSerif-Regular.ttf',
+  'Liberation Mono': '/api/fonts/builtin/LiberationMono-Regular.ttf',
+  'DejaVu Sans': '/api/fonts/builtin/DejaVuSans.ttf',
+  'DejaVu Serif': '/api/fonts/builtin/DejaVuSerif.ttf',
+  'DejaVu Sans Mono': '/api/fonts/builtin/DejaVuSansMono.ttf',
+  'FreeSans': '/api/fonts/builtin/FreeSans.ttf',
+};
+
+function registerFontFace(fontName, url) {
+  const existingId = `custom-font-${fontName.replace(/\s+/g, '-')}`;
+  if (document.getElementById(existingId)) return;
+  const style = document.createElement('style');
+  style.id = existingId;
+  style.textContent = `@font-face { font-family: '${fontName}'; src: url('${url}'); font-weight: 100 900; font-display: swap; }`;
+  document.head.appendChild(style);
+}
 // clip_exporter.py:19-24
 const ASPECT_RATIO_VALUES = {
   '16:9': 16 / 9,
@@ -28,6 +60,9 @@ const REF_H = 1080;
 // ass_generator.py:48-55
 const DEFAULT_SPEAKER_PALETTE = [
   '#00D9FF', '#F59E0B', '#10B981', '#A78BFA', '#EF4444', '#EC4899',
+  '#06B6D4', '#8B5CF6', '#F97316', '#14B8A6', '#E879F9', '#84CC16',
+  '#FB7185', '#38BDF8', '#FBBF24', '#34D399', '#C084FC', '#F472B6',
+  '#22D3EE', '#A3E635', '#FB923C', '#2DD4BF', '#818CF8', '#F87171',
 ];
 
 // --- Backend logic replicated in JS ---
@@ -46,29 +81,7 @@ function getFrameMode(aspectRatio, sourceWidth, sourceHeight) {
   return { mode: 'crop', targetRatio };
 }
 
-/**
- * Convert subject_x (0-100) to a CSS objectPosition percentage that
- * centers the subject in the cropped frame.
- *
- * With objectFit: cover, objectPosition X% aligns the X% point of the
- * content with the X% point of the container — so using the raw subject_x
- * places the subject at subject_x% of the output, not centered.
- *
- * This function computes the objectPosition value that puts the subject
- * at exactly 50% (center) of the visible crop.
- *
- * R = srcRatio / targetRatio = rendered_width / container_width (for cover)
- * centerPct = (R * sx - 50) / (R - 1)
- */
-function subjectXToCenterPct(sx, srcRatio, targetRatio) {
-  const R = srcRatio / targetRatio;
-  if (R <= 1.01) return Math.max(0, Math.min(100, sx)); // no horizontal overflow
-  const pct = (R * sx - 50) / (R - 1);
-  // Use full precision — CSS objectPosition handles decimals fine,
-  // and rounding at high R values (e.g. 3.16 for 16:9→9:16) causes
-  // visible ~2% offset from center.
-  return Math.max(0, Math.min(100, pct));
-}
+// subjectXToCenterPct is imported from subjectTracking.js (shared with VideoEditor)
 
 function formatTime(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00';
@@ -254,6 +267,8 @@ export default function ClipPreview({
   onClose,
   title,
   inline = false,
+  initialVolume,
+  initialSpeed,
 }) {
   const { isMobile } = useResponsive();
   const fgVideoRef = useRef(null);
@@ -267,28 +282,34 @@ export default function ClipPreview({
         console.log('[SubjectTracking] ClipPreview: no scenes available — using static subject_x');
         return null;
       }
-      const raw = buildSubjectKeyframes(scenes, clipStart, clipEnd);
-      const smoothed = raw && raw.length > 1 ? smoothKeyframes(raw) : raw;
-      const dynamic = smoothed && isDynamic(smoothed);
+      // Compute aspect ratios for dynamic safe margin in pipeline
+      const _srcRatio = sourceWidth / sourceHeight;
+      const _targetRatio = (aspectRatio && ASPECT_RATIO_VALUES[aspectRatio]) ? ASPECT_RATIO_VALUES[aspectRatio] : _srcRatio;
+      const _isCrop = Math.abs(_srcRatio - _targetRatio) > 0.01;
+      const processed = processKeyframes(scenes, clipStart, clipEnd, _isCrop ? _srcRatio : null, _isCrop ? _targetRatio : null);
+      const dynamic = processed && isDynamic(processed);
       console.log(
-        `[SubjectTracking] ClipPreview: ${smoothed?.length || 0} keyframes built ` +
+        `[SubjectTracking] ClipPreview: ${processed?.length || 0} keyframes (pipeline: build→compress→deadzone→cuts→smooth→holds) ` +
         `(${clipStart.toFixed(1)}s-${clipEnd.toFixed(1)}s), ` +
         `mode=${dynamic ? 'DYNAMIC' : 'STATIC'}, ` +
-        `sx range: [${Math.min(...(smoothed || []).map(k=>k.x))}-${Math.max(...(smoothed || []).map(k=>k.x))}], ` +
-        `keyframes: ${JSON.stringify(smoothed?.map(k => ({t: +k.t.toFixed(2), x: k.x})))}`
+        `sx range: [${Math.min(...(processed || []).map(k=>k.x))}-${Math.max(...(processed || []).map(k=>k.x))}], ` +
+        `keyframes: ${JSON.stringify(processed?.map(k => ({t: +k.t.toFixed(2), x: k.x})))}`
       );
-      return smoothed;
+      return processed;
     },
-    [scenes, clipStart, clipEnd],
+    [scenes, clipStart, clipEnd, aspectRatio, sourceWidth, sourceHeight],
   );
   const hasDynamicSubject = useMemo(
     () => subjectKeyframes && isDynamic(subjectKeyframes),
     [subjectKeyframes],
   );
 
+  const SPEED_OPTIONS = [0.5, 1.0, 1.5, 2.0];
+
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(clipStart);
-  const [volume, setVolume] = useState(1);
+  const [volume, setVolume] = useState(initialVolume != null ? initialVolume / 100 : 1);
+  const [speed, setSpeed] = useState(initialSpeed != null && initialSpeed > 0 ? initialSpeed : 1.0);
   const [hovered, setHovered] = useState(false);
   const [containerSize, setContainerSize] = useState({ w: 0, h: 0 });
   const [currentSubtitle, setCurrentSubtitle] = useState(null);
@@ -403,11 +424,50 @@ export default function ClipPreview({
     };
   }, [clipStart, clipEnd]);
 
-  // --- Eagerly preload the selected subtitle font so the browser downloads
-  //     it before the subtitle text first renders (avoids FOUT / stuck fallback).
+  // --- Sync volume from settings ---
+  useEffect(() => {
+    if (initialVolume == null) return;
+    const v = Math.max(0, Math.min(1, initialVolume / 100));
+    setVolume(v);
+    if (fgVideoRef.current) fgVideoRef.current.volume = v;
+  }, [initialVolume]);
+
+  // --- Sync speed from settings ---
+  useEffect(() => {
+    if (initialSpeed == null || initialSpeed <= 0) return;
+    setSpeed(initialSpeed);
+    if (fgVideoRef.current) fgVideoRef.current.playbackRate = initialSpeed;
+  }, [initialSpeed]);
+
+  // --- Apply speed to video element ---
+  useEffect(() => {
+    if (fgVideoRef.current) fgVideoRef.current.playbackRate = speed;
+  }, [speed]);
+
+  // --- Register @font-face and preload the selected subtitle font so the
+  //     browser downloads it before the subtitle text first renders.
   useEffect(() => {
     const font = subtitleSettings?.subtitleFont;
     if (!font || typeof document === 'undefined') return;
+
+    // Register builtin font @font-face if known
+    if (BUILTIN_FONT_FILES[font]) {
+      registerFontFace(font, BUILTIN_FONT_FILES[font]);
+    } else {
+      // Custom font — look up URL from /api/fonts
+      fetch('/api/fonts')
+        .then((r) => r.ok ? r.json() : [])
+        .then((fonts) => {
+          const match = fonts.find((f) => f.name === font);
+          if (match) {
+            registerFontFace(match.name, match.url);
+            document.fonts.load(`400 16px "${font}"`).catch(() => {});
+            document.fonts.load(`700 16px "${font}"`).catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }
+
     // Trigger download for both normal and bold weights
     document.fonts.load(`400 16px "${font}"`).catch(() => {});
     document.fonts.load(`700 16px "${font}"`).catch(() => {});
@@ -448,7 +508,7 @@ export default function ClipPreview({
     return () => cancelAnimationFrame(animId);
   }, [subtitlesEnabled, clipSegments, clipStart, activeWordEnabled, speakerRates]);
 
-  // --- Dynamic subject tracking: update objectPosition during playback ---
+  // --- Dynamic subject tracking: update objectPosition via rAF for smooth ~60fps updates ---
   const srcRatio = sourceWidth / sourceHeight;
   useEffect(() => {
     if (!hasDynamicSubject) return;
@@ -456,28 +516,36 @@ export default function ClipPreview({
     if (!video) return;
     const R = srcRatio / targetRatio;
     let logCount = 0;
+    let lastPct = null;
     console.log(
-      `[SubjectTracking] DYNAMIC mode active: R=${R.toFixed(3)} (src=${srcRatio.toFixed(3)}, target=${targetRatio.toFixed(3)}), ` +
+      `[SubjectTracking] DYNAMIC mode active (rAF): R=${R.toFixed(3)} (src=${srcRatio.toFixed(3)}, target=${targetRatio.toFixed(3)}), ` +
       `${subjectKeyframes.length} keyframes`
     );
-    const onTime = () => {
+    let animId;
+    const tick = () => {
       const relTime = video.currentTime - clipStart;
       const sx = interpolateSubjectX(subjectKeyframes, relTime);
       const centerPct = subjectXToCenterPct(Math.max(0, Math.min(100, sx)), srcRatio, targetRatio);
-      video.style.objectPosition = `${centerPct}% 50%`;
-      // Log first 5 updates and then every 30th for debugging
-      if (logCount < 5 || logCount % 30 === 0) {
-        console.log(
-          `[SubjectTracking] t=${relTime.toFixed(2)}s: sx=${sx.toFixed(1)} → objectPosition=${centerPct.toFixed(2)}% 50%`
-        );
+      // Only update DOM if value actually changed (avoid layout thrashing)
+      // Use higher precision — 4 decimal places eliminates visible stepping
+      // while still preventing unnecessary DOM updates
+      const rounded = Math.round(centerPct * 10000) / 10000;
+      if (rounded !== lastPct) {
+        video.style.objectPosition = `${centerPct}% 50%`;
+        lastPct = rounded;
+        // Log first 5 updates and then every 30th for debugging
+        if (logCount < 5 || logCount % 30 === 0) {
+          console.log(
+            `[SubjectTracking] t=${relTime.toFixed(2)}s: sx=${sx.toFixed(1)} → objectPosition=${centerPct.toFixed(2)}% 50%`
+          );
+        }
+        logCount++;
       }
-      logCount++;
+      animId = requestAnimationFrame(tick);
     };
-    video.addEventListener('timeupdate', onTime);
-    // Set initial position
-    onTime();
+    animId = requestAnimationFrame(tick);
     return () => {
-      video.removeEventListener('timeupdate', onTime);
+      cancelAnimationFrame(animId);
       // Do NOT clear video.style.objectPosition here — the cleanup runs
       // after React's DOM commit, so clearing would overwrite the correct
       // static objectPosition that React just applied.
@@ -601,7 +669,7 @@ export default function ClipPreview({
     const bgEnabled = subtitleSettings?.subtitleBgEnabled || false;
     const bgColor = subtitleSettings?.subtitleBgColor || '#000000';
     const bgOpacity = subtitleSettings?.subtitleBgOpacity ?? 75;
-    const fontWeight = subtitleSettings?.subtitleFontWeight === 'bold' ? 700 : 400;
+    const fontWeight = typeof subtitleSettings?.subtitleFontWeight === 'number' ? subtitleSettings.subtitleFontWeight : subtitleSettings?.subtitleFontWeight === 'bold' ? 700 : 400;
     const rawFont = subtitleSettings?.subtitleFont || 'DM Sans';
     // Wrap in quotes for multi-word names and add generic fallback so the
     // browser never falls back to the inherited UI font stack when the
@@ -637,10 +705,12 @@ export default function ClipPreview({
       // Shadow depth matches ASS: proportional to outline width.
       const shadowDepth = Math.max(1, Math.min(4, Math.round(backendOlWidth * 0.75)));
       const scaledShadow = shadowDepth * subtitleScale;
+      const olColorStr = `rgba(${olR},${olG},${olB},${olOpacity})`;
+      const dropShadow = `${scaledShadow}px ${scaledShadow}px 0px rgba(0,0,0,0.5)`;
       outlineStyle = {
-        WebkitTextStroke: `${scaledOlWidth * 2}px rgba(${olR},${olG},${olB},${olOpacity})`,
+        WebkitTextStroke: `${scaledOlWidth * 2}px ${olColorStr}`,
         paintOrder: 'stroke fill',
-        textShadow: `${scaledShadow}px ${scaledShadow}px 0px rgba(0,0,0,0.5)`,
+        textShadow: outlineTextShadow(scaledOlWidth, olColorStr, dropShadow),
       };
     } else {
       // No outline, no background — minimal shadow for readability
@@ -650,16 +720,23 @@ export default function ClipPreview({
     }
 
     // Margin calculations matching backend (ass_generator.py:196-235)
-    const clampedMaxWidth = Math.max(50, Math.min(100, maxWidthPct));
+    const clampedMaxWidth = Math.max(20, Math.min(100, maxWidthPct));
     const clampedOffsetV = Math.max(0, Math.min(100, offsetVPct));
 
     // Horizontal: backend uses max(20, ...) minimum + safe-area cap
     const marginH_px = Math.max(20, Math.floor(outputDims.w * (100 - clampedMaxWidth) / 100 / 2));
-    const maxMarginH = Math.floor(outputDims.w * 0.25); // (1 - MIN_TEXT_AREA_W=0.50) / 2
+    const maxMarginH = Math.floor(outputDims.w * 0.40); // (1 - MIN_TEXT_AREA_W=0.20) / 2
     const effectiveMarginH = Math.min(marginH_px, maxMarginH) / outputDims.w * 100;
 
-    // Vertical: offset_v is absolute position (0=bottom, 100=top)
-    const positionStyle = { bottom: `${clampedOffsetV}%` };
+    // Vertical positioning based on position setting
+    let positionStyle;
+    if (position === 'top') {
+      positionStyle = { top: `${clampedOffsetV}%` };
+    } else if (position === 'center') {
+      positionStyle = { top: '50%', transform: 'translateY(-50%)' };
+    } else {
+      positionStyle = { bottom: `${clampedOffsetV}%` };
+    }
 
     const text = showLabels && currentSubtitle.speaker
       ? `${currentSubtitle.speaker}: ${currentSubtitle.text}`
@@ -696,6 +773,7 @@ export default function ClipPreview({
                     ? {
                         WebkitTextStroke: `${scaledOlWidth * 2}px rgba(${awOlR},${awOlG},${awOlB},${olOpacity})`,
                         paintOrder: 'stroke fill',
+                        textShadow: outlineTextShadow(scaledOlWidth, `rgba(${awOlR},${awOlG},${awOlB},${olOpacity})`),
                       }
                     : {}),
                   ...(awBgOpacity > 0
@@ -872,7 +950,12 @@ export default function ClipPreview({
             </div>
             <div style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', marginTop: 2 }}>
               {formatTime(clipStart)} &rarr; {formatTime(clipEnd)}
-              <span style={{ marginLeft: 8, color: 'var(--text-secondary)' }}>({formatTime(clipDur)})</span>
+              <span style={{ marginLeft: 8, color: 'var(--text-secondary)' }}>({formatTime(clipDur / speed)})</span>
+              {speed !== 1.0 && (
+                <span style={{ marginLeft: 8, color: '#FFD60A', fontSize: 10 }}>
+                  {speed}x speed
+                </span>
+              )}
               {aspectRatio && (
                 <span style={{ marginLeft: 8, color: 'var(--accent-amber)', fontSize: 10 }}>
                   {aspectRatio}{isCrop ? ' (crop)' : ''}
@@ -976,7 +1059,7 @@ export default function ClipPreview({
             fontFamily: 'var(--font-mono)', fontSize: 11,
             color: 'var(--text-secondary)', marginLeft: 2,
           }}>
-            {formatTime(elapsed)} / {formatTime(clipDur)}
+            {formatTime(elapsed / speed)} / {formatTime(clipDur / speed)}
           </span>
 
           <div style={{ flex: 1 }} />
@@ -991,6 +1074,29 @@ export default function ClipPreview({
             }}
             style={{ width: isMobile ? 40 : 50, accentColor: 'var(--accent-cyan)' }}
           />
+
+          <button
+            onClick={() => {
+              const idx = SPEED_OPTIONS.indexOf(speed);
+              const next = SPEED_OPTIONS[(idx + 1) % SPEED_OPTIONS.length];
+              setSpeed(next);
+            }}
+            style={{
+              background: speed !== 1.0 ? 'rgba(255, 214, 10, 0.12)' : 'none',
+              border: speed !== 1.0 ? '1px solid rgba(255, 214, 10, 0.25)' : '1px solid rgba(255,255,255,0.1)',
+              color: speed !== 1.0 ? '#FFD60A' : 'var(--text-secondary)',
+              fontSize: 11,
+              fontFamily: 'var(--font-mono)',
+              fontWeight: 500,
+              cursor: 'pointer',
+              padding: '2px 6px',
+              borderRadius: 4,
+              lineHeight: 1.2,
+            }}
+            title="Playback speed (click to cycle)"
+          >
+            {speed}x
+          </button>
 
           <button
             onClick={toggleFullscreen}

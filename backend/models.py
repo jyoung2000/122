@@ -41,6 +41,9 @@ class TranscriptSegment(BaseModel):
     text: str
     speaker: str  # "Speaker 1", "Speaker 2", etc.
     words: Optional[list[WordTimestamp]] = None  # per-word timestamps from Whisper
+    confidence: Optional[float] = None  # 0.0-1.0, derived from avg_logprob
+    avg_logprob: Optional[float] = None  # Raw Whisper log probability
+    no_speech_prob: Optional[float] = None  # Probability this is not speech
 
 
 class ClipCandidate(BaseModel):
@@ -57,6 +60,15 @@ class ClipCandidate(BaseModel):
     hook_text: str
     why_this_works: str
     clip_focus: Optional[str] = None  # The focus topic used to generate this clip, if any
+    focus_relevance: Optional[int] = None  # 1-100, how relevant to the focus query
+    focus_tier: Optional[str] = None  # "strong", "moderate", "weak"
+    # Persisted SEO data (populated by generation endpoints)
+    seo_title: Optional[str] = None
+    seo_description: Optional[str] = None
+    seo_tags: list[str] = []
+    seo_platform_tips: Optional[str] = None
+    shorts_description: Optional[str] = None
+    longform_description: Optional[str] = None
 
 
 class VideoSummary(BaseModel):
@@ -72,6 +84,7 @@ class JobResult(BaseModel):
     filename: str
     file_path: str
     language: str = ""  # ISO 639-1 code, empty = auto-detect
+    subtitle_language: str = ""  # ISO 639-1 target language for subtitles, empty = same as audio
     duration: float = 0.0
     resolution: str = ""
     fps: float = 0.0
@@ -87,9 +100,11 @@ class JobResult(BaseModel):
     summary: Optional[VideoSummary] = None
     scenes: list[SceneDescription] = []
     transcript: list[TranscriptSegment] = []
+    translated_transcript: list[TranscriptSegment] = []  # Translated subtitle segments
     clips: list[ClipCandidate] = []
     speaker_names: dict[str, str] = {}  # {"Speaker 1": "Eric", "Speaker 2": "Alice"}
     exported_clips: list[dict] = []
+    subtitle_settings: Optional[dict] = None  # Canonical subtitle settings — server is source of truth
     error: Optional[str] = None
     estimated_cost_usd: Optional[float] = None
 
@@ -104,7 +119,7 @@ class ClipSEO(BaseModel):
 class SubtitleSettings(BaseModel):
     font: str = "DM Sans"
     size: Union[str, int, float] = "medium"  # "small" | "medium" | "large" | numeric px (12-72)
-    font_weight: str = "bold"  # "normal" | "bold"
+    font_weight: Union[str, int] = "bold"  # "normal"|"bold" or numeric 100-900
     font_color: str = "#FFFFFF"  # default subtitle text color (hex)
     position: str = "bottom"  # "top" | "center" | "bottom"
     speaker_colors: dict[str, str] = {}  # {"Speaker 1": "#00D9FF"}
@@ -117,7 +132,7 @@ class SubtitleSettings(BaseModel):
     outline_opacity: int = 100  # 0-100, text outline opacity
     outline_width: int = 2  # 0-10, text outline thickness in reference pixels
     show_speaker_labels: bool = False  # show "Speaker:" prefix in subtitle text
-    max_width: int = 90  # 50-100, max subtitle width as % of video width
+    max_width: int = 90  # 20-100, max subtitle width as % of video width
     offset_v: int = 4  # 0-100, vertical offset from edge as % of video height
     max_words: int = 0  # 0 = disabled, 1-20 = max words per subtitle event
     active_word_enabled: bool = False  # highlight the currently spoken word
@@ -125,6 +140,119 @@ class SubtitleSettings(BaseModel):
     active_word_outline_color: str = "#000000"  # outline/stroke color of the active word
     active_word_bg_color: str = "#000000"  # background color behind the active word
     active_word_bg_opacity: int = 0  # 0-100, background opacity (0 = no background)
+    active_word_bg_radius: int = 4  # 0-20, border radius of the active word background box
+
+
+class SegmentSettings(BaseModel):
+    start: float          # Absolute start time in seconds
+    end: float            # Absolute end time in seconds
+    volume: float = 1.0   # 0.0 to 2.0 gain
+    muted: bool = False
+    subtitles_enabled: bool = True
+    subject_tracking_enabled: bool = True  # Per-segment subject tracking toggle
+    speed: float = 1.0    # 0.25 to 4.0 playback speed
+
+
+class VideoEffects(BaseModel):
+    """Video effects applied via FFmpeg eq/hue/boxblur filters to match preview."""
+    brightness: float = 0.0    # -100 to 100 (maps to FFmpeg eq brightness)
+    contrast: float = 0.0      # -100 to 100 (maps to FFmpeg eq contrast)
+    saturation: float = 0.0    # -100 to 100 (maps to FFmpeg eq saturation)
+    blur: float = 0.0          # 0 to 20 (maps to FFmpeg boxblur)
+    hue_rotate: float = 0.0    # 0 to 360 degrees (maps to FFmpeg hue)
+    sepia: float = 0.0         # 0 to 100 (maps to FFmpeg colorchannelmixer)
+    opacity: float = 1.0       # 0 to 1 (maps to FFmpeg colorchannelmixer alpha)
+    # Video transform — position/size/rotation from Properties panel
+    position_x: float = 50.0   # 0-100% (50 = centered)
+    position_y: float = 50.0   # 0-100% (50 = centered)
+    width: float = 100.0       # 0-200% of frame (100 = original)
+    height: float = 100.0      # 0-200% of frame (100 = original)
+    rotation: float = 0.0      # degrees
+    fade_in: float = 0.0       # seconds
+    fade_out: float = 0.0      # seconds
+
+
+class TextOverlay(BaseModel):
+    """Text overlay for FFmpeg drawtext filter."""
+    item_id: str = ""          # timeline item ID for compositing order lookup
+    text: str = ""
+    x: float = 50              # position % (0-100)
+    y: float = 50              # position % (0-100)
+    font_size: float = 48
+    font_color: str = "#FFFFFF"
+    font_family: str = "sans-serif"
+    font_weight: float = 400
+    background_color: Optional[str] = None
+    outline_width: float = 0
+    outline_color: str = "#000000"
+    start_time: float = 0.0    # relative to clip start
+    end_time: float = 0.0
+    rotation: float = 0.0
+    opacity: float = 1.0
+    fade_in: float = 0.0       # seconds
+    fade_out: float = 0.0      # seconds
+    animation: str = "none"
+    text_align: str = "center"
+    shadow_blur: float = 0
+    shadow_color: str = "rgba(0,0,0,0.5)"
+    shadow_offset_x: float = 0
+    shadow_offset_y: float = 0
+    bg_opacity: float = 0
+    bg_padding: float = 8
+    bg_radius: float = 4
+
+
+class ImageOverlay(BaseModel):
+    """Image overlay for FFmpeg overlay filter."""
+    item_id: str = ""          # timeline item ID for compositing order lookup
+    src: str = ""              # path or URL to image
+    x: float = 50              # position % (0-100)
+    y: float = 50              # position % (0-100)
+    width: float = 30          # size % (0-100)
+    height: float = 30         # size % (0-100)
+    start_time: float = 0.0
+    end_time: float = 0.0
+    opacity: float = 1.0
+    fade_in: float = 0.0       # seconds
+    fade_out: float = 0.0      # seconds
+    rotation: float = 0.0      # degrees (-360 to 360)
+    # Visual effects from multi-track editor properties panel
+    brightness: float = 0.0    # -100 to 100
+    contrast: float = 0.0      # -100 to 100
+    saturation: float = 0.0    # -100 to 100
+    blur: float = 0.0          # 0 to 20 (px)
+    hue_rotate: float = 0.0    # 0 to 360 (degrees)
+    sepia: float = 0.0         # 0 to 100
+
+
+class ShapeOverlay(BaseModel):
+    """Shape overlay rendered as a temporary PNG and composited via FFmpeg overlay."""
+    item_id: str = ""          # timeline item ID for compositing order lookup
+    shape_type: str = "rectangle"  # rectangle | circle | ellipse | line | arrow
+    x: float = 50              # center position % (0-100)
+    y: float = 50              # center position % (0-100)
+    width: float = 20          # size % (0-100)
+    height: float = 20         # size % (0-100)
+    fill_color: str = "#FF3B30"
+    stroke_color: str = "#FFFFFF"
+    stroke_width: float = 2
+    corner_radius: float = 0   # for rectangles
+    start_time: float = 0.0
+    end_time: float = 0.0
+    rotation: float = 0.0
+    opacity: float = 1.0
+    fade_in: float = 0.0      # seconds
+    fade_out: float = 0.0     # seconds
+
+
+class AudioOverlay(BaseModel):
+    """Additional audio item from multi-track editor (background music, SFX)."""
+    src: str = ""              # path or URL to audio file
+    start_time: float = 0.0   # start on the timeline (seconds)
+    end_time: float = 0.0     # end on the timeline (seconds)
+    volume: float = 1.0       # 0.0 to 2.0 gain
+    fade_in: float = 0.0      # seconds
+    fade_out: float = 0.0     # seconds
 
 
 class ExportRequest(BaseModel):
@@ -133,16 +261,44 @@ class ExportRequest(BaseModel):
     clip_id: int
     clip_title: Optional[str] = None  # optional title — used as export filename
     aspect_ratio: Optional[str] = None  # "16:9" | "9:16" | "1:1" | "4:5" | None=source
-    subtitles_enabled: bool = False
+    subtitles_enabled: bool = False    # True if ANY subtitles needed (global or per-segment)
+    global_subtitles_enabled: Optional[bool] = None  # Original global toggle (before segment overrides)
     subtitle_settings: Optional[SubtitleSettings] = None
     export_quality: str = "1080p"  # "720p" | "1080p" | "4k"
+    # VideoEditor params — applied during FFmpeg export
+    volume: float = 1.0              # 0.0 to 2.0 gain
+    speed: float = 1.0               # 0.25 to 4.0 playback speed
+    trim_start_offset: float = 0.0   # Seconds trimmed from clip start
+    trim_end_offset: float = 0.0     # Seconds trimmed from clip end
+    segments: list[SegmentSettings] = []  # Per-segment volume/subtitle overrides
+    # Multi-track editor effects — applied via FFmpeg filters to match preview
+    video_effects: Optional[VideoEffects] = None
+    text_overlays: list[TextOverlay] = []
+    image_overlays: list[ImageOverlay] = []
+    shape_overlays: list[ShapeOverlay] = []
+    audio_overlays: list[AudioOverlay] = []  # Additional audio items (music, SFX)
+    overlay_compositing_order: list[dict] = []  # Global render order for cross-type compositing
+    edited_subtitle_segments: Optional[list[TranscriptSegment]] = None  # User-edited subtitle timing from timeline
 
 
 class FullVideoExportRequest(BaseModel):
     aspect_ratio: Optional[str] = None  # "16:9" | "9:16" | "1:1" | "4:5" | None=source
-    subtitles_enabled: bool = False
+    subtitles_enabled: bool = False    # True if ANY subtitles needed (global or per-segment)
+    global_subtitles_enabled: Optional[bool] = None  # Original global toggle (before segment overrides)
     subtitle_settings: Optional[SubtitleSettings] = None
     export_quality: str = "1080p"  # "720p" | "1080p" | "4k"
+    # VideoEditor params — applied during FFmpeg export
+    volume: float = 1.0
+    speed: float = 1.0
+    trim_start_offset: float = 0.0
+    trim_end_offset: float = 0.0
+    segments: list[SegmentSettings] = []  # Per-segment volume/subtitle overrides
+    # Multi-track editor effects — applied via FFmpeg filters to match preview
+    video_effects: Optional[VideoEffects] = None
+    text_overlays: list[TextOverlay] = []
+    image_overlays: list[ImageOverlay] = []
+    shape_overlays: list[ShapeOverlay] = []
+    edited_subtitle_segments: Optional[list[TranscriptSegment]] = None  # User-edited subtitle timing from timeline
 
 
 class UpdateClipTitleRequest(BaseModel):
@@ -190,3 +346,46 @@ class SavePresetRequest(BaseModel):
 
 class RenamePresetRequest(BaseModel):
     name: str
+
+
+class TranslateRequest(BaseModel):
+    source_language: str = ""  # Auto-detect from job if empty
+    target_language: str       # ISO 639-1 code
+
+
+# ── Multi-track Timeline Models ─────────────────────────────────────────────
+
+class TimelineItem(BaseModel):
+    id: str
+    track_id: str
+    type: str  # 'video', 'audio', 'image', 'subtitle'
+    media_ref: Optional[str] = None
+    start: float
+    end: float
+    trim_start: float = 0
+    trim_end: Optional[float] = None
+    volume: float = 1.0
+    speed: float = 1.0
+    opacity: float = 1.0
+    position: Optional[dict] = None  # {x, y} percentages
+    size: Optional[dict] = None      # {w, h} percentages
+    fade_in: float = 0
+    fade_out: float = 0
+    subtitle_text: Optional[str] = None
+    subtitle_style: Optional[dict] = None
+
+
+class TimelineExportRequest(BaseModel):
+    tracks: list[dict] = []
+    items: list[TimelineItem] = []
+    duration: float = 0
+    resolution: str = "1080p"  # "720p", "1080p", "4K"
+    quality: int = 23          # CRF value
+    format: str = "mp4"
+
+
+class EditorStateRequest(BaseModel):
+    tracks: list[dict] = []
+    items: list[dict] = []
+    mediaLibrary: list[dict] = []
+    duration: float = 0

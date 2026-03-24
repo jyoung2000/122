@@ -3,6 +3,7 @@ import logging
 import os
 import shutil
 import asyncio
+import tempfile
 from typing import Optional
 
 import aiofiles
@@ -37,8 +38,20 @@ async def save_job(job: JobResult) -> None:
         path = _job_path(job.job_id)
         data = job.model_dump(mode="json")
         content = json.dumps(data, indent=2, default=str)
-        async with aiofiles.open(path, "w") as f:
-            await f.write(content)
+        # Atomic write: write to temp file then rename to prevent readers
+        # from seeing a truncated/empty file during concurrent access.
+        fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".tmp")
+        try:
+            async with aiofiles.open(fd, "w", closefd=True) as f:
+                await f.write(content)
+            os.replace(tmp_path, path)
+        except BaseException:
+            # Clean up temp file on any failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
 
 async def load_job(job_id: str) -> Optional[JobResult]:
@@ -46,11 +59,18 @@ async def load_job(job_id: str) -> Optional[JobResult]:
     if not os.path.exists(path):
         return None
     lock = _get_lock(job_id)
-    async with lock:
-        async with aiofiles.open(path, "r") as f:
-            content = await f.read()
-        data = json.loads(content)
-        return JobResult(**data)
+    try:
+        async with lock:
+            async with aiofiles.open(path, "r") as f:
+                content = await f.read()
+            if not content.strip():
+                logger.warning("Empty job.json for %s, treating as not found", job_id)
+                return None
+            data = json.loads(content)
+            return JobResult(**data)
+    except (json.JSONDecodeError, Exception) as e:
+        logger.warning("Failed to load job %s: %s", job_id, e)
+        return None
 
 
 async def list_jobs() -> list[JobResult]:
@@ -74,12 +94,75 @@ async def list_jobs() -> list[JobResult]:
 
 
 async def delete_job(job_id: str) -> bool:
-    """Delete a job and all its associated files (uploads + outputs). Returns True if deleted."""
+    """Delete a job and all its associated files (uploads + outputs). Returns True if deleted.
+
+    IMPORTANT: The global media library (_library) is never deleted via this path.
+    Job-specific user-uploaded media in /data/uploads/{job_id}/media/ is preserved
+    by moving it to the global library before the job directory is removed, so that
+    user uploads survive job deletion and can only be deleted explicitly via the
+    DELETE /api/media/{id} endpoint.
+    """
     directory = _job_dir(job_id)
     if not os.path.exists(directory):
         return False
+
+    # Guard: never delete the global media library
+    if job_id == "_library":
+        logger.warning("Blocked attempt to delete global media library via delete_job")
+        return False
+
     lock = _get_lock(job_id)
     async with lock:
+        # Preserve user-uploaded media by moving files to the global library.
+        # This ensures uploads survive job deletion and can only be removed by
+        # explicit user action (DELETE /api/media/{id}).
+        job_media_dir = os.path.join(directory, "media")
+        if os.path.isdir(job_media_dir):
+            global_media_dir = os.path.join("/data/uploads", "_library", "media")
+            os.makedirs(global_media_dir, exist_ok=True)
+
+            # Load metadata from both source and destination
+            src_meta_path = os.path.join(job_media_dir, "_meta.json")
+            dst_meta_path = os.path.join(global_media_dir, "_meta.json")
+            src_meta = {}
+            dst_meta = {}
+            try:
+                if os.path.isfile(src_meta_path):
+                    with open(src_meta_path) as f:
+                        src_meta = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+            try:
+                if os.path.isfile(dst_meta_path):
+                    with open(dst_meta_path) as f:
+                        dst_meta = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+
+            # Move each media file to the global library
+            for fname in os.listdir(job_media_dir):
+                if fname.startswith("_"):
+                    continue  # skip metadata files
+                src_path = os.path.join(job_media_dir, fname)
+                if not os.path.isfile(src_path):
+                    continue
+                dst_path = os.path.join(global_media_dir, fname)
+                if not os.path.exists(dst_path):
+                    try:
+                        shutil.move(src_path, dst_path)
+                        media_id = os.path.splitext(fname)[0]
+                        if media_id in src_meta:
+                            dst_meta[media_id] = src_meta[media_id]
+                    except OSError:
+                        pass
+
+            # Save updated global metadata
+            try:
+                with open(dst_meta_path, "w") as f:
+                    json.dump(dst_meta, f)
+            except OSError:
+                pass
+
         shutil.rmtree(directory, ignore_errors=True)
         # Also clean up exported clips / output files
         output_dir = f"/data/outputs/{job_id}"

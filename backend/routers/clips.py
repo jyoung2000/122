@@ -2,19 +2,82 @@ import asyncio
 import logging
 import os
 import time
+from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from backend import database
 from backend.config import settings
-from backend.models import ExportRequest, FullVideoExportRequest, GenerateClipsRequest, UpdateClipTimesRequest, UpdateClipTitleRequest
+from backend.models import ExportRequest, FullVideoExportRequest, GenerateClipsRequest, TranslateRequest, TranscriptSegment, UpdateClipTimesRequest, UpdateClipTitleRequest
 from backend.services.clip_exporter import export_clip
 from backend.services.pipeline import broadcast_ws
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["clips"])
+
+
+def _seg_attr(seg, key: str, default=None):
+    """Get attribute from a segment (dict or Pydantic model)."""
+    if isinstance(seg, dict):
+        return seg.get(key, default)
+    return getattr(seg, key, default)
+
+
+def _compute_output_duration(
+    start: float,
+    end: float,
+    global_speed: float,
+    segments: list | None = None,
+) -> float:
+    """Compute expected output duration accounting for per-segment speeds.
+
+    When segments have individual speed overrides, each segment's output
+    duration is its input duration divided by its speed.  Gap regions
+    (not covered by any segment) use the global speed.
+
+    This matches the logic in clip_exporter._build_speed_timeline so the
+    stored duration record matches the actual exported file.
+    """
+    clip_dur = end - start
+    speed = global_speed if global_speed else 1.0
+    if not segments:
+        return clip_dur / speed
+
+    # Check if any segment has a per-segment speed override
+    has_seg_speed = any(
+        abs(_seg_attr(s, "speed", 1.0) - 1.0) > 0.001
+        for s in segments
+    )
+    if not has_seg_speed:
+        return clip_dur / speed
+
+    # Walk through segments and compute output duration per region
+    sorted_segs = sorted(segments, key=lambda s: _seg_attr(s, "start", 0))
+    total_output = 0.0
+    pos = 0.0  # clip-relative position
+
+    for seg in sorted_segs:
+        seg_start = max(0.0, _seg_attr(seg, "start", 0) - start)
+        seg_end = min(clip_dur, _seg_attr(seg, "end", 0) - start)
+        if seg_end <= seg_start:
+            continue
+
+        # Gap before this segment — uses global speed
+        if seg_start > pos + 0.01:
+            total_output += (seg_start - pos) / speed
+
+        seg_speed = _seg_attr(seg, "speed", speed)
+        total_output += (seg_end - seg_start) / seg_speed
+        pos = seg_end
+
+    # Gap after last segment
+    if pos < clip_dur - 0.01:
+        total_output += (clip_dur - pos) / speed
+
+    return total_output
 
 # Track active clip generation tasks per job so we can cancel on re-trigger
 _active_clip_tasks: dict[str, asyncio.Task] = {}
@@ -124,13 +187,66 @@ async def export_clip_endpoint(
         logger.info("[SubjectTracking] clip %s: no scene data in job — using default center crop", req.clip_id)
 
     export_key = f"{job_id}_{req.clip_id}"
+
+    # Prevent duplicate exports: if an export for this clip is already
+    # in progress, reject the second request instead of creating a
+    # parallel task that would race and double-export.
+    existing_task = _active_export_tasks.get(export_key)
+    if existing_task and not existing_task.done():
+        logger.info("Export already in progress for %s — ignoring duplicate request", export_key)
+        return {"export_id": export_key, "status": "exporting", "duplicate": True}
+
     cancel_event = asyncio.Event()
     _export_cancel_events[export_key] = cancel_event
+
+    # Apply VideoEditor trim offsets
+    actual_start = req.start + req.trim_start_offset
+    actual_end = req.end - req.trim_end_offset
+
+    # Adjust overlay times to account for trim offset.
+    # Overlay times from the frontend are computed as (item.start + req.start),
+    # but the backend uses actual_start (= req.start + trim_start_offset) as
+    # clip_start for overlay positioning.  Without this correction, overlays
+    # would be shifted earlier by trim_start_offset seconds.
+    if req.trim_start_offset:
+        _trim = req.trim_start_offset
+        for _ol_list in (req.text_overlays, req.image_overlays,
+                         req.shape_overlays, req.audio_overlays):
+            if _ol_list:
+                for _ol in _ol_list:
+                    _ol.start_time += _trim
+                    _ol.end_time += _trim
+
+    # Warn if any image/audio overlay src looks like a blob URL (client-only)
+    for _ol_list, _label in ((req.image_overlays, "image"), (req.audio_overlays, "audio")):
+        if _ol_list:
+            for _ol in _ol_list:
+                _src = getattr(_ol, "src", "") or ""
+                if _src.startswith("blob:"):
+                    logger.warning(
+                        "Export request for clip %s has %s overlay with blob URL src=%s — "
+                        "this cannot be resolved server-side and will be skipped",
+                        req.clip_id, _label, _src[:80],
+                    )
+
+    # ISSUE 14: Warn when export request is missing expected editor data.
+    # If the clip was edited but the request has no effects/overlays, the
+    # export won't match the preview.
+    if (not req.segments and not req.video_effects
+            and not req.text_overlays and not req.image_overlays
+            and not req.audio_overlays):
+        logger.warning(
+            "Export request for clip %s has no segments, video_effects, "
+            "text_overlays, image_overlays, or audio_overlays. If the user "
+            "edited this clip in the VideoEditor, the export may not match "
+            "the preview. Ensure the frontend sends all editor state.",
+            req.clip_id,
+        )
 
     async def _do_export():
         try:
             export_start = time.monotonic()
-            clip_dur = req.end - req.start
+            clip_dur = actual_end - actual_start
 
             await broadcast_ws(job_id, {
                 "type": "status",
@@ -138,6 +254,33 @@ async def export_clip_endpoint(
                 "progress": 0,
                 "message": f"Starting export for clip {req.clip_id} ({clip_dur:.1f}s) [{req.export_quality or '1080p'}]",
             })
+
+            # Pre-flight diagnostic logging
+            logger.info(
+                "EXPORT PRE-FLIGHT clip %s: text_overlays=%d, image_overlays=%d, "
+                "shape_overlays=%d, audio_overlays=%d, video_effects=%s, "
+                "subtitles=%s, aspect=%s, quality=%s, trim=(%.2f, %.2f)",
+                req.clip_id,
+                len(req.text_overlays or []),
+                len(req.image_overlays or []),
+                len(req.shape_overlays or []),
+                len(req.audio_overlays or []),
+                bool(req.video_effects),
+                req.subtitles_enabled,
+                req.aspect_ratio,
+                req.export_quality,
+                req.trim_start_offset,
+                req.trim_end_offset,
+            )
+            for ti, t_ov in enumerate(req.text_overlays or []):
+                logger.info("  TEXT[%d]: text=%r pos=(%.0f%%,%.0f%%) time=%.1f-%.1f",
+                            ti, (t_ov.text or "")[:30], t_ov.x, t_ov.y, t_ov.start_time, t_ov.end_time)
+            for ii, i_ov in enumerate(req.image_overlays or []):
+                logger.info("  IMAGE[%d]: src=%r pos=(%.0f%%,%.0f%%) time=%.1f-%.1f",
+                            ii, (i_ov.src or "")[:60], i_ov.x, i_ov.y, i_ov.start_time, i_ov.end_time)
+            for ai, a_ov in enumerate(req.audio_overlays or []):
+                logger.info("  AUDIO[%d]: src=%r time=%.1f-%.1f vol=%.1f",
+                            ai, (a_ov.src or "")[:60], a_ov.start_time, a_ov.end_time, a_ov.volume)
 
             # Log subject tracking status for this export
             if settings.SUBJECT_TRACKING_ENABLED and clip_scenes:
@@ -169,24 +312,33 @@ async def export_clip_endpoint(
                 })
 
             async def _export_progress(msg: str):
-                await broadcast_ws(job_id, {
+                # Extract real encoding percentage from message text.
+                # When the message has no percentage (e.g. "Preparing clip..."
+                # or "Subtitle file generated..."), omit the progress field so
+                # the frontend keeps the previous value instead of jumping.
+                import re as _re
+                _m = _re.search(r'(\d+)%', msg)
+                payload = {
                     "type": "status",
                     "status": "exporting",
-                    "progress": 50,
                     "message": msg,
-                })
+                }
+                if _m:
+                    payload["progress"] = int(_m.group(1))
+                await broadcast_ws(job_id, payload)
 
             output_path = await export_clip(
                 job_id=job_id,
                 video_path=job.file_path,
-                start=req.start,
-                end=req.end,
+                start=actual_start,
+                end=actual_end,
                 clip_id=req.clip_id,
                 clip_title=req.clip_title,
                 aspect_ratio=req.aspect_ratio,
                 subtitles_enabled=req.subtitles_enabled,
+                global_subtitles_enabled=req.global_subtitles_enabled,
                 subtitle_settings=req.subtitle_settings.model_dump() if req.subtitle_settings else None,
-                transcript=[s.model_dump() for s in job.transcript] if req.subtitles_enabled else None,
+                transcript=[s.model_dump() for s in (req.edited_subtitle_segments or (job.translated_transcript if job.translated_transcript else job.transcript))] if req.subtitles_enabled else None,
                 video_width=vid_w,
                 video_height=vid_h,
                 subject_x=clip_subject_x,
@@ -194,6 +346,15 @@ async def export_clip_endpoint(
                 progress_callback=_export_progress,
                 cancel_event=cancel_event,
                 export_quality=req.export_quality or "1080p",
+                volume=req.volume,
+                speed=req.speed,
+                segments=[s.model_dump() for s in req.segments] if req.segments else None,
+                video_effects=req.video_effects.model_dump() if req.video_effects else None,
+                text_overlays=[t.model_dump() for t in req.text_overlays] if req.text_overlays else None,
+                image_overlays=[i.model_dump() for i in req.image_overlays] if req.image_overlays else None,
+                shape_overlays=[s.model_dump() for s in req.shape_overlays] if req.shape_overlays else None,
+                audio_overlays=[a.model_dump() for a in req.audio_overlays] if req.audio_overlays else None,
+                overlay_compositing_order=req.overlay_compositing_order if req.overlay_compositing_order else None,
             )
 
             elapsed = int(time.monotonic() - export_start)
@@ -207,21 +368,25 @@ async def export_clip_endpoint(
                     "path": output_path,
                     "filename": os.path.basename(output_path),
                     "title": req.clip_title or f"Clip {req.clip_id}",
-                    "start": req.start,
-                    "end": req.end,
+                    "start": actual_start,
+                    "end": actual_end,
                     "exported_at": datetime.now(timezone.utc).isoformat(),
-                    "duration": round(req.end - req.start, 2),
+                    "duration": round(_compute_output_duration(
+                        actual_start, actual_end, req.speed, req.segments,
+                    ), 2),
                     "export_quality": req.export_quality or "1080p",
                     "aspect_ratio": req.aspect_ratio,
                     "subtitles_enabled": req.subtitles_enabled,
                     "subtitle_settings": req.subtitle_settings.model_dump() if req.subtitle_settings else None,
+                    "volume": req.volume,
+                    "speed": req.speed,
                 })
                 await database.save_job(j)
 
             await broadcast_ws(job_id, {
                 "type": "export_complete",
                 "clip_id": req.clip_id,
-                "download_url": f"/api/files/{job_id}/clips/{os.path.basename(output_path)}",
+                "download_url": f"/api/files/{job_id}/clips/{quote(os.path.basename(output_path))}?t={int(time.time())}",
                 "message": f"Clip {req.clip_id} exported in {elapsed}s [{req.export_quality or '1080p'}]",
                 "qa_passed": True,
             })
@@ -231,6 +396,7 @@ async def export_clip_endpoint(
                 "message": f"Clip {req.clip_id} export cancelled",
             })
         except Exception as e:
+            logger.exception("Export failed for clip %s in job %s", req.clip_id, job_id)
             await broadcast_ws(job_id, {
                 "type": "error",
                 "message": f"Clip {req.clip_id} export failed: {str(e)}",
@@ -294,6 +460,13 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
 
     # Use clip_id=0 to denote full-video export (matches frontend's ${jobId}_0 convention)
     export_key = f"{job_id}_0"
+
+    # Prevent duplicate exports
+    existing_task = _active_export_tasks.get(export_key)
+    if existing_task and not existing_task.done():
+        logger.info("Full video export already in progress for %s — ignoring duplicate request", export_key)
+        return {"export_id": export_key, "status": "exporting", "duplicate": True}
+
     cancel_event = asyncio.Event()
     _export_cancel_events[export_key] = cancel_event
 
@@ -317,24 +490,33 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                 })
 
             async def _export_progress(msg: str):
-                await broadcast_ws(job_id, {
+                import re as _re
+                _m = _re.search(r'(\d+)%', msg)
+                payload = {
                     "type": "status",
                     "status": "exporting",
-                    "progress": 50,
                     "message": msg,
-                })
+                }
+                if _m:
+                    payload["progress"] = int(_m.group(1))
+                await broadcast_ws(job_id, payload)
+
+            # Apply VideoEditor trim offsets for full video
+            fv_start = 0 + req.trim_start_offset
+            fv_end = job.duration - req.trim_end_offset
 
             output_path = await export_clip(
                 job_id=job_id,
                 video_path=job.file_path,
-                start=0,
-                end=job.duration,
+                start=fv_start,
+                end=fv_end,
                 clip_id=0,
                 clip_title=os.path.splitext(job.filename or "full_video")[0],
                 aspect_ratio=req.aspect_ratio,
                 subtitles_enabled=req.subtitles_enabled,
+                global_subtitles_enabled=req.global_subtitles_enabled,
                 subtitle_settings=req.subtitle_settings.model_dump() if req.subtitle_settings else None,
-                transcript=[s.model_dump() for s in job.transcript] if req.subtitles_enabled and job.transcript else None,
+                transcript=[s.model_dump() for s in (req.edited_subtitle_segments or (job.translated_transcript if job.translated_transcript else job.transcript))] if req.subtitles_enabled and (req.edited_subtitle_segments or job.translated_transcript or job.transcript) else None,
                 video_width=vid_w,
                 video_height=vid_h,
                 subject_x=full_subject_x,
@@ -342,6 +524,14 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                 progress_callback=_export_progress,
                 cancel_event=cancel_event,
                 export_quality=req.export_quality or "1080p",
+                volume=req.volume,
+                speed=req.speed,
+                segments=[s.model_dump() for s in req.segments] if req.segments else None,
+                video_effects=req.video_effects.model_dump() if req.video_effects else None,
+                text_overlays=[t.model_dump() for t in req.text_overlays] if req.text_overlays else None,
+                image_overlays=[i.model_dump() for i in req.image_overlays] if req.image_overlays else None,
+                shape_overlays=[s.model_dump() for s in req.shape_overlays] if hasattr(req, 'shape_overlays') and req.shape_overlays else None,
+                audio_overlays=[a.model_dump() for a in req.audio_overlays] if hasattr(req, 'audio_overlays') and req.audio_overlays else None,
             )
 
             elapsed = int(time.monotonic() - export_start)
@@ -354,10 +544,12 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
                     "path": output_path,
                     "filename": os.path.basename(output_path),
                     "title": os.path.splitext(job.filename or "full_video")[0],
-                    "start": 0,
-                    "end": job.duration,
+                    "start": fv_start,
+                    "end": fv_end,
                     "exported_at": datetime.now(timezone.utc).isoformat(),
-                    "duration": round(job.duration, 2),
+                    "duration": round(_compute_output_duration(
+                        fv_start, fv_end, req.speed, req.segments,
+                    ), 2),
                     "export_quality": req.export_quality or "1080p",
                     "aspect_ratio": req.aspect_ratio,
                     "subtitles_enabled": req.subtitles_enabled,
@@ -369,7 +561,7 @@ async def export_full_video_endpoint(job_id: str, req: FullVideoExportRequest):
             await broadcast_ws(job_id, {
                 "type": "export_complete",
                 "clip_id": 0,
-                "download_url": f"/api/files/{job_id}/clips/{os.path.basename(output_path)}",
+                "download_url": f"/api/files/{job_id}/clips/{quote(os.path.basename(output_path))}?t={int(time.time())}",
                 "message": f"Full video exported in {elapsed}s [{req.export_quality or '1080p'}]",
                 "qa_passed": True,
             })
@@ -568,6 +760,14 @@ async def generate_clips_endpoint(
             parts.append(f"Audience: {job.summary.estimated_audience}")
         summary_text = "\n".join(parts)
 
+    # Build existing clip info so the AI avoids duplicating already-found clips
+    existing_clips_info = None
+    if job.clips:
+        existing_clips_info = "\n".join(
+            f"  \u2022 [{c.start_time:.0f}-{c.end_time:.0f}s] \"{c.title}\""
+            for c in job.clips
+        )
+
     async def _do_generate():
         try:
             from backend.services.ai_orchestrator import AIOrchestrator
@@ -683,6 +883,7 @@ async def generate_clips_endpoint(
                         max_duration=req.max_duration,
                         clip_focus=req.clip_focus,
                         video_summary=summary_text,
+                        existing_clips=existing_clips_info,
                     ),
                     timeout=_CLIP_DETECTION_TIMEOUT,
                 )
@@ -820,6 +1021,43 @@ async def _cancel_existing_generation(job_id: str):
     _clip_cancel_events.pop(job_id, None)
 
 
+@router.post("/jobs/{job_id}/translate-subtitles")
+async def translate_subtitles(job_id: str, req: TranslateRequest):
+    """Translate the transcript for a job into a target language."""
+    from backend.services.translator import translate_segments_with_fallback, SUPPORTED_LANGUAGES
+    from backend.services.ai_orchestrator import AIOrchestrator
+
+    job = await database.load_job(job_id)
+    if not job or not job.transcript:
+        raise HTTPException(404, "Job not found or has no transcript")
+
+    if req.target_language not in SUPPORTED_LANGUAGES:
+        raise HTTPException(400, f"Unsupported language: {req.target_language}")
+
+    orchestrator = AIOrchestrator()
+    segments = [TranscriptSegment(**s) if isinstance(s, dict) else s for s in job.transcript]
+
+    translated = await translate_segments_with_fallback(
+        segments,
+        source_language=req.source_language or job.language or "en",
+        target_language=req.target_language,
+        orchestrator=orchestrator,
+    )
+
+    # Store translated transcript and update subtitle_language
+    await database.update_job_status(
+        job_id,
+        translated_transcript=[s.model_dump() for s in translated],
+        subtitle_language=req.target_language,
+    )
+
+    return {
+        "status": "ok",
+        "target_language": req.target_language,
+        "segments": len(translated),
+    }
+
+
 @router.get("/jobs/{job_id}/clips")
 async def list_clips(job_id: str):
     job = await database.load_job(job_id)
@@ -829,12 +1067,27 @@ async def list_clips(job_id: str):
         {
             "clip_id": c.get("clip_id"),
             "filename": c.get("filename"),
-            "download_url": f"/api/files/{job_id}/clips/{c.get('filename')}",
+            "download_url": f"/api/files/{job_id}/clips/{quote(c.get('filename', ''))}",
             "start": c.get("start"),
             "end": c.get("end"),
         }
         for c in job.exported_clips
     ]
+
+
+@router.get("/jobs/{job_id}/retention")
+async def get_retention_predictions(job_id: str):
+    """Get audience retention predictions for all clips in a job."""
+    from backend.services.retention_predictor import predict_retention_for_clips
+
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if not job.clips:
+        return {"predictions": {}}
+
+    predictions = predict_retention_for_clips(job.clips, job.transcript, job.scenes)
+    return {"predictions": predictions}
 
 
 @router.post("/jobs/{job_id}/seo/{clip_id}")
@@ -861,6 +1114,19 @@ async def generate_seo_endpoint(job_id: str, clip_id: int):
     if job.summary:
         video_summary = job.summary.overview
 
+    # Check that at least one AI provider has an API key configured
+    has_any_key = any([
+        settings.OPENROUTER_API_KEY,
+        settings.ANTHROPIC_API_KEY,
+        settings.GEMINI_API_KEY,
+        settings.GROQ_API_KEY,
+    ])
+    if not has_any_key:
+        raise HTTPException(
+            status_code=400,
+            detail="No OpenRouter API key configured. Please add your key in Settings.",
+        )
+
     await broadcast_ws(job_id, {
         "type": "status",
         "status": "generating_seo",
@@ -870,8 +1136,9 @@ async def generate_seo_endpoint(job_id: str, clip_id: int):
 
     try:
         from backend.services.ai_orchestrator import AIOrchestrator
+        from backend.services.prompts import load_prompts
 
-        orchestrator = AIOrchestrator(ws_broadcast=broadcast_ws)
+        orchestrator = AIOrchestrator(ws_broadcast=broadcast_ws, custom_prompts=load_prompts())
 
         seo, provider = await orchestrator.generate_seo(
             clip_title=clip.title,
@@ -888,11 +1155,655 @@ async def generate_seo_endpoint(job_id: str, clip_id: int):
             "message": f"SEO generated via {provider}",
         })
 
+        # Persist SEO data on the clip
+        seo_data = seo.model_dump()
+        clip.seo_title = seo_data.get("title", "")
+        clip.seo_description = seo_data.get("description", "")
+        clip.seo_tags = seo_data.get("tags", [])
+        clip.seo_platform_tips = seo_data.get("platform_tips", "")
+        await database.save_job(job)
+
         return {
             "clip_id": clip_id,
             "provider": provider,
-            "seo": seo.model_dump(),
+            "seo": seo_data,
         }
     except Exception as e:
         logger.exception(f"SEO generation failed for {job_id}/{clip_id}")
         raise HTTPException(status_code=500, detail=f"SEO generation failed: {str(e)}")
+
+
+# ── YouTube Description Generators ─────────────────────────────────────
+
+_SHORTS_DESCRIPTION_PROMPT = (
+    "You are a YouTube Shorts SEO expert. Generate a YouTube Shorts description "
+    "that is optimized for discoverability and engagement.\n\n"
+    "You will be given the FULL TRANSCRIPT of what is said in the clip plus KEY SCENES "
+    "describing what visually happens. Use BOTH to write a description that tells "
+    "viewers and the YouTube algorithm exactly what this video is about.\n\n"
+    "Requirements:\n"
+    "- Hook line in the first sentence that references the specific topic or moment in the clip\n"
+    "- 3-5 sentences that describe what actually happens in the clip — reference specific things "
+    "said, shown, or discussed. Mention key points, quotes, or moments from the transcript.\n"
+    "- Weave in relevant keywords naturally so the algorithm understands the content\n"
+    "- 5-8 relevant hashtags at the bottom (mix broad and niche tags related to the actual content)\n"
+    "- Include a call-to-action (e.g., 'Follow for more', 'Like if you agree')\n"
+    "- Total length: 400-800 characters\n"
+    "- Write naturally — not like a marketer or robot. Sound like a real creator.\n"
+    "- DO NOT be generic. Every sentence should contain specific information from the clip.\n\n"
+    "Return ONLY valid JSON:\n"
+    '{"description": "the full description text including hashtags"}'
+)
+
+_LONGFORM_DESCRIPTION_PROMPT = (
+    "You are a YouTube SEO expert. Generate a detailed YouTube video description "
+    "optimized for search ranking and viewer engagement.\n\n"
+    "You will be given the FULL TRANSCRIPT of what is said in the clip plus KEY SCENES "
+    "describing what visually happens. Use BOTH to write a rich, contextual description "
+    "that tells viewers and the YouTube algorithm exactly what this video covers.\n\n"
+    "Requirements:\n"
+    "- Strong opening paragraph (first 2-3 lines appear in search results — front-load keywords). "
+    "This paragraph must reference the specific topic and key takeaway of the clip.\n"
+    "- A detailed body section (2-3 paragraphs) covering:\n"
+    "  * What the viewer will see and learn — reference specific points discussed in the transcript\n"
+    "  * Key quotes or statements from the speaker(s) that capture the main message\n"
+    "  * The context and significance of what is being discussed or shown\n"
+    "- Use the KEY SCENES provided to create a timestamp section with real timestamps "
+    "(e.g., '0:00 - Introduction', '0:15 - Main topic begins'). Base these on the scene "
+    "timestamps and descriptions given to you.\n"
+    "- A keyword-rich paragraph that naturally summarizes the topics for search ranking\n"
+    "- 5-8 hashtags section (specific to the actual content, not generic filler)\n"
+    "- Social links placeholder section (e.g., 'Follow me on: [Instagram] [Twitter] [TikTok]')\n"
+    "- Total length: 1000-3000 characters\n"
+    "- Write naturally and engagingly — match the tone of the video content\n"
+    "- DO NOT be generic or vague. Every paragraph should contain specific information from "
+    "the transcript and scenes. A viewer reading this should understand what the video is about "
+    "without watching it.\n\n"
+    "Return ONLY valid JSON:\n"
+    '{"description": "the full description text"}'
+)
+
+
+class GenerateDescriptionRequest(BaseModel):
+    description_type: str  # "shorts" or "long_form"
+
+
+@router.post("/jobs/{job_id}/generate-description/{clip_id}")
+async def generate_description_endpoint(
+    job_id: str, clip_id: int, req: GenerateDescriptionRequest,
+):
+    """Generate a YouTube Shorts or long-form description for a clip."""
+    if req.description_type not in ("shorts", "long_form"):
+        raise HTTPException(status_code=400, detail="description_type must be 'shorts' or 'long_form'")
+
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    clip = next((c for c in job.clips if c.id == clip_id), None)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    # Check that at least one AI provider has an API key configured
+    has_any_key = any([
+        settings.OPENROUTER_API_KEY,
+        settings.ANTHROPIC_API_KEY,
+        settings.GEMINI_API_KEY,
+        settings.GROQ_API_KEY,
+    ])
+    if not has_any_key:
+        raise HTTPException(
+            status_code=400,
+            detail="No OpenRouter API key configured. Please add your key in Settings.",
+        )
+
+    # Build clip transcript
+    clip_transcript = "\n".join(
+        f"{s.speaker}: {s.text}"
+        for s in job.transcript
+        if s.start >= clip.start_time and s.end <= clip.end_time
+    )
+    if not clip_transcript:
+        clip_transcript = clip.suggested_caption or clip.title
+
+    video_summary = ""
+    if job.summary:
+        video_summary = job.summary.overview
+        if job.summary.key_topics:
+            video_summary += "\nTopics: " + ", ".join(job.summary.key_topics)
+        if job.summary.content_category:
+            video_summary += "\nCategory: " + job.summary.content_category
+
+    # Gather scene descriptions that fall within this clip's time range
+    clip_scenes = [
+        s for s in job.scenes
+        if s.timestamp >= clip.start_time and s.timestamp <= clip.end_time
+    ]
+    scene_context = ""
+    if clip_scenes:
+        scene_lines = []
+        for s in clip_scenes:
+            # Show timestamp relative to clip start for timestamp generation
+            rel_ts = s.timestamp - clip.start_time
+            mins, secs = divmod(int(rel_ts), 60)
+            scene_lines.append(
+                f"  [{mins}:{secs:02d}] (importance {s.importance_score}/10) {s.description}"
+            )
+        scene_context = "\n".join(scene_lines)
+
+    # Select the appropriate prompt prefix
+    if req.description_type == "shorts":
+        desc_prompt = _SHORTS_DESCRIPTION_PROMPT
+    else:
+        desc_prompt = _LONGFORM_DESCRIPTION_PROMPT
+
+    # Build rich context with video summary and scene descriptions.
+    # NOTE: clip_transcript is passed separately to generate_seo(), so we don't
+    # duplicate it here — the provider already includes it in the prompt.
+    context_parts = [f"VIDEO OVERVIEW:\n{video_summary}"] if video_summary else []
+    if scene_context:
+        context_parts.append(f"KEY SCENES IN THIS CLIP (with timestamps relative to clip start):\n{scene_context}")
+    full_context = "\n\n".join(context_parts)
+
+    # Use a marker prefix so providers can detect this is a description
+    # generation call and skip the default SEO prompt (which conflicts with
+    # our character-length and formatting requirements).
+    enriched_summary = (
+        f"DESCRIPTION_OVERRIDE\n"
+        f"{desc_prompt}\n\n"
+        f"{full_context}"
+    )
+
+    try:
+        from backend.services.ai_orchestrator import AIOrchestrator
+        from backend.services.prompts import load_prompts
+
+        orchestrator = AIOrchestrator(ws_broadcast=broadcast_ws, custom_prompts=load_prompts())
+
+        seo_result, provider = await orchestrator.generate_seo(
+            clip_title=clip.title,
+            clip_transcript=clip_transcript,
+            video_summary=enriched_summary,
+            platform=clip.platform,
+            job_id=job_id,
+        )
+
+        # The AI should have returned the description in the description field
+        description = seo_result.description or ""
+
+        # Persist description on the clip
+        if req.description_type == "shorts":
+            clip.shorts_description = description
+        else:
+            clip.longform_description = description
+        await database.save_job(job)
+
+        return {
+            "clip_id": clip_id,
+            "description_type": req.description_type,
+            "description": description,
+            "provider": provider,
+        }
+    except Exception as e:
+        logger.exception(f"Description generation failed for {job_id}/{clip_id}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Description generation failed: {str(e)}",
+        )
+
+
+# ── Persist SEO edits ──────────────────────────────────────────────────
+
+class UpdateClipSEORequest(BaseModel):
+    seo_title: Optional[str] = None
+    seo_description: Optional[str] = None
+    seo_tags: Optional[list[str]] = None
+    seo_platform_tips: Optional[str] = None
+    shorts_description: Optional[str] = None
+    longform_description: Optional[str] = None
+
+
+@router.put("/jobs/{job_id}/clips/{clip_id}/seo")
+async def update_clip_seo(job_id: str, clip_id: int, req: UpdateClipSEORequest):
+    """Persist user-edited SEO data on a clip."""
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    clip = next((c for c in job.clips if c.id == clip_id), None)
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    if req.seo_title is not None:
+        clip.seo_title = req.seo_title
+    if req.seo_description is not None:
+        clip.seo_description = req.seo_description
+    if req.seo_tags is not None:
+        clip.seo_tags = req.seo_tags
+    if req.seo_platform_tips is not None:
+        clip.seo_platform_tips = req.seo_platform_tips
+    if req.shorts_description is not None:
+        clip.shorts_description = req.shorts_description
+    if req.longform_description is not None:
+        clip.longform_description = req.longform_description
+
+    await database.save_job(job)
+
+    return {
+        "clip_id": clip_id,
+        "seo_title": clip.seo_title,
+        "seo_description": clip.seo_description,
+        "seo_tags": clip.seo_tags,
+        "seo_platform_tips": clip.seo_platform_tips,
+        "shorts_description": clip.shorts_description,
+        "longform_description": clip.longform_description,
+    }
+
+
+# ═══════════════════════════════════════════════════════
+# Multi-Track Editor State Endpoints
+# ═══════════════════════════════════════════════════════
+
+EDITOR_STATE_DIR = "/data/uploads"
+
+
+@router.put("/jobs/{job_id}/clips/{clip_id}/editor-state")
+async def save_editor_state(job_id: str, clip_id: int, state: dict):
+    """Persist editor timeline state for cross-session recovery."""
+    import json
+    state_dir = os.path.join(EDITOR_STATE_DIR, job_id, "editor-state")
+    os.makedirs(state_dir, exist_ok=True)
+    state_file = os.path.join(state_dir, f"clip_{clip_id}.json")
+    with open(state_file, "w") as f:
+        json.dump(state, f)
+    logger.info("Saved editor state for job %s clip %d", job_id, clip_id)
+    return {"status": "saved", "job_id": job_id, "clip_id": clip_id}
+
+
+@router.get("/jobs/{job_id}/clips/{clip_id}/editor-state")
+async def get_editor_state(job_id: str, clip_id: int):
+    """Retrieve saved editor state."""
+    import json
+    state_file = os.path.join(EDITOR_STATE_DIR, job_id, "editor-state", f"clip_{clip_id}.json")
+    if not os.path.isfile(state_file):
+        return {"state": None}
+    try:
+        with open(state_file, "r") as f:
+            state = json.load(f)
+        return {"state": state}
+    except Exception:
+        return {"state": None}
+
+
+@router.post("/jobs/{job_id}/clips/{clip_id}/export-timeline", deprecated=True)
+async def export_timeline(job_id: str, clip_id: int, timeline: dict):
+    """Deprecated: use POST /jobs/{job_id}/export-clip instead.
+
+    The standard export-clip endpoint now supports all multi-track editor
+    data including video_effects, text_overlays, image_overlays, segments,
+    and per-segment volume/speed/subtitle overrides.
+    """
+    raise HTTPException(
+        status_code=410,
+        detail="This endpoint is deprecated. Use POST /api/jobs/{job_id}/export-clip "
+               "with video_effects, text_overlays, and image_overlays fields instead.",
+    )
+
+
+# ── Export Parity Validation ──────────────────────────────────────────
+
+@router.post("/jobs/{job_id}/validate-export-parity")
+async def validate_export_parity(job_id: str, req: ExportRequest):
+    """Validate that an export request will produce output matching the preview.
+
+    Returns a detailed report of which effects, overlays, and settings will be
+    applied in the FFmpeg export, and flags any missing parameters.
+    """
+    report: dict = {"effects": [], "overlays": [], "segments": [], "warnings": []}
+
+    # Video effects
+    if req.video_effects:
+        ve = req.video_effects.model_dump()
+        for key, val in ve.items():
+            default = 0 if key not in ("opacity", "position_x", "position_y", "width", "height") else {
+                "opacity": 1.0, "position_x": 50, "position_y": 50, "width": 100, "height": 100,
+            }.get(key, 0)
+            if val != default:
+                report["effects"].append({"name": key, "value": val, "has_ffmpeg_filter": True})
+    else:
+        report["warnings"].append("No video_effects in request — no brightness/contrast/etc will be applied")
+
+    # Text overlays
+    if req.text_overlays:
+        for i, t in enumerate(req.text_overlays):
+            report["overlays"].append({
+                "type": "text", "index": i,
+                "text": t.text[:50],
+                "timing": f"{t.start_time:.1f}s - {t.end_time:.1f}s",
+                "has_drawtext": True,
+            })
+    else:
+        report["warnings"].append("No text_overlays in request")
+
+    # Image overlays
+    if req.image_overlays:
+        for i, img in enumerate(req.image_overlays):
+            report["overlays"].append({
+                "type": "image", "index": i,
+                "src": img.src[:80] if img.src else "(empty)",
+                "timing": f"{img.start_time:.1f}s - {img.end_time:.1f}s",
+                "has_overlay_filter": bool(img.src),
+            })
+    else:
+        report["warnings"].append("No image_overlays in request")
+
+    # Audio overlays
+    if req.audio_overlays:
+        for i, ao in enumerate(req.audio_overlays):
+            report["overlays"].append({
+                "type": "audio", "index": i,
+                "src": ao.src[:80] if ao.src else "(empty)",
+                "timing": f"{ao.start_time:.1f}s - {ao.end_time:.1f}s",
+                "has_amix": bool(ao.src),
+            })
+
+    # Segments
+    if req.segments:
+        for i, seg in enumerate(req.segments):
+            report["segments"].append({
+                "index": i,
+                "start": seg.start, "end": seg.end,
+                "volume": seg.volume, "muted": seg.muted,
+                "speed": seg.speed,
+                "subtitles_enabled": seg.subtitles_enabled,
+            })
+    else:
+        report["warnings"].append("No per-segment overrides in request")
+
+    # Subtitle check
+    if req.subtitles_enabled:
+        report["subtitles"] = {
+            "enabled": True,
+            "font": req.subtitle_settings.font if req.subtitle_settings else "default",
+            "burn_in": True,
+        }
+    else:
+        report["subtitles"] = {"enabled": False, "burn_in": False}
+
+    # Volume / speed
+    report["audio"] = {"volume": req.volume, "speed": req.speed}
+
+    # Trim
+    report["trim"] = {
+        "start_offset": req.trim_start_offset,
+        "end_offset": req.trim_end_offset,
+        "effective_start": req.start + req.trim_start_offset,
+        "effective_end": req.end - req.trim_end_offset,
+    }
+
+    return {"job_id": job_id, "clip_id": req.clip_id, "parity_report": report}
+
+
+# ── QA / Validation Endpoint ─────────────────────────────────────────
+
+@router.get("/jobs/{job_id}/qa-validate")
+async def qa_validate_job(job_id: str):
+    """Run QA validation checks on a completed analysis job.
+
+    Validates that:
+    - Transcript was generated with segments
+    - Scenes were analyzed with importance scores
+    - Clips were detected with proper viral scores
+    - Clip boundaries are within video duration
+    - Clip durations are within valid ranges
+    - ClipFocus clips have focus metadata
+    - Subject tracking data is present (when enabled)
+    - All AI providers responded correctly
+    """
+    job = await database.load_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    checks = []
+    warnings = []
+    errors = []
+
+    # 1. Job status
+    checks.append({
+        "name": "Job Status",
+        "status": "pass" if job.status == "complete" else "fail",
+        "detail": f"Status: {job.status}",
+    })
+
+    # 2. Transcript quality
+    if job.transcript:
+        seg_count = len(job.transcript)
+        speaker_count = len(set(s.speaker for s in job.transcript))
+        total_words = sum(len(s.text.split()) for s in job.transcript)
+        empty_segs = sum(1 for s in job.transcript if not s.text.strip())
+        checks.append({
+            "name": "Transcript",
+            "status": "pass" if seg_count > 0 and total_words > 10 else "warn",
+            "detail": f"{seg_count} segments, {speaker_count} speakers, {total_words} words",
+        })
+        if empty_segs > 0:
+            warnings.append(f"{empty_segs} empty transcript segments detected")
+        # Check for word-level timestamps
+        has_words = sum(1 for s in job.transcript if s.words and len(s.words) > 0)
+        checks.append({
+            "name": "Word Timestamps",
+            "status": "pass" if has_words > 0 else "warn",
+            "detail": f"{has_words}/{seg_count} segments have word-level timestamps (needed for active word highlighting)",
+        })
+    else:
+        checks.append({
+            "name": "Transcript",
+            "status": "fail",
+            "detail": "No transcript generated",
+        })
+        errors.append("No transcript — AI clip detection relies on transcript data")
+
+    # 3. Scene analysis quality
+    if job.scenes:
+        scene_count = len(job.scenes)
+        high_importance = sum(1 for s in job.scenes if s.importance_score >= 7)
+        avg_importance = round(sum(s.importance_score for s in job.scenes) / scene_count, 1)
+        checks.append({
+            "name": "Scene Analysis",
+            "status": "pass",
+            "detail": f"{scene_count} scenes analyzed, {high_importance} high-importance (7+), avg score {avg_importance}/10",
+        })
+        # Subject tracking check
+        if settings.SUBJECT_TRACKING_ENABLED:
+            tracked = [s for s in job.scenes if s.subject_x is not None]
+            all_center = all(s.subject_x == 50 for s in tracked) if tracked else True
+            checks.append({
+                "name": "Subject Tracking",
+                "status": "pass" if tracked and not all_center else "warn",
+                "detail": f"{len(tracked)}/{scene_count} scenes tracked"
+                    + (" — WARNING: all subject_x=50 (model may not have detected positions)" if all_center and tracked else ""),
+            })
+        else:
+            checks.append({
+                "name": "Subject Tracking",
+                "status": "info",
+                "detail": "Disabled in settings — exports use center crop",
+            })
+    else:
+        checks.append({
+            "name": "Scene Analysis",
+            "status": "fail",
+            "detail": "No scenes analyzed",
+        })
+        errors.append("No scene analysis — visual moment detection unavailable")
+
+    # 4. Clip detection quality
+    if job.clips:
+        clip_count = len(job.clips)
+        scores = [c.viral_score for c in job.clips]
+        avg_score = round(sum(scores) / len(scores), 1)
+        min_score = min(scores)
+        max_score = max(scores)
+        durations = [c.duration for c in job.clips]
+
+        checks.append({
+            "name": "Clip Detection",
+            "status": "pass",
+            "detail": f"{clip_count} clips found, viral scores: {min_score}-{max_score} (avg {avg_score})",
+        })
+
+        # Duration validation
+        invalid_dur = []
+        for c in job.clips:
+            if c.duration < 5:
+                invalid_dur.append(f"Clip {c.id}: too short ({c.duration:.1f}s)")
+            elif c.duration > 600:
+                invalid_dur.append(f"Clip {c.id}: too long ({c.duration:.1f}s)")
+        if invalid_dur:
+            checks.append({
+                "name": "Clip Durations",
+                "status": "warn",
+                "detail": f"{len(invalid_dur)} clips with unusual durations",
+            })
+            warnings.extend(invalid_dur)
+        else:
+            checks.append({
+                "name": "Clip Durations",
+                "status": "pass",
+                "detail": f"All clips within valid range ({min(durations):.0f}s - {max(durations):.0f}s)",
+            })
+
+        # Boundary validation
+        out_of_bounds = []
+        for c in job.clips:
+            if c.start_time < 0:
+                out_of_bounds.append(f"Clip {c.id}: negative start ({c.start_time:.1f}s)")
+            if job.duration and c.end_time > job.duration + 1:
+                out_of_bounds.append(f"Clip {c.id}: end ({c.end_time:.1f}s) exceeds video duration ({job.duration:.1f}s)")
+            if c.end_time <= c.start_time:
+                out_of_bounds.append(f"Clip {c.id}: end <= start ({c.start_time:.1f}-{c.end_time:.1f})")
+        if out_of_bounds:
+            checks.append({
+                "name": "Clip Boundaries",
+                "status": "fail",
+                "detail": f"{len(out_of_bounds)} clips with invalid boundaries",
+            })
+            errors.extend(out_of_bounds)
+        else:
+            checks.append({
+                "name": "Clip Boundaries",
+                "status": "pass",
+                "detail": "All clips within video boundaries",
+            })
+
+        # Overlap detection
+        sorted_clips = sorted(job.clips, key=lambda c: c.start_time)
+        overlaps = []
+        for i in range(len(sorted_clips) - 1):
+            a, b = sorted_clips[i], sorted_clips[i + 1]
+            overlap = a.end_time - b.start_time
+            if overlap > a.duration * 0.5:
+                overlaps.append(f"Clips {a.id} and {b.id}: {overlap:.1f}s overlap (>{a.duration * 0.5:.0f}s)")
+        if overlaps:
+            checks.append({
+                "name": "Clip Overlap",
+                "status": "warn",
+                "detail": f"{len(overlaps)} heavily overlapping clip pairs",
+            })
+            warnings.extend(overlaps)
+        else:
+            checks.append({
+                "name": "Clip Overlap",
+                "status": "pass",
+                "detail": "No excessive clip overlap detected",
+            })
+
+        # ClipFocus metadata
+        focus_clips = [c for c in job.clips if c.clip_focus]
+        if focus_clips:
+            with_relevance = sum(1 for c in focus_clips if c.focus_relevance is not None)
+            with_tier = sum(1 for c in focus_clips if c.focus_tier)
+            checks.append({
+                "name": "ClipFocus Metadata",
+                "status": "pass" if with_relevance == len(focus_clips) else "warn",
+                "detail": f"{len(focus_clips)} focus clips, {with_relevance} with relevance scores, {with_tier} with tier labels",
+            })
+    else:
+        checks.append({
+            "name": "Clip Detection",
+            "status": "fail" if job.status == "complete" else "info",
+            "detail": "No clips detected" + (" — analysis may still be running" if job.status != "complete" else ""),
+        })
+        if job.status == "complete":
+            errors.append("Analysis completed but no clips found — check AI provider configuration")
+
+    # 5. Summary quality
+    if job.summary:
+        has_overview = bool(job.summary.overview and len(job.summary.overview) > 20)
+        has_topics = bool(job.summary.key_topics and len(job.summary.key_topics) >= 2)
+        has_category = bool(job.summary.content_category and job.summary.content_category != "uncategorized")
+        checks.append({
+            "name": "Video Summary",
+            "status": "pass" if has_overview and has_topics else "warn",
+            "detail": f"Category: {job.summary.content_category}, Tone: {job.summary.tone}, "
+                f"{len(job.summary.key_topics)} topics, Audience: {job.summary.estimated_audience}",
+        })
+    else:
+        checks.append({
+            "name": "Video Summary",
+            "status": "warn",
+            "detail": "No summary generated — content-type guidance unavailable for clip detection",
+        })
+
+    # 6. Provider info
+    if job.provider_used:
+        provider_strs = [f"{task}: {provider}" for task, provider in job.provider_used.items()]
+        has_none = any(v == "none" for v in job.provider_used.values())
+        checks.append({
+            "name": "AI Providers",
+            "status": "warn" if has_none else "pass",
+            "detail": ", ".join(provider_strs),
+        })
+        if has_none:
+            warnings.append("Some pipeline stages used no AI provider (fallback/timeout)")
+    else:
+        checks.append({
+            "name": "AI Providers",
+            "status": "info",
+            "detail": "No provider info recorded",
+        })
+
+    # 7. Pipeline timing
+    if job.analysis_duration_seconds:
+        dur = job.analysis_duration_seconds
+        if dur < 60:
+            dur_str = f"{int(dur)}s"
+        else:
+            m, s = divmod(int(dur), 60)
+            dur_str = f"{m}m {s}s"
+        checks.append({
+            "name": "Pipeline Duration",
+            "status": "pass",
+            "detail": dur_str,
+        })
+
+    # Overall verdict
+    pass_count = sum(1 for c in checks if c["status"] == "pass")
+    warn_count = sum(1 for c in checks if c["status"] == "warn")
+    fail_count = sum(1 for c in checks if c["status"] == "fail")
+
+    if fail_count > 0:
+        overall = "fail"
+    elif warn_count > 0:
+        overall = "warn"
+    else:
+        overall = "pass"
+
+    return {
+        "job_id": job_id,
+        "overall": overall,
+        "summary": f"{pass_count} passed, {warn_count} warnings, {fail_count} failures",
+        "checks": checks,
+        "warnings": warnings,
+        "errors": errors,
+    }

@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import useResponsive from '../hooks/useResponsive';
 
 const SPEAKER_COLORS_LIST = [
@@ -34,8 +34,10 @@ function toTXT(segments) {
   return segments.map((seg) => `[${formatTime(seg.start)}] ${seg.speaker}: ${seg.text}`).join('\n');
 }
 
-export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerRenamed, onTranscriptUpdated, timeRange }) {
+export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerRenamed, onTranscriptUpdated, timeRange, currentTime, maxHeight }) {
   const { isMobile } = useResponsive();
+  const scrollContainerRef = useRef(null);
+  const activeSegRef = useRef(null);
   const [search, setSearch] = useState('');
   const [editingSpeaker, setEditingSpeaker] = useState(null);
   const [editValue, setEditValue] = useState('');
@@ -43,6 +45,11 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
   const [editingSegIdx, setEditingSegIdx] = useState(null);
   const [editSegText, setEditSegText] = useState('');
   const [savingSegment, setSavingSegment] = useState(false);
+
+  // Multi-select state
+  const [selectedIndices, setSelectedIndices] = useState(new Set());
+  const lastClickedIdx = useRef(null);
+  const [bulkSaving, setBulkSaving] = useState(false);
 
   // Insert segment state
   const [insertAfterIdx, setInsertAfterIdx] = useState(null);
@@ -83,6 +90,38 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
     return timeFiltered.filter((seg) => seg.text.toLowerCase().includes(q) || seg.speaker.toLowerCase().includes(q));
   }, [timeFiltered, search]);
 
+  // Determine which segment is currently playing (by original transcript index)
+  const activeOriginalIdx = useMemo(() => {
+    if (currentTime == null || !filtered.length) return -1;
+    for (const seg of filtered) {
+      if (seg.start <= currentTime && currentTime < seg.end) {
+        return transcript.indexOf(seg);
+      }
+    }
+    return -1;
+  }, [currentTime, filtered, transcript]);
+
+  // Auto-scroll to keep the active segment centered in the transcript view
+  useEffect(() => {
+    if (activeOriginalIdx < 0) return;
+    const el = activeSegRef.current;
+    const container = scrollContainerRef.current;
+    if (!el || !container) return;
+    // Scroll so the active segment is centered in the container
+    const elRect = el.getBoundingClientRect();
+    const cRect = container.getBoundingClientRect();
+    const elCenter = elRect.top + elRect.height / 2;
+    const cCenter = cRect.top + cRect.height / 2;
+    const offset = elCenter - cCenter;
+    // Scroll if the element is not near the center (within 20% of container height)
+    if (Math.abs(offset) > cRect.height * 0.2) {
+      container.scrollTo({
+        top: container.scrollTop + offset,
+        behavior: 'smooth',
+      });
+    }
+  }, [activeOriginalIdx]);
+
   const download = (content, filename) => {
     const blob = new Blob([content], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
@@ -94,7 +133,7 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
   };
 
   const copyAll = () => {
-    const text = toTXT(transcript);
+    const text = toTXT(timeFiltered);
     navigator.clipboard.writeText(text);
   };
 
@@ -196,6 +235,60 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
       if (res.ok && onTranscriptUpdated) onTranscriptUpdated();
     } catch (err) {
       console.error('Speaker change failed:', err);
+    }
+  };
+
+  // --- Multi-select helpers ---
+  const toggleSelect = useCallback((originalIdx, e) => {
+    setSelectedIndices((prev) => {
+      const next = new Set(prev);
+      if (e?.shiftKey && lastClickedIdx.current != null) {
+        // Range select: select all filtered segments between last click and this one
+        const filteredOriginalIndices = filtered.map((seg) => transcript.indexOf(seg));
+        const a = filteredOriginalIndices.indexOf(lastClickedIdx.current);
+        const b = filteredOriginalIndices.indexOf(originalIdx);
+        if (a >= 0 && b >= 0) {
+          const [lo, hi] = a < b ? [a, b] : [b, a];
+          for (let i = lo; i <= hi; i++) {
+            next.add(filteredOriginalIndices[i]);
+          }
+        }
+      } else {
+        if (next.has(originalIdx)) next.delete(originalIdx);
+        else next.add(originalIdx);
+      }
+      lastClickedIdx.current = originalIdx;
+      return next;
+    });
+  }, [filtered, transcript]);
+
+  const selectAllFiltered = useCallback(() => {
+    const allIndices = filtered.map((seg) => transcript.indexOf(seg));
+    setSelectedIndices(new Set(allIndices));
+  }, [filtered, transcript]);
+
+  const clearSelection = useCallback(() => {
+    setSelectedIndices(new Set());
+    lastClickedIdx.current = null;
+  }, []);
+
+  const handleBulkSpeakerChange = async (newSpeaker) => {
+    if (!jobId || !newSpeaker || selectedIndices.size === 0) return;
+    setBulkSaving(true);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/transcript/bulk-update-speaker`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ segment_indices: [...selectedIndices], speaker: newSpeaker }),
+      });
+      if (res.ok) {
+        clearSelection();
+        if (onTranscriptUpdated) onTranscriptUpdated();
+      }
+    } catch (err) {
+      console.error('Bulk speaker change failed:', err);
+    } finally {
+      setBulkSaving(false);
     }
   };
 
@@ -407,7 +500,7 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
                   onMouseEnter={(e) => (e.target.style.borderBottomColor = color)}
                   onMouseLeave={(e) => (e.target.style.borderBottomColor = 'transparent')}
                 >
-                  {sp}
+                  {String(sp ?? '')}
                 </span>
               )}
             </div>
@@ -435,7 +528,7 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
           }}
         />
         <button
-          onClick={() => download(toTXT(transcript), 'transcript.txt')}
+          onClick={() => download(toTXT(timeFiltered), 'transcript.txt')}
           style={{
             padding: '8px 12px',
             background: 'var(--bg-elevated)',
@@ -448,7 +541,7 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
           .txt
         </button>
         <button
-          onClick={() => download(toSRT(transcript), 'transcript.srt')}
+          onClick={() => download(toSRT(timeFiltered), 'transcript.srt')}
           style={{
             padding: '8px 12px',
             background: 'var(--bg-elevated)',
@@ -473,6 +566,23 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
         >
           Copy All
         </button>
+        {jobId && speakers.length > 0 && (
+          <button
+            onClick={selectedIndices.size > 0 && selectedIndices.size === filtered.reduce((s, seg) => { s.add(transcript.indexOf(seg)); return s; }, new Set()).size ? clearSelection : selectAllFiltered}
+            style={{
+              padding: '8px 12px',
+              background: selectedIndices.size > 0 ? 'var(--accent-cyan-dim, rgba(0,217,255,0.08))' : 'var(--bg-elevated)',
+              color: selectedIndices.size > 0 ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+              border: selectedIndices.size > 0 ? '1px solid var(--accent-cyan)' : '1px solid var(--border)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 12,
+              cursor: 'pointer',
+              fontWeight: selectedIndices.size > 0 ? 600 : 400,
+            }}
+          >
+            {selectedIndices.size > 0 ? `${selectedIndices.size} Selected` : 'Select All'}
+          </button>
+        )}
       </div>
 
       {/* Editable hint */}
@@ -483,12 +593,57 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
         </div>
       )}
 
+      {/* Multi-select bulk action bar */}
+      {jobId && selectedIndices.size > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+          marginBottom: 8, background: 'var(--accent-cyan-dim, rgba(0,217,255,0.08))',
+          border: '1px solid var(--accent-cyan)', borderRadius: 'var(--radius-sm)',
+          flexWrap: 'wrap',
+        }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent-cyan)' }}>
+            {selectedIndices.size} selected
+          </span>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>|</span>
+          <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>Set speaker:</span>
+          {speakers.map((sp) => (
+            <button
+              key={sp}
+              onClick={() => handleBulkSpeakerChange(sp)}
+              disabled={bulkSaving}
+              style={{
+                ...btnStyle, fontSize: 11, padding: '3px 10px',
+                background: 'var(--bg-elevated)', color: speakerColor(sp),
+                border: `1px solid ${speakerColor(sp)}`, fontWeight: 600,
+                opacity: bulkSaving ? 0.5 : 1, cursor: bulkSaving ? 'wait' : 'pointer',
+              }}
+            >
+              {sp}
+            </button>
+          ))}
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>|</span>
+          <button
+            onClick={selectAllFiltered}
+            style={{ ...btnStyle, fontSize: 10, background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
+          >
+            Select All
+          </button>
+          <button
+            onClick={clearSelection}
+            style={{ ...btnStyle, fontSize: 10, background: 'var(--bg-elevated)', color: 'var(--text-secondary)', border: '1px solid var(--border)' }}
+          >
+            Deselect
+          </button>
+        </div>
+      )}
+
       {/* Segments */}
-      <div style={{ maxHeight: 500, overflow: 'auto' }}>
+      <div ref={scrollContainerRef} style={{ maxHeight: maxHeight || 500, overflow: 'auto' }}>
         {filtered.map((seg, i) => {
           const color = speakerColor(seg.speaker);
           const originalIdx = transcript.indexOf(seg);
           const isEditingSeg = editingSegIdx === originalIdx;
+          const isActiveSeg = activeOriginalIdx === originalIdx;
           const highlightedText = search.trim()
             ? seg.text.replace(
                 new RegExp(`(${search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi'),
@@ -496,16 +651,48 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
               )
             : seg.text;
 
+          const isSelected = selectedIndices.has(originalIdx);
+
           return (
             <React.Fragment key={`seg-${originalIdx}`}>
               <div
+                ref={isActiveSeg ? activeSegRef : undefined}
                 style={{
                   display: 'flex',
                   gap: isMobile ? 8 : 12,
-                  padding: '8px 0',
+                  padding: '8px 4px',
                   alignItems: 'flex-start',
+                  borderRadius: 'var(--radius-sm)',
+                  transition: 'background 0.2s, border-color 0.2s',
+                  ...(isActiveSeg && !isSelected ? {
+                    background: 'var(--accent-cyan-dim, rgba(0,217,255,0.08))',
+                    borderLeft: '2px solid var(--accent-cyan)',
+                    paddingLeft: 6,
+                  } : isSelected ? {
+                    background: 'var(--accent-cyan-dim, rgba(0,217,255,0.12))',
+                    borderLeft: '2px solid var(--accent-cyan)',
+                    paddingLeft: 6,
+                  } : {
+                    borderLeft: '2px solid transparent',
+                  }),
                 }}
               >
+                {/* Selection checkbox */}
+                {jobId && (
+                  <div
+                    style={{ flexShrink: 0, display: 'flex', alignItems: 'center', paddingTop: 2 }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={(e) => toggleSelect(originalIdx, e.nativeEvent)}
+                      onClick={(e) => e.stopPropagation()}
+                      title="Select line (Shift+click to select range)"
+                      style={{ cursor: 'pointer', accentColor: 'var(--accent-cyan)' }}
+                    />
+                  </div>
+                )}
+
                 {/* Speaker + time column */}
                 <div style={{ minWidth: isMobile ? 80 : 110, maxWidth: isMobile ? 110 : 150, flexShrink: 0 }}>
                   {/* Speaker dropdown */}
@@ -534,7 +721,7 @@ export default function TranscriptViewer({ transcript, onSeek, jobId, onSpeakerR
                     <span
                       style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color, fontWeight: 600 }}
                     >
-                      {seg.speaker}
+                      {String(seg.speaker ?? '')}
                     </span>
                   )}
                   <br />

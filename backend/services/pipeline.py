@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import time as _time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -18,8 +19,88 @@ from backend.services.frame_extractor import (
 from backend.services.transcription import transcribe_audio
 from backend.services.ai_orchestrator import AIOrchestrator
 from backend.services.prompts import load_prompts
+from backend.services.providers.base import build_summary_from_transcript, has_real_summary_content, AllProvidersFailedError
+from backend.services.audio_analyzer import analyze_audio_energy, format_audio_energy_map
+from backend.services.clip_boundary_snapper import snap_all_clips
 
 logger = logging.getLogger(__name__)
+
+
+def _log_gpu_memory(job_id: str, label: str):
+    """Log current GPU memory state for VRAM debugging."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            free_mb, total_mb = [x / (1024 * 1024) for x in torch.cuda.mem_get_info()]
+            used_mb = total_mb - free_mb
+            logger.info(
+                "[%s] GPU VRAM [%s]: %.0f MB used / %.0f MB total (%.0f MB free)",
+                job_id, label, used_mb, total_mb, free_mb,
+            )
+    except Exception:
+        pass  # Non-critical — don't break pipeline if GPU query fails
+
+
+async def _release_whisper_vram(job_id: str):
+    """Release Whisper model from VRAM so Ollama can use the GPU.
+
+    On a 4GB GTX 1650, Whisper large-v3-turbo occupies ~3GB VRAM.
+    Without explicit release, Ollama gets only ~465MB — not enough
+    for any vision or text model, causing repeated SIGABRT/SIGSEGV
+    crashes from cudaMalloc failures.
+
+    This is only needed when Ollama shares the same physical GPU
+    (both containers get --gpus all in docker-compose.gpu.yml).
+    """
+    try:
+        from backend.services.transcription import _whisper_model, _model_lock
+        import gc
+
+        # Check if Whisper is loaded before doing anything
+        if _whisper_model is None:
+            logger.debug("[%s] Whisper model not loaded — nothing to release", job_id)
+            return
+
+        # Clear the cached model reference so it gets garbage collected
+        from backend.services import transcription as _trans_mod
+        with _trans_mod._model_lock:
+            _trans_mod._whisper_model = None
+
+        # Force garbage collection to release the GPU tensors
+        gc.collect()
+
+        # Release CUDA memory back to the driver
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+
+                # Log how much VRAM is now free
+                free_mb = torch.cuda.mem_get_info()[0] / (1024 * 1024)
+                total_mb = torch.cuda.mem_get_info()[1] / (1024 * 1024)
+                logger.info(
+                    "[%s] Whisper VRAM released — GPU memory: %.0f MB free / %.0f MB total",
+                    job_id, free_mb, total_mb,
+                )
+        except ImportError:
+            pass  # torch not available — ctranslate2 manages its own memory
+        except Exception as e:
+            logger.debug("[%s] torch.cuda.empty_cache failed (non-critical): %s", job_id, e)
+
+        # Also try ctranslate2's memory release (used by faster-whisper)
+        try:
+            import ctranslate2
+            # ctranslate2 doesn't have explicit memory release, but deleting the
+            # model and running gc.collect() releases the CUDA allocations
+        except ImportError:
+            pass
+
+        logger.info("[%s] Whisper model unloaded from VRAM for Ollama", job_id)
+
+    except Exception as e:
+        logger.warning("[%s] Failed to release Whisper VRAM (non-critical): %s", job_id, e)
+
 
 # Dedicated thread pool for base64 frame encoding so it never competes
 # with the default executor or the Whisper transcription pool.
@@ -98,12 +179,19 @@ def unregister_ws_subscriber(job_id: str, ws):
 
 async def broadcast_ws(job_id: str, message: dict):
     """Broadcast a message to all WebSocket subscribers for a job."""
-    import json
+    from enum import Enum
+    # Pre-sanitize: ensure all values are JSON-safe primitives (no Enum remnants)
+    safe_message = {}
+    for k, v in message.items():
+        if isinstance(v, Enum):
+            safe_message[k] = str(v.value) if hasattr(v, 'value') else str(v)
+        else:
+            safe_message[k] = v
     subscribers = _ws_subscribers.get(job_id, [])
     dead = []
     for ws in subscribers:
         try:
-            await ws.send_json(message)
+            await ws.send_json(safe_message)
         except Exception:
             dead.append(ws)
     for ws in dead:
@@ -128,6 +216,146 @@ async def _update_progress(job_id: str, status: str, progress: int, message: str
         "progress": progress,
         "message": message,
     })
+
+
+async def _background_post_processing(job_id: str, transcript: list, orchestrator, job):
+    """Run transcript polishing and subtitle translation in background after analysis.
+
+    These are quality-of-life improvements that don't affect clip detection.
+    Running them after COMPLETE status saves ~5+ minutes on the critical path.
+    """
+    # ── Transcript polishing ──
+    if settings.AI_TRANSCRIPT_CORRECTION and transcript:
+        try:
+            from backend.services.transcript_corrector import correct_transcript, _adaptive_batch_size
+            logger.info("[%s] Background transcript polishing started (%d segments)", job_id, len(transcript))
+
+            await broadcast_ws(job_id, {
+                "type": "background_task",
+                "task": "transcript_polishing",
+                "status": "running",
+                "message": "Polishing transcript in background...",
+            })
+
+            _polish_info = orchestrator.get_text_model_info()
+            _batch_size = _adaptive_batch_size(len(transcript))
+            _total_batches = -(-len(transcript) // _batch_size)
+            _remaining_waves = -(- max(0, _total_batches - 1) // 3)
+            _per_batch = 150 if _polish_info.get("is_thinking") else 90
+            _correction_timeout = max(120, min(600, _per_batch + (_remaining_waves * _per_batch) + 30))
+
+            # Get Whisper's detected language for the correction prompt
+            from backend.services.transcription import _last_detected_language
+            whisper_lang = _last_detected_language.get("lang", "")
+
+            polished = await asyncio.wait_for(
+                correct_transcript(transcript, orchestrator, job_id=job_id, language=whisper_lang),
+                timeout=_correction_timeout,
+            )
+            await database.update_job_status(job_id, transcript=list(polished))
+            transcript = polished  # Use polished version for translation below
+
+            await broadcast_ws(job_id, {
+                "type": "background_task",
+                "task": "transcript_polishing",
+                "status": "complete",
+                "message": "Transcript polished",
+            })
+            logger.info("[%s] Background transcript polishing complete", job_id)
+        except Exception as e:
+            logger.warning("[%s] Background transcript polishing failed: %s", job_id, e)
+            await broadcast_ws(job_id, {
+                "type": "background_task",
+                "task": "transcript_polishing",
+                "status": "failed",
+                "message": f"Polishing skipped: {str(e)[:80]}",
+            })
+
+    # ── Subtitle translation ──
+    if job.subtitle_language and transcript:
+        source_lang = job.language or ""
+        target_lang = job.subtitle_language.strip().lower()
+
+        # If source language wasn't detected, try to get it from Whisper
+        if not source_lang:
+            from backend.services.transcription import _last_detected_language
+            source_lang = _last_detected_language.get("lang", "")
+
+        # If Whisper used task="translate", the transcript is already in English.
+        # Store it as translated_transcript and skip LLM translation.
+        whisper_did_translate = (
+            target_lang == "en"
+            and source_lang
+            and source_lang != "en"
+        )
+
+        if whisper_did_translate:
+            logger.info(
+                "[%s] Whisper native translate produced English text — "
+                "storing as translated_transcript (skipping LLM translation)",
+                job_id,
+            )
+            await database.update_job_status(
+                job_id,
+                translated_transcript=list(transcript),
+            )
+            await broadcast_ws(job_id, {
+                "type": "background_task",
+                "task": "subtitle_translation",
+                "status": "complete",
+                "message": "English subtitles ready (Whisper native translation)",
+            })
+        elif target_lang and target_lang != source_lang:
+            from backend.services.translator import translate_segments_with_fallback, SUPPORTED_LANGUAGES
+            target_name = SUPPORTED_LANGUAGES.get(target_lang, target_lang)
+            source_name = SUPPORTED_LANGUAGES.get(source_lang, source_lang) if source_lang else "auto-detected"
+            logger.info("[%s] Background subtitle translation: %s → %s (%d segments)",
+                        job_id, source_name, target_name, len(transcript))
+
+            await broadcast_ws(job_id, {
+                "type": "background_task",
+                "task": "subtitle_translation",
+                "status": "running",
+                "message": f"Translating subtitles to {target_name}...",
+            })
+
+            # Scale timeout with segment count — allow extra time for model pull + fallback
+            _trans_timeout = max(600, len(transcript) * 4)
+            try:
+                orchestrator.reset_circuit_breaker()
+                translated = await asyncio.wait_for(
+                    translate_segments_with_fallback(
+                        transcript,
+                        source_language=source_lang if source_lang else "auto",
+                        target_language=target_lang,
+                        orchestrator=orchestrator,
+                    ),
+                    timeout=_trans_timeout,
+                )
+
+                changed = sum(1 for t, o in zip(translated, transcript) if t.text != o.text)
+                await database.update_job_status(
+                    job_id,
+                    translated_transcript=list(translated),
+                )
+
+                await broadcast_ws(job_id, {
+                    "type": "background_task",
+                    "task": "subtitle_translation",
+                    "status": "complete",
+                    "message": f"Subtitles translated to {target_name} ({changed}/{len(translated)} segments)",
+                })
+                logger.info("[%s] Translated %d/%d segments to %s",
+                            job_id, changed, len(translated), target_lang)
+
+            except Exception as e:
+                logger.error("[%s] Translation failed: %s", job_id, e)
+                await broadcast_ws(job_id, {
+                    "type": "background_task",
+                    "task": "subtitle_translation",
+                    "status": "failed",
+                    "message": f"Translation failed: {str(e)[:80]}",
+                })
 
 
 async def run_analysis(job_id: str):
@@ -159,11 +387,15 @@ async def run_analysis(job_id: str):
             })
         except Exception as e:
             logger.exception(f"Analysis pipeline failed for {job_id}")
+            # Preserve last known progress so the frontend can show where it
+            # failed instead of the bar collapsing to 0%.
+            current = await database.load_job(job_id)
+            last_pct = current.progress if current and current.progress else 0
             await database.update_job_status(
                 job_id,
                 status=JobStatus.FAILED,
-                progress=0,
-                progress_message="",
+                progress=last_pct,
+                progress_message=f"Failed at {last_pct}%: {str(e)[:120]}",
                 error=str(e),
             )
             await broadcast_ws(job_id, {
@@ -203,22 +435,76 @@ async def _run_analysis_inner(job_id: str):
     def _pipeline_elapsed():
         return _time.monotonic() - _pipeline_start
 
+    _clips_phase_start = [0.0]  # mutable; set when clip detection starts
+    # Scene analysis phase-local tracking for accurate ETA
+    _scene_phase_start = [0.0]  # set when scene analysis begins
+    _scene_recent_timestamps: list[float] = []  # timestamps of recent frame completions
+
+    def _format_remaining(total_remaining: float) -> str:
+        if total_remaining < 60:
+            return f" — ~{int(total_remaining)}s remaining"
+        m, s = divmod(int(total_remaining), 60)
+        return f" — ~{m}m {s}s remaining"
+
     def _pipeline_eta(current_pct):
-        """Estimate remaining time based on current progress percentage."""
+        """Estimate remaining time based on progress.
+
+        Uses phase-local estimation during scene analysis (15-62%) and clip
+        detection (78-95%) to avoid nonsensical ETA drift from global rate.
+        """
         if current_pct <= 2:
             return ""
         elapsed = _pipeline_elapsed()
-        rate = current_pct / elapsed  # percent per second
+
+        # During scene analysis (15-62%), use sliding window ETA
+        if 15 < current_pct < 62 and _scene_phase_start[0] > 0:
+            now = _time.monotonic()
+            _scene_recent_timestamps.append(now)
+            # Keep last 15 timestamps for sliding window average
+            if len(_scene_recent_timestamps) > 15:
+                _scene_recent_timestamps[:] = _scene_recent_timestamps[-15:]
+            if len(_scene_recent_timestamps) >= 3:
+                window = _scene_recent_timestamps
+                recent_elapsed = window[-1] - window[0]
+                recent_steps = len(window) - 1
+                if recent_elapsed > 0:
+                    recent_rate = recent_steps / recent_elapsed  # pct-steps per sec
+                    # Map current_pct to remaining pct in scene phase
+                    phase_remaining_pct = 62 - current_pct
+                    # Estimate remaining using recent rate (steps map roughly to pct)
+                    scene_remaining = phase_remaining_pct / max(0.001, recent_rate)
+                    # Add estimate for remaining phases (clip detection + saving)
+                    total_remaining = scene_remaining + 120  # rough estimate for later phases
+                    return _format_remaining(total_remaining)
+
+        # During clip detection (78-95%), use phase-local ETA
+        if 78 <= current_pct <= 95 and _clips_phase_start[0] > 0:
+            phase_elapsed = _time.monotonic() - _clips_phase_start[0]
+            phase_pct = current_pct - 78  # 0-17 within clip phase
+            if phase_pct > 0 and phase_elapsed > 5:
+                phase_rate = phase_pct / phase_elapsed
+                phase_remaining = max(0, (95 - current_pct) / phase_rate)
+                total_remaining = phase_remaining + 15  # ~15s for saving
+            else:
+                # Not enough data yet — rough estimate from video duration
+                vid_min = metadata["duration"] / 60 if metadata.get("duration") else 10
+                total_remaining = max(60, vid_min * 8)
+            return _format_remaining(total_remaining)
+
+        # Default: global pipeline rate
+        if elapsed <= 0:
+            return ""
+        rate = current_pct / elapsed
+        if rate <= 0:
+            return ""
         remaining = max(0, (100 - current_pct) / rate)
-        if remaining < 60:
-            return f" — ~{int(remaining)}s remaining"
-        m, s = divmod(int(remaining), 60)
-        return f" — ~{m}m {s}s remaining"
+        return _format_remaining(remaining)
 
     # Step 1 — Video Metadata (0-5%)
     cancel_check()
     await _update_progress(job_id, JobStatus.EXTRACTING_FRAMES, 2, "Extracting video metadata...")
     logger.info("[%s] Pipeline started — video: %s", job_id, video_path)
+    _log_gpu_memory(job_id, "pipeline start")
     async with _stage_timer(job_id, "metadata"):
         try:
             metadata = await asyncio.wait_for(
@@ -240,10 +526,121 @@ async def _run_analysis_inner(job_id: str):
     res = metadata.get("resolution", "?")
     fps_val = metadata.get("fps", 0)
     mb = metadata.get("file_size_mb", 0)
+
+    # Duration tier system — auto-adjusts pipeline based on video length
+    from backend.config import get_duration_tier, apply_ollama_overrides
+    vid_minutes = metadata["duration"] / 60
+    tier = get_duration_tier(metadata["duration"])
+
+    # Detect if Ollama is the primary provider
+    _active_chain = orchestrator._get_active_chain()
+    _primary_provider = _active_chain[0] if _active_chain else None
+    is_ollama_primary = _primary_provider and _primary_provider.provider_name == "ollama"
+
+    if is_ollama_primary:
+        tier = apply_ollama_overrides(tier, is_ollama=True)
+        logger.info(
+            "[%s] Ollama is primary provider — applying overrides: "
+            "window=%ds, timeout=%ds, summary=%s, sequential=True",
+            job_id, tier.window_duration, tier.per_call_timeout_base, tier.summary_strategy,
+        )
+        # Warm up models to avoid cold-start timeout on first analysis call
+        try:
+            await _update_progress(job_id, JobStatus.EXTRACTING_FRAMES, 3, "Warming up local AI models...")
+            await _primary_provider.warmup()
+        except Exception:
+            pass
+
+    logger.info(
+        "[%s] Duration tier: %s (%.1f min) — frame_rate=%ds, summary=%s, "
+        "window=%ds, max_clips=%d, max_gaps=%d, ollama=%s",
+        job_id, tier.name, vid_minutes, tier.frame_sample_rate,
+        tier.summary_strategy, tier.window_duration,
+        tier.max_clip_candidates, tier.max_gaps_pass2, is_ollama_primary,
+    )
+
+    # Adaptive timeouts based on video duration + provider type + tier
+    _EXTRACTION_TIMEOUT = max(600, int(vid_minutes * 60))
+    if is_ollama_primary:
+        est_windows = max(1, int(metadata["duration"] / tier.window_duration)) if tier.window_duration > 0 else 1
+        # Ollama timeouts: generous because local inference is slow but reliable
+        _SUMMARY_CLIP_TIMEOUT = max(
+            1800,  # Minimum 30 minutes for any video
+            est_windows * tier.per_call_timeout_base + 900
+        )
+        _B64_ENCODE_TIMEOUT = max(300, int(vid_minutes * 10))
+        # Parent timeout for transcription+scene: scale with video length.
+        # GPU Whisper runs ~10-30x real-time, but CPU fallback (int8 small)
+        # can be ~0.5-1x real-time. Use generous multiplier to avoid killing
+        # long transcriptions that fell back to CPU.
+        _trans_scene_timeout = max(
+            1800,  # Minimum 30 minutes
+            int(vid_minutes * 150)  # ~2.5min per min of video (covers CPU fallback + vision)
+        )
+        logger.info(
+            "[%s] Ollama-scaled timeouts: extraction=%ds, summary_clip=%ds, "
+            "trans_scene=%ds, b64=%ds (%d est. windows, %.1f min video)",
+            job_id, _EXTRACTION_TIMEOUT, _SUMMARY_CLIP_TIMEOUT,
+            _trans_scene_timeout, _B64_ENCODE_TIMEOUT, est_windows, vid_minutes,
+        )
+    else:
+        _SUMMARY_CLIP_TIMEOUT = max(900, int(vid_minutes * 120))
+        _B64_ENCODE_TIMEOUT = max(300, int(vid_minutes * 10))
+        _trans_scene_timeout = max(1800, int(vid_minutes * 150))
+    logger.info(
+        "[%s] Adaptive timeouts: extraction=%ds, summary_clip=%ds, b64=%ds (%.1f min video)",
+        job_id, _EXTRACTION_TIMEOUT, _SUMMARY_CLIP_TIMEOUT, _B64_ENCODE_TIMEOUT, vid_minutes,
+    )
+
+    codec_label = metadata.get("codec_name", "unknown")
+    pix_fmt_label = metadata.get("pix_fmt", "")
+    codec_info = f" [{codec_label}]" if codec_label else ""
+    if pix_fmt_label and pix_fmt_label not in ("yuv420p", "yuvj420p"):
+        codec_info += f" ({pix_fmt_label})"
     await _update_progress(
         job_id, JobStatus.EXTRACTING_FRAMES, 5,
-        f"Metadata extracted — {res} @ {fps_val}fps, {dur_fmt} duration, {mb:.1f}MB",
+        f"Metadata extracted — {res} @ {fps_val}fps, {dur_fmt} duration, {mb:.1f}MB{codec_info}",
     )
+
+    # Disk space pre-check — estimate needed space from video metadata
+    disk_usage = shutil.disk_usage("/data")
+    # Estimate: audio WAV ~1.8MB/min + frames ~3MB + overhead
+    estimated_need_mb = max(50, metadata.get("file_size_mb", 100) * 0.3)
+    if disk_usage.free < estimated_need_mb * 1024 * 1024:
+        raise RuntimeError(
+            f"Insufficient disk space: {disk_usage.free // (1024*1024)}MB free, "
+            f"estimated {int(estimated_need_mb)}MB needed. "
+            f"Please free space on the /data volume."
+        )
+
+    # Broadcast GPU info early so user can see what hardware is available
+    try:
+        from backend.services.clip_exporter import detect_gpu_capabilities, get_encoder_label
+        _gpu = detect_gpu_capabilities()
+        _gpu_parts = []
+        if _gpu.get("cuda_available"):
+            _gpu_parts.append(f"Whisper: CUDA ({_gpu.get('gpu_name', 'GPU')})")
+        else:
+            # Check if GPU is detected but CUDA isn't available
+            _gpu_name = _gpu.get("gpu_name", "")
+            if _gpu_name and _gpu_name != "None (CPU only)":
+                _gpu_parts.append(f"Whisper: CPU (GPU detected: {_gpu_name} — CUDA runtime not available)")
+            else:
+                _gpu_parts.append("Whisper: CPU")
+        _enc_label = get_encoder_label()
+        _gpu_parts.append(f"Encoding: {_enc_label}")
+        # Add issues hint if GPU detected but encoder fell back to CPU
+        _gpu_issues = _gpu.get("gpu_issues", [])
+        if _gpu_issues:
+            _gpu_parts.append("(GPU passthrough incomplete — check Settings > Advanced)")
+        await broadcast_ws(job_id, {
+            "type": "status",
+            "status": "processing",
+            "progress": 5,
+            "message": f"Hardware — {' | '.join(_gpu_parts)}",
+        })
+    except Exception:
+        pass  # Non-critical — don't break pipeline if GPU detection fails
 
     # Step 2 — Frame + Audio Extraction in parallel (5-15%)
     cancel_check()
@@ -255,8 +652,13 @@ async def _run_analysis_inner(job_id: str):
         f"Extracting frames + audio{size_note}...",
     )
 
+    # Estimate total frames for progress scaling
+    _est_frame_rate = settings.FRAME_SAMPLE_RATE
+    _est_total_frames = max(50, int(metadata["duration"] / _est_frame_rate)) if metadata["duration"] > 0 else 100
+
     async def _frame_progress(frames_so_far: int):
-        pct = min(14, 8 + frames_so_far)
+        extraction_pct = min(1.0, frames_so_far / _est_total_frames)
+        pct = 8 + int(extraction_pct * 6)  # 8% to 14%
         await _update_progress(
             job_id, JobStatus.EXTRACTING_FRAMES, pct,
             f"Extracted {frames_so_far} frames so far{size_note}...",
@@ -271,6 +673,8 @@ async def _run_analysis_inner(job_id: str):
                     extract_frames(
                         video_path, frames_dir,
                         cancel_check=cancel_check, progress_callback=_frame_progress,
+                        video_duration=metadata["duration"],
+                        video_codec=metadata.get("codec_name", ""),
                     ),
                     extract_audio(video_path, audio_path, cancel_check=cancel_check),
                 ),
@@ -325,8 +729,17 @@ async def _run_analysis_inner(job_id: str):
     async def _branch_transcription():
         cancel_check()
         lang_label = job.language if job.language else "auto-detect"
+        # Include GPU/device info in the initial transcription message
+        from backend.services.transcription import whisper_device_info
+        _wdev = whisper_device_info
+        if _wdev["device"] == "cuda" and _wdev["gpu_name"]:
+            device_label = f"GPU: {_wdev['gpu_name']} ({_wdev['compute_type']})"
+        elif _wdev["device"] == "cuda":
+            device_label = f"GPU: CUDA ({_wdev['compute_type']})"
+        else:
+            device_label = f"CPU ({_wdev['compute_type']})"
         await _update_branch_progress("transcription", 5, JobStatus.TRANSCRIBING,
-            f"Transcribing audio ({lang_label})...")
+            f"Transcribing audio ({lang_label}) — {device_label}")
 
         async def _transcribe_progress(info: dict):
             pct = info["pct"]
@@ -337,18 +750,70 @@ async def _run_analysis_inner(job_id: str):
             # branch-specific ETA here to avoid confusing double "remaining" messages.
             parts = [f"Transcribing{lang_info}: {pos} / {total}"]
             parts.append(f"{info['segments']} segments")
+            parts.append(f"via {device_label}")
             branch_pct = 5 + pct * 0.95  # 5-100% (audio already extracted in Step 2)
             await _update_branch_progress("transcription", branch_pct,
                 JobStatus.TRANSCRIBING, " \u2014 ".join(parts))
 
+        # Determine the Whisper task: "translate" for direct audio→English,
+        # "transcribe" for same-language transcription.
+        # Whisper's native translate is dramatically more accurate than
+        # transcribe→LLM-translate because it uses the raw audio signal.
+        whisper_task = "transcribe"
+        if job.subtitle_language and job.subtitle_language.strip().lower() == "en":
+            audio_lang = job.language.strip().lower() if job.language else ""
+            if audio_lang and audio_lang != "en":
+                whisper_task = "translate"
+                logger.info("[%s] Using Whisper native translate: %s audio → English subtitles", job_id, audio_lang)
+            elif not audio_lang:
+                whisper_task = "translate"
+                logger.info("[%s] Using Whisper native translate: auto-detect → English subtitles", job_id)
+
+        # Build initial_prompt for Whisper from available context
+        # This helps Whisper recognize proper nouns, technical terms, etc.
+        import re
+        initial_prompt_parts = []
+        if job.filename:
+            name_clean = re.sub(r'\.[^.]+$', '', job.filename)
+            name_clean = re.sub(r'[-_\[\](){}]', ' ', name_clean)
+            name_clean = re.sub(r'\s+', ' ', name_clean).strip()
+            if name_clean and len(name_clean) > 3:
+                initial_prompt_parts.append(name_clean)
+        initial_prompt = ". ".join(initial_prompt_parts) if initial_prompt_parts else ""
+
         result = await transcribe_audio(
-            audio_path, language=job.language, cancel_check=cancel_check,
+            audio_path, language=job.language, task=whisper_task,
+            initial_prompt=initial_prompt, cancel_check=cancel_check,
             progress_callback=_transcribe_progress, audio_duration=audio_duration,
         )
         await database.update_job_status(job_id, transcript=list(result))
+
+        # If language was auto-detected, store the detected language on the job
+        # so the translator knows the source language
+        if not job.language and result:
+            from backend.services.transcription import _last_detected_language
+            detected = _last_detected_language.get("lang", "")
+            if detected:
+                job.language = detected
+                await database.update_job_status(job_id, language=detected)
+                logger.info("[%s] Auto-detected language: %s", job_id, detected)
+
+        # NOTE: Transcript polishing and subtitle translation are deferred to
+        # a background task that runs AFTER analysis completes (see
+        # _background_post_processing). This saves ~5+ minutes on the critical
+        # path — raw Whisper output is good enough for clip detection.
+
         speaker_count = len(set(s.speaker for s in result))
+        from backend.services.transcription import _last_diarization_method
+        diar_method = _last_diarization_method.get("method", "heuristic")
+        if diar_method == "deferred":
+            diar_label = "speaker detection deferred to post-processing"
+        elif diar_method == "neural":
+            diar_label = f"{speaker_count} speaker{'s' if speaker_count != 1 else ''} detected via neural (pyannote)"
+        else:
+            diar_label = f"{speaker_count} speaker{'s' if speaker_count != 1 else ''} detected via heuristic (pause-based)"
         await _update_branch_progress("transcription", 100, JobStatus.TRANSCRIBING,
-            f"Transcribed {len(result)} segments \u2014 {speaker_count} speaker{'s' if speaker_count != 1 else ''} detected")
+            f"Transcribed {len(result)} segments \u2014 {diar_label}")
         return result
 
     # ── Branch B: Base64 encoding + AI scene analysis ──
@@ -358,7 +823,7 @@ async def _run_analysis_inner(job_id: str):
         await _update_branch_progress("scene_analysis", 0, JobStatus.ANALYZING_SCENES,
             f"Preparing {total_frames} frames for AI analysis...")
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         _completed = 0
         _batch_size = min(16, max(1, total_frames))
 
@@ -396,6 +861,7 @@ async def _run_analysis_inner(job_id: str):
             "Analyzing scenes with AI...")
 
         _scene_start = _time.monotonic()
+        _scene_phase_start[0] = _scene_start
 
         async def _scene_progress(frames_done, frames_total, provider_name):
             pct = int((frames_done / max(frames_total, 1)) * 100)
@@ -413,7 +879,19 @@ async def _run_analysis_inner(job_id: str):
         except CancelledError:
             raise
         except Exception as e:
-            logger.exception("[%s] Scene analysis failed, continuing with empty scenes", job_id)
+            error_str = str(e)
+            if any(p in error_str.lower() for p in ["out of memory", "cudamalloc", "ggml_assert", "sigabrt"]):
+                logger.warning(
+                    "[%s] Scene analysis failed due to GPU memory — "
+                    "continuing with empty scenes. Consider using smaller Ollama models "
+                    "(e.g., moondream:1.8b for vision, qwen2.5:3b for text) or adding "
+                    "more VRAM. Error: %s",
+                    job_id, error_str[:200],
+                )
+                # Don't count OOM as a circuit breaker failure — it's a hardware limitation
+                orchestrator.reset_circuit_breaker()
+            else:
+                logger.exception("[%s] Scene analysis failed, continuing with empty scenes", job_id)
             scenes_result = []
             provider = "none"
 
@@ -467,32 +945,83 @@ async def _run_analysis_inner(job_id: str):
 
         return scenes_result, provider
 
-    # Run both branches concurrently — this is the key optimization.
-    # Use return_exceptions=True so one branch failing doesn't kill the other.
-    logger.info("[%s] Starting concurrent transcription + scene analysis", job_id)
-    _trans_scene_timeout = max(600, audio_duration * 5)
-    async with _stage_timer(job_id, "transcription+scene_analysis"):
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(
-                    _branch_transcription(),
-                    _branch_scene_analysis(),
-                    return_exceptions=True,
-                ),
-                timeout=_trans_scene_timeout,
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                "[%s] Transcription+scene analysis timed out after %.0fs",
-                job_id, _trans_scene_timeout,
-            )
-            raise RuntimeError(
-                f"Transcription and scene analysis timed out after "
-                f"{int(_trans_scene_timeout // 60)} minutes."
-            )
+    # When Ollama (local GPU inference) is the provider, run transcription
+    # FIRST so Whisper gets exclusive GPU access, then run scene analysis.
+    # On a 4GB GPU, concurrent execution pushes both to CPU (~3x slower).
+    # With cloud providers, run concurrently since there's no VRAM contention.
+    _uses_local_gpu = "ollama" in settings.active_provider_chain
+    # _trans_scene_timeout was already computed in the adaptive timeout block above
 
-    # Unpack results, tolerating individual branch failures
-    trans_result, scene_result = results
+    if _uses_local_gpu:
+        logger.info("[%s] Sequential mode: transcription first, then scene analysis (local GPU)", job_id)
+        async with _stage_timer(job_id, "transcription+scene_analysis"):
+            try:
+                trans_result = await asyncio.wait_for(
+                    _branch_transcription(),
+                    timeout=_trans_scene_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error("[%s] Transcription timed out", job_id)
+                raise RuntimeError("Transcription timed out")
+            except Exception as e:
+                logger.exception("[%s] Transcription branch failed", job_id)
+                trans_result = e
+
+            # Pre-compute transcript-only hot zones for frame triage
+            # (runs before scene analysis so Ollama can skip cold-zone frames)
+            if not isinstance(trans_result, BaseException) and trans_result:
+                try:
+                    from backend.services.hot_zone_scorer import score_hot_zones_transcript_only
+                    import backend.services.providers.ollama_provider as _ollama_mod
+                    pre_hot_zones = score_hot_zones_transcript_only(trans_result, metadata["duration"])
+                    _ollama_mod._current_hot_zones = pre_hot_zones
+                    logger.info("[%s] Pre-computed %d transcript-only hot zones for frame triage", job_id, len(pre_hot_zones))
+                except Exception as e:
+                    logger.warning("[%s] Hot zone pre-scoring failed (non-fatal): %s", job_id, e)
+
+            # Release Whisper VRAM before Ollama loads its models
+            await _release_whisper_vram(job_id)
+            _log_gpu_memory(job_id, "after Whisper release")
+            await _update_progress(
+                job_id, JobStatus.ANALYZING_SCENES, 40,
+                "Released transcription GPU memory — preparing scene analysis...",
+            )
+            # Brief pause to let CUDA driver reclaim memory across containers
+            await asyncio.sleep(2)
+
+            try:
+                scene_result = await asyncio.wait_for(
+                    _branch_scene_analysis(),
+                    timeout=_trans_scene_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error("[%s] Scene analysis timed out", job_id)
+                raise RuntimeError("Scene analysis timed out")
+            except Exception as e:
+                logger.exception("[%s] Scene analysis branch failed", job_id)
+                scene_result = e
+    else:
+        logger.info("[%s] Concurrent mode: transcription + scene analysis (cloud providers)", job_id)
+        async with _stage_timer(job_id, "transcription+scene_analysis"):
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(
+                        _branch_transcription(),
+                        _branch_scene_analysis(),
+                        return_exceptions=True,
+                    ),
+                    timeout=_trans_scene_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[%s] Transcription+scene analysis timed out after %.0fs",
+                    job_id, _trans_scene_timeout,
+                )
+                raise RuntimeError(
+                    f"Transcription and scene analysis timed out after "
+                    f"{int(_trans_scene_timeout // 60)} minutes."
+                )
+            trans_result, scene_result = results
 
     if isinstance(trans_result, BaseException):
         if isinstance(trans_result, CancelledError):
@@ -521,81 +1050,240 @@ async def _run_analysis_inner(job_id: str):
         f"{len(scenes)} scenes via {scenes_provider}",
     )
 
-    # ── Steps 5+6 — Run summary + clip detection CONCURRENTLY ──
-    # Both take (transcript, scenes) as input and are independent LLM calls.
-    # Running them in parallel saves the time of whichever completes first.
+    # ── Steps 5+6 — Summary + audio/hot-zone analysis, THEN clip detection ──
+    # Summary runs first so clip detection can use content context.
+    # Audio energy + hot zone scoring run concurrently with summary (no AI needed).
     cancel_check()
     await _update_progress(
         job_id, JobStatus.GENERATING_SUMMARY, 65,
-        f"Transcription and scene analysis complete — generating summary + detecting clips...{_pipeline_eta(65)}",
+        f"Generating video summary...{_pipeline_eta(65)}",
     )
 
-    _sc_pct = {"summary": 0.0, "clips": 0.0}
+    # CRITICAL: Reset circuit breaker before critical AI operations.
+    orchestrator.reset_circuit_breaker()
 
-    async def _update_sc_progress(branch: str, branch_pct: float, status: str, message: str):
-        _sc_pct[branch] = min(100.0, branch_pct)
-        combined = (_sc_pct["summary"] + _sc_pct["clips"]) / 200
-        pipeline_pct = 65 + int(combined * 30)  # 65% to 95%
-        eta = _pipeline_eta(pipeline_pct)
-        await _update_progress(job_id, status, min(95, pipeline_pct), message + eta)
+    # Launch summary generation as a task
+    _summary_start = _time.monotonic()
+    summary_task = asyncio.create_task(
+        orchestrator.generate_summary(transcript, scenes, job_id, tier=tier)
+    )
 
-    async def _branch_summary():
-        cancel_check()
-        _summary_start = _time.monotonic()
+    # While summary runs, do audio energy analysis + hot zone scoring (no AI)
+    audio_energy_text = ""
+    audio_moments = []
+    hot_zone_text = ""
+    try:
+        audio_moments = await analyze_audio_energy(audio_path)
+        audio_energy_text = format_audio_energy_map(audio_moments)
+        if audio_energy_text:
+            logger.info("[%s] Audio energy analysis: %d spikes detected", job_id, len(audio_moments))
+    except Exception as e:
+        logger.warning("[%s] Audio energy analysis failed (non-critical): %s", job_id, e)
 
-        async def _summary_heartbeat():
-            await asyncio.sleep(10)
-            while True:
-                elapsed = int(_time.monotonic() - _summary_start)
-                await _update_sc_progress("summary", 50, JobStatus.GENERATING_SUMMARY,
-                    f"Generating summary... ({elapsed}s elapsed)")
-                await asyncio.sleep(8)
+    # Hot zone pre-scoring (instant, no AI calls)
+    from backend.services.hot_zone_scorer import score_hot_zones, format_hot_zones_for_prompt
+    hot_zones = score_hot_zones(transcript, scenes, audio_moments, metadata["duration"])
+    hot_zone_text = format_hot_zones_for_prompt(hot_zones, top_n=tier.hot_zone_top_n)
+    logger.info(
+        "[%s] Hot zone scoring: %d zones, top score=%.1f",
+        job_id, len(hot_zones),
+        hot_zones[0].composite_score if hot_zones else 0,
+    )
 
-        heartbeat_task = asyncio.create_task(_summary_heartbeat())
+    # Now await summary
+    try:
+        summary, summary_provider = await summary_task
+    except CancelledError:
+        raise
+    except AllProvidersFailedError:
+        logger.warning("[%s] All providers failed for summary — retrying in 5s", job_id)
+        orchestrator.reset_circuit_breaker()
+        await asyncio.sleep(5)
         try:
             summary, summary_provider = await orchestrator.generate_summary(
-                transcript, scenes, job_id,
+                transcript, scenes, job_id, tier=tier,
             )
-        except CancelledError:
-            raise
-        except Exception as e:
-            logger.exception("[%s] Summary generation failed", job_id)
-            summary = VideoSummary(
-                overview="Summary generation failed.",
-                key_topics=[],
-                tone="unknown",
-                estimated_audience="unknown",
-                content_category="uncategorized",
-            )
+        except Exception:
+            logger.exception("[%s] Summary generation retry also failed, building from transcript", job_id)
+            fb = build_summary_from_transcript(transcript, scenes)
+            summary = VideoSummary(**fb)
             summary_provider = "none"
-        finally:
-            heartbeat_task.cancel()
-            try:
-                await heartbeat_task
-            except asyncio.CancelledError:
-                pass
+    except Exception as e:
+        logger.exception("[%s] Summary generation failed, building from transcript", job_id)
+        fb = build_summary_from_transcript(transcript, scenes)
+        summary = VideoSummary(**fb)
+        summary_provider = "none"
 
-        await _update_sc_progress("summary", 100, JobStatus.GENERATING_SUMMARY,
-            f"Summary generated via {summary_provider}")
-        return summary, summary_provider
+    await _update_progress(
+        job_id, JobStatus.GENERATING_SUMMARY, 75,
+        f"Summary generated via {summary_provider} — now detecting viral clips...{_pipeline_eta(75)}",
+    )
 
-    async def _branch_clip_detection():
-        cancel_check()
+    # Build summary context string for clip detection
+    summary_text = summary.overview
+    if summary.key_topics:
+        summary_text += f"\nKey topics: {', '.join(summary.key_topics)}"
+    if summary.content_category:
+        summary_text += f"\nCategory: {summary.content_category}"
+    if summary.tone:
+        summary_text += f"\nTone: {summary.tone}"
+    if audio_energy_text:
+        summary_text += audio_energy_text
+    if hot_zone_text:
+        summary_text += hot_zone_text
+
+    # Step 6: Clip detection with summary context
+    _log_gpu_memory(job_id, "before clip detection")
+    cancel_check()
+
+    # ── Early exit: skip clip detection when there's no data to analyze ──
+    # Without transcript, the AI has nothing to find clips in. Running 46 windows
+    # of empty prompts wastes hours of CPU time for guaranteed 0 clips.
+    # This saved 224 minutes in production on a 113-min video where Whisper crashed.
+    real_scenes = [s for s in scenes if "failed" not in s.description.lower()
+                   and "skipped" not in s.description.lower()
+                   and "vision analysis skipped" not in s.description.lower()]
+    if not transcript and len(real_scenes) < 10:
+        logger.warning(
+            "[%s] Skipping clip detection: 0 transcript segments, %d useful scenes. "
+            "Nothing for the AI to analyze. Check Whisper logs for transcription errors.",
+            job_id, len(real_scenes),
+        )
+        clips = []
+        clips_provider = "skipped (no transcript)"
+        await _update_progress(
+            job_id, JobStatus.DETECTING_CLIPS, 95,
+            "Clip detection skipped — no transcript data available. "
+            "Check logs for Whisper errors.",
+        )
+    else:
+
+        # Reset again before clip detection — summary generation may have
+        # had transient failures that shouldn't block clip detection.
+        orchestrator.reset_circuit_breaker()
+
         _clips_start = _time.monotonic()
+        _clips_phase_start[0] = _clips_start  # For phase-aware ETA
+
+        # Scale clip count with video duration — use tier if available
+        dynamic_clip_count = tier.max_clip_candidates
+        logger.info(
+            "[%s] Dynamic clip count: %d (%.0f min video, default=%d)",
+            job_id, dynamic_clip_count, vid_minutes, settings.MAX_CLIP_CANDIDATES,
+        )
+
+        clip_detection_task = None
+        _clips_max_pct = [78]  # Track highest progress seen (never go backward)
+
+        async def _clip_progress(phase: str, info: dict):
+            """Progress callback from multi-pass clip detection."""
+            elapsed = int(_time.monotonic() - _clips_start)
+
+            if phase == "pass1_start":
+                n_windows = info.get("windows", 1)
+                msg = f"Pass 1: scanning {n_windows} window{'s' if n_windows > 1 else ''}..."
+                pct = 78
+            elif phase == "pass1_window_done":
+                idx = info.get("window_idx", 1)
+                total = info.get("window_total", 1)
+                clips_so_far = info.get("clips_so_far", 0)
+                msg = f"Pass 1: window {idx}/{total} done ({clips_so_far} clips so far)..."
+                pct = 78 + int((idx / max(total, 1)) * 12)  # 78-90%
+            elif phase == "pass1_done":
+                n_clips = info.get("clips", 0)
+                msg = f"Pass 1 found {n_clips} clips — checking coverage..."
+                pct = 90
+            elif phase == "pass2_start":
+                n_gaps = info.get("gaps", 0)
+                msg = f"Pass 2: sweeping {n_gaps} gap{'s' if n_gaps != 1 else ''} for hidden moments..."
+                pct = 91
+            elif phase == "pass2_gap":
+                idx = info.get("gap_idx", 1)
+                total = info.get("gap_total", 1)
+                start = info.get("start", 0)
+                end = info.get("end", 0)
+                msg = f"Pass 2: scanning gap {idx}/{total} ({start:.0f}-{end:.0f}s)..."
+                pct = 91 + int((idx / max(total, 1)) * 3)  # 91-94%
+            elif phase == "pass3_merge":
+                raw = info.get("raw", 0)
+                msg = f"Merging {raw} candidates..."
+                pct = 94
+            else:
+                msg = f"Identifying viral moments... ({elapsed}s elapsed)"
+                pct = min(94, 78 + elapsed // 15)
+
+            # Never go backward
+            pct = max(pct, _clips_max_pct[0])
+            _clips_max_pct[0] = pct
+
+            await _update_progress(
+                job_id, JobStatus.DETECTING_CLIPS, min(95, pct),
+                f"{msg}{_pipeline_eta(min(95, pct))}",
+            )
 
         async def _clips_heartbeat():
             await asyncio.sleep(10)
             while True:
+                try:
+                    cancel_check()
+                except Exception:
+                    if clip_detection_task and not clip_detection_task.done():
+                        clip_detection_task.cancel()
+                    raise
                 elapsed = int(_time.monotonic() - _clips_start)
-                await _update_sc_progress("clips", 50, JobStatus.DETECTING_CLIPS,
-                    f"Identifying viral moments... ({elapsed}s elapsed)")
+                hb_pct = min(94, 78 + elapsed // 15)
+                # Only update if heartbeat would ADVANCE progress (never regress)
+                if hb_pct > _clips_max_pct[0]:
+                    _clips_max_pct[0] = hb_pct
+                    await _update_progress(
+                        job_id, JobStatus.DETECTING_CLIPS, hb_pct,
+                        f"Identifying viral moments... ({elapsed}s elapsed){_pipeline_eta(hb_pct)}",
+                    )
                 await asyncio.sleep(8)
 
         heartbeat_task = asyncio.create_task(_clips_heartbeat())
         try:
-            clips, clips_provider = await orchestrator.detect_viral_clips(
-                transcript, scenes, metadata["duration"], job_id,
-            )
+            try:
+                clip_detection_task = asyncio.ensure_future(
+                    orchestrator.detect_viral_clips(
+                        transcript, scenes, metadata["duration"], job_id,
+                        video_summary=summary_text,
+                        hot_zones=hot_zones,
+                        progress_callback=_clip_progress,
+                        clip_count=dynamic_clip_count,
+                        tier=tier,
+                    )
+                )
+                clips, clips_provider = await asyncio.wait_for(
+                    clip_detection_task,
+                    timeout=_SUMMARY_CLIP_TIMEOUT,
+                )
+            except AllProvidersFailedError:
+                # All providers failed on first attempt — wait briefly for any
+                # transient rate limits to clear and retry once.
+                logger.warning("[%s] All providers failed for clip detection — retrying in 10s", job_id)
+                orchestrator.reset_circuit_breaker()
+                await asyncio.sleep(10)
+                try:
+                    clips, clips_provider = await asyncio.wait_for(
+                        orchestrator.detect_viral_clips(
+                            transcript, scenes, metadata["duration"], job_id,
+                            video_summary=summary_text,
+                            hot_zones=hot_zones,
+                            progress_callback=_clip_progress,
+                            clip_count=dynamic_clip_count,
+                            tier=tier,
+                        ),
+                        timeout=_SUMMARY_CLIP_TIMEOUT,
+                    )
+                except Exception:
+                    logger.exception("[%s] Clip detection retry also failed", job_id)
+                    clips = []
+                    clips_provider = "none"
+        except asyncio.TimeoutError:
+            logger.error("[%s] Clip detection timed out", job_id)
+            clips = []
+            clips_provider = "none"
         except CancelledError:
             raise
         except Exception as e:
@@ -606,41 +1294,17 @@ async def _run_analysis_inner(job_id: str):
             heartbeat_task.cancel()
             try:
                 await heartbeat_task
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, CancelledError):
                 pass
 
-        await _update_sc_progress("clips", 100, JobStatus.DETECTING_CLIPS,
-            f"Found {len(clips)} clip candidates via {clips_provider}")
-        return clips, clips_provider
+    await _update_progress(
+        job_id, JobStatus.DETECTING_CLIPS, 95,
+        f"Summary via {summary_provider} + {len(clips)} clips via {clips_provider}",
+    )
 
-    logger.info("[%s] Starting concurrent summary + clip detection", job_id)
-    async with _stage_timer(job_id, "summary+clip_detection"):
-        try:
-            (summary, summary_provider), (clips, clips_provider) = await asyncio.wait_for(
-                asyncio.gather(
-                    _branch_summary(),
-                    _branch_clip_detection(),
-                ),
-                timeout=_SUMMARY_CLIP_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.error(
-                "[%s] Summary+clip detection timed out after %ds", job_id, _SUMMARY_CLIP_TIMEOUT,
-            )
-            # Use fallback values so the pipeline can still complete
-            summary = VideoSummary(
-                overview="Summary generation timed out.",
-                key_topics=[], tone="unknown",
-                estimated_audience="unknown",
-                content_category="uncategorized",
-            )
-            summary_provider = "none"
-            clips = []
-            clips_provider = "none"
-            await _update_progress(
-                job_id, JobStatus.DETECTING_CLIPS, 90,
-                f"Summary/clip detection timed out after {_SUMMARY_CLIP_TIMEOUT // 60}min — saving partial results",
-            )
+    # Snap clip boundaries to word-level timestamps for clean cuts
+    if clips and transcript:
+        clips = snap_all_clips(clips, transcript)
 
     # Save both results
     job = await database.load_job(job_id)
@@ -703,3 +1367,10 @@ async def _run_analysis_inner(job_id: str):
         job_id, completion_msg,
         summary_provider, scenes_provider, clips_provider,
     )
+
+    # Launch background post-processing (transcript polishing + subtitle translation)
+    # These improve quality but don't affect clip detection — run after COMPLETE.
+    if transcript:
+        asyncio.create_task(
+            _background_post_processing(job_id, transcript, orchestrator, job)
+        )

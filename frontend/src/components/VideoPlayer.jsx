@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react';
-import { buildSubjectKeyframes, smoothKeyframes, interpolateSubjectX, isDynamic } from '../utils/subjectTracking';
+import { processKeyframes, interpolateSubjectX, isDynamic } from '../utils/subjectTracking';
 import useResponsive from '../hooks/useResponsive';
 
 const ASPECT_RATIO_VALUES = {
@@ -20,7 +20,17 @@ function subjectXToCenterPct(sx, srcRatio, targetRatio) {
   const R = srcRatio / targetRatio;
   if (R <= 1.01) return Math.max(0, Math.min(100, sx));
   const pct = (R * sx - 50) / (R - 1);
-  return Math.max(0, Math.min(100, pct));
+
+  // Soft clamp: if pct is outside [0, 100], ease toward the edge
+  // instead of hard-clamping. This prevents the "slam to edge" visual.
+  if (pct < 0) {
+    return Math.max(0, 5 * (1 - Math.min(1, Math.abs(pct) / 50)));
+  }
+  if (pct > 100) {
+    return Math.min(100, 100 - 5 * (1 - Math.min(1, (pct - 100) / 50)));
+  }
+
+  return pct;
 }
 
 function formatTime(seconds) {
@@ -30,7 +40,7 @@ function formatTime(seconds) {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, aspectRatio, sourceWidth = 1920, sourceHeight = 1080, subjectX = 50, scenes }) {
+export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, aspectRatio, sourceWidth = 1920, sourceHeight = 1080, subjectX = 50, scenes, initialTime }) {
   const { isMobile } = useResponsive();
   const videoRef = useRef(null);
   const containerRef = useRef(null);
@@ -97,11 +107,44 @@ export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, asp
     setCurrentTime(time);
   };
 
-  // Expose seekTo via ref callback
+  // Expose seekTo and pause/getTime via window for cross-component control.
+  // Only clean up globals if this instance still owns them (prevents one
+  // VideoPlayer from deleting another's registration on unmount).
   useEffect(() => {
     window.__clipai_seekTo = seekTo;
-    return () => { delete window.__clipai_seekTo; };
+    window.__clipai_pausePlayer = () => {
+      const video = videoRef.current;
+      if (video && !video.paused) {
+        video.pause();
+        setPlaying(false);
+      }
+    };
+    window.__clipai_getPlayerTime = () => {
+      return videoRef.current?.currentTime ?? 0;
+    };
+    const mySeekTo = seekTo;
+    return () => {
+      if (window.__clipai_seekTo === mySeekTo) {
+        delete window.__clipai_seekTo;
+        delete window.__clipai_pausePlayer;
+        delete window.__clipai_getPlayerTime;
+      }
+    };
   }, []);
+
+  // Seek to initialTime once when the player mounts (no auto-play)
+  const initialTimeApplied = useRef(false);
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || initialTime == null || initialTimeApplied.current) return;
+    initialTimeApplied.current = true;
+    const doSeek = () => {
+      video.currentTime = initialTime;
+      setCurrentTime(initialTime);
+    };
+    if (video.readyState >= 1) doSeek();
+    else video.addEventListener('loadedmetadata', doSeek, { once: true });
+  }, [initialTime]);
 
   // Auto-seek and auto-play when clip preview changes
   useEffect(() => {
@@ -145,39 +188,46 @@ export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, asp
     return Math.abs(srcRatio - ASPECT_RATIO_VALUES[aspectRatio]) > 0.01;
   }, [aspectRatio, srcRatio]);
 
-  // Dynamic subject tracking keyframes (with smoothing matching backend)
+  // Dynamic subject tracking keyframes (full pipeline matching backend)
   const subjectKeyframes = useMemo(
     () => {
       if (!scenes?.length || clipStart == null || clipEnd == null) return null;
-      const raw = buildSubjectKeyframes(scenes, clipStart, clipEnd);
-      const smoothed = raw && raw.length > 1 ? smoothKeyframes(raw) : raw;
-      if (smoothed && isDynamic(smoothed)) {
-        console.log(`[SubjectTracking] VideoPlayer: ${smoothed.length} keyframes built (${clipStart.toFixed(1)}s-${clipEnd.toFixed(1)}s), x range: ${Math.min(...smoothed.map(k=>k.x))}-${Math.max(...smoothed.map(k=>k.x))}`);
+      const _isCrop = isCrop;
+      const processed = processKeyframes(scenes, clipStart, clipEnd, _isCrop ? srcRatio : null, _isCrop ? targetRatio : null);
+      if (processed && isDynamic(processed)) {
+        console.log(`[SubjectTracking] VideoPlayer: ${processed.length} keyframes (pipeline: build→cuts→compress→deadzone→smooth→holds) (${clipStart.toFixed(1)}s-${clipEnd.toFixed(1)}s), x range: ${Math.min(...processed.map(k=>k.x))}-${Math.max(...processed.map(k=>k.x))}`);
       }
-      return smoothed;
+      return processed;
     },
-    [scenes, clipStart, clipEnd],
+    [scenes, clipStart, clipEnd, isCrop, srcRatio, targetRatio],
   );
   const hasDynamicSubject = useMemo(
     () => isCrop && subjectKeyframes && isDynamic(subjectKeyframes),
     [isCrop, subjectKeyframes],
   );
 
-  // Update objectPosition dynamically during playback
+  // Update objectPosition dynamically via rAF for smooth ~60fps updates
   useEffect(() => {
     if (!hasDynamicSubject) return;
     const video = videoRef.current;
     if (!video) return;
-    const onTime = () => {
+    let animId;
+    let lastPct = null;
+    const tick = () => {
       const relTime = video.currentTime - (clipStart || 0);
       const sx = interpolateSubjectX(subjectKeyframes, relTime);
       const centerPct = subjectXToCenterPct(sx, srcRatio, targetRatio);
-      video.style.objectPosition = `${centerPct}% 50%`;
+      // Only update DOM if value actually changed (avoid layout thrashing)
+      const rounded = Math.round(centerPct * 100) / 100;
+      if (rounded !== lastPct) {
+        video.style.objectPosition = `${centerPct}% 50%`;
+        lastPct = rounded;
+      }
+      animId = requestAnimationFrame(tick);
     };
-    video.addEventListener('timeupdate', onTime);
-    onTime();
+    animId = requestAnimationFrame(tick);
     return () => {
-      video.removeEventListener('timeupdate', onTime);
+      cancelAnimationFrame(animId);
       // Clear direct DOM style so React's declarative objectPosition takes over
       video.style.objectPosition = '';
     };

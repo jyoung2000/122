@@ -1,11 +1,15 @@
+import asyncio
+import base64
 import json
 import logging
 import os
 import re
+import threading
 import time
+import uuid
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, File, Request, UploadFile, Form
 from pydantic import BaseModel
 
 from typing import Optional
@@ -44,15 +48,19 @@ _PLACEHOLDER_KEYS = {"sk-or-...", "sk-ant-...", "AIza...", "gsk_...", ""}
 # Keys that are persisted to user_settings.json
 _PERSISTABLE_KEYS = [
     "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY",
+    "HF_AUTH_TOKEN",
     "OPENROUTER_PRESET", "OPENROUTER_VISION_MODEL", "OPENROUTER_TEXT_MODEL",
-    "OPENROUTER_SUMMARY_MODEL", "WHISPER_MODEL", "WHISPER_BEAM_SIZE",
+    "OPENROUTER_SUMMARY_MODEL", "OLLAMA_VISION_MODEL", "OLLAMA_TEXT_MODEL", "OLLAMA_TRANSLATION_MODEL",
+    "WHISPER_MODEL", "WHISPER_BEAM_SIZE",
     "WHISPER_VAD_FILTER", "FRAME_SAMPLE_RATE", "SUBJECT_TRACKING_ENABLED",
     "FFMPEG_PRESET", "FFMPEG_CRF", "FFMPEG_THREADS", "FFMPEG_FASTSTART",
+    "GPU_ACCELERATION_ENABLED", "GPU_VENDOR_OVERRIDE",
+    "GPU_HWDECODE_ENABLED", "GPU_HEVC_FOR_4K", "GPU_DEVICE_INDEX",
     "AI_FALLBACK_CHAIN",
 ]
 
 # API key fields specifically (used to filter out placeholder values)
-_API_KEY_FIELDS = {"OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY"}
+_API_KEY_FIELDS = {"OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GROQ_API_KEY", "HF_AUTH_TOKEN"}
 
 
 def _is_real_value(key: str, val: str) -> bool:
@@ -151,6 +159,7 @@ _PROVIDER_KEY_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
     "gemini": "GEMINI_API_KEY",
     "groq": "GROQ_API_KEY",
+    "huggingface": "HF_AUTH_TOKEN",
 }
 
 # -- Cost estimation for a 10-min video --
@@ -309,6 +318,13 @@ async def provider_status():
     else:
         statuses["groq"] = {"status": "not_configured"}
 
+    # HuggingFace (speaker diarization)
+    hf_token = settings.HF_AUTH_TOKEN
+    if hf_token and hf_token.strip():
+        statuses["huggingface"] = {"status": "configured", "message": "Token set"}
+    else:
+        statuses["huggingface"] = {"status": "not_configured", "message": "No HF token"}
+
     # Determine the active provider and models based on fallback chain
     chain = settings.active_provider_chain
     active_provider = None
@@ -374,6 +390,8 @@ async def test_provider(provider_name: str):
         return await _test_gemini()
     elif provider_name == "groq":
         return await _test_groq()
+    elif provider_name == "huggingface":
+        return await _test_huggingface()
     else:
         return {"status": "error", "message": f"Unknown provider: {provider_name}"}
 
@@ -585,6 +603,49 @@ async def _test_groq():
         return {"status": "error", "message": f"Connection failed: {str(e)[:200]}"}
 
 
+async def _test_huggingface():
+    token = settings.HF_AUTH_TOKEN
+    if not token or not token.strip():
+        return {
+            "status": "not_configured",
+            "message": "HF_AUTH_TOKEN is not set. Add your HuggingFace access token to enable pyannote speaker diarization.",
+            "help": "Get a free token at https://huggingface.co/settings/tokens",
+        }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                "https://huggingface.co/api/whoami-v2",
+                headers={"Authorization": f"Bearer {token.strip()}"},
+            )
+            if resp.status_code == 200:
+                username = resp.json().get("name", "unknown")
+                model_resp = await client.get(
+                    "https://huggingface.co/api/models/pyannote/speaker-diarization-3.1",
+                    headers={"Authorization": f"Bearer {token.strip()}"},
+                )
+                if model_resp.status_code == 200:
+                    return {
+                        "status": "connected",
+                        "message": f"Connected as '{username}'. pyannote model access confirmed — neural speaker diarization is enabled.",
+                    }
+                elif model_resp.status_code == 403:
+                    return {
+                        "status": "connected",
+                        "message": f"Connected as '{username}', but you must accept the pyannote model terms at https://huggingface.co/pyannote/speaker-diarization-3.1 and click 'Agree and access repository'.",
+                    }
+                else:
+                    return {
+                        "status": "connected",
+                        "message": f"Connected as '{username}'. Could not verify pyannote model access (HTTP {model_resp.status_code}).",
+                    }
+            elif resp.status_code == 401:
+                return {"status": "invalid_key", "message": "Token is invalid or expired."}
+            else:
+                return {"status": "error", "message": f"HuggingFace API returned HTTP {resp.status_code}."}
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to reach HuggingFace API: {e}"}
+
+
 class SaveKeyRequest(BaseModel):
     provider: str
     key: str
@@ -615,6 +676,15 @@ async def save_provider_key(req: SaveKeyRequest):
     # Update the settings object in memory
     setattr(settings, env_var, key_val)
     _invalidate_status_cache()
+
+    # If the HuggingFace token changed, reload the diarization pipeline
+    if env_var == "HF_AUTH_TOKEN":
+        try:
+            from backend.services.transcription import reload_diarization
+            reload_diarization()
+            logger.info("Reloading pyannote diarization pipeline with new HF token")
+        except Exception as e:
+            logger.warning("Failed to reload diarization pipeline: %s", e)
 
     # Persist to .env file (backup)
     env_path = _find_env_file()
@@ -685,13 +755,52 @@ class ToggleOllamaRequest(BaseModel):
     enabled: bool
 
 
+def _pull_ollama_models_background(models: list[str] | None = None):
+    """Pull Ollama models in a background thread.
+
+    If no models are specified, pulls the configured vision, text, and
+    translation models.  This is called when Ollama is toggled on or when
+    models are saved, so the models are ready by the time the user tries
+    to use them.
+    """
+    if models is None:
+        models = []
+        for m in (settings.OLLAMA_VISION_MODEL, settings.OLLAMA_TEXT_MODEL,
+                  settings.OLLAMA_TRANSLATION_MODEL):
+            if m and m not in models:
+                models.append(m)
+
+    if not models:
+        return
+
+    def _do_pull():
+        import httpx as _httpx
+        host = settings.OLLAMA_HOST
+        for model in models:
+            try:
+                logger.info("Background pull: requesting %s from Ollama...", model)
+                resp = _httpx.post(
+                    f"{host}/api/pull",
+                    json={"name": model},
+                    timeout=_httpx.Timeout(connect=10, read=1800, write=10, pool=10),
+                )
+                if resp.status_code == 200:
+                    logger.info("Background pull: %s ready", model)
+                else:
+                    logger.warning("Background pull: %s returned %d", model, resp.status_code)
+            except Exception as exc:
+                logger.warning("Background pull: %s failed (%s)", model, exc)
+
+    threading.Thread(target=_do_pull, daemon=True, name="ollama-bg-pull").start()
+
+
 @router.post("/providers/ollama/toggle")
 async def toggle_ollama(req: ToggleOllamaRequest):
     """Add or remove Ollama from the fallback chain."""
     chain = [p.strip() for p in settings.AI_FALLBACK_CHAIN.split(",") if p.strip()]
     if req.enabled:
         if "ollama" not in chain:
-            chain.append("ollama")
+            chain.insert(0, "ollama")  # Ollama goes FIRST — user wants to use local models
     else:
         chain = [p for p in chain if p != "ollama"]
     settings.AI_FALLBACK_CHAIN = ",".join(chain)
@@ -702,6 +811,13 @@ async def toggle_ollama(req: ToggleOllamaRequest):
         _upsert_env_var(env_path, "AI_FALLBACK_CHAIN", settings.AI_FALLBACK_CHAIN)
 
     _persist_user_settings()
+
+    # When Ollama is enabled, pull configured models in the background
+    # so they're ready when the user needs them.  The startup pull only
+    # fires if Ollama was already in the chain at boot time.
+    if req.enabled:
+        _pull_ollama_models_background()
+
     return {
         "status": "saved",
         "ollama_enabled": "ollama" in chain,
@@ -1093,6 +1209,8 @@ _WHISPER_MODELS = [
     {"id": "small", "name": "Whisper Small", "provider": "local", "desc": "Good accuracy/speed balance (~244M params, default)", "cost_per_hour": 0, "is_free": True, "quality_score": 3, "quality": "good"},
     {"id": "medium", "name": "Whisper Medium", "provider": "local", "desc": "High accuracy, slower (~769M params)", "cost_per_hour": 0, "is_free": True, "quality_score": 4, "quality": "excellent"},
     {"id": "large-v3", "name": "Whisper Large V3", "provider": "local", "desc": "Best accuracy, needs GPU (~1.5B params)", "cost_per_hour": 0, "is_free": True, "quality_score": 5, "quality": "best"},
+    {"id": "large-v3-turbo", "name": "Whisper Large V3 Turbo", "provider": "local", "desc": "Near large-v3 accuracy, 40% faster (~809M params)", "cost_per_hour": 0, "is_free": True, "quality_score": 5, "quality": "best"},
+    {"id": "distil-large-v3", "name": "Whisper Distil Large V3", "provider": "local", "desc": "Distilled large-v3, 6x faster, English-optimized (~756M params)", "cost_per_hour": 0, "is_free": True, "quality_score": 4, "quality": "excellent"},
 ]
 
 # Known models for direct providers (when user has their API key)
@@ -1189,6 +1307,92 @@ async def available_models():
                 vision.append({**entry, **_estimate_speed(mid, "vision", False)})
             text.append({**entry, **_estimate_speed(mid, "text", False)})
 
+    # Add Ollama local models if Ollama is in the chain and reachable
+    _VISION_FAMILIES = {"llava", "moondream", "bakllava", "minicpm-v", "llava-llama3", "llava-phi3", "nanollava"}
+    if "ollama" in settings.active_provider_chain:
+        _ollama_seen_ids: set[str] = set()
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{settings.OLLAMA_HOST}/api/tags")
+                if resp.status_code == 200:
+                    ollama_data = resp.json()
+                    for m in ollama_data.get("models", []):
+                        model_name = m.get("name", "")
+                        model_family = model_name.split(":")[0].lower()
+                        has_vision = any(vf in model_family for vf in _VISION_FAMILIES)
+
+                        size_bytes = m.get("size", 0)
+                        size_gb = round(size_bytes / (1024**3), 1) if size_bytes else 0
+                        details = m.get("details", {})
+                        param_size = details.get("parameter_size", "")
+                        quant = details.get("quantization_level", "")
+
+                        desc_parts = ["LOCAL", "FREE"]
+                        if param_size:
+                            desc_parts.append(param_size)
+                        if quant:
+                            desc_parts.append(quant)
+                        if size_gb:
+                            desc_parts.append(f"{size_gb}GB")
+                        desc = " — ".join(desc_parts)
+
+                        entry = {
+                            "id": f"ollama/{model_name}",
+                            "name": f"{model_name} (Ollama Local)",
+                            "provider": "ollama",
+                            "is_free": True,
+                            "cost_per_hour": 0,
+                            "context_length": 0,
+                            "created": int(time.time()),  # Sort to top as "newest"
+                            "desc": desc,
+                            "speed": "balanced",
+                            "est_time_display": "varies by GPU",
+                            "quality_score": 3,
+                            "quality": "good",
+                        }
+
+                        _ollama_seen_ids.add(f"ollama/{model_name}")
+                        if has_vision:
+                            vision.append(entry)
+                        # All models can do text
+                        text.append(entry)
+        except Exception as e:
+            logger.warning("Failed to fetch Ollama models for available list: %s", e)
+
+        # Always show the configured default models even if they haven't been
+        # pulled yet (e.g. Ollama was just toggled on and pulls are in progress).
+        # This lets the user select them in the dropdown immediately.
+        _defaults = [
+            (settings.OLLAMA_VISION_MODEL, True),   # (model_name, is_vision)
+            (settings.OLLAMA_TEXT_MODEL, False),
+        ]
+        for _def_name, _def_is_vision in _defaults:
+            if not _def_name:
+                continue
+            _def_id = f"ollama/{_def_name}"
+            if _def_id in _ollama_seen_ids:
+                continue  # Already listed from /api/tags
+            _def_family = _def_name.split(":")[0].lower()
+            _is_vision = _def_is_vision or any(vf in _def_family for vf in _VISION_FAMILIES)
+            _def_entry = {
+                "id": _def_id,
+                "name": f"{_def_name} (Ollama Local — pulling...)",
+                "provider": "ollama",
+                "is_free": True,
+                "cost_per_hour": 0,
+                "context_length": 0,
+                "created": int(time.time()),
+                "desc": "LOCAL — FREE — downloading...",
+                "speed": "balanced",
+                "est_time_display": "varies by GPU",
+                "quality_score": 3,
+                "quality": "good",
+            }
+            if _is_vision:
+                vision.append(_def_entry)
+            text.append(_def_entry)
+            _ollama_seen_ids.add(_def_id)
+
     # Sort: free first, then newer + cheaper towards the top
     # Within free models: newest first.  Within paid: newest first, then cheapest.
     def _sort_key(m):
@@ -1201,14 +1405,31 @@ async def available_models():
     text.sort(key=_sort_key)
 
     # Limit to top 100 per category to avoid overwhelming the UI
+    # Return current models based on which provider is primary.
+    # If Ollama is first in chain OR is in the chain and has models configured,
+    # return Ollama models so the UI shows what the user actually selected.
+    chain = settings.active_provider_chain
+    ollama_is_primary = chain and chain[0] == "ollama"
+    ollama_models_set = (
+        "ollama" in chain
+        and settings.OLLAMA_VISION_MODEL
+        and settings.OLLAMA_TEXT_MODEL
+    )
+    if ollama_is_primary or (ollama_models_set and not _key_is_set(settings.OPENROUTER_API_KEY)):
+        current_vision = f"ollama/{settings.OLLAMA_VISION_MODEL}"
+        current_text = f"ollama/{settings.OLLAMA_TEXT_MODEL}"
+    else:
+        current_vision = settings.OPENROUTER_VISION_MODEL
+        current_text = settings.OPENROUTER_TEXT_MODEL
+
     return {
         "transcript": transcript,
         "vision": vision[:100],
         "text": text[:100],
         "current": {
             "transcript_model": settings.WHISPER_MODEL,
-            "vision_model": settings.OPENROUTER_VISION_MODEL,
-            "text_model": settings.OPENROUTER_TEXT_MODEL,
+            "vision_model": current_vision,
+            "text_model": current_text,
         },
     }
 
@@ -1230,23 +1451,86 @@ async def save_models(req: SaveModelsRequest):
             _upsert_env_var(env_path, "WHISPER_MODEL", req.transcript_model)
 
     if req.vision_model:
-        settings.OPENROUTER_VISION_MODEL = req.vision_model
-        settings.OPENROUTER_PRESET = "custom"
-        if env_path:
-            _upsert_env_var(env_path, "OPENROUTER_VISION_MODEL", req.vision_model)
-            _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
+        if req.vision_model.startswith("ollama/"):
+            # Strip the "ollama/" prefix to get the raw model name
+            ollama_model = req.vision_model[len("ollama/"):]
+            settings.OLLAMA_VISION_MODEL = ollama_model
+            if env_path:
+                _upsert_env_var(env_path, "OLLAMA_VISION_MODEL", ollama_model)
+        else:
+            settings.OPENROUTER_VISION_MODEL = req.vision_model
+            settings.OPENROUTER_PRESET = "custom"
+            if env_path:
+                _upsert_env_var(env_path, "OPENROUTER_VISION_MODEL", req.vision_model)
+                _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
 
     if req.text_model:
-        settings.OPENROUTER_TEXT_MODEL = req.text_model
-        settings.OPENROUTER_SUMMARY_MODEL = req.text_model
-        settings.OPENROUTER_PRESET = "custom"
-        if env_path:
-            _upsert_env_var(env_path, "OPENROUTER_TEXT_MODEL", req.text_model)
-            _upsert_env_var(env_path, "OPENROUTER_SUMMARY_MODEL", req.text_model)
-            _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
+        if req.text_model.startswith("ollama/"):
+            ollama_model = req.text_model[len("ollama/"):]
+            settings.OLLAMA_TEXT_MODEL = ollama_model
+            if env_path:
+                _upsert_env_var(env_path, "OLLAMA_TEXT_MODEL", ollama_model)
+        else:
+            settings.OPENROUTER_TEXT_MODEL = req.text_model
+            settings.OPENROUTER_SUMMARY_MODEL = req.text_model
+            settings.OPENROUTER_PRESET = "custom"
+            if env_path:
+                _upsert_env_var(env_path, "OPENROUTER_TEXT_MODEL", req.text_model)
+                _upsert_env_var(env_path, "OPENROUTER_SUMMARY_MODEL", req.text_model)
+                _upsert_env_var(env_path, "OPENROUTER_PRESET", "custom")
+
+    # If the user selected Ollama models, ensure Ollama is in the fallback chain
+    # so it actually gets used for analysis. Put it first since that's the user's intent.
+    has_ollama_models = (
+        (req.vision_model and req.vision_model.startswith("ollama/"))
+        or (req.text_model and req.text_model.startswith("ollama/"))
+    )
+    if has_ollama_models:
+        chain = [p.strip() for p in settings.AI_FALLBACK_CHAIN.split(",") if p.strip()]
+        if "ollama" not in chain:
+            chain.insert(0, "ollama")
+            settings.AI_FALLBACK_CHAIN = ",".join(chain)
+            if env_path:
+                _upsert_env_var(env_path, "AI_FALLBACK_CHAIN", settings.AI_FALLBACK_CHAIN)
+            logger.info("Auto-enabled Ollama in fallback chain (user selected Ollama models)")
+        elif chain[0] != "ollama":
+            # Move Ollama to front — user clearly wants local models as primary
+            chain = ["ollama"] + [p for p in chain if p != "ollama"]
+            settings.AI_FALLBACK_CHAIN = ",".join(chain)
+            if env_path:
+                _upsert_env_var(env_path, "AI_FALLBACK_CHAIN", settings.AI_FALLBACK_CHAIN)
+            logger.info("Moved Ollama to front of fallback chain (user selected Ollama models)")
 
     _invalidate_status_cache()
     _persist_user_settings()
+
+    # Pull any newly selected Ollama models in the background
+    if has_ollama_models:
+        pull_models = []
+        if req.vision_model and req.vision_model.startswith("ollama/"):
+            pull_models.append(req.vision_model[len("ollama/"):])
+        if req.text_model and req.text_model.startswith("ollama/"):
+            pull_models.append(req.text_model[len("ollama/"):])
+        if pull_models:
+            _pull_ollama_models_background(pull_models)
+
+    # Return the currently active models.
+    # If the user just saved Ollama models, reflect those regardless of chain order.
+    # This prevents the UI from reverting to OpenRouter models when Ollama is enabled
+    # but not the first provider in the chain.
+    chain = settings.active_provider_chain
+    has_ollama_models = (
+        (req.vision_model and req.vision_model.startswith("ollama/"))
+        or (req.text_model and req.text_model.startswith("ollama/"))
+    )
+    use_ollama = has_ollama_models or (chain and chain[0] == "ollama")
+    if use_ollama:
+        return {
+            "status": "saved",
+            "transcript_model": settings.WHISPER_MODEL,
+            "vision_model": f"ollama/{settings.OLLAMA_VISION_MODEL}",
+            "text_model": f"ollama/{settings.OLLAMA_TEXT_MODEL}",
+        }
     return {
         "status": "saved",
         "transcript_model": settings.WHISPER_MODEL,
@@ -1388,6 +1672,477 @@ async def set_subject_tracking(req: SubjectTrackingRequest):
     return {"status": "saved", "enabled": settings.SUBJECT_TRACKING_ENABLED}
 
 
+# ── GPU Hardware Acceleration ────────────────────────────────────
+
+
+@router.get("/gpu-acceleration")
+async def get_gpu_acceleration():
+    """Return current GPU acceleration toggle state and detected GPU info.
+
+    When enabled, runs GPU detection and returns full hardware details.
+    When disabled, returns minimal info with vendor='none'.
+    """
+    from backend.services.clip_exporter import detect_gpu_capabilities
+
+    # Always detect GPUs so the UI can show all available devices,
+    # even when GPU acceleration is toggled off.
+    # Run in thread to avoid blocking the event loop (subprocess calls inside).
+    gpu_info = await asyncio.to_thread(detect_gpu_capabilities, force_redetect=True)
+
+    return {
+        "enabled": settings.GPU_ACCELERATION_ENABLED,
+        "vendor_override": settings.GPU_VENDOR_OVERRIDE,
+        "hwdecode_enabled": settings.GPU_HWDECODE_ENABLED,
+        "hevc_for_4k": settings.GPU_HEVC_FOR_4K,
+        "gpu_device_index": settings.GPU_DEVICE_INDEX,
+        "detected": {
+            "vendor": gpu_info["vendor"],
+            "gpu_name": gpu_info.get("gpu_name", "Unknown"),
+            "encoder": gpu_info["encoder"],
+            "hevc_encoder": gpu_info.get("hevc_encoder"),
+            "decoder": gpu_info["decoder"],
+            "hwaccel": gpu_info["hwaccel"],
+            "capabilities": gpu_info.get("capabilities", []),
+            "vram_mb": gpu_info.get("vram_mb", 0),
+            "driver_version": gpu_info.get("driver_version", ""),
+            "cuda_available": gpu_info.get("cuda_available", False),
+            "whisper_device": gpu_info.get("whisper_device", "cpu"),
+            "gpus": gpu_info.get("gpus", []),
+            "gpu_issues": gpu_info.get("gpu_issues", []),
+        },
+    }
+
+
+class GpuAccelerationRequest(BaseModel):
+    enabled: bool
+    vendor_override: Optional[str] = None
+
+
+@router.post("/gpu-acceleration")
+async def set_gpu_acceleration(req: GpuAccelerationRequest):
+    """Toggle GPU acceleration on/off and optionally set vendor override.
+
+    When toggled ON: clears cached GPU info, re-scans for available GPUs,
+    runs test-encodes to confirm the encoder works, returns full GPU details.
+    When toggled OFF: clears cache, returns CPU fallback info.
+    """
+    from backend.services.clip_exporter import detect_gpu_capabilities, _gpu_info_cache_clear
+    from backend.services.transcription import reload_model as reload_whisper_model
+
+    settings.GPU_ACCELERATION_ENABLED = req.enabled
+    if req.vendor_override is not None:
+        settings.GPU_VENDOR_OVERRIDE = req.vendor_override
+
+    _persist_user_settings()
+
+    # Force re-detection so the response includes fresh GPU info
+    _gpu_info_cache_clear()
+    # Reload Whisper model so it moves between CPU/CUDA to match the toggle
+    reload_whisper_model()
+    # Run in thread to avoid blocking the event loop (subprocess calls inside).
+    gpu_info = await asyncio.to_thread(detect_gpu_capabilities, force_redetect=True)
+
+    return {
+        "status": "saved",
+        "enabled": settings.GPU_ACCELERATION_ENABLED,
+        "detected": {
+            "vendor": gpu_info["vendor"],
+            "gpu_name": gpu_info.get("gpu_name", "Unknown"),
+            "encoder": gpu_info["encoder"],
+            "decoder": gpu_info["decoder"],
+            "hwaccel": gpu_info["hwaccel"],
+            "vram_mb": gpu_info.get("vram_mb", 0),
+            "driver_version": gpu_info.get("driver_version", ""),
+            "cuda_available": gpu_info.get("cuda_available", False),
+            "whisper_device": gpu_info.get("whisper_device", "cpu"),
+            "gpus": gpu_info.get("gpus", []),
+            "gpu_issues": gpu_info.get("gpu_issues", []),
+        },
+    }
+
+
+# ── Client GPU (Browser) Report ──────────────────────────────────
+
+
+class ClientGpuReport(BaseModel):
+    """Reported by the browser after GPU detection."""
+    webgpu_supported: bool = False
+    webcodec_supported: bool = False
+    gpu_name: str = ""
+    gpu_vendor: str = ""
+    estimated_vram_mb: int = 0
+    has_fp16: bool = False
+    whisper_capable: bool = False
+    h264_hardware_encode: bool = False
+    hevc_hardware_encode: bool = False
+    h264_hw_encode: bool = False
+    hevc_hw_encode: bool = False
+    client_whisper_enabled: bool = False
+    client_encoding_enabled: bool = False
+    gpu_index: str = "0"
+    gpu_backend: str = ""
+
+
+@router.post("/client-gpu-report")
+async def report_client_gpu(req: ClientGpuReport):
+    """Store client GPU capabilities so the pipeline can decide where to process.
+
+    The server uses this to skip server-side transcription if the client will
+    handle it, or to prepare server-side fallback if the client can't.
+    Also stores the user's selected GPU index for FFmpeg device selection.
+
+    When the client reports an NVIDIA GPU and server-side GPU acceleration
+    is not yet enabled, this triggers auto-detection and enables it.
+    """
+    # Store the selected GPU index so FFmpeg can target the right device
+    if req.gpu_index:
+        settings.GPU_DEVICE_INDEX = req.gpu_index
+        logger.info("GPU device index set to %s (%s)", req.gpu_index, req.gpu_name)
+        _persist_user_settings()
+
+    # Auto-enable server GPU acceleration if client reports NVIDIA GPU
+    # and server hasn't enabled it yet
+    if req.gpu_vendor and "nvidia" in req.gpu_vendor.lower() and not settings.GPU_ACCELERATION_ENABLED:
+        logger.info(
+            "Client reports NVIDIA GPU (%s) — auto-enabling server GPU acceleration",
+            req.gpu_name,
+        )
+        settings.GPU_ACCELERATION_ENABLED = True
+        settings.GPU_VENDOR_OVERRIDE = "nvidia"
+        _persist_user_settings()
+        # Force GPU re-detection and reload Whisper model for CUDA
+        try:
+            from backend.services.clip_exporter import _gpu_info_cache_clear
+            _gpu_info_cache_clear()
+            from backend.services.transcription import reload_model as reload_whisper_model
+            reload_whisper_model()
+        except Exception:
+            pass
+
+    logger.info(
+        "Client GPU report: webgpu=%s gpu=%s vendor=%s whisper_capable=%s "
+        "client_whisper=%s client_encoding=%s gpu_index=%s",
+        req.webgpu_supported, req.gpu_name, req.gpu_vendor, req.whisper_capable,
+        req.client_whisper_enabled, req.client_encoding_enabled, req.gpu_index,
+    )
+    return {"status": "received"}
+
+
+# ── GPU QA & Validation ──────────────────────────────────────────────
+
+
+@router.get("/gpu-qa")
+async def gpu_qa_validation():
+    """Run comprehensive GPU QA validation.
+
+    Checks that GPU acceleration is properly configured and actually
+    being used for both Whisper transcription and FFmpeg video encoding.
+    Returns a structured report with pass/fail checks, warnings, and
+    actionable recommendations.
+    """
+    import subprocess as _subprocess
+
+    from backend.services.clip_exporter import (
+        detect_gpu_capabilities,
+        _gpu_encode_args,
+        _gpu_decode_args,
+    )
+    from backend.services.transcription import whisper_device_info
+
+    checks = []
+    warnings = []
+    errors = []
+
+    # ── 1. GPU Detection ──
+    gpu_info = await asyncio.to_thread(detect_gpu_capabilities, force_redetect=True)
+    gpu_vendor = gpu_info.get("vendor", "none")
+    gpu_name = gpu_info.get("gpu_name", "Unknown")
+
+    if gpu_vendor != "none":
+        checks.append({
+            "name": "GPU detected",
+            "status": "pass",
+            "detail": f"{gpu_name} (vendor: {gpu_vendor})",
+        })
+    else:
+        checks.append({
+            "name": "GPU detected",
+            "status": "fail",
+            "detail": "No GPU detected by FFmpeg/system probes",
+        })
+        errors.append("No GPU hardware detected — GPU acceleration cannot work")
+
+    # ── 2. GPU Acceleration Setting ──
+    if settings.GPU_ACCELERATION_ENABLED:
+        checks.append({
+            "name": "GPU acceleration enabled",
+            "status": "pass",
+            "detail": f"Enabled (vendor_override={settings.GPU_VENDOR_OVERRIDE or 'auto'})",
+        })
+    else:
+        checks.append({
+            "name": "GPU acceleration enabled",
+            "status": "fail",
+            "detail": "GPU acceleration is disabled in settings",
+        })
+        errors.append(
+            "GPU acceleration is disabled — enable it in Settings > GPU Acceleration"
+        )
+
+    # ── 3. CUDA Runtime (for Whisper) ──
+    cuda_available = False
+    cuda_device_count = 0
+    try:
+        from backend.services.transcription import _detect_cuda_available
+        cuda_available, cuda_device_count, _ = _detect_cuda_available()
+    except Exception:
+        pass
+
+    if cuda_available and cuda_device_count > 0:
+        checks.append({
+            "name": "CUDA runtime available",
+            "status": "pass",
+            "detail": f"{cuda_device_count} CUDA device(s) found",
+        })
+    else:
+        checks.append({
+            "name": "CUDA runtime available",
+            "status": "warn" if gpu_vendor != "none" else "fail",
+            "detail": "CUDA runtime not available (ctranslate2/torch cannot use GPU)",
+        })
+        if gpu_vendor == "nvidia":
+            warnings.append(
+                "NVIDIA GPU detected but CUDA runtime is not available. "
+                "Ensure CUDA toolkit is installed and container has --gpus all."
+            )
+
+    # ── 4. Whisper Model GPU Status ──
+    whisper_dev = whisper_device_info.get("device", "cpu")
+    whisper_idx = whisper_device_info.get("device_index", 0)
+    whisper_compute = whisper_device_info.get("compute_type", "int8")
+
+    if whisper_dev == "cuda":
+        checks.append({
+            "name": "Whisper using GPU",
+            "status": "pass",
+            "detail": f"device=cuda:{whisper_idx}, compute_type={whisper_compute}",
+        })
+    else:
+        status = "fail" if settings.GPU_ACCELERATION_ENABLED and cuda_available else "warn"
+        checks.append({
+            "name": "Whisper using GPU",
+            "status": status,
+            "detail": f"Whisper running on CPU ({whisper_compute})",
+        })
+        if status == "fail":
+            errors.append(
+                "GPU is enabled and CUDA is available, but Whisper is running on CPU. "
+                "Try toggling GPU acceleration off and on to reload the model."
+            )
+
+    # ── 5. Whisper GPU Verification (live check) ──
+    if whisper_dev == "cuda":
+        verification_results = []
+        try:
+            import ctranslate2
+            ct2_count = ctranslate2.get_cuda_device_count()
+            if ct2_count > 0:
+                verification_results.append(f"ctranslate2: {ct2_count} CUDA device(s)")
+        except Exception:
+            pass
+
+        try:
+            import torch
+            if torch.cuda.is_available():
+                mem = torch.cuda.memory_allocated(whisper_idx)
+                verification_results.append(
+                    f"torch: {mem / 1024 / 1024:.1f}MB allocated on device {whisper_idx}"
+                )
+        except Exception:
+            pass
+
+        try:
+            smi = _subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if smi.returncode == 0 and smi.stdout.strip():
+                our_pid = str(os.getpid())
+                for line in smi.stdout.strip().split("\n"):
+                    if our_pid in line:
+                        verification_results.append(f"nvidia-smi: PID {our_pid} using GPU")
+                        break
+        except Exception:
+            pass
+
+        if verification_results:
+            checks.append({
+                "name": "Whisper GPU verification",
+                "status": "pass",
+                "detail": "; ".join(verification_results),
+            })
+        else:
+            checks.append({
+                "name": "Whisper GPU verification",
+                "status": "warn",
+                "detail": "Could not independently verify GPU memory usage",
+            })
+            warnings.append(
+                "Whisper reports device=cuda but live GPU verification could not confirm usage"
+            )
+
+    # ── 6. FFmpeg GPU Encoder ──
+    encoder = gpu_info.get("encoder", "")
+    if encoder and encoder != "libx264":
+        checks.append({
+            "name": "FFmpeg GPU encoder available",
+            "status": "pass",
+            "detail": f"Encoder: {encoder}",
+        })
+    elif settings.GPU_ACCELERATION_ENABLED and gpu_vendor != "none":
+        checks.append({
+            "name": "FFmpeg GPU encoder available",
+            "status": "fail",
+            "detail": "GPU detected but no hardware encoder found by FFmpeg",
+        })
+        errors.append(
+            "FFmpeg cannot find a GPU encoder. Ensure FFmpeg is built with NVENC/VAAPI/QSV support."
+        )
+    else:
+        checks.append({
+            "name": "FFmpeg GPU encoder available",
+            "status": "info",
+            "detail": "Using software encoder (libx264)",
+        })
+
+    # ── 7. FFmpeg GPU Decoder / HW Decode ──
+    if settings.GPU_HWDECODE_ENABLED:
+        hwaccel = gpu_info.get("hwaccel", "")
+        if hwaccel:
+            checks.append({
+                "name": "FFmpeg GPU decoder available",
+                "status": "pass",
+                "detail": f"hwaccel: {hwaccel}",
+            })
+        else:
+            checks.append({
+                "name": "FFmpeg GPU decoder available",
+                "status": "warn",
+                "detail": "Hardware decode enabled but no hwaccel method detected",
+            })
+    else:
+        checks.append({
+            "name": "FFmpeg GPU decoder available",
+            "status": "info",
+            "detail": "Hardware decode disabled in settings",
+        })
+
+    # ── 8. Test Encode (quick NVENC/VAAPI probe) ──
+    if settings.GPU_ACCELERATION_ENABLED and encoder and encoder != "libx264":
+        try:
+            # Provide a minimal quality preset dict for the test
+            test_preset = {"crf": 23, "preset": "fast"}
+            encode_args = await asyncio.to_thread(_gpu_encode_args, test_preset, "1080p")
+            if encode_args:
+                # Run a minimal test encode to verify GPU encoder actually works
+                test_cmd = [
+                    "ffmpeg", "-y", "-f", "lavfi", "-i",
+                    "color=c=black:s=64x64:d=0.1:r=1",
+                    *encode_args, "-frames:v", "1",
+                    "-f", "null", "-",
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *test_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=15)
+                if proc.returncode == 0:
+                    checks.append({
+                        "name": "GPU test encode",
+                        "status": "pass",
+                        "detail": f"Test encode succeeded with {encoder}",
+                    })
+                else:
+                    stderr_text = stderr_bytes.decode(errors="replace")[-300:]
+                    checks.append({
+                        "name": "GPU test encode",
+                        "status": "fail",
+                        "detail": f"Test encode failed: {stderr_text}",
+                    })
+                    errors.append(
+                        f"GPU encoder '{encoder}' failed test encode. "
+                        "The GPU driver or FFmpeg build may not support this encoder."
+                    )
+            else:
+                checks.append({
+                    "name": "GPU test encode",
+                    "status": "warn",
+                    "detail": "No encode args returned — encoder may not be configured",
+                })
+        except asyncio.TimeoutError:
+            checks.append({
+                "name": "GPU test encode",
+                "status": "warn",
+                "detail": "Test encode timed out (15s)",
+            })
+        except Exception as exc:
+            checks.append({
+                "name": "GPU test encode",
+                "status": "warn",
+                "detail": f"Test encode error: {exc}",
+            })
+
+    # ── 9. Device Index Consistency ──
+    configured_idx = (settings.GPU_DEVICE_INDEX or "0").strip()
+    if whisper_dev == "cuda" and str(whisper_idx) != configured_idx:
+        warnings.append(
+            f"Whisper is on CUDA device {whisper_idx} but GPU_DEVICE_INDEX is '{configured_idx}'. "
+            "Toggle GPU off/on to apply the new device index."
+        )
+
+    # ── Summary ──
+    pass_count = sum(1 for c in checks if c["status"] == "pass")
+    fail_count = sum(1 for c in checks if c["status"] == "fail")
+    warn_count = sum(1 for c in checks if c["status"] == "warn")
+
+    overall = "pass"
+    if fail_count > 0:
+        overall = "fail"
+    elif warn_count > 0:
+        overall = "warn"
+
+    return {
+        "overall": overall,
+        "summary": f"{pass_count} passed, {fail_count} failed, {warn_count} warnings",
+        "checks": checks,
+        "errors": errors,
+        "warnings": warnings,
+        "config": {
+            "gpu_acceleration_enabled": settings.GPU_ACCELERATION_ENABLED,
+            "gpu_vendor_override": settings.GPU_VENDOR_OVERRIDE,
+            "gpu_hwdecode_enabled": settings.GPU_HWDECODE_ENABLED,
+            "gpu_hevc_for_4k": settings.GPU_HEVC_FOR_4K,
+            "gpu_device_index": settings.GPU_DEVICE_INDEX,
+        },
+        "whisper": {
+            "device": whisper_dev,
+            "compute_type": whisper_compute,
+            "device_index": whisper_idx,
+            "gpu_name": whisper_device_info.get("gpu_name", ""),
+        },
+        "ffmpeg": {
+            "vendor": gpu_vendor,
+            "gpu_name": gpu_name,
+            "encoder": encoder,
+            "hevc_encoder": gpu_info.get("hevc_encoder", ""),
+            "decoder": gpu_info.get("decoder", ""),
+            "hwaccel": gpu_info.get("hwaccel", ""),
+        },
+    }
+
+
 # ── Prompt Management ──────────────────────────────────────────────
 
 
@@ -1395,6 +2150,8 @@ class SavePromptsRequest(BaseModel):
     frame_analysis: Optional[str] = None
     viral_clip_detection: Optional[str] = None
     subject_tracking: Optional[str] = None
+    summary: Optional[str] = None
+    seo: Optional[str] = None
 
 
 @router.get("/prompts")
@@ -1441,6 +2198,24 @@ async def update_prompts(req: SavePromptsRequest):
             }
         current.subject_tracking = text if text else defaults.subject_tracking
 
+    if req.summary is not None:
+        text = req.summary.strip()
+        if len(text) > MAX_PROMPT_LENGTH:
+            return {
+                "status": "error",
+                "message": f"Summary prompt exceeds {MAX_PROMPT_LENGTH} characters",
+            }
+        current.summary = text if text else defaults.summary
+
+    if req.seo is not None:
+        text = req.seo.strip()
+        if len(text) > MAX_PROMPT_LENGTH:
+            return {
+                "status": "error",
+                "message": f"SEO prompt exceeds {MAX_PROMPT_LENGTH} characters",
+            }
+        current.seo = text if text else defaults.seo
+
     save_prompts(current)
     return {"status": "saved", "prompts": current.model_dump()}
 
@@ -1451,3 +2226,143 @@ async def reset_prompts():
     defaults = get_defaults()
     save_prompts(defaults)
     return {"status": "reset", "prompts": defaults.model_dump()}
+
+
+# ═══════════════════════════════════════════════════════════════
+# Site Customisation — title, favicon, logo
+# ═══════════════════════════════════════════════════════════════
+
+SITE_CONFIG_PATH = os.path.join(_DATA_DIR, "site_config.json")
+SITE_UPLOADS_DIR = os.path.join(_DATA_DIR, "site_uploads")
+
+
+def _load_site_config() -> dict:
+    if os.path.exists(SITE_CONFIG_PATH):
+        try:
+            with open(SITE_CONFIG_PATH, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_site_config(cfg: dict):
+    os.makedirs(os.path.dirname(SITE_CONFIG_PATH), exist_ok=True)
+    with open(SITE_CONFIG_PATH, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+@router.get("/site-config")
+async def get_site_config():
+    """Return site customisation (title, favicon URL, logo URL)."""
+    return _load_site_config()
+
+
+@router.post("/site-config")
+async def update_site_config(
+    title: Optional[str] = Form(None),
+    favicon: Optional[UploadFile] = File(None),
+    logo: Optional[UploadFile] = File(None),
+    remove_favicon: Optional[str] = Form(None),
+    remove_logo: Optional[str] = Form(None),
+):
+    """Update site title, favicon, and/or logo."""
+    cfg = _load_site_config()
+    os.makedirs(SITE_UPLOADS_DIR, exist_ok=True)
+
+    if title is not None:
+        cfg["title"] = title.strip()
+
+    if remove_favicon == "true":
+        old = cfg.pop("favicon", None)
+        if old:
+            old_path = os.path.join(SITE_UPLOADS_DIR, os.path.basename(old))
+            if os.path.isfile(old_path):
+                os.remove(old_path)
+    elif favicon and favicon.filename:
+        ext = os.path.splitext(favicon.filename)[1].lower() or ".ico"
+        fname = f"favicon-{uuid.uuid4().hex[:8]}{ext}"
+        fpath = os.path.join(SITE_UPLOADS_DIR, fname)
+        content = await favicon.read()
+        with open(fpath, "wb") as f:
+            f.write(content)
+        cfg["favicon"] = fname
+
+    if remove_logo == "true":
+        old = cfg.pop("logo", None)
+        if old:
+            old_path = os.path.join(SITE_UPLOADS_DIR, os.path.basename(old))
+            if os.path.isfile(old_path):
+                os.remove(old_path)
+    elif logo and logo.filename:
+        ext = os.path.splitext(logo.filename)[1].lower() or ".png"
+        fname = f"logo-{uuid.uuid4().hex[:8]}{ext}"
+        fpath = os.path.join(SITE_UPLOADS_DIR, fname)
+        content = await logo.read()
+        with open(fpath, "wb") as f:
+            f.write(content)
+        cfg["logo"] = fname
+
+    _save_site_config(cfg)
+    return {"status": "saved", **cfg}
+
+
+@router.get("/site-uploads/{filename}")
+async def serve_site_upload(filename: str):
+    """Serve uploaded site assets (favicon, logo)."""
+    safe = os.path.basename(filename)
+    fpath = os.path.join(SITE_UPLOADS_DIR, safe)
+    if not os.path.isfile(fpath):
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=404, content={"error": "not found"})
+    from fastapi.responses import FileResponse
+    return FileResponse(fpath)
+
+
+# ═══════════════════════════════════════════════════════════════
+# UI State Sync — persists frontend localStorage to the server
+# so settings stay consistent across browsers.
+# ═══════════════════════════════════════════════════════════════
+
+UI_STATE_PATH = os.path.join(_DATA_DIR, "ui_state.json")
+
+
+def _load_ui_state() -> dict:
+    if os.path.exists(UI_STATE_PATH):
+        try:
+            with open(UI_STATE_PATH, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_ui_state(state: dict):
+    os.makedirs(os.path.dirname(UI_STATE_PATH), exist_ok=True)
+    with open(UI_STATE_PATH, "w") as f:
+        json.dump(state, f, indent=2)
+
+
+@router.get("/ui-state")
+async def get_ui_state():
+    """Return all persisted frontend UI state (settings, segments, etc.)."""
+    return _load_ui_state()
+
+
+@router.put("/ui-state")
+async def put_ui_state(request: Request):
+    """Merge incoming UI state into the persisted file.
+
+    Accepts a JSON object of localStorage key→value pairs.  Values that
+    are ``null`` delete the key from the persisted state so that
+    localStorage.removeItem propagates to other browsers.
+    """
+    incoming = await request.json()
+    state = _load_ui_state()
+    for key, value in incoming.items():
+        if value is None:
+            state.pop(key, None)
+        else:
+            state[key] = value
+    _save_ui_state(state)
+    return {"status": "saved", "keys": len(state)}

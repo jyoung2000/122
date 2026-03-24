@@ -9,10 +9,123 @@ ASS is used instead of SRT for FFmpeg subtitle burning because it supports:
 """
 
 import logging
+import subprocess
 
 from backend.models import TranscriptSegment
 
 logger = logging.getLogger(__name__)
+
+# ── Pillow-to-libass width calibration ──────────────────────────────
+# Pillow's ImageFont.getlength() consistently overestimates text advance
+# width compared to libass/FreeType rendering.  Cross-font testing across
+# DM Sans, Montserrat, Inter, Roboto, Poppins, Open Sans at 20-60px shows
+# Pillow overestimates by 8-15%.  This factor is multiplied into Pillow
+# widths when computing BGDRAW/AWDRAW rectangle positions so that boxes
+# tightly wrap the actual rendered text (matching the CSS preview).
+#
+# If boxes still appear too wide/narrow for a specific font, adjust this.
+# Lower values = tighter boxes, higher = looser.  Valid range: 0.80-1.00.
+_PILLOW_TO_LIBASS_WIDTH_RATIO = 0.92
+
+
+def _resolve_font_path(font_name: str, bold: bool = False) -> str | None:
+    """Resolve a font family name to a file path using fc-match."""
+    try:
+        style = ":style=Bold" if bold else ""
+        result = subprocess.run(
+            ["fc-match", f"{font_name}{style}", "--format=%{file}"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            path = result.stdout.strip()
+            import os
+            if os.path.isfile(path):
+                return path
+    except Exception:
+        pass
+    return None
+
+
+def _measure_text(text: str, font_path: str, size_px: int) -> tuple[float, float, float, float, float] | None:
+    """Measure text dimensions using Pillow.
+
+    Returns (advance_width, font_ascent, font_descent, visual_top, visual_height)
+    or None.
+
+    - advance_width: how far the cursor moves (for text positioning/centering)
+    - font_ascent/descent: font-level metrics (for Y positioning to match libass)
+    - visual_top: top of visible ink relative to baseline (from getbbox)
+    - visual_height: height of visible ink (tight bbox, for drawing backgrounds)
+    """
+    try:
+        from PIL import ImageFont
+        font = ImageFont.truetype(font_path, size_px)
+        advance_width = font.getlength(text)
+        font_ascent, font_descent = font.getmetrics()
+        # getbbox() returns the tight visual bounding box of rendered glyphs.
+        # This is much tighter than getmetrics() which includes space for
+        # accents and diacritics that may not be present in the actual text.
+        bbox = font.getbbox(text)
+        if bbox:
+            visual_top = bbox[1]       # top of ink relative to origin
+            visual_height = bbox[3] - bbox[1]  # tight visual height
+        else:
+            visual_top = 0
+            visual_height = font_ascent + font_descent
+        return (advance_width, font_ascent, font_descent, visual_top, visual_height)
+    except Exception:
+        return None
+
+
+def _measure_reference_height(font_path: str, size_px: int) -> tuple[float, float] | None:
+    """Measure reference visual metrics using 'Hg' — a string that contains
+    both a tall ascender (H) and a deep descender (g).
+
+    Returns (ref_vis_top, ref_vis_h) or None.
+
+    Using a fixed reference string ensures:
+    - Consistent background height across all subtitle segments
+    - No visual "jumping" between lines with different character sets
+    - Tighter fit than font_ascent + font_descent (which includes
+      space for accents and extreme descenders not present in most text)
+    """
+    try:
+        from PIL import ImageFont
+        font = ImageFont.truetype(font_path, size_px)
+        bbox = font.getbbox("Hg")
+        if bbox:
+            return (bbox[1], bbox[3] - bbox[1])
+        # Fallback: use font metrics
+        asc, desc = font.getmetrics()
+        return (0, asc + desc)
+    except Exception:
+        return None
+
+
+def _ass_rounded_rect(w: int, h: int, r: int) -> str:
+    """Generate ASS drawing commands for a rounded rectangle.
+
+    Coordinates are relative to the drawing origin (top-left).
+    Uses cubic bezier curves to approximate quarter circles at corners.
+    """
+    r = min(r, min(w, h) // 2)  # clamp radius
+    if r <= 0:
+        # Simple rectangle
+        return f"m 0 0 l {w} 0 {w} {h} 0 {h}"
+    # Bezier approximation constant for quarter circles
+    k = 0.5523
+    kr = round(r * k)
+    return (
+        f"m {r} 0 "
+        f"l {w - r} 0 "
+        f"b {w - r + kr} 0 {w} {r - kr} {w} {r} "
+        f"l {w} {h - r} "
+        f"b {w} {h - r + kr} {w - r + kr} {h} {w - r} {h} "
+        f"l {r} {h} "
+        f"b {r - kr} {h} 0 {h - r + kr} 0 {h - r} "
+        f"l 0 {r} "
+        f"b 0 {r - kr} {r - kr} 0 {r} 0"
+    )
 
 
 FONT_SIZE_MAP = {
@@ -25,6 +138,23 @@ FONT_WEIGHT_MAP = {
     "normal": 0,
     "bold": -1,  # ASS v4+ uses -1 for bold (1 is interpreted as weight=1, ultra-thin)
 }
+
+
+def _normalize_font_weight(weight) -> tuple[int, int]:
+    """Normalize font weight to (numeric_weight, ass_bold_flag).
+
+    Accepts string ("normal", "bold") or numeric (100-900) weights.
+    Returns (numeric_weight, ass_bold) where ass_bold is -1 (bold) or 0 (normal).
+    """
+    if isinstance(weight, (int, float)):
+        w = int(weight)
+        return w, -1 if w >= 600 else 0
+    w_str = str(weight).lower().strip()
+    if w_str == "bold":
+        return 700, -1
+    if w_str == "black":
+        return 900, -1
+    return 400, 0
 
 # ASS alignment: 2=bottom-center, 5=middle-center, 8=top-center
 POSITION_ALIGNMENT = {
@@ -46,16 +176,14 @@ DEFAULT_MARGIN_V = {
 
 # Safe-area limits: total margin (base + inset) per side must not consume
 # more than this fraction of the frame, guaranteeing a minimum text area.
-MIN_TEXT_AREA_W = 0.50  # subtitle text area >= 50% of output width
+MIN_TEXT_AREA_W = 0.20  # subtitle text area >= 20% of output width
 MIN_TEXT_AREA_H = 0.60  # subtitle text area >= 60% of output height
 
 DEFAULT_SPEAKER_PALETTE = [
-    "#00D9FF",
-    "#F59E0B",
-    "#10B981",
-    "#A78BFA",
-    "#EF4444",
-    "#EC4899",
+    "#00D9FF", "#F59E0B", "#10B981", "#A78BFA", "#EF4444", "#EC4899",
+    "#06B6D4", "#8B5CF6", "#F97316", "#14B8A6", "#E879F9", "#84CC16",
+    "#FB7185", "#38BDF8", "#FBBF24", "#34D399", "#C084FC", "#F472B6",
+    "#22D3EE", "#A3E635", "#FB923C", "#2DD4BF", "#818CF8", "#F87171",
 ]
 
 
@@ -101,6 +229,36 @@ def _sanitize_style_name(name: str) -> str:
     return name.replace(",", "_").replace("\\", "_").replace("{", "_").replace("}", "_").strip()
 
 
+def _align_word_timestamps(seg_word_ts, words, clip_start, clip_end):
+    """Best-effort alignment of word timestamps to (possibly edited) text.
+
+    Returns a list of (start, end, word) tuples matching `words`, or None
+    if alignment is impossible (e.g., text was completely rewritten).
+    """
+    if len(seg_word_ts) == len(words):
+        return seg_word_ts  # Exact match — use as-is
+
+    # If counts differ by more than 3, too divergent for positional alignment
+    if abs(len(seg_word_ts) - len(words)) > 3:
+        return None
+
+    # More timestamps than words (user deleted words): sample evenly
+    if len(seg_word_ts) > len(words):
+        step = len(seg_word_ts) / len(words)
+        return [seg_word_ts[min(int(i * step), len(seg_word_ts) - 1)] for i in range(len(words))]
+
+    # Fewer timestamps than words (user added words): split longest-duration entries
+    result = list(seg_word_ts)
+    while len(result) < len(words):
+        max_dur_idx = max(range(len(result)), key=lambda i: result[i][1] - result[i][0])
+        ts = result[max_dur_idx]
+        mid = (ts[0] + ts[1]) / 2
+        result[max_dur_idx] = (ts[0], mid, ts[2])
+        result.insert(max_dur_idx + 1, (mid, ts[1], ''))
+
+    return result[:len(words)]
+
+
 def split_segments_by_max_words(
     segments: list[tuple],
     max_words: int,
@@ -125,26 +283,39 @@ def split_segments_by_max_words(
 
         total_words = len(words)
         duration = end - start
+        has_word_ts = seg_words and len(seg_words) == total_words
         current_time = start
 
         for i in range(0, total_words, max_words):
             chunk_words = words[i : i + max_words]
             chunk_count = len(chunk_words)
-            chunk_duration = duration * (chunk_count / total_words)
-            chunk_end = current_time + chunk_duration
+            chunk_word_ts = None
 
-            # Ensure the last chunk ends exactly at the segment end
-            if i + max_words >= total_words:
-                chunk_end = end
-
-            # Skip chunks that would be too short (< 0.1s)
-            if chunk_end - current_time >= 0.1:
-                # Slice word timestamps for this chunk
-                chunk_word_ts = None
+            if has_word_ts:
+                # Use actual word timestamps for accurate chunk boundaries
+                chunk_word_ts = seg_words[i : i + max_words]
+                if chunk_word_ts:
+                    last_word_end = chunk_word_ts[-1][1]  # end timestamp
+                    chunk_end = last_word_end + 0.02  # 20ms padding
+                else:
+                    chunk_word_ts = None
+                    chunk_end = current_time + duration * (chunk_count / total_words)
+            else:
+                # Fallback: proportional splitting
+                chunk_end = current_time + duration * (chunk_count / total_words)
                 if seg_words:
                     chunk_word_ts = seg_words[i : i + max_words]
                     if not chunk_word_ts:
                         chunk_word_ts = None
+
+            # Ensure the last chunk ends exactly at the segment end
+            if i + max_words >= total_words:
+                chunk_end = end
+            # Never exceed segment end
+            chunk_end = min(chunk_end, end)
+
+            # Skip chunks that would be too short (< 0.1s)
+            if chunk_end - current_time >= 0.1:
                 result.append((
                     current_time,
                     chunk_end,
@@ -163,7 +334,7 @@ def generate_ass(
     end_time: float,
     font: str = "DM Sans",
     font_size: str | int | float = "medium",
-    font_weight: str = "bold",
+    font_weight: str | int = "bold",
     font_color: str = "#FFFFFF",
     position: str = "bottom",
     speaker_colors: dict[str, str] | None = None,
@@ -188,6 +359,7 @@ def generate_ass(
     active_word_outline_color: str = "#000000",
     active_word_bg_color: str = "#000000",
     active_word_bg_opacity: int = 0,
+    active_word_bg_radius: int = 4,
 ) -> str:
     """Generate an ASS subtitle string from transcript segments within a time range.
 
@@ -208,10 +380,10 @@ def generate_ass(
     else:
         size_px = FONT_SIZE_MAP.get(font_size, 30)
     # alignment is set below after margin_v computation (absolute vertical positioning)
-    bold_flag = FONT_WEIGHT_MAP.get(font_weight, 0)
+    _numeric_weight, bold_flag = _normalize_font_weight(font_weight)
 
     # Clamp user-configurable values
-    max_width_pct = max(50, min(100, max_width_pct))
+    max_width_pct = max(20, min(100, max_width_pct))
     offset_v_pct = max(0, min(100, offset_v_pct))
 
     # Clamp outline values
@@ -239,7 +411,7 @@ def generate_ass(
     # so visible per-side = scaledOlWidth = round(olWidth * fontScale).
     # ASS `\bord` specifies the border expanding outward from the glyph —
     # it IS the per-side width — so it should equal the same 1x value.
-    scaled_outline_width = max(0, round(outline_width * font_scale * 3)) if outline_width > 0 else 0
+    scaled_outline_width = max(0, round(outline_width * font_scale)) if outline_width > 0 else 0
 
     # Horizontal margin from max_width_pct: (100% - max_width%) / 2 of output width
     margin_h = max(20, int(video_width * (100 - max_width_pct) / 100 / 2))
@@ -279,11 +451,19 @@ def generate_ass(
             ]
             if not seg_words:
                 seg_words = None
+        # Extend segment end to cover last word if word timestamps exceed it
+        if seg_words:
+            last_word_end = max(w[1] for w in seg_words)
+            if last_word_end > clip_end:
+                clip_end = min(last_word_end + 0.05, end_time - start_time)
         clip_segments.append((clip_start, clip_end, seg.text.strip(), seg.speaker, seg_words))
 
-    # Apply max_words splitting
-    if max_words > 0:
-        clip_segments = split_segments_by_max_words(clip_segments, max_words)
+    # Apply max_words splitting.
+    # When max_words is 0 (user didn't set a limit), enforce a sensible
+    # default of 14 words to prevent Whisper's often-huge segments from
+    # creating enormous subtitle blocks that overflow the video frame.
+    effective_max_words = max_words if max_words > 0 else 14
+    clip_segments = split_segments_by_max_words(clip_segments, effective_max_words)
 
     # --- Eliminate inter-segment temporal overlap ---
     # Transcript segments (especially from Whisper) often have overlapping
@@ -337,14 +517,15 @@ def generate_ass(
             speakers_seen.append(sp)
 
     speaker_color_map = {}
+    # When speaker colors are enabled, they override the font color picker.
     for i, sp in enumerate(speakers_seen):
-        if not use_speaker_colors:
-            # Toggle off: all speakers use the uniform font color
-            speaker_color_map[sp] = font_color
-        elif sp in speaker_colors:
-            speaker_color_map[sp] = speaker_colors[sp]
+        if use_speaker_colors:
+            if sp in speaker_colors:
+                speaker_color_map[sp] = speaker_colors[sp]
+            else:
+                speaker_color_map[sp] = DEFAULT_SPEAKER_PALETTE[i % len(DEFAULT_SPEAKER_PALETTE)]
         else:
-            speaker_color_map[sp] = DEFAULT_SPEAKER_PALETTE[i % len(DEFAULT_SPEAKER_PALETTE)]
+            speaker_color_map[sp] = font_color or "#FFFFFF"
 
     # Build ASS header
     lines = [
@@ -362,12 +543,64 @@ def generate_ass(
         "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
     ]
 
+    # Rounded-corner background: when background_radius > 0, use ASS drawing
+    # commands (\p1) to render a rounded rectangle BELOW the text instead of
+    # BorderStyle=3 (which only renders sharp rectangles).
+    _bg_split = bool(background_enabled and background_radius > 0)
+    _bg_font_path = None
+    _bg_draw_pad_h = 0
+    _bg_draw_pad_v = 0
+    _bg_draw_radius = 0
+    _bg_ref_vis_top = 0
+    _bg_ref_vis_h = 0
+    if _bg_split:
+        _bg_font_path = _resolve_font_path(font, bold=(bold_flag == -1))
+        if not _bg_font_path:
+            logger.warning("Cannot resolve font path for '%s' — "
+                           "falling back to sharp background box", font)
+            _bg_split = False
+        else:
+            # Measure reference visual height once for consistent backgrounds
+            ref = _measure_reference_height(_bg_font_path, size_px)
+            if ref:
+                _bg_ref_vis_top, _bg_ref_vis_h = ref
+            else:
+                # Fallback: use font metrics (less tight but still works)
+                fallback_m = _measure_text("Hg", _bg_font_path, size_px)
+                if fallback_m:
+                    _bg_ref_vis_top = fallback_m[3]
+                    _bg_ref_vis_h = fallback_m[4]
+                else:
+                    _bg_split = False
+
+            if _bg_split:
+                # Match frontend CSS padding: max(1, max(floor(4 * backendFontScale), 2) * subtitleScale)px
+                # At output resolution (subtitleScale=1, backendFontScale=font_scale):
+                # padding = max(1, max(floor(4 * font_scale), 2)) — UNIFORM in CSS
+                _css_pad = max(1, max(int(4 * font_scale), 2))
+                _bg_draw_pad_h = _css_pad
+                _bg_draw_pad_v = max(1, round(_css_pad * 0.6))  # Slightly tighter vertical for inline feel
+                _bg_draw_radius = max(1, round(background_radius * font_scale))
+
     # Compute outline/background style settings (same for all speakers)
-    if background_enabled:
-        back_color_ass = _hex_to_ass_color_with_alpha(background_color, background_opacity)
-        style_outline_color = back_color_ass  # same as box so border blends in
+    if background_enabled and not _bg_split:
+        # BorderStyle=3: OutlineColour = box color, BackColour = shadow behind box.
+        # With Shadow=0, BackColour should be invisible but some libass builds
+        # still composite it at offset (0,0), doubling the box opacity.
+        # Fix: keep BackColour fully transparent so only OutlineColour renders.
+        style_outline_color = _hex_to_ass_color_with_alpha(background_color, background_opacity)
+        back_color_ass = "&HFF000000&"  # fully transparent — no shadow needed
         border_style = 3
-        ol_width = max(int(4 * font_scale), 2)  # minimum padding for the box
+        # Match frontend CSS uniform padding: max(1, max(floor(4 * fontScale), 2))
+        ol_width = max(2, int(4 * font_scale))  # BorderStyle=3 padding
+        shadow_depth = 0
+    elif _bg_split:
+        # Background via drawing commands: base style has no box.
+        # OutlineColour = transparent, BackColour = transparent.
+        style_outline_color = "&HFF000000&"  # fully transparent
+        back_color_ass = "&HFF000000&"  # fully transparent
+        border_style = 1
+        ol_width = 0
         shadow_depth = 0
     else:
         style_outline_color = _hex_to_ass_color_with_alpha(outline_color, outline_opacity)
@@ -378,6 +611,11 @@ def generate_ass(
         # (backendOlWidth in ClipPreview.jsx:622).
         shadow_depth = max(1, min(4, round(scaled_outline_width * 0.75))) if scaled_outline_width > 0 else 0
 
+    # With the two-layer architecture for active word mode, shadow is rendered
+    # correctly on Layer 0 (uniform color, no \c overrides → continuous shadow).
+    # No need to suppress shadow in the Style definition.
+    style_shadow = shadow_depth
+
     # Create a style per speaker
     for sp in speakers_seen:
         color_hex = speaker_color_map[sp]
@@ -386,22 +624,114 @@ def generate_ass(
 
         lines.append(
             f"Style: {style_name},{font},{size_px},{ass_color},&H000000FF&,{style_outline_color},{back_color_ass},"
-            f"{bold_flag},0,0,0,100,100,0,0,{border_style},{ol_width},{shadow_depth},{alignment},{margin_h},{margin_h},{margin_v},1"
+            f"{bold_flag},0,0,0,100,100,0,0,{border_style},{ol_width},{style_shadow},{alignment},{margin_h},{margin_h},{margin_v},1"
+        )
+
+    # When background is enabled AND outline_width > 0, create an outline
+    # overlay style (_OL) that renders text outline on top of the box.
+    # ASS BorderStyle=3 hijacks OutlineColour for box fill, so a separate
+    # BorderStyle=1 layer is the only way to show both box AND text outline.
+    bg_has_outline = background_enabled and scaled_outline_width > 0
+    if bg_has_outline:
+        ol_ass_color = _hex_to_ass_color_with_alpha(outline_color, outline_opacity)
+        for sp in speakers_seen:
+            color_hex = speaker_color_map[sp]
+            ass_color = _hex_to_ass_color(color_hex)
+            sn = _sanitize_style_name(sp)
+            # _OL style: BorderStyle=1 for text outline, transparent background
+            lines.append(
+                f"Style: {sn}_OL,{font},{size_px},{ass_color},&H000000FF&,{ol_ass_color},&HFF000000&,"
+                f"{bold_flag},0,0,0,100,100,0,0,1,{scaled_outline_width},0,{alignment},{margin_h},{margin_h},{margin_v},1"
+            )
+
+    # When background (BorderStyle=3) + active word highlighting are both
+    # enabled, per-word \c color overrides cause libass to segment the
+    # background box at every tag boundary — each word gets its own box,
+    # and adjacent boxes overlap creating visible black bar borders.
+    #
+    # Fix: create a separate ASS style for the color overlay layer (Layer 1)
+    # that uses BorderStyle=1 with Outline=0 and Shadow=0.  This style
+    # renders ONLY the colored text fill with zero box/border/shadow.
+    # BorderStyle is a STYLE-LEVEL setting that CANNOT be overridden by
+    # inline tags, so a separate style is the only robust solution.
+    if active_word_enabled:
+        for sp in speakers_seen:
+            color_hex = speaker_color_map[sp]
+            ass_color = _hex_to_ass_color(color_hex)
+            sn = _sanitize_style_name(sp)
+            # _AW style: identical layout (font, size, bold, alignment, margins)
+            # but BorderStyle=1, Outline=0, Shadow=0, transparent OutlineColour
+            # and BackColour.  Renders text fill only — no box, no border.
+            lines.append(
+                f"Style: {sn}_AW,{font},{size_px},{ass_color},&H000000FF&,&HFF000000&,&HFF000000&,"
+                f"{bold_flag},0,0,0,100,100,0,0,1,0,0,{alignment},{margin_h},{margin_h},{margin_v},1"
+            )
+
+    # Active word background uses BorderStyle=3 (ASS native box) which
+    # guarantees pixel-perfect alignment because the same engine (libass)
+    # renders both the text and the box.
+    # Match frontend CSS: padding = max(1, 2*subtitleScale)px horizontal, max(1, 1*subtitleScale)px vertical
+    # BorderStyle=3 Outline is uniform padding, so use the larger (horizontal) value
+    # Frontend uses 2px base * subtitleScale; backend equivalent is 2 * font_scale
+    # Match frontend CSS: padding 1px vertical / 2px horizontal.
+    # ASS BorderStyle=3 Outline is uniform, so use 2px (closer to the
+    # larger horizontal value — the vertical will be slightly thicker
+    # than CSS but prevents the box from clipping glyph strokes).
+    _aw_bg_box_padding = max(1, round(2 * font_scale))
+
+    # Rounded corners: ASS BorderStyle=3 only renders sharp rectangles.
+    # For rounded corners we use ASS drawing commands (\p1) to render a
+    # rounded rectangle on a layer BELOW the text.  This requires Pillow
+    # font measurements to position the drawing at the word's location.
+    # If the font can't be resolved, we fall back to sharp BorderStyle=3.
+    _aw_bg_split = False  # Always use BorderStyle=3 for pixel-perfect active word boxes
+
+    if active_word_enabled and active_word_bg_opacity > 0:
+        # OutlineColour = active word bg color (used as box fill in BorderStyle=3)
+        # Default to transparent so non-active words show no box
+        aw_bg_style_ol = "&HFF000000&"  # fully transparent by default (per-word \3c\3a overrides)
+        for sp in speakers_seen:
+            color_hex = speaker_color_map[sp]
+            ass_color = _hex_to_ass_color(color_hex)
+            sn = _sanitize_style_name(sp)
+            lines.append(
+                f"Style: {sn}_AWBG,{font},{size_px},{ass_color},&H000000FF&,{aw_bg_style_ol},&HFF000000&,"
+                f"{bold_flag},0,0,0,100,100,0,0,3,{_aw_bg_box_padding},0,{alignment},{margin_h},{margin_h},{margin_v},1"
+            )
+
+    # BGDRAW style for rounded-rect background drawing events.
+    # Same approach as AWDRAW: font_size=64 → 1:1 pixel mapping, alignment=7.
+    if _bg_split:
+        lines.append(
+            "Style: BGDRAW,Arial,64,&H00FFFFFF,&H000000FF,&H00000000,&H00000000,"
+            "0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1"
         )
 
     lines.append("")
     lines.append("[Events]")
     lines.append("Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text")
 
-    # Pre-compute active word ASS colors
+    # Pre-compute active word ASS colors (defaults for when active word is off)
+    aw_bg = None
+    aw_bg_color = None
+    aw_bg_alpha = None
     if active_word_enabled:
         aw_color = _hex_to_ass_color(active_word_color)
-        aw_outline = _hex_to_ass_color(active_word_outline_color)
+        # Use the same outline color+alpha as the style so the active word
+        # outline matches non-active words (prevents thicker/darker outline
+        # on the highlighted word).
+        aw_outline = style_outline_color
         aw_bg = None
+        aw_bg_color = None  # ASS color for \3c (box fill in BorderStyle=3)
+        aw_bg_alpha = None  # ASS alpha for \3a (box opacity in BorderStyle=3)
         if active_word_bg_opacity > 0:
             aw_bg = _hex_to_ass_color_with_alpha(
                 active_word_bg_color, active_word_bg_opacity
             )
+            # Separate color (&H00BBGGRR&) and alpha (&HAA&) for \3c and \3a tags
+            aw_bg_color = _hex_to_ass_color(active_word_bg_color)
+            alpha_byte = 255 - max(0, min(255, int(active_word_bg_opacity / 100 * 255)))
+            aw_bg_alpha = f"&H{alpha_byte:02X}&"
 
     # Explicit border override tags for every Dialogue event.
     # Even though the Style already sets Outline, some libass builds and
@@ -412,8 +742,34 @@ def generate_ass(
     # from inheriting unexpected border state from the Style definition.
     if not background_enabled:
         bord_tag = f"\\bord{ol_width}\\shad{shadow_depth}\\3c{style_outline_color}"
+        # Layer 1 tag for active word two-layer architecture:
+        # No border, no shadow, transparent outline — renders ONLY text fill.
+        # \3a&HFF& makes OutlineColour fully transparent so no outline bleeds.
+        aw_nobord_tag = "\\bord0\\shad0\\3a&HFF&"
     else:
         bord_tag = ""
+        # Background mode: Layer 1 uses the _AW style (BorderStyle=1) so
+        # the box is disabled at the style level.  These inline tags are
+        # belt-and-suspenders: \bord0 = no padding, \shad0 = no shadow,
+        # \3a&HFF& = transparent outline, \4a&HFF& = transparent back color.
+        aw_nobord_tag = "\\bord0\\shad0\\3a&HFF&\\4a&HFF&"
+
+    # When active word background is enabled, Layer 1 uses _AWBG
+    # (BorderStyle=3) where \3a controls box visibility per word.
+    if aw_bg:
+        # \shad0 = no shadow, \3a&HFF& = transparent box by default
+        aw_nobord_tag = "\\shad0\\3a&HFF&"
+
+    # Style suffix for Layer 1 events:
+    #   _AWBG: active word background (BorderStyle=3 per-word box)
+    #   _AW:   background mode (text fill only, no box)
+    #   "":    outline mode without aw_bg (same base style)
+    if aw_bg:
+        aw_style_suffix = "_AWBG"
+    elif background_enabled and active_word_enabled:
+        aw_style_suffix = "_AW"
+    else:
+        aw_style_suffix = ""
 
     # Add dialogue events
     # Two-layer architecture for active-word mode:
@@ -423,6 +779,8 @@ def generate_ass(
     #
     # For standard mode: single-layer events on Layer 0 as before.
     pending_word_events: list[tuple[float, float, str, str]] = []
+    pending_box_events: list[tuple[float, float, str, str]] = []
+    pending_bg_draw_events: list[tuple[float, float, str, str]] = []  # BGDRAW events
     base_text_events: list[tuple[float, float, str, str]] = []
 
     for seg in clip_segments:
@@ -434,97 +792,152 @@ def generate_ass(
         if active_word_enabled:
             prefix = f"{speaker}: " if show_speaker_labels and speaker else ""
 
-            # Add base text event on Layer 0 (full segment, no highlight)
-            base_bord_override = f"{{{bord_tag}}}" if bord_tag else ""
-            base_event_text = f"{base_bord_override}{prefix}{safe_text}" if prefix else f"{base_bord_override}{safe_text}"
-            base_text_events.append((clip_start, clip_end, style_name, base_event_text))
+            # ── Two-layer architecture for active word highlighting ──
+            #
+            # The root cause of "black bars" is that ASS/libass segments
+            # border rendering at every \c (PrimaryColour) override tag.
+            # When two bordered text runs meet, their border rectangles
+            # overlap at the junction, doubling the border opacity and
+            # creating visible dark seams.
+            #
+            # The fix uses two ASS layers that composite together:
+            #
+            #   Layer 0 (border layer): Full text with uniform color
+            #     (no \c overrides) + \bord + \shad.  Because there are
+            #     no color changes, libass treats the entire line as ONE
+            #     text run with a single continuous border/shadow — no
+            #     seams possible.
+            #
+            #   Layer 1 (color layer): Full text with per-word \c color
+            #     overrides + \bord0\shad0\3a&HFF& (no border, no shadow,
+            #     transparent outline).  This renders ONLY the colored
+            #     text fill on top of Layer 0's border.
+            #
+            # This mirrors how CSS renders subtitles in the browser
+            # preview: -webkit-text-stroke is a single layer behind all
+            # text, and inline <span style="color:gold"> only changes
+            # the fill color on top.
 
-            # --- Per-word highlight events ---
             words = safe_text.split()
             if len(words) <= 1:
-                # Single word — just color the whole event with active word color
-                aw_tags = f"\\c{aw_color}\\3c{aw_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                if aw_bg:
-                    aw_tags += f"\\4c{aw_bg}"
-                event_text = f"{prefix}{{{aw_tags}}}{safe_text}"
-                pending_word_events.append((clip_start, clip_end, style_name, event_text))
-            elif seg_word_ts and len(seg_word_ts) == len(words):
-                # Real per-word timestamps from Whisper — use them directly.
-                #
-                # The frontend determines the active word at time T by:
-                #   adjusted = T + anticipation
-                #   for i in words: if adjusted < word[i].end → return i
-                #
-                # To produce the same result, we set each ASS word event to:
-                #   start = word[i].start - anticipation  (highlight leads audio)
-                #   end   = word[i].end - anticipation    (transition matches frontend)
-                #
-                # This way, at time T the ASS engine shows word i when:
-                #   word[i].start - ant <= T < word[i].end - ant
-                # Which is equivalent to:
-                #   word[i].start <= T + ant < word[i].end
-                # Matching the frontend's check: adjusted < word[i].end
-                #
-                # The gap-filling pass later will extend events to fill any
-                # gaps between words, keeping the last highlighted word visible.
-                _WORD_ANTICIPATION_S = 0.10
+                # Single word — no color transitions, so no segmentation
+                # issue.  Just use a single layer with active word color.
+                if background_enabled:
+                    # Background mode: Layer 0 = box, Layer 1 = colored text
+                    base_text_events.append((clip_start, clip_end, style_name, f"{prefix}{safe_text}"))
+                    nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
+                    aw_tags = f"\\c{aw_color}"
+                    if aw_bg_color:
+                        aw_tags += f"\\3c{aw_bg_color}\\3a{aw_bg_alpha}"
+                    event_text = f"{nobord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
+                    pending_word_events.append((clip_start, clip_end, style_name + aw_style_suffix, event_text))
+                else:
+                    # Layer 0: border layer with uniform color
+                    bord_prefix = f"{{{bord_tag}}}" if bord_tag else ""
+                    border_event_text = f"{bord_prefix}{prefix}{safe_text}"
+                    base_text_events.append((clip_start, clip_end, style_name, border_event_text))
+                    # Layer 1: color layer with \bord0 (no duplicate borders)
+                    nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
+                    aw_tags = f"\\c{aw_color}"
+                    if aw_bg_color:
+                        aw_tags += f"\\3c{aw_bg_color}\\3a{aw_bg_alpha}"
+                    event_text = f"{nobord_prefix}{prefix}{{{aw_tags}}}{safe_text}"
+                    pending_word_events.append((clip_start, clip_end, style_name + aw_style_suffix, event_text))
+            elif seg_word_ts and len(seg_word_ts) > 0 and len(words) > 0 and _align_word_timestamps(seg_word_ts, words, clip_start, clip_end) is not None:
+                # Real per-word timestamps from Whisper (possibly aligned
+                # after minor user edits to subtitle text).
+                seg_word_ts = _align_word_timestamps(seg_word_ts, words, clip_start, clip_end)
+                _WORD_ANTICIPATION_S = 0.05
                 base_color = _hex_to_ass_color(speaker_color_map[speaker])
-                base_outline = style_outline_color
+
+                # Background mode: ONE Layer 0 event per segment = one
+                # continuous background box.  Per-word Layer 0 events are
+                # only needed for outline mode (BorderStyle=1) where each
+                # per-word event carries its own \bord tags.
+                # Compute extended end to cover last word's full duration
+                last_w = seg_word_ts[-1] if seg_word_ts else None
+                extended_seg_end = clip_end
+                if last_w:
+                    natural_last = last_w[1] - 0.05  # anticipation-adjusted
+                    extended_seg_end = min(max(clip_end, natural_last + 0.3), clip_end + 0.5)
+                if background_enabled:
+                    base_text_events.append((clip_start, extended_seg_end, style_name, f"{prefix}{safe_text}"))
 
                 for word_idx in range(len(words)):
                     w_start, w_end, _ = seg_word_ts[word_idx]
-                    # Apply anticipation to BOTH start and end for 1:1 parity
                     w_start = max(w_start - _WORD_ANTICIPATION_S, clip_start)
                     w_end = max(w_end - _WORD_ANTICIPATION_S, w_start + 0.01)
-                    w_end = min(w_end, clip_end)
-                    # Ensure first word starts at segment start for complete
-                    # coverage (no gap at beginning where no subtitle shows).
-                    if word_idx == 0:
-                        w_start = clip_start
                     if word_idx == len(words) - 1:
-                        w_end = clip_end
+                        # Last word: use natural end + 0.3s grace, allow up to
+                        # 0.5s past clip_end so highlighting isn't cut short
+                        natural_end = seg_word_ts[word_idx][1] - _WORD_ANTICIPATION_S
+                        w_end = min(max(w_end, natural_end) + 0.3, clip_end + 0.5)
+                    else:
+                        w_end = min(w_end, clip_end)
                     if w_end - w_start < 0.01:
                         continue
 
-                    # Build text with inline overrides on the active word.
-                    # Every word gets explicit \bord and \shad to guarantee
-                    # outline rendering regardless of libass style caching.
-                    parts = []
-                    for i, w in enumerate(words):
-                        if i == word_idx:
-                            tags = f"\\c{aw_color}\\3c{aw_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                            if aw_bg:
-                                tags += f"\\4c{aw_bg}"
-                            parts.append(f"{{{tags}}}{w}")
-                        else:
-                            tags = f"\\c{base_color}\\3c{base_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                            parts.append(f"{{{tags}}}{w}")
+                    # Layer 0: Border layer — full text, uniform color,
+                    # WITH border/shadow.  No \c overrides → seamless border.
+                    # Skipped for background mode (single per-segment event above).
+                    if not background_enabled:
+                        border_prefix = f"{{{bord_tag}}}" if bord_tag else ""
+                        border_event_text = f"{border_prefix}{prefix}{safe_text}"
+                        base_text_events.append((w_start, w_end, style_name, border_event_text))
 
-                    event_text = prefix + " ".join(parts)
-                    pending_word_events.append((w_start, w_end, style_name, event_text))
+                    # Layer 1: Color layer — full text, per-word colors,
+                    # NO border/box.  In outline mode: \bord0\shad0\3a&HFF&.
+                    # In background mode: _AW style (BorderStyle=1, no box).
+                    before = " ".join(words[:word_idx])
+                    active = words[word_idx]
+                    after = " ".join(words[word_idx + 1:])
+                    nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
+                    # base_tag: non-active word color + transparent box
+                    if aw_bg_color:
+                        base_tag = "{" + f"\\c{base_color}\\3a&HFF&" + "}"
+                    else:
+                        base_tag = "{" + f"\\c{base_color}" + "}"
+                    # aw_tag: active word color + visible box
+                    aw_extra = f"\\c{aw_color}"
+                    if aw_bg_color:
+                        aw_extra += f"\\3c{aw_bg_color}\\3a{aw_bg_alpha}"
+                    aw_tag = "{" + aw_extra + "}"
+                    # reset_tag: after the active word, hide the box again
+                    if aw_bg_color:
+                        reset_tag = "{" + f"\\c{base_color}\\3a&HFF&" + "}"
+                    else:
+                        reset_tag = base_tag
+                    parts = []
+                    if before:
+                        parts.append(f"{base_tag}{before} ")
+                    parts.append(f"{aw_tag}{active}")
+                    if after:
+                        parts.append(f"{reset_tag} {after}")
+                    color_event_text = nobord_prefix + prefix + "".join(parts)
+                    pending_word_events.append((w_start, w_end, style_name + aw_style_suffix, color_event_text))
             else:
-                # Fallback: character-proportional estimation
-                # Uses punctuation-aware, speaker-rate-scaled timing that
-                # matches the frontend getCurrentWordIndex() algorithm so
-                # the exported video looks identical to the preview.
                 # Fallback: character-proportional estimation with natural
                 # speech rhythm.  Uses punctuation-aware, speaker-rate-scaled
                 # timing that matches the frontend getCurrentWordIndex().
                 _BASE_OVERHEAD_S = 0.04
-                _ANTICIPATION_S = 0.10  # must match frontend _ANTICIPATION_S
+                # Match frontend timing exactly so export word highlights
+                # align with what the user previewed.  The frontend uses
+                # anticipation=0.10 and subtracts audio_buffer=0.12 for a
+                # net -0.02s offset.  Since FFmpeg has no audio buffer lag,
+                # we apply the net offset when shifting word boundaries below.
+                _ANTICIPATION_S = 0.10
+                _AUDIO_BUFFER_S = 0.12
                 _PUNCT_PAUSE = {
                     ",": 0.15, ";": 0.16, ":": 0.12,
                     ".": 0.22, "!": 0.22, "?": 0.24,
                     "\u2014": 0.12, "\u2013": 0.10,
                 }
-                # Function words are spoken ~25% faster in natural speech
                 _FAST_WORDS = frozenset({
                     "the", "a", "an", "to", "in", "on", "at", "of", "for",
                     "and", "but", "or", "is", "was", "are", "were", "it",
                     "its", "this", "that",
                 })
                 base_color = _hex_to_ass_color(speaker_color_map[speaker])
-                base_outline = style_outline_color
                 total_chars = sum(len(w) for w in words)
                 if total_chars == 0:
                     total_chars = 1
@@ -557,14 +970,11 @@ def generate_ass(
                     char_dur = char_time * (len(words[word_idx]) / total_chars)
                     pause = (_BASE_OVERHEAD_S * rate_scale + punct_pauses[word_idx]) * pause_scale
                     word_dur = char_dur + pause
-                    # Function words are spoken faster
                     stripped = words[word_idx].lower().rstrip(".,!?;:\u2014\u2013")
                     if stripped in _FAST_WORDS:
                         word_dur *= 0.75
-                    # First word emphasis (slightly longer hold)
                     if word_idx == 0:
                         word_dur *= 1.15
-                    # Last word trailing emphasis
                     elif word_idx == len(words) - 1:
                         word_dur *= 1.10
                     raw_durations.append(word_dur)
@@ -575,35 +985,62 @@ def generate_ass(
                     norm = duration / total_raw
                     raw_durations = [d * norm for d in raw_durations]
 
-                current_time = clip_start
+                # Background mode: ONE Layer 0 event per segment (continuous box)
+                if background_enabled:
+                    base_text_events.append((clip_start, clip_end, style_name, f"{prefix}{safe_text}"))
+
+                # Apply net timing offset to match frontend's perception model.
+                # Frontend: elapsed = (t - start) + anticipation*rateScale - 0.12
+                # This shifts word boundaries so the highlight at any given
+                # playback time matches the preview.
+                _net_offset = anticipation - _AUDIO_BUFFER_S
+                current_time = clip_start + _net_offset
                 for word_idx in range(len(words)):
                     word_dur = raw_durations[word_idx]
                     word_end = current_time + word_dur
                     if word_idx == len(words) - 1:
-                        word_end = clip_end
-                    # Skip very short word slots (below ASS centisecond resolution)
+                        word_end = min(current_time + word_dur + 0.3, clip_end)
                     if word_end - current_time < 0.01:
                         current_time = word_end
                         continue
 
-                    # Shift event start earlier by anticipation offset
                     shifted_start = max(clip_start, current_time - anticipation)
 
-                    # Build text with inline overrides on the active word.
-                    # Every word gets explicit \bord and \shad.
-                    parts = []
-                    for i, w in enumerate(words):
-                        if i == word_idx:
-                            tags = f"\\c{aw_color}\\3c{aw_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                            if aw_bg:
-                                tags += f"\\4c{aw_bg}"
-                            parts.append(f"{{{tags}}}{w}")
-                        else:
-                            tags = f"\\c{base_color}\\3c{base_outline}\\bord{ol_width}\\shad{shadow_depth}"
-                            parts.append(f"{{{tags}}}{w}")
+                    # Layer 0: Border layer — uniform color, continuous outline
+                    # Skipped for background mode (single per-segment event above).
+                    if not background_enabled:
+                        border_prefix = f"{{{bord_tag}}}" if bord_tag else ""
+                        border_event_text = f"{border_prefix}{prefix}{safe_text}"
+                        base_text_events.append((shifted_start, word_end, style_name, border_event_text))
 
-                    event_text = prefix + " ".join(parts)
-                    pending_word_events.append((shifted_start, word_end, style_name, event_text))
+                    # Layer 1: Color layer — per-word coloring, no border/box.
+                    before = " ".join(words[:word_idx])
+                    active = words[word_idx]
+                    after = " ".join(words[word_idx + 1:])
+                    nobord_prefix = "{" + aw_nobord_tag + "}" if aw_nobord_tag else ""
+                    # base_tag: non-active word color + transparent box
+                    if aw_bg_color:
+                        base_tag = "{" + f"\\c{base_color}\\3a&HFF&" + "}"
+                    else:
+                        base_tag = "{" + f"\\c{base_color}" + "}"
+                    # aw_tag: active word color + visible box
+                    aw_extra = f"\\c{aw_color}"
+                    if aw_bg_color:
+                        aw_extra += f"\\3c{aw_bg_color}\\3a{aw_bg_alpha}"
+                    aw_tag = "{" + aw_extra + "}"
+                    # reset_tag: after the active word, hide the box again
+                    if aw_bg_color:
+                        reset_tag = "{" + f"\\c{base_color}\\3a&HFF&" + "}"
+                    else:
+                        reset_tag = base_tag
+                    parts = []
+                    if before:
+                        parts.append(f"{base_tag}{before} ")
+                    parts.append(f"{aw_tag}{active}")
+                    if after:
+                        parts.append(f"{reset_tag} {after}")
+                    color_event_text = nobord_prefix + prefix + "".join(parts)
+                    pending_word_events.append((shifted_start, word_end, style_name + aw_style_suffix, color_event_text))
                     current_time = word_end
         else:
             # Standard: single event with plain text + explicit outline override
@@ -627,7 +1064,7 @@ def generate_ass(
                 # Small gap: extend to fill — keeps text visible between segments
                 base_text_events[i] = (ev_start, next_start, ev_style, ev_text)
 
-    # --- Per-word highlight events (active word mode, Layer 0) ---
+    # --- Per-word color events (active word mode, Layer 1) ---
     # Eliminate temporal overlap AND fill small gaps between word events.
     # Overlap: when multiple word events overlap in time, libass renders
     # them all simultaneously and stacks them vertically ("bouncing").
@@ -649,6 +1086,72 @@ def generate_ass(
                 # Small gap: extend to fill
                 pending_word_events[i] = (ev_start, next_start, ev_style, ev_text)
             # Long gaps (> 0.5s): let subtitle disappear during pauses
+
+    # ── Generate rounded-rect background drawing events (BGDRAW) ──
+    # When _bg_split is active, each base text event gets a corresponding
+    # BGDRAW event with a rounded rectangle behind the text.
+    if _bg_split and _bg_font_path and base_text_events:
+        import re as _re
+        _bg_color = _hex_to_ass_color(background_color)
+        _bg_alpha_byte = 255 - max(0, min(255, int(background_opacity / 100 * 255)))
+        _bg_alpha = f"&H{_bg_alpha_byte:02X}&"
+
+        for ev_start, ev_end, ev_style, ev_text in base_text_events:
+            # Strip ASS override tags to get plain text for measurement
+            plain = _re.sub(r"\{[^}]*\}", "", ev_text)
+            if not plain.strip():
+                continue
+            m = _measure_text(plain, _bg_font_path, size_px)
+            if not m:
+                continue
+            text_w = m[0] * _PILLOW_TO_LIBASS_WIDTH_RATIO
+            text_asc = m[1]
+            text_desc = m[2]
+            line_h = text_asc + text_desc  # Full font cell (for libass Y positioning)
+
+            # Horizontal: center text within margin-bounded area
+            text_area_w = video_width - 2 * margin_h
+            line_left_x = margin_h + (text_area_w - text_w) / 2
+
+            # Vertical: compute where libass places the font cell top
+            if alignment == 2:
+                text_top_y = video_height - margin_v - line_h
+            elif alignment == 5:
+                text_top_y = (video_height - line_h) / 2
+            elif alignment == 8:
+                text_top_y = margin_v
+            else:
+                continue
+
+            # ── Tight background using reference visual height ──
+            # The reference "Hg" measurement gives us a stable visual height
+            # that includes both ascenders and descenders. This is much tighter
+            # than ascent+descent (which reserves space for accents like Ä).
+            #
+            # Position the background rect centered on the reference visual
+            # midpoint within the font cell:
+            #   ref_center_y = text_top_y + _bg_ref_vis_top + _bg_ref_vis_h / 2
+            #   draw_y = ref_center_y - _bg_ref_vis_h / 2 - pad_v
+            #          = text_top_y + _bg_ref_vis_top - pad_v
+            draw_x = round(line_left_x - _bg_draw_pad_h)
+            draw_y = round(text_top_y + _bg_ref_vis_top - _bg_draw_pad_v)
+            draw_w = round(text_w + 2 * _bg_draw_pad_h)
+            draw_h = round(_bg_ref_vis_h + 2 * _bg_draw_pad_v)
+
+            drawing = _ass_rounded_rect(draw_w, draw_h, _bg_draw_radius)
+            event_text = (
+                f"{{\\an7\\pos({draw_x},{draw_y})"
+                f"\\p1\\c{_bg_color}\\1a{_bg_alpha}"
+                f"\\bord0\\shad0}}{drawing}"
+            )
+            pending_bg_draw_events.append((ev_start, ev_end, "BGDRAW", event_text))
+
+        logger.info(
+            "BGDRAW: generated %d rounded-rect drawing events "
+            "(radius=%dpx, pad=%dx%d, ref_vis_h=%d, font=%s)",
+            len(pending_bg_draw_events), _bg_draw_radius,
+            _bg_draw_pad_h, _bg_draw_pad_v, _bg_ref_vis_h, _bg_font_path,
+        )
 
     # ═══════════════════════════════════════════════════════════════════
     # FINAL OVERLAP ELIMINATION — unified pass at centisecond precision
@@ -690,18 +1193,45 @@ def generate_ass(
         total_minutes = int(t // 60)
         return total_minutes * 6000 + cs_from_seconds
 
+    # When background + outline are both enabled, create outline overlay events
+    # on a separate layer using the _OL style (BorderStyle=1 with text outline).
+    outline_overlay_events: list[tuple[float, float, str, str]] = []
+    if bg_has_outline:
+        for ev in base_text_events:
+            # Replace style with _OL variant for outline rendering
+            ol_style = ev[2] + "_OL"
+            outline_overlay_events.append((ev[0], ev[1], ol_style, ev[3]))
+
     # Collect all events as (layer, start, end, style, text) tuples.
-    # When active_word_enabled, word events go on Layer 0 (single-layer
-    # approach) — base_text_events is empty in this case.
-    # When active_word is off, only base_text_events is populated.
+    # Layer ordering (lower = renders first / behind):
+    #   Layer 0: BGDRAW events (rounded-rect subtitle background)
+    #   Layer N: base text events (border layer, uniform color)
+    #   Layer N+1: outline overlay events (when bg + outline both enabled)
+    #   Layer N+2: active word box events (BorderStyle=3 via _AWBG style)
+    #   Layer N+3: active word color events (topmost, sharp text)
     all_events: list[tuple[int, float, float, str, str]] = []
+    next_layer = 0
+    if pending_bg_draw_events:
+        for ev in pending_bg_draw_events:
+            all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
+        next_layer += 1
     for ev in base_text_events:
-        all_events.append((0, ev[0], ev[1], ev[2], ev[3]))
+        all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
+    next_layer += 1
+    for ev in outline_overlay_events:
+        all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
+    if outline_overlay_events:
+        next_layer += 1
+    if pending_box_events:
+        for ev in pending_box_events:
+            all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
+        next_layer += 1
     for ev in pending_word_events:
-        all_events.append((1, ev[0], ev[1], ev[2], ev[3]))
+        all_events.append((next_layer, ev[0], ev[1], ev[2], ev[3]))
 
     # Process each layer independently.
-    for layer in (0, 1):
+    _max_layer = max((e[0] for e in all_events), default=0)
+    for layer in range(0, _max_layer + 1):
         layer_evs = [e for e in all_events if e[0] == layer]
         if not layer_evs:
             continue
@@ -724,8 +1254,22 @@ def generate_ass(
                 # at that centisecond — clamp to eliminate.
                 layer_evs[i] = (layer, s, ns, st, tx)
 
+        # Merge sub-centisecond events into their predecessor instead of
+        # silently dropping them — ensures every word gets highlighted.
+        final_layer_evs = []
+        for ev in layer_evs:
+            layer_num, ev_s, ev_e, ev_st, ev_tx = ev
+            dur_cs = _to_cs(ev_e) - _to_cs(ev_s)
+            if dur_cs >= 1:
+                final_layer_evs.append(ev)
+            elif final_layer_evs:
+                # Merge into previous event: extend its end and use this
+                # event's text (which has the current word highlighted).
+                prev = final_layer_evs[-1]
+                final_layer_evs[-1] = (prev[0], prev[1], ev_e, prev[3], ev_tx)
+
         # Emit events to ASS output
-        for _, ev_s, ev_e, ev_st, ev_tx in layer_evs:
+        for _, ev_s, ev_e, ev_st, ev_tx in final_layer_evs:
             if _to_cs(ev_e) - _to_cs(ev_s) >= 1:  # at least 1 centisecond
                 lines.append(
                     f"Dialogue: {layer},{_format_ass_time(ev_s)},"
@@ -734,12 +1278,17 @@ def generate_ass(
 
     logger.info(
         "ASS generated: font=%s size=%s(%dpx) weight=%s color=%s pos=%s "
-        "bg=%s outline=%dpx speakers=%d segments=%d active_word=%s "
-        "max_words=%d res=%dx%d",
+        "bg=%s(%s) bg_radius=%d bg_split=%s bg_ref_vis_h=%d outline=%dpx speakers=%d segments=%d "
+        "active_word=%s aw_bg_opacity=%d aw_bg_padding=%d "
+        "bg_draw_events=%d word_events=%d max_words=%d res=%dx%d",
         font, font_size, size_px, font_weight, font_color, position,
-        f"yes({background_color}@{background_opacity}%)" if background_enabled else "no",
+        "yes" if background_enabled else "no",
+        f"{background_color}@{background_opacity}%" if background_enabled else "n/a",
+        background_radius, _bg_split, _bg_ref_vis_h if _bg_split else 0,
         ol_width, len(speakers_seen), len(clip_segments),
         "yes" if active_word_enabled else "no",
+        active_word_bg_opacity, _aw_bg_box_padding,
+        len(pending_bg_draw_events), len(pending_word_events),
         max_words, video_width, video_height,
     )
 

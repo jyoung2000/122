@@ -55,6 +55,21 @@ class _CircuitBreaker:
         if was_degraded:
             logger.info("Circuit breaker: provider %s RECOVERED (success after degraded)", name)
 
+    def clear_degraded(self, name: str):
+        """Immediately remove degraded status for a provider."""
+        was_degraded = name in self._degraded_until
+        self._degraded_until.pop(name, None)
+        if was_degraded:
+            logger.info("Circuit breaker: %s manually un-degraded before critical operation", name)
+
+    def force_reset_all(self):
+        """Reset ALL provider states. Used before critical pipeline stages."""
+        had_degraded = list(self._degraded_until.keys())
+        self._failures.clear()
+        self._degraded_until.clear()
+        if had_degraded:
+            logger.info("Circuit breaker: RESET all states (was degraded: %s)", had_degraded)
+
 
 def _build_provider(name: str) -> Optional[AIProvider]:
     try:
@@ -112,6 +127,38 @@ class AIOrchestrator:
                 rate = self._COST_PER_1K_TOKENS.get(name, 0.001)
                 total += (tokens / 1000) * rate
         return round(total, 6)
+
+    async def unload_local_models(self):
+        """Unload Ollama models from VRAM so GPU is free for other tasks."""
+        ollama = self._providers.get("ollama")
+        if ollama and hasattr(ollama, "unload_models"):
+            await ollama.unload_models()
+
+    def reset_circuit_breaker(self):
+        """Reset circuit breaker state before critical pipeline operations.
+
+        Call this before summary generation and clip detection to ensure
+        that failures from non-critical steps (transcript correction)
+        don't block the core analysis pipeline.
+        """
+        self._circuit_breaker.force_reset_all()
+
+    def get_text_model_info(self) -> dict:
+        """Return info about the text model that will handle the next text_completion call.
+
+        Used by transcript correction to:
+        1. Log which model is polishing the transcript
+        2. Set an appropriate timeout based on model type (thinking vs standard)
+        """
+        chain = self._get_active_chain()
+        if not chain:
+            return {"provider": "none", "model": "none", "is_thinking": False}
+        provider = chain[0]
+        return {
+            "provider": provider.provider_name,
+            "model": provider.text_model_name,
+            "is_thinking": provider.is_thinking_model,
+        }
 
     def _get_active_chain(self) -> list[AIProvider]:
         chain = []
@@ -208,13 +255,22 @@ class AIOrchestrator:
         transcript: list[TranscriptSegment],
         scenes: list[SceneDescription],
         job_id: str,
+        tier=None,
     ) -> tuple[VideoSummary, str]:
-        """Returns (summary, provider_name_used)."""
+        """Returns (summary, provider_name_used).
+
+        If tier specifies map_reduce strategy, splits transcript into chunks,
+        summarizes each, then merges. This ensures long videos get full coverage.
+        """
+        if tier and tier.summary_strategy == "map_reduce" and tier.summary_chunk_minutes > 0:
+            return await self._map_reduce_summary(transcript, scenes, job_id, tier)
+
+        summary_prompt = self._custom_prompts.summary if self._custom_prompts else None
         for provider in self._get_active_chain():
             try:
                 await self._notify_attempt(job_id, provider.provider_name, "summary generation")
                 t0 = time.monotonic()
-                result = await provider.generate_summary(transcript, scenes, cancel_check=self._cancel_check)
+                result = await provider.generate_summary(transcript, scenes, cancel_check=self._cancel_check, custom_prompt=summary_prompt)
                 elapsed = time.monotonic() - t0
                 logger.info("Summary generation via %s completed in %.1fs", provider.provider_name, elapsed)
                 self._circuit_breaker.record_success(provider.provider_name)
@@ -224,6 +280,133 @@ class AIOrchestrator:
                 await self._notify_fallback(job_id, provider.provider_name, str(e))
                 continue
         raise AllProvidersFailedError("All providers failed for summary generation")
+
+    async def _map_reduce_summary(
+        self,
+        transcript: list[TranscriptSegment],
+        scenes: list[SceneDescription],
+        job_id: str,
+        tier,
+    ) -> tuple[VideoSummary, str]:
+        """Hierarchical map-reduce summary for long videos.
+
+        Map: Split transcript into N-minute chunks, generate mini-summary per chunk.
+        Reduce: Feed all mini-summaries into a final summary call.
+        """
+        from backend.services.providers.base import extract_json, has_real_summary_content
+
+        chunk_seconds = tier.summary_chunk_minutes * 60
+        if not transcript:
+            from backend.services.providers.base import build_summary_from_transcript
+            fb = build_summary_from_transcript(transcript, scenes)
+            return VideoSummary(**fb), "fallback"
+
+        video_end = max(s.end for s in transcript)
+        chunk_overlap = 30.0  # 30 second overlap between chunks
+        chunks: list[tuple[float, float, list[TranscriptSegment], list[SceneDescription]]] = []
+        t = 0.0
+        while t < video_end:
+            chunk_end = min(t + chunk_seconds, video_end)
+            # Extend segment selection by overlap into adjacent chunks
+            chunk_segs = [s for s in transcript if s.start >= t - chunk_overlap and s.end <= chunk_end + chunk_overlap]
+            chunk_scenes = [s for s in scenes if t - chunk_overlap <= s.timestamp <= chunk_end + chunk_overlap]
+            chunks.append((t, chunk_end, chunk_segs, chunk_scenes))
+            t = chunk_end
+
+        chain = self._get_active_chain()
+        is_ollama = chain and chain[0].provider_name == "ollama"
+        max_segs = 20 if is_ollama else 50
+        chunk_timeout = 90 if is_ollama else 60
+        max_chunk_tokens = 300 if is_ollama else 500
+
+        logger.info(
+            "[%s] Map-reduce summary: %d chunks (%.0fs each), ollama=%s",
+            job_id, len(chunks), chunk_seconds, is_ollama,
+        )
+
+        sem = asyncio.Semaphore(1 if is_ollama else 3)
+
+        async def _summarize_chunk(idx, start, end, segs, scns):
+            async with sem:
+                time_label = f"{int(start//60)}:{int(start%60):02d}-{int(end//60)}:{int(end%60):02d}"
+                text = "\n".join(
+                    f"[{s.start:.0f}s] {s.speaker}: {s.text}"
+                    for s in segs[:max_segs]
+                )
+                scene_text = "\n".join(
+                    f"[{s.timestamp:.0f}s] {s.description[:60 if is_ollama else 100]}"
+                    for s in scns[:5 if is_ollama else 10]
+                )
+                prompt = (
+                    f"Summarize this {time_label} segment in 2-3 sentences. "
+                    f"Include: main topic, key speakers, notable moments.\n\n"
+                    f"TRANSCRIPT:\n{text}\n\nSCENES:\n{scene_text}\n\n"
+                    f"Return a plain text summary (no JSON)."
+                )
+                try:
+                    result = await self.text_completion(
+                        prompt, max_tokens=max_chunk_tokens,
+                        timeout=chunk_timeout,
+                        job_id=job_id, skip_circuit_breaker=True,
+                    )
+                    # Broadcast chunk progress so the user sees activity
+                    if self._ws_broadcast and job_id:
+                        try:
+                            await self._ws_broadcast(job_id, {
+                                "type": "status",
+                                "message": f"Summary: chunk {idx + 1}/{len(chunks)} complete...",
+                            })
+                        except Exception:
+                            pass
+                    return f"[{time_label}] {result.strip()}"
+                except Exception as e:
+                    logger.warning("[%s] Chunk %d summary failed: %s", job_id, idx, e)
+                    return f"[{time_label}] {segs[0].text[:200] if segs else 'No content'}"
+
+        results = await asyncio.gather(*[
+            _summarize_chunk(i, s, e, segs, scns)
+            for i, (s, e, segs, scns) in enumerate(chunks)
+        ])
+        mini_summaries = [r for r in results if r]
+
+        # Reduce phase
+        combined = "\n".join(mini_summaries)
+        if is_ollama and len(combined) > 2500:
+            combined = combined[:2500]
+
+        reduce_prompt = (
+            f"You have segment-by-segment summaries of a video. "
+            f"Combine them into a cohesive summary.\n\n"
+            f"SEGMENT SUMMARIES:\n{combined}\n\n"
+            "Return ONLY valid JSON:\n"
+            '{"overview": "<paragraph>", "key_topics": ["topic1", ...], '
+            '"tone": "<tone>", "estimated_audience": "<audience>", "content_category": "<category>"}'
+        )
+
+        for provider in chain:
+            try:
+                raw = await asyncio.wait_for(
+                    provider.text_complete(reduce_prompt, max_tokens=1000 if is_ollama else 2000),
+                    timeout=120 if is_ollama else 90,
+                )
+                data = extract_json(raw)
+                if has_real_summary_content(data):
+                    return VideoSummary(**data), provider.provider_name
+            except Exception as e:
+                logger.warning("[%s] Reduce summary via %s failed: %s", job_id, provider.provider_name, e)
+                continue
+
+        # Fallback: use mini-summaries as overview
+        overview = " ".join(mini_summaries[:6])
+        if len(overview) > 500:
+            overview = overview[:500].rsplit(" ", 1)[0] + "..."
+        return VideoSummary(
+            overview=overview,
+            key_topics=[],
+            tone="conversational",
+            estimated_audience="general viewers",
+            content_category="video content",
+        ), "map_reduce_fallback"
 
     async def detect_viral_clips(
         self,
@@ -236,37 +419,81 @@ class AIOrchestrator:
         max_duration: Optional[float] = None,
         clip_focus: Optional[str] = None,
         video_summary: Optional[str] = None,
+        existing_clips: Optional[str] = None,
+        hot_zones=None,
+        progress_callback=None,
+        tier=None,
     ) -> tuple[list[ClipCandidate], str]:
         """Returns (clips, provider_name_used)."""
         clip_prompt = self._custom_prompts.viral_clip_detection if self._custom_prompts else None
-        # If clip_focus is provided, override the viral algorithm with a focus-based prompt
+        # If clip_focus is provided, build an augmented focus prompt that
+        # BUILDS ON the viral detection infrastructure rather than replacing it
         if clip_focus and clip_focus.strip():
             focus_text = clip_focus.strip()
             clip_prompt = (
-                f"You are finding clips in a video that focus specifically on: {focus_text}\n\n"
-                f"IMPORTANT: Only select segments that are directly related to '{focus_text}'. "
-                f"Cross-reference the transcript text with visual scene descriptions to find moments "
-                f"where both the spoken content AND visual content relate to '{focus_text}'. "
-                f"Use the video summary to understand overall context. "
-                f"Prioritize clips that contain high-importance scenes (score 7+).\n\n"
+                f"You are finding clips in a video that focus on a specific user-requested topic.\n\n"
+                f"USER'S FOCUS QUERY: \"{focus_text}\"\n\n"
+                f"SEMANTIC EXPANSION — Before searching, expand this query into related concepts:\n"
+                f"Think about synonyms, related terms, sub-topics, and adjacent concepts that someone "
+                f"searching for \"{focus_text}\" would also want to see. For example, if the focus is "
+                f"'fighting', also look for: combat, battle, argument, confrontation, sparring, conflict, "
+                f"physical altercation, self-defense, martial arts, etc.\n\n"
+                f"RELEVANCE TIERS:\n"
+                f"  Tier 1 (STRONG — score 80-100): The segment IS ABOUT '{focus_text}'. "
+                f"The topic is the main subject of discussion or the primary visual action.\n"
+                f"  Tier 2 (MODERATE — score 50-79): The segment discusses '{focus_text}' as a "
+                f"significant part of a broader conversation. Multiple sentences or visual moments relate to it.\n"
+                f"  Tier 3 (WEAK — score 20-49): The topic is mentioned briefly or tangentially. "
+                f"Only include Tier 3 clips if fewer than 3 Tier 1/2 clips exist.\n"
+                f"  EXCLUDE: Segments that merely mention a word related to '{focus_text}' in passing, "
+                f"negations ('I don't like {focus_text}'), or purely metaphorical usage.\n\n"
+                f"COMPOUND QUERIES: If the focus contains both a topic and a mood/quality "
+                f"(e.g., 'funny cooking moments'), prioritize segments matching BOTH aspects. "
+                f"Score clips higher when they combine the topic with the specified mood.\n\n"
+                f"SCORING: Use 'viral_score' to represent RELEVANCE to '{focus_text}' (not virality). "
+                f"A clip with 90 relevance means the segment is deeply, directly about the focus topic. "
+                f"In 'viral_score_reasoning', explain WHY this clip matches the focus query and which "
+                f"relevance tier it falls into.\n\n"
+                f"Additionally include 'focus_relevance' (1-100) and 'focus_tier' (\"strong\", \"moderate\", "
+                f"or \"weak\") in each clip's JSON.\n\n"
                 f"SCENE & SUBJECT COHERENCE (CRITICAL):\n"
                 f"- The main subject or speaker MUST stay in focus throughout the entire clip\n"
                 f"- NEVER cut across unrelated scenes or topics — the clip must feel like ONE moment\n"
-                f"- If a clip covers a conversation, keep it within the same exchange\n"
-                f"- The visual setting should remain consistent\n"
-                f"- Prefer segments where the camera stays on the main action without jarring cuts"
+                f"- If a clip covers a conversation, keep it within the same exchange between the same speakers\n"
+                f"- The visual setting should remain consistent — don't span across location changes\n"
+                f"- Prefer segments where the camera stays on the main action without jarring cuts\n"
+                f"- If scene descriptions show different settings at different timestamps, do NOT combine them into one clip\n\n"
+                f"BOUNDARY RULES:\n"
+                f"- Start at natural speech boundaries — beginning of a sentence, after a pause, at a speaker change\n"
+                f"- End at natural conclusions — even if focus content extends further, find a clean exit point\n"
+                f"- Must work standalone without context from the full video\n"
+                f"- Prefer clips where the focus topic is introduced within the first 5 seconds"
             )
             logger.info("Clip focus mode active for job %s: '%s'", job_id, focus_text)
         # Per-provider timeout prevents any single provider from blocking the
-        # fallback chain.  Cloud APIs get 5 min for clip detection (large
-        # prompts with full transcript + scenes need time); local ollama
-        # gets 2 min (3 retries × ~30s each with 90s httpx timeout as cap).
-        _PROVIDER_TIMEOUT = {"ollama": 120}
-        _DEFAULT_PROVIDER_TIMEOUT = 330  # 5.5 min — allows 300s internal + overhead
+        # fallback chain. Scale timeout based on video duration and provider type.
+        vid_minutes = video_duration / 60 if video_duration else 0
+        if vid_minutes > 30:
+            # Windows processed 2 at a time (or sequentially for Ollama)
+            est_windows = max(1, int(video_duration / 600) + 1)
+            est_rounds = (est_windows + 1) // 2
+            default_timeout = max(600, est_rounds * 330 + 300)
+        else:
+            default_timeout = 330
+
+        # Shared partial results container. Providers populate this incrementally
+        # so even if a timeout fires, we have whatever completed.
+        _partial_clips: list = []
 
         for provider in self._get_active_chain():
             pname = provider.provider_name
-            timeout = _PROVIDER_TIMEOUT.get(pname, _DEFAULT_PROVIDER_TIMEOUT)
+            # Compute Ollama timeout: sequential windows need much more time
+            if pname == "ollama":
+                est_windows = max(1, int(video_duration / 300))
+                timeout = max(420, est_windows * 300 + 120)
+                logger.info("Ollama clip detection timeout: %ds (%d est. windows)", timeout, est_windows)
+            else:
+                timeout = default_timeout
             try:
                 await self._notify_attempt(job_id, pname, "viral clip detection")
                 t0 = time.monotonic()
@@ -277,6 +504,11 @@ class AIOrchestrator:
                         clip_count=clip_count, min_duration=min_duration,
                         max_duration=max_duration,
                         video_summary=video_summary,
+                        existing_clips=existing_clips,
+                        hot_zones=hot_zones,
+                        progress_callback=progress_callback,
+                        _partial_results=_partial_clips,
+                        tier=tier,
                     ),
                     timeout=timeout,
                 )
@@ -285,6 +517,18 @@ class AIOrchestrator:
                 self._circuit_breaker.record_success(pname)
                 return result, pname
             except asyncio.TimeoutError:
+                elapsed = time.monotonic() - t0
+                # Check if partial results were collected before timeout
+                if _partial_clips:
+                    if hasattr(provider, '_deduplicate_clips'):
+                        deduped = provider._deduplicate_clips(_partial_clips)
+                    else:
+                        deduped = _partial_clips
+                    logger.warning(
+                        "Clip detection via %s timed out after %ds but recovered %d partial clips",
+                        pname, timeout, len(deduped),
+                    )
+                    return deduped, f"{pname} (partial)"
                 logger.warning("Clip detection via %s timed out after %ds", pname, timeout)
                 self._circuit_breaker.record_failure(pname)
                 await self._notify_fallback(job_id, pname, f"Timed out after {timeout}s")
@@ -293,7 +537,56 @@ class AIOrchestrator:
                 self._circuit_breaker.record_failure(pname)
                 await self._notify_fallback(job_id, pname, str(e))
                 continue
+
+        # Even if all providers "failed", check partial results
+        if _partial_clips:
+            logger.warning(
+                "All providers failed but recovered %d partial clips", len(_partial_clips),
+            )
+            return _partial_clips, "partial"
         raise AllProvidersFailedError("All providers failed for viral clip detection")
+
+    async def text_completion(self, prompt: str, max_tokens: int = 4096, timeout: float = 60, job_id: str = "", skip_circuit_breaker: bool = False) -> str:
+        """Generic text completion using the configured provider chain.
+
+        Used by transcript correction, translation, and other text-only tasks.
+        Falls back through the provider chain on failure.
+        Returns the raw text response from the first successful provider.
+
+        Args:
+            skip_circuit_breaker: If True, failures are NOT recorded in the
+                circuit breaker. Use this for non-critical/optional operations
+                (like transcript polishing) that should not degrade the provider
+                for subsequent critical operations (summary, clip detection).
+        """
+        for provider in self._get_active_chain():
+            pname = provider.provider_name
+            model_name = provider.text_model_name
+            try:
+                logger.info("text_completion attempting via %s model=%s (%d chars prompt)", pname, model_name, len(prompt))
+                t0 = time.monotonic()
+                result = await asyncio.wait_for(
+                    provider.text_complete(prompt, max_tokens=max_tokens, timeout=int(timeout)),
+                    timeout=timeout,
+                )
+                elapsed = time.monotonic() - t0
+                logger.info("text_completion via %s model=%s completed in %.1fs", pname, model_name, elapsed)
+                if not skip_circuit_breaker:
+                    self._circuit_breaker.record_success(pname)
+                return result
+            except asyncio.TimeoutError:
+                if not skip_circuit_breaker:
+                    self._circuit_breaker.record_failure(pname)
+                logger.warning("text_completion via %s model=%s timed out after %.0fs — trying next provider", pname, model_name, timeout)
+                await self._notify_fallback(job_id, pname, f"Text completion timed out after {timeout:.0f}s (model={model_name})")
+                continue
+            except Exception as e:
+                if not skip_circuit_breaker:
+                    self._circuit_breaker.record_failure(pname)
+                logger.warning("text_completion via %s model=%s failed: %s — trying next provider", pname, model_name, e)
+                await self._notify_fallback(job_id, pname, str(e))
+                continue
+        raise AllProvidersFailedError("All providers failed for text completion")
 
     async def generate_seo(
         self,
@@ -304,6 +597,7 @@ class AIOrchestrator:
         job_id: str,
     ) -> tuple[ClipSEO, str]:
         """Returns (seo, provider_name_used)."""
+        seo_prompt = self._custom_prompts.seo if self._custom_prompts else None
         for provider in self._get_active_chain():
             try:
                 await self._notify_attempt(job_id, provider.provider_name, "SEO generation")
@@ -311,6 +605,7 @@ class AIOrchestrator:
                 result = await provider.generate_seo(
                     clip_title, clip_transcript, video_summary,
                     platform, cancel_check=self._cancel_check,
+                    custom_prompt=seo_prompt,
                 )
                 elapsed = time.monotonic() - t0
                 logger.info("SEO generation via %s completed in %.1fs", provider.provider_name, elapsed)

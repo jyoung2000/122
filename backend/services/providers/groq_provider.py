@@ -10,8 +10,8 @@ from backend.config import settings
 from backend.models import (
     FrameData, SceneDescription, TranscriptSegment, VideoSummary, ClipCandidate, ClipSEO,
 )
-from backend.services.providers.base import AIProvider, ProviderError, ProviderRateLimitError, extract_json, normalize_seo_data
-from backend.services.prompts import DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT
+from backend.services.providers.base import AIProvider, ChunkedClipDetectionMixin, ProviderError, ProviderRateLimitError, extract_json, extract_description_fallback, normalize_seo_data, build_fallback_summary, has_real_summary_content, build_summary_from_transcript
+from backend.services.prompts import DEFAULT_VIRAL_CLIP_PROMPT, DEFAULT_SEO_PROMPT, DEFAULT_SUMMARY_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ MODEL = "llama-3.3-70b-versatile"
 _API_TIMEOUT = 90  # 90s — Groq is fast
 
 
-class GroqProvider(AIProvider):
+class GroqProvider(ChunkedClipDetectionMixin, AIProvider):
     """Groq provider - text only, no vision support."""
 
     def __init__(self):
@@ -34,6 +34,14 @@ class GroqProvider(AIProvider):
     @property
     def provider_name(self) -> str:
         return "groq"
+
+    @property
+    def text_model_name(self) -> str:
+        return getattr(self, '_model', 'groq/unknown')
+
+    async def text_complete(self, prompt: str, max_tokens: int = 4096, timeout: int | None = None) -> str:
+        messages = [{"role": "user", "content": prompt}]
+        return await self._call(messages, max_tokens=max_tokens)
 
     async def _call(self, messages: list[dict], max_tokens: int = 4096) -> str:
         t0 = time.monotonic()
@@ -75,7 +83,9 @@ class GroqProvider(AIProvider):
         transcript: list[TranscriptSegment],
         scenes: list[SceneDescription],
         cancel_check=None,
+        custom_prompt=None,
     ) -> VideoSummary:
+        instruction = custom_prompt if custom_prompt else DEFAULT_SUMMARY_PROMPT
         transcript_text = "\n".join(
             f"[{s.start:.1f}-{s.end:.1f}] {s.speaker}: {s.text}" for s in transcript
         )
@@ -84,7 +94,7 @@ class GroqProvider(AIProvider):
             for s in scenes
         ) if scenes else "No scene descriptions available."
         prompt = (
-            "Based on the transcript and scene descriptions below, generate a content summary.\n\n"
+            f"{instruction}\n\n"
             f"TRANSCRIPT:\n{transcript_text}\n\n"
             f"SCENES:\n{scene_text}\n\n"
             "Return ONLY valid JSON:\n"
@@ -95,15 +105,17 @@ class GroqProvider(AIProvider):
         raw = await self._call(messages)
         try:
             data = extract_json(raw)
+            if not has_real_summary_content(data):
+                logger.warning("Summary JSON has placeholder values, trying fallback extraction")
+                raise ValueError("Placeholder values detected in summary")
             return VideoSummary(**data)
         except Exception:
-            return VideoSummary(
-                overview=raw[:500],
-                key_topics=["Unable to parse"],
-                tone="unknown",
-                estimated_audience="general",
-                content_category="uncategorized",
-            )
+            logger.warning("Failed to parse summary JSON, using fallback extraction. Raw (first 300): %s", raw[:300])
+            fb = build_fallback_summary(raw)
+            if not has_real_summary_content(fb):
+                logger.warning("Fallback extraction also produced placeholders, building from transcript")
+                fb = build_summary_from_transcript(transcript, scenes)
+            return VideoSummary(**fb)
 
     async def detect_viral_clips(
         self,
@@ -116,6 +128,49 @@ class GroqProvider(AIProvider):
         min_duration: Optional[float] = None,
         max_duration: Optional[float] = None,
         video_summary: Optional[str] = None,
+        existing_clips: Optional[str] = None,
+        hot_zones=None,
+        progress_callback=None,
+        tier=None,
+        _partial_results: Optional[list] = None,
+    ) -> list[ClipCandidate]:
+        """Dispatch to multi-pass for long videos, single-pass for short."""
+        if video_duration > 300:
+            logger.info("Groq: video %.0fs (>5min) — using multi-pass clip detection", video_duration)
+            return await self._multi_pass_clip_detection(
+                transcript, scenes, video_duration,
+                tier=tier, sequential=False,
+                custom_prompt=custom_prompt, cancel_check=cancel_check,
+                clip_count=clip_count, min_duration=min_duration,
+                max_duration=max_duration, video_summary=video_summary,
+                existing_clips=existing_clips,
+                hot_zones=hot_zones,
+                progress_callback=progress_callback,
+                _partial_results=_partial_results,
+            )
+        return await self._single_pass_clip_detection(
+            transcript, scenes, video_duration,
+            custom_prompt=custom_prompt, cancel_check=cancel_check,
+            clip_count=clip_count, min_duration=min_duration,
+            max_duration=max_duration, video_summary=video_summary,
+            existing_clips=existing_clips,
+            hot_zones=hot_zones,
+        )
+
+    async def _single_pass_clip_detection(
+        self,
+        transcript: list[TranscriptSegment],
+        scenes: list[SceneDescription],
+        video_duration: float,
+        custom_prompt: Optional[str] = None,
+        cancel_check=None,
+        clip_count: Optional[int] = None,
+        min_duration: Optional[float] = None,
+        max_duration: Optional[float] = None,
+        video_summary: Optional[str] = None,
+        existing_clips: Optional[str] = None,
+        hot_zones=None,
+        **kwargs,
     ) -> list[ClipCandidate]:
         instruction = custom_prompt if custom_prompt else DEFAULT_VIRAL_CLIP_PROMPT
         # Groq models have limited context — keep data compact
@@ -170,6 +225,14 @@ class GroqProvider(AIProvider):
         for attempt in range(3):
             if cancel_check:
                 cancel_check()
+
+            # Build fresh messages each attempt — do NOT accumulate conversation
+            # history, as it bloats the prompt and causes timeouts
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+
             raw = await self._call(messages, max_tokens=8192)
             try:
                 raw = raw.strip()
@@ -178,52 +241,65 @@ class GroqProvider(AIProvider):
                 data = json.loads(raw)
                 clips = []
                 for c in data.get("clips", []):
-                    duration = c.get("duration", c.get("end_time", 0) - c.get("start_time", 0))
+                    start = float(c.get("start_time", 0))
+                    end = float(c.get("end_time", 0))
+                    # Always compute from timestamps — model's duration field is unreliable
+                    duration = end - start
+                    if duration <= 0:
+                        duration = float(c.get("duration", 0))
                     if duration < (min_duration or 15) or duration > (max_duration or 600):
                         continue
                     clips.append(ClipCandidate(
-                        id=c["id"],
+                        id=int(c.get("id", len(clips) + 1)),
                         title=c.get("title", "Untitled"),
-                        start_time=c["start_time"],
-                        end_time=c["end_time"],
-                        duration=duration,
-                        viral_score=max(1, min(100, c.get("viral_score", 50))),
-                        viral_score_reasoning=c.get("viral_score_reasoning", ""),
-                        clip_type=c.get("clip_type", "highlight"),
-                        platform=c.get("platform", "both"),
-                        suggested_caption=c.get("suggested_caption", ""),
-                        hook_text=c.get("hook_text", ""),
-                        why_this_works=c.get("why_this_works", ""),
+                        start_time=start,
+                        end_time=end,
+                        duration=round(duration, 1),
+                        viral_score=max(1, min(100, int(float(c.get("viral_score", 50))))),
+                        viral_score_reasoning=str(c.get("viral_score_reasoning", "")),
+                        clip_type=str(c.get("clip_type", "highlight")),
+                        platform=str(c.get("platform", "both")),
+                        suggested_caption=str(c.get("suggested_caption", "")),
+                        hook_text=str(c.get("hook_text", "")),
+                        why_this_works=str(c.get("why_this_works", "")),
                     ))
-                return clips
+                if clips:
+                    return clips
+                logger.warning(f"Attempt {attempt + 1}: All Groq clips filtered out")
+                continue
             except (json.JSONDecodeError, KeyError) as e:
                 logger.warning(f"Attempt {attempt + 1}: Failed to parse Groq clips: {e}")
-                if attempt < 2:
-                    messages.append({"role": "assistant", "content": raw})
-                    messages.append({"role": "user", "content": "Return ONLY valid JSON."})
                 continue
         raise ProviderError("Failed to parse viral clips after 3 attempts")
 
     async def generate_seo(
         self, clip_title: str, clip_transcript: str, video_summary: str,
-        platform: str, cancel_check=None,
+        platform: str, cancel_check=None, custom_prompt=None,
     ) -> ClipSEO:
-        prompt = (
-            f"{DEFAULT_SEO_PROMPT}\n\n"
-            f"CLIP TITLE: {clip_title}\n"
-            f"TARGET PLATFORM: {platform}\n\n"
-            f"VIDEO SUMMARY:\n{video_summary}\n\n"
-            f"CLIP TRANSCRIPT:\n{clip_transcript}\n"
-        )
+        seo_instruction = custom_prompt if custom_prompt else DEFAULT_SEO_PROMPT
+        is_description = video_summary.startswith("DESCRIPTION_OVERRIDE")
+        if is_description:
+            prompt = (
+                f"{video_summary}\n\n"
+                f"CLIP TITLE: {clip_title}\n"
+                f"TARGET PLATFORM: {platform}\n\n"
+                f"CLIP TRANSCRIPT:\n{clip_transcript}\n"
+            )
+        else:
+            prompt = (
+                f"{seo_instruction}\n\n"
+                f"CLIP TITLE: {clip_title}\n"
+                f"TARGET PLATFORM: {platform}\n\n"
+                f"VIDEO SUMMARY:\n{video_summary}\n\n"
+                f"CLIP TRANSCRIPT:\n{clip_transcript}\n"
+            )
         messages = [{"role": "user", "content": prompt}]
-        raw = await self._call(messages)
+        tokens = 16384 if is_description else 4096
+        raw = await self._call(messages, max_tokens=tokens)
         try:
             data = normalize_seo_data(extract_json(raw))
             return ClipSEO(**data)
         except Exception:
             logger.warning(f"Failed to parse SEO JSON, using fallback. Raw (first 300): {raw[:300]}")
-            return ClipSEO(
-                title=clip_title,
-                description=raw[:300] if raw else "SEO generation failed",
-                tags=[], platform_tips="",
-            )
+            desc = extract_description_fallback(raw) if is_description and raw else (raw[:300] if raw else "SEO generation failed")
+            return ClipSEO(title=clip_title, description=desc, tags=[], platform_tips="")

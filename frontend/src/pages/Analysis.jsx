@@ -1,16 +1,30 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import VideoPlayer from '../components/VideoPlayer';
 import ClipPreview from '../components/ClipPreview';
+import VideoEditor from '../components/VideoEditor';
+import SubtitleOverlay from '../components/SubtitleOverlay';
 import ProgressBar from '../components/ProgressBar';
 import SceneCard from '../components/SceneCard';
 import TranscriptViewer from '../components/TranscriptViewer';
 import ClipCard from '../components/ClipCard';
+import sanitizeJob, { sanitizeSubtitleSettings } from '../utils/sanitizeJob';
+import { sendNotification, requestNotificationPermission } from '../utils/notifications';
 import ClipSettingsPanel from '../components/ClipSettingsPanel';
 import { showToast } from '../components/Toast';
 import useResponsive from '../hooks/useResponsive';
 import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
+import useTimelineStore from '../stores/timelineStore';
+import { buildOverlayPayload, buildVideoEffectsPayload, mapSubtitleSettings } from '../utils/buildExportPayload';
+
+// Speaker color palette (must match SubtitleOverlay / ClipSettingsPanel / VideoEditor)
+const DEFAULT_SPEAKER_PALETTE = [
+  '#00D9FF', '#F59E0B', '#10B981', '#A78BFA', '#EF4444', '#EC4899',
+  '#06B6D4', '#8B5CF6', '#F97316', '#14B8A6', '#E879F9', '#84CC16',
+  '#FB7185', '#38BDF8', '#FBBF24', '#34D399', '#C084FC', '#F472B6',
+  '#22D3EE', '#A3E635', '#FB923C', '#2DD4BF', '#818CF8', '#F87171',
+];
 
 function formatDuration(seconds) {
   if (!seconds) return '-';
@@ -53,6 +67,39 @@ function loadGenSettings() {
 }
 
 const TABS = ['Summary', 'Key Scenes', 'Transcript', 'Viral Clips'];
+
+// sanitizeJob imported from ../utils/sanitizeJob
+
+/**
+ * Error boundary that isolates VideoEditor crashes so they don't take down
+ * the entire Analysis page.  Shows a retry button on failure.
+ */
+class VideoEditorBoundary extends React.Component {
+  constructor(props) { super(props); this.state = { hasError: false, error: null }; }
+  static getDerivedStateFromError(error) { return { hasError: true, error }; }
+  componentDidCatch(error, info) {
+    console.error('[VideoEditorBoundary]', error, info?.componentStack?.slice(0, 500));
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: 24, textAlign: 'center', color: 'var(--danger, #ef4444)' }}>
+          <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>Video preview failed to render</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>
+            {String(this.state.error?.message || 'Unknown error')}
+          </div>
+          <button
+            onClick={() => this.setState({ hasError: false, error: null })}
+            style={{ padding: '6px 16px', fontSize: 12, background: 'var(--accent-cyan)', color: '#000', border: 'none', borderRadius: 4, cursor: 'pointer' }}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function AddSceneForm({ jobId, duration, onAdded }) {
   const [open, setOpen] = React.useState(false);
@@ -222,8 +269,12 @@ export default function Analysis() {
   const navigate = useNavigate();
   const [job, setJob] = useState(null);
   const [tab, setTab] = useState(0);
+  const prevTabRef = useRef(0);
+  const [transcriptInitTime, setTranscriptInitTime] = useState(null);
+  const stickyPlayerRef = useRef(null);
   const [loading, setLoading] = useState(true);
   const [clipPreview, setClipPreview] = useState(null);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
   const [cancellingJob, setCancellingJob] = useState(false);
   const [selectedClips, setSelectedClips] = useState(new Set());
   const [filters, setFilters] = useState({ minScore: 0, platform: 'all', type: 'all', sort: 'viral_score' });
@@ -231,14 +282,15 @@ export default function Analysis() {
   const [activityLog, setActivityLog] = useState([]);
   const [logExpanded, setLogExpanded] = useState(true);
   const logEndRef = useRef(null);
-  // Initialize with defaults so ClipPreview renders immediately when a clip
-  // is selected, even before ClipSettingsPanel mounts and fires its callback.
-  const [clipSettings, setClipSettings] = useState({
+  // Subtitle/clip settings — server is the source of truth.
+  // On mount we start with defaults; once the job loads, server-stored
+  // settings replace them (see the effect below).
+  const CLIP_SETTINGS_DEFAULTS = React.useMemo(() => ({
     aspectRatio: null,
     subtitlesEnabled: false,
     subtitleFont: 'DM Sans',
     subtitleSize: 30,
-    subtitleFontWeight: 'bold',
+    subtitleFontWeight: 700,
     subtitleFontColor: '#FFFFFF',
     subtitlePosition: 'bottom',
     speakerColors: {},
@@ -258,8 +310,161 @@ export default function Analysis() {
     activeWordOutlineColor: '#000000',
     activeWordBgColor: '#000000',
     activeWordBgOpacity: 0,
+    activeWordBgRadius: 4,
     useSpeakerColors: true,
-  });
+    playbackVolume: 100,
+    playbackSpeed: 1.0,
+  }), []);
+  const [clipSettings, setClipSettings] = useState(CLIP_SETTINGS_DEFAULTS);
+  const clipSettingsLoadedFromServer = useRef(false);
+  const skipNextServerSave = useRef(false);
+
+  // ── Multi-track editor timeline items (for export) ──
+  const timelineItems = useTimelineStore((s) => s.items);
+  const timelineTracks = useTimelineStore((s) => s.tracks);
+  const timelineMediaLibrary = useTimelineStore((s) => s.mediaLibrary);
+
+  // ── Server is source of truth for subtitle settings ──
+  // When the job loads from the backend, apply server-stored settings (ignoring
+  // potentially-stale localStorage).  This runs every time `job` changes.
+  useEffect(() => {
+    if (!job) return;
+    if (job.subtitle_settings && Object.keys(job.subtitle_settings).length > 0) {
+      // Server has canonical settings — use them, merged over defaults
+      skipNextServerSave.current = true; // Don't echo back to server
+      setClipSettings({ ...CLIP_SETTINGS_DEFAULTS, ...sanitizeSubtitleSettings(job.subtitle_settings) });
+      clipSettingsLoadedFromServer.current = true;
+    } else if (!clipSettingsLoadedFromServer.current) {
+      // No server settings yet — fall back to localStorage for first-time migration
+      try {
+        const saved = localStorage.getItem('clipai_clip_settings');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          setClipSettings({ ...CLIP_SETTINGS_DEFAULTS, ...sanitizeSubtitleSettings(parsed) });
+        }
+      } catch {}
+    }
+  }, [job?.subtitle_settings, CLIP_SETTINGS_DEFAULTS]);
+
+  // ── Persist settings to server whenever they change (debounced) ──
+  // This replaces the old localStorage-only persistence.  The server is the
+  // source of truth; localStorage is only kept as a temporary migration path.
+  const saveSettingsTimerRef = useRef(null);
+  useEffect(() => {
+    // Also keep localStorage in sync as a fallback
+    try { localStorage.setItem('clipai_clip_settings', JSON.stringify(clipSettings)); } catch {}
+    // Skip the echo-back when settings were just loaded from server
+    if (skipNextServerSave.current) {
+      skipNextServerSave.current = false;
+      return;
+    }
+    // Debounced save to server
+    if (!jobId) return;
+    if (saveSettingsTimerRef.current) clearTimeout(saveSettingsTimerRef.current);
+    saveSettingsTimerRef.current = setTimeout(() => {
+      fetch(`/api/jobs/${jobId}/subtitle-settings`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(clipSettings),
+      }).catch(() => {});
+    }, 800);
+    return () => { if (saveSettingsTimerRef.current) clearTimeout(saveSettingsTimerRef.current); };
+  }, [clipSettings, jobId]);
+
+  // VideoEditor state for export params
+  const [editorTrim, setEditorTrim] = useState({ trimStart: 0, trimEnd: 0 });
+  const [editorVolume, setEditorVolume] = useState(1.0);
+  const [editorSpeed, setEditorSpeed] = useState(1.0);
+  const [editorSegments, setEditorSegments] = useState([]);
+  // Persist segments per clip ID so switching clips doesn't lose segments
+  const clipSegmentsMapRef = useRef({});
+
+  // ── localStorage helpers for segment persistence across refresh ──
+  const segStorageKey = useCallback((cId) => `clipai_segments_${jobId}_${cId}`, [jobId]);
+  const saveSegmentsToStorage = useCallback((cId, segs) => {
+    try {
+      if (segs && segs.length > 0) {
+        localStorage.setItem(segStorageKey(cId), JSON.stringify(segs));
+      } else {
+        localStorage.removeItem(segStorageKey(cId));
+      }
+    } catch {}
+  }, [segStorageKey]);
+  const loadSegmentsFromStorage = useCallback((cId) => {
+    try {
+      const raw = localStorage.getItem(segStorageKey(cId));
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  }, [segStorageKey]);
+  // Restore segments from localStorage on mount (full video uses key 'full')
+  useEffect(() => {
+    if (!jobId) return;
+    const saved = loadSegmentsFromStorage('full');
+    if (saved.length > 0) setEditorSegments(saved);
+  }, [jobId, loadSegmentsFromStorage]);
+
+  // Track applied trim ranges so the trimmed region becomes the full video
+  const [fullVideoRange, setFullVideoRange] = useState(null); // { start, end } for full video editor
+  const [showInlineSubSettings, setShowInlineSubSettings] = useState(false);
+
+  // ── Mark Key Scene inline state ──
+  const [showMarkScene, setShowMarkScene] = useState(false);
+  const [markSceneDesc, setMarkSceneDesc] = useState('');
+  const [markSceneScore, setMarkSceneScore] = useState(8);
+  const [markSceneSaving, setMarkSceneSaving] = useState(false);
+  const [inlineCustomFonts, setInlineCustomFonts] = useState([]);
+
+  // Fetch custom fonts for the inline subtitle settings panel and register
+  // @font-face so they render in the dropdown and subtitle preview.
+  useEffect(() => {
+    // Register builtin fonts via @font-face (same mapping as ClipSettingsPanel)
+    const BUILTIN_FONT_FILES = {
+      'DM Sans': '/api/fonts/builtin/DMSans.ttf',
+      'Montserrat': '/api/fonts/builtin/Montserrat.ttf',
+      'Open Sans': '/api/fonts/builtin/OpenSans.ttf',
+      'Roboto': '/api/fonts/builtin/Roboto.ttf',
+      'Poppins': '/api/fonts/builtin/Poppins-Regular.ttf',
+      'Inter': '/api/fonts/builtin/Inter.ttf',
+      'Nunito': '/api/fonts/builtin/Nunito.ttf',
+      'Lato': '/api/fonts/builtin/Lato-Regular.ttf',
+      'Oswald': '/api/fonts/builtin/Oswald.ttf',
+      'Playfair Display': '/api/fonts/builtin/PlayfairDisplay.ttf',
+      'Bebas Neue': '/api/fonts/builtin/BebasNeue-Regular.ttf',
+      'Liberation Sans': '/api/fonts/builtin/LiberationSans-Regular.ttf',
+      'Liberation Serif': '/api/fonts/builtin/LiberationSerif-Regular.ttf',
+      'Liberation Mono': '/api/fonts/builtin/LiberationMono-Regular.ttf',
+      'DejaVu Sans': '/api/fonts/builtin/DejaVuSans.ttf',
+      'DejaVu Serif': '/api/fonts/builtin/DejaVuSerif.ttf',
+      'DejaVu Sans Mono': '/api/fonts/builtin/DejaVuSansMono.ttf',
+      'FreeSans': '/api/fonts/builtin/FreeSans.ttf',
+    };
+    Object.entries(BUILTIN_FONT_FILES).forEach(([name, url]) => {
+      const id = `custom-font-${name.replace(/\s+/g, '-')}`;
+      if (!document.getElementById(id)) {
+        const style = document.createElement('style');
+        style.id = id;
+        style.textContent = `@font-face { font-family: '${name}'; src: url('${url}'); font-weight: 100 900; font-display: swap; }`;
+        document.head.appendChild(style);
+      }
+    });
+    // Fetch user-uploaded custom fonts
+    fetch('/api/fonts')
+      .then((r) => r.ok ? r.json() : [])
+      .then((fonts) => {
+        setInlineCustomFonts(fonts);
+        // Register @font-face for each custom font
+        fonts.forEach((f) => {
+          const id = `custom-font-${f.name.replace(/\s+/g, '-')}`;
+          if (!document.getElementById(id)) {
+            const style = document.createElement('style');
+            style.id = id;
+            style.textContent = `@font-face { font-family: '${f.name}'; src: url('${f.url}'); font-weight: 100 900; font-display: swap; }`;
+            document.head.appendChild(style);
+          }
+        });
+      })
+      .catch(() => {});
+  }, []);
   const [isGeneratingClips, setIsGeneratingClips] = useState(false);
   const [stuckSeconds, setStuckSeconds] = useState(0);
   const lastProgressRef = useRef({ message: '', time: Date.now() });
@@ -276,8 +481,51 @@ export default function Analysis() {
   const prevClipSettingsRef = useRef(clipSettings);
   const [clipPresets, setClipPresets] = useState([]);
   const [selectedPresetId, setSelectedPresetId] = useState('');
+  const [qaResult, setQaResult] = useState(null);
+  const [qaLoading, setQaLoading] = useState(false);
+  const [inlinePresetSaveOpen, setInlinePresetSaveOpen] = useState(false);
+  const [inlinePresetName, setInlinePresetName] = useState('');
+  const [inlineActivePreset, setInlineActivePreset] = useState('');
   const fullVideoExporting = encoding.tasks[`${jobId}_0`]?.status === 'encoding';
 
+  // Speaker detection (post-processing diarization)
+  const [diarizeNumSpeakers, setDiarizeNumSpeakers] = useState(0);
+  const [diarizeLoading, setDiarizeLoading] = useState(false);
+  const [diarizeResult, setDiarizeResult] = useState('');
+
+  // Fetch presets on mount so the preset bar is available from the start
+  useEffect(() => {
+    fetch('/api/clip-presets')
+      .then(r => r.ok ? r.json() : [])
+      .then(data => { if (Array.isArray(data)) setClipPresets(data); })
+      .catch(() => {});
+  }, []);
+
+  const handleRunDiarization = useCallback(async () => {
+    setDiarizeLoading(true);
+    setDiarizeResult('');
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/diarize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ num_speakers: diarizeNumSpeakers }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setDiarizeResult(`Detected ${data.speakers_detected} speaker${data.speakers_detected !== 1 ? 's' : ''}`);
+        fetchJob();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || 'Diarization failed', 'error');
+      }
+    } catch (e) {
+      showToast('Diarization request failed', 'error');
+    } finally {
+      setDiarizeLoading(false);
+    }
+  }, [jobId, diarizeNumSpeakers]);
+
+  const fetchJobRetryRef = useRef(0);
   const fetchJob = useCallback(async () => {
     try {
       const controller = new AbortController();
@@ -285,22 +533,73 @@ export default function Analysis() {
       const res = await fetch(`/api/jobs/${jobId}`, { signal: controller.signal });
       clearTimeout(timeout);
       if (res.ok) {
-        const data = await res.json();
+        const data = sanitizeJob(await res.json());
         setJob(data);
+        fetchJobRetryRef.current = 0;
         // Sync generating state from job status (handles page refresh mid-generation)
         if (data.status === 'detecting_clips') {
-          setIsGeneratingClips(true);
+          setIsGeneratingClips((prev) => prev || true);
         }
+      } else if (res.status === 404 && fetchJobRetryRef.current < 10) {
+        // Job may still be initializing (pipeline writes job.json async).
+        // Retry a few times before showing "not found" to avoid flash during
+        // large file uploads where there's a delay between upload complete
+        // and job.json being written.
+        fetchJobRetryRef.current += 1;
+        setTimeout(() => fetchJob(), 2000);
+        return; // Don't clear loading yet
       }
-    } catch {
+    } catch (err) {
+      // Only log — if setJob was never called, job stays null and the "not found" guard handles it.
+      console.warn('[Analysis] fetchJob error:', err?.message || err);
     } finally {
       setLoading(false);
     }
   }, [jobId]);
 
+  const handleMarkKeyScene = useCallback(async () => {
+    if (!markSceneDesc.trim() || markSceneSaving) return;
+    setMarkSceneSaving(true);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/scenes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          timestamp: videoCurrentTime,
+          description: markSceneDesc.trim(),
+          importance_score: markSceneScore,
+        }),
+      });
+      if (res.ok) {
+        showToast(`Key scene marked at ${formatDuration(videoCurrentTime)}`, 'success');
+        setMarkSceneDesc('');
+        setMarkSceneScore(8);
+        setShowMarkScene(false);
+        fetchJob();
+      } else {
+        showToast('Failed to mark key scene', 'error');
+      }
+    } catch {
+      showToast('Failed to mark key scene', 'error');
+    } finally {
+      setMarkSceneSaving(false);
+    }
+  }, [jobId, videoCurrentTime, markSceneDesc, markSceneScore, markSceneSaving, fetchJob]);
+
   const pushLog = useCallback((type, message, extra) => {
     const ts = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    setActivityLog((prev) => [...prev, { ts, type, message, ...extra }]);
+    // Ensure message is always a string to prevent React error #310
+    const safeMsg = typeof message === 'string' ? message : String(message ?? '');
+    // Spread extra FIRST so ts/type/message always win (prevents overwrite).
+    // Also sanitize extra values — any objects would cause #310 if rendered.
+    const safeExtra = {};
+    if (extra && typeof extra === 'object') {
+      for (const [k, v] of Object.entries(extra)) {
+        if (k === 'ts' || k === 'type' || k === 'message') continue; // never overwrite core fields
+        safeExtra[k] = (v != null && typeof v === 'object') ? JSON.stringify(v) : v;
+      }
+    }
+    setActivityLog((prev) => [...prev, { ...safeExtra, ts, type, message: safeMsg }]);
   }, []);
 
   // Auto-scroll log to bottom (within its own scroll container, not the page)
@@ -329,23 +628,51 @@ export default function Analysis() {
       ws.onopen = () => {
         reconnectDelay = 1000; // reset backoff on successful connect
         pushLog('info', 'Connected to live updates');
+        requestNotificationPermission();
       };
 
       ws.onmessage = (evt) => {
         try {
           const msg = JSON.parse(evt.data);
+          // Coerce message to string — backend may send objects in some edge cases
+          if (msg.message != null && typeof msg.message !== 'string') {
+            msg.message = typeof msg.message === 'object' ? JSON.stringify(msg.message) : String(msg.message);
+          }
+          // Also coerce status
+          if (msg.status != null && typeof msg.status !== 'string') {
+            msg.status = String(msg.status);
+          }
           if (msg.type === 'status' || msg.type === 'complete') {
-            setJob((prev) => prev ? {
-              ...prev,
-              status: msg.status || prev.status,
-              progress: msg.progress ?? prev.progress,
-              progress_message: msg.message || prev.progress_message,
-            } : prev);
-            // Track clip generation state from status messages
+            // Ignore export-related status messages — encoding progress is
+            // handled by useEncodingManager.  Updating job.status to
+            // 'exporting' would cause isProcessing to toggle and the
+            // analysis progress bar to blink in and out.
+            const isExportStatus = msg.status === 'exporting' || msg.status === 'generating_seo';
+            if (!isExportStatus) {
+              setJob((prev) => {
+                if (!prev) return prev;
+                // Coerce all values to safe primitives — WS messages are not sanitized
+                const nextStatus = typeof msg.status === 'string' ? msg.status : String(msg.status || prev.status);
+                const nextProgress = typeof msg.progress === 'number' ? msg.progress : (prev.progress ?? 0);
+                const nextMessage = typeof msg.message === 'string'
+                  ? msg.message
+                  : (msg.message != null && typeof msg.message === 'object')
+                    ? JSON.stringify(msg.message)
+                    : String(msg.message ?? prev.progress_message ?? '');
+                // Skip update if nothing actually changed — prevents cascading re-renders
+                // during rapid WS messages (large file processing can send many per second)
+                if (prev.status === nextStatus && prev.progress === nextProgress && prev.progress_message === nextMessage) {
+                  return prev;
+                }
+                return { ...prev, status: nextStatus, progress: nextProgress, progress_message: nextMessage };
+              });
+            }
+            // Track clip generation state from status messages — use functional
+            // updater to avoid re-render when value hasn't changed
             if (msg.status === 'detecting_clips') {
-              setIsGeneratingClips(true);
+              setIsGeneratingClips((prev) => prev || true);
             } else if (msg.type === 'complete') {
-              setIsGeneratingClips(false);
+              setIsGeneratingClips((prev) => prev ? false : prev);
             }
             pushLog(
               msg.type === 'complete' ? 'success' : 'status',
@@ -353,11 +680,15 @@ export default function Analysis() {
               { progress: msg.progress },
             );
             if (msg.type === 'complete') {
+              sendNotification('Analysis Complete', {
+                body: msg.message || 'Your video analysis has finished.',
+                tag: `analysis-${jobId}`,
+              });
               fetchJob();
             }
           } else if (msg.type === 'fallback') {
-            pushLog('warning', `Provider fallback: ${msg.from_provider} → ${msg.to_provider} (${msg.reason})`);
-            showToast(`Fallback: ${msg.from_provider} -> ${msg.to_provider}: ${msg.reason}`, 'warning');
+            pushLog('warning', `Provider fallback: ${String(msg.from_provider || '?')} → ${String(msg.to_provider || '?')} (${String(msg.reason || 'unknown')})`);
+            showToast(`Fallback: ${String(msg.from_provider || '?')} -> ${String(msg.to_provider || '?')}: ${String(msg.reason || '')}`, 'warning');
           } else if (msg.type === 'export_complete') {
             const label = msg.clip_id === 0 ? 'Full video' : `Clip ${msg.clip_id}`;
             pushLog('success', `${label} exported`);
@@ -366,10 +697,13 @@ export default function Analysis() {
             // Download is handled by useEncodingManager (global) — do NOT
             // trigger a second download here to avoid duplicate file saves.
           } else if (msg.type === 'clips_generated') {
-            pushLog('success', msg.message || `Generated ${msg.count} clips`);
-            showToast(msg.message || `Found ${msg.count} clip candidates`, 'success');
-            setIsGeneratingClips(false);
+            pushLog('success', String(msg.message || `Generated ${msg.count} clips`));
+            showToast(String(msg.message || `Found ${msg.count} clip candidates`), 'success');
+            setIsGeneratingClips((prev) => prev ? false : prev);
             fetchJob();
+            // Re-run QA validation after new clips are generated
+            setQaResult(null);
+            setTimeout(() => runQaValidation(), 1500);
           } else if (msg.type === 'cancelled') {
             pushLog('warning', 'Job cancelled by user');
             showToast('Job cancelled', 'info');
@@ -377,14 +711,32 @@ export default function Analysis() {
           } else if (msg.type === 'subject_tracking') {
             pushLog(
               msg.enabled ? 'info' : 'warning',
-              msg.message,
+              String(msg.message || ''),
               { tracked_scenes: msg.tracked_scenes, total_scenes: msg.total_scenes },
             );
           } else if (msg.type === 'error') {
-            pushLog('error', msg.message);
-            showToast(msg.message, 'error');
-            setIsGeneratingClips(false);
+            pushLog('error', String(msg.message || 'Unknown error'));
+            showToast(String(msg.message || 'Unknown error'), 'error');
+            setIsGeneratingClips((prev) => prev ? false : prev);
             fetchJob();
+          } else if (msg.type === 'background_task') {
+            // Background post-processing (transcript polishing, translation)
+            const taskName = String(msg.task || 'background');
+            const taskStatus = String(msg.status || 'running');
+            const taskMsg = String(msg.message || `${taskName}: ${taskStatus}`);
+            pushLog(
+              taskStatus === 'complete' ? 'success' : taskStatus === 'failed' ? 'warning' : 'info',
+              taskMsg,
+            );
+            // Refresh job data when background task completes (e.g., polished transcript)
+            if (taskStatus === 'complete') {
+              fetchJob();
+            }
+          } else {
+            // Unknown message type — log but don't crash.  Coerce all fields.
+            const safeType = String(msg.type || 'unknown');
+            const safeMsg = String(msg.message || msg.status || `Received: ${safeType}`);
+            pushLog('info', safeMsg);
           }
         } catch {
         }
@@ -422,17 +774,17 @@ export default function Analysis() {
   // Stuck detection: track when progress_message last changed
   useEffect(() => {
     if (!job || ['complete', 'failed', 'cancelled'].includes(job.status)) {
-      setStuckSeconds(0);
+      setStuckSeconds((prev) => prev === 0 ? prev : 0);
       return;
     }
     const currentMsg = job.progress_message || job.status;
     if (currentMsg !== lastProgressRef.current.message) {
       lastProgressRef.current = { message: currentMsg, time: Date.now() };
-      setStuckSeconds(0);
+      setStuckSeconds((prev) => prev === 0 ? prev : 0);
     }
     const interval = setInterval(() => {
       const elapsed = Math.floor((Date.now() - lastProgressRef.current.time) / 1000);
-      setStuckSeconds(elapsed);
+      setStuckSeconds((prev) => prev === elapsed ? prev : elapsed);
     }, 5000);
     return () => clearInterval(interval);
   }, [job?.progress_message, job?.status]);
@@ -441,7 +793,42 @@ export default function Analysis() {
     if (window.__clipai_seekTo) window.__clipai_seekTo(time);
   };
 
+  // Sync players when switching to/from the Transcript tab (tab 2).
+  // Entering tab 2: pause the sticky player and capture its time so the
+  // transcript tab's inline player can pick up where it left off.
+  // Leaving tab 2: seek the sticky player to where the transcript player was.
+  useEffect(() => {
+    const prev = prevTabRef.current;
+    prevTabRef.current = tab;
+
+    if (tab === 2 && prev !== 2) {
+      // Entering transcript tab — pause sticky player and capture time
+      const stickyVideo = stickyPlayerRef.current?.querySelector('video');
+      const stickyTime = stickyVideo ? stickyVideo.currentTime : videoCurrentTime;
+      if (stickyVideo && !stickyVideo.paused) {
+        stickyVideo.pause();
+      }
+      setTranscriptInitTime(stickyTime);
+    } else if (prev === 2 && tab !== 2) {
+      // Leaving transcript tab — sync sticky player to transcript's current time
+      const stickyVideo = stickyPlayerRef.current?.querySelector('video');
+      if (stickyVideo) {
+        stickyVideo.currentTime = videoCurrentTime;
+      }
+      setTranscriptInitTime(null);
+    }
+  }, [tab]);
+
   const handleClipPreview = (clip) => {
+    // Save current clip's segments before switching
+    if (clipPreview) {
+      clipSegmentsMapRef.current[clipPreview.id] = editorSegments;
+      saveSegmentsToStorage(clipPreview.id, editorSegments);
+    }
+    // Restore segments for the new clip: in-memory cache first, then localStorage
+    const savedSegments = clipSegmentsMapRef.current[clip.id] || loadSegmentsFromStorage(clip.id);
+    clipSegmentsMapRef.current[clip.id] = savedSegments;
+    setEditorSegments(savedSegments);
     setClipPreview(clip);
     handleSeek(clip.start_time);
     setTab(3);
@@ -469,35 +856,71 @@ export default function Analysis() {
       if (cs.aspectRatio) {
         exportBody.aspect_ratio = cs.aspectRatio;
       }
-      exportBody.subtitles_enabled = cs.subtitlesEnabled || false;
-      if (cs.subtitlesEnabled) {
-        exportBody.subtitle_settings = {
-          font: cs.subtitleFont || 'DM Sans',
-          size: cs.subtitleSize ?? 30,
-          font_weight: cs.subtitleFontWeight || 'bold',
-          font_color: cs.subtitleFontColor || '#FFFFFF',
-          position: cs.subtitlePosition || 'bottom',
-          speaker_colors: cs.speakerColors || {},
-          use_speaker_colors: cs.useSpeakerColors ?? true,
-          background_enabled: cs.subtitleBgEnabled ?? false,
-          background_color: cs.subtitleBgColor || '#000000',
-          background_opacity: cs.subtitleBgOpacity ?? 75,
-          background_radius: cs.subtitleBgRadius ?? 0,
-          outline_color: cs.subtitleOutlineColor || '#000000',
-          outline_opacity: cs.subtitleOutlineOpacity ?? 100,
-          outline_width: cs.subtitleOutlineWidth ?? 2,
-          show_speaker_labels: cs.showSpeakerLabels ?? false,
-          max_width: cs.subtitleMaxWidth ?? 90,
-          offset_v: cs.subtitleOffsetV ?? 4,
-          max_words: cs.subtitleMaxWords ?? 0,
-          active_word_enabled: cs.activeWordEnabled ?? false,
-          active_word_color: cs.activeWordColor || '#FFD700',
-          active_word_outline_color: cs.activeWordOutlineColor || '#000000',
-          active_word_bg_color: cs.activeWordBgColor || '#000000',
-          active_word_bg_opacity: cs.activeWordBgOpacity ?? 0,
-        };
+      // Enable subtitles if global is on OR any segment has subtitles enabled
+      const globalSubsOn = cs.subtitlesEnabled || false;
+      const anySegmentSubsOn = editorSegments.some(s => s.subtitlesEnabled !== false);
+      const needsSubtitles = globalSubsOn || anySegmentSubsOn;
+      exportBody.subtitles_enabled = needsSubtitles;
+      exportBody.global_subtitles_enabled = globalSubsOn;
+      if (needsSubtitles) {
+        exportBody.subtitle_settings = mapSubtitleSettings(cs);
       }
     }
+    // Include VideoEditor trim/volume/speed/segments params
+    if (editorTrim.trimStart > 0) exportBody.trim_start_offset = editorTrim.trimStart;
+    if (editorTrim.trimEnd > 0) exportBody.trim_end_offset = editorTrim.trimEnd;
+    if (editorVolume !== 1.0) exportBody.volume = editorVolume;
+    if (editorSpeed !== 1.0) exportBody.speed = editorSpeed;
+    if (editorSegments.length > 0) {
+      exportBody.segments = editorSegments.map(s => ({
+        start: s.start, end: s.end,
+        volume: (s.muted ? 0 : s.volume) / 100, // Convert to 0-2.0 gain
+        muted: s.muted,
+        subtitles_enabled: s.subtitlesEnabled,
+        subject_tracking_enabled: s.subjectTrackingEnabled !== false,
+        speed: s.speed || 1.0,
+      }));
+    }
+    // Include multi-track editor video effects + transform so export matches preview
+    const videoEffects = buildVideoEffectsPayload(timelineItems);
+    if (videoEffects) exportBody.video_effects = videoEffects;
+
+    // Build overlay arrays via shared utility (consistent filtering + validation)
+    const overlays = buildOverlayPayload({
+      timelineItems,
+      mediaLibrary: timelineMediaLibrary,
+      clipStart: clip.start_time,
+      tracks: useTimelineStore.getState().tracks,
+    });
+    if (overlays.textOverlays.length > 0) exportBody.text_overlays = overlays.textOverlays;
+    if (overlays.imageOverlays.length > 0) exportBody.image_overlays = overlays.imageOverlays;
+    if (overlays.shapeOverlays.length > 0) exportBody.shape_overlays = overlays.shapeOverlays;
+    if (overlays.audioOverlays.length > 0) exportBody.audio_overlays = overlays.audioOverlays;
+    if (overlays.compositingOrder?.length > 0) {
+      exportBody.overlay_compositing_order = overlays.compositingOrder;
+    }
+    if (overlays.warnings.length > 0) {
+      for (const w of overlays.warnings) console.warn(`[Export] ${w}`);
+    }
+
+    // Diagnostic logging: full export payload for debugging overlay/settings issues
+    console.log('[Analysis Export] clip:', clip.id, 'payload:', JSON.stringify({
+      aspect_ratio: exportBody.aspect_ratio,
+      subtitles_enabled: exportBody.subtitles_enabled,
+      subtitle_settings: exportBody.subtitle_settings ? 'YES' : 'NO',
+      video_effects: exportBody.video_effects ? 'YES' : 'NO',
+      volume: exportBody.volume,
+      speed: exportBody.speed,
+      trim: [exportBody.trim_start_offset || 0, exportBody.trim_end_offset || 0],
+      segments: exportBody.segments?.length || 0,
+      text_overlays: exportBody.text_overlays?.length || 0,
+      image_overlays: exportBody.image_overlays?.length || 0,
+      shape_overlays: exportBody.shape_overlays?.length || 0,
+      audio_overlays: exportBody.audio_overlays?.length || 0,
+      timelineItems_total: timelineItems.length,
+      timelineItems_types: [...new Set(timelineItems.map(it => it.type))],
+    }));
+
     encoding.startExport(jobId, clip.id, clip.title || `Clip ${clip.id}`, exportBody);
     showToast(`Exporting "${clip.title || `Clip ${clip.id}`}" at ${quality}...`, 'info');
   };
@@ -508,34 +931,56 @@ export default function Analysis() {
     const quality = cs?.exportQuality || '1080p';
     const body = { export_quality: quality };
     if (cs?.aspectRatio) body.aspect_ratio = cs.aspectRatio;
-    body.subtitles_enabled = cs?.subtitlesEnabled || false;
-    if (cs?.subtitlesEnabled) {
-      body.subtitle_settings = {
-        font: cs.subtitleFont || 'DM Sans',
-        size: cs.subtitleSize ?? 30,
-        font_weight: cs.subtitleFontWeight || 'bold',
-        font_color: cs.subtitleFontColor || '#FFFFFF',
-        position: cs.subtitlePosition || 'bottom',
-        speaker_colors: cs.speakerColors || {},
-        use_speaker_colors: cs.useSpeakerColors ?? true,
-        background_enabled: cs.subtitleBgEnabled ?? false,
-        background_color: cs.subtitleBgColor || '#000000',
-        background_opacity: cs.subtitleBgOpacity ?? 75,
-        background_radius: cs.subtitleBgRadius ?? 0,
-        outline_color: cs.subtitleOutlineColor || '#000000',
-        outline_opacity: cs.subtitleOutlineOpacity ?? 100,
-        outline_width: cs.subtitleOutlineWidth ?? 2,
-        show_speaker_labels: cs.showSpeakerLabels ?? false,
-        max_width: cs.subtitleMaxWidth ?? 90,
-        offset_v: cs.subtitleOffsetV ?? 4,
-        max_words: cs.subtitleMaxWords ?? 0,
-        active_word_enabled: cs.activeWordEnabled ?? false,
-        active_word_color: cs.activeWordColor || '#FFD700',
-        active_word_outline_color: cs.activeWordOutlineColor || '#000000',
-        active_word_bg_color: cs.activeWordBgColor || '#000000',
-        active_word_bg_opacity: cs.activeWordBgOpacity ?? 0,
-      };
+    const fvGlobalSubsOn = cs?.subtitlesEnabled || false;
+    const fvAnySegmentSubsOn = editorSegments.some(s => s.subtitlesEnabled !== false);
+    const fvNeedsSubtitles = fvGlobalSubsOn || fvAnySegmentSubsOn;
+    body.subtitles_enabled = fvNeedsSubtitles;
+    body.global_subtitles_enabled = fvGlobalSubsOn;
+    if (fvNeedsSubtitles) {
+      body.subtitle_settings = mapSubtitleSettings(cs);
     }
+    // Include trim/volume/speed from VideoEditor
+    if (fullVideoRange) {
+      body.trim_start_offset = fullVideoRange.start;
+      body.trim_end_offset = (job.duration || 0) - fullVideoRange.end;
+    }
+    if (editorTrim.trimStart > 0) body.trim_start_offset = (body.trim_start_offset || 0) + editorTrim.trimStart;
+    if (editorTrim.trimEnd > 0) body.trim_end_offset = (body.trim_end_offset || 0) + editorTrim.trimEnd;
+    if (editorVolume !== 1.0) body.volume = editorVolume;
+    if (editorSpeed !== 1.0) body.speed = editorSpeed;
+    if (editorSegments.length > 0) {
+      body.segments = editorSegments.map(s => ({
+        start: s.start, end: s.end,
+        volume: (s.muted ? 0 : s.volume) / 100,
+        muted: s.muted,
+        subtitles_enabled: s.subtitlesEnabled,
+        subject_tracking_enabled: s.subjectTrackingEnabled !== false,
+        speed: s.speed || 1.0,
+      }));
+    }
+    // Video effects from multi-track editor
+    const fvVideoEffects = buildVideoEffectsPayload(timelineItems);
+    if (fvVideoEffects) body.video_effects = fvVideoEffects;
+
+    // Build overlay arrays via shared utility
+    // For full-video export, clipStart is 0 (timeline items are already video-relative)
+    const fvOverlays = buildOverlayPayload({
+      timelineItems,
+      mediaLibrary: timelineMediaLibrary,
+      clipStart: 0,
+      tracks: useTimelineStore.getState().tracks,
+    });
+    if (fvOverlays.textOverlays.length > 0) body.text_overlays = fvOverlays.textOverlays;
+    if (fvOverlays.imageOverlays.length > 0) body.image_overlays = fvOverlays.imageOverlays;
+    if (fvOverlays.shapeOverlays.length > 0) body.shape_overlays = fvOverlays.shapeOverlays;
+    if (fvOverlays.audioOverlays.length > 0) body.audio_overlays = fvOverlays.audioOverlays;
+    if (fvOverlays.compositingOrder?.length > 0) {
+      body.overlay_compositing_order = fvOverlays.compositingOrder;
+    }
+    if (fvOverlays.warnings.length > 0) {
+      for (const w of fvOverlays.warnings) console.warn(`[Export] ${w}`);
+    }
+
     encoding.startExport(jobId, 0, job.filename || 'Full Video', body, {
       endpoint: `/api/jobs/${jobId}/export-full-video`,
     });
@@ -571,6 +1016,28 @@ export default function Analysis() {
       showToast('Failed to delete clip', 'error');
     }
   };
+
+  const runQaValidation = useCallback(async () => {
+    if (!jobId) return;
+    setQaLoading(true);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}/qa-validate`);
+      if (res.ok) {
+        const data = await res.json();
+        setQaResult(data);
+      }
+    } catch {
+    } finally {
+      setQaLoading(false);
+    }
+  }, [jobId]);
+
+  // Auto-run QA when analysis completes
+  useEffect(() => {
+    if (job?.status === 'complete' && job?.clips?.length > 0 && !qaResult) {
+      runQaValidation();
+    }
+  }, [job?.status, job?.clips?.length, runQaValidation, qaResult]);
 
   const handleGenerateClips = async () => {
     setIsGeneratingClips(true);
@@ -626,11 +1093,154 @@ export default function Analysis() {
   }, [clipSettings, clipPreview]);
   useEffect(() => () => { if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current); }, []);
 
+  // Determine if playhead is inside a segment — used for segment-aware subs toggle.
+  // MUST be before early returns to satisfy Rules of Hooks.
+  const activeSegment = useMemo(() => {
+    if (!editorSegments || editorSegments.length === 0) return null;
+    return editorSegments.find(s => videoCurrentTime >= s.start && videoCurrentTime < s.end) || null;
+  }, [editorSegments, videoCurrentTime]);
+
+  // Effective subs state: active segment's subtitlesEnabled takes precedence over global
+  const effectiveSubsEnabled = activeSegment ? (activeSegment.subtitlesEnabled !== false) : clipSettings.subtitlesEnabled;
+
+  const handleSubsToggle = useCallback(() => {
+    if (activeSegment) {
+      // Toggle the active segment's subtitlesEnabled
+      const newVal = activeSegment.subtitlesEnabled === false; // flip: false→true, true/undefined→false
+      setEditorSegments(prev =>
+        prev.map(s => s.id === activeSegment.id ? { ...s, subtitlesEnabled: newVal } : s)
+      );
+    } else {
+      setClipSettings(prev => ({ ...prev, subtitlesEnabled: !prev.subtitlesEnabled }));
+    }
+  }, [activeSegment]);
+
   const handleApplyClipSettings = (settings) => {
     setClipSettings(settings);
     showToast('Clip settings applied to preview & export', 'info');
   };
 
+  // Derive unique speakers from transcript — MUST be before early returns
+  // because the useEffect below is a hook and hooks cannot be skipped.
+  const speakers = useMemo(() => {
+    const sp = [];
+    (job?.transcript || []).forEach((seg) => {
+      if (!sp.includes(seg.speaker)) sp.push(seg.speaker);
+    });
+    return sp;
+  }, [job?.transcript]);
+
+  // Auto-initialize speaker colors from palette when speakers are detected
+  // This ensures each speaker gets a unique color even before ClipSettingsPanel mounts
+  // MUST be before early returns to satisfy Rules of Hooks (error #310).
+  useEffect(() => {
+    if (speakers.length === 0) return;
+    setClipSettings((prev) => {
+      const currentColors = prev.speakerColors || {};
+      const needsInit = speakers.some((sp) => !currentColors[sp]);
+      if (!needsInit) return prev;
+      const newColors = { ...currentColors };
+      speakers.forEach((sp, i) => {
+        if (!newColors[sp]) {
+          newColors[sp] = DEFAULT_SPEAKER_PALETTE[i % DEFAULT_SPEAKER_PALETTE.length];
+        }
+      });
+      return { ...prev, speakerColors: newColors };
+    });
+  }, [speakers]);
+
+  // --- Auto-trigger subject tracking when clip or aspect ratio changes ---
+  // Mirrors ViralClips.jsx auto-trigger behavior. When a clip is opened with
+  // a crop aspect ratio, check if AI scene data exists. If not, trigger
+  // background analysis so subject tracking can center the crop on the subject.
+  const prevAnalysisTrackingRef = useRef({ clipId: null, ar: null });
+  const subjectTrackingPollRef = useRef(null);
+  useEffect(() => {
+    // Clean up any previous polling interval
+    if (subjectTrackingPollRef.current) {
+      clearInterval(subjectTrackingPollRef.current);
+      subjectTrackingPollRef.current = null;
+    }
+
+    // Guard: job not loaded yet — skip tracking logic
+    if (!job) return;
+
+    const ar = clipSettings?.aspectRatio;
+    const prev = prevAnalysisTrackingRef.current;
+    const clipId = clipPreview?.id ?? null;
+
+    const clipChanged = clipId !== prev.clipId;
+    const arChanged = ar !== prev.ar;
+    prevAnalysisTrackingRef.current = { clipId, ar };
+
+    // Only act when a clip is open with a crop aspect ratio, and something changed
+    if (!clipPreview || !ar) return;
+    if (!clipChanged && !arChanged) return;
+
+    // Check if this job already has AI-detected per-scene subject positions
+    const scenes = job.scenes || [];
+    const hasAiData = scenes.some((s) => {
+      const sx = typeof s === 'object' ? (s.subject_x ?? 50) : 50;
+      return sx !== 50;
+    });
+
+    let cancelled = false;
+    if (!hasAiData && jobId) {
+      // No AI subject data — trigger background scene analysis
+      console.log('[Analysis] Auto-triggering subject tracking for clip', clipId, 'aspect', ar);
+      fetch(`/api/jobs/${jobId}/recenter-subject`, { method: 'POST' })
+        .then((res) => {
+          if (cancelled || !res.ok) throw new Error('recenter failed');
+          return res.json();
+        })
+        .then((data) => {
+          if (cancelled) return;
+          if (data.status === 'reanalyzing') {
+            showToast('Analyzing subject position...', 'info');
+            // Poll for completion
+            const poll = setInterval(async () => {
+              if (cancelled) { clearInterval(poll); return; }
+              try {
+                const jr = await fetch(`/api/jobs/${jobId}`, { cache: 'no-store' });
+                if (!jr.ok) return;
+                const jd = await jr.json();
+                const sxVals = (jd.scenes || []).map((s) => s.subject_x);
+                if (sxVals.some((v) => v !== 50)) {
+                  clearInterval(poll);
+                  subjectTrackingPollRef.current = null;
+                  // Refresh job data so scenes are updated
+                  await fetchJob();
+                  showToast('Subject tracking applied', 'success');
+                }
+              } catch { /* ignore polling errors */ }
+            }, 3000);
+            subjectTrackingPollRef.current = poll;
+            // Timeout after 2 minutes
+            setTimeout(() => { clearInterval(poll); subjectTrackingPollRef.current = null; }, 120000);
+          } else {
+            // Data already exists — refresh job
+            fetchJob();
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) console.warn('[Analysis] Subject tracking auto-trigger failed:', err);
+        });
+    }
+
+    return () => {
+      cancelled = true;
+      if (subjectTrackingPollRef.current) {
+        clearInterval(subjectTrackingPollRef.current);
+        subjectTrackingPollRef.current = null;
+      }
+    };
+  }, [clipPreview?.id, clipSettings?.aspectRatio, job?.scenes]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ══════════════════════════════════════════════════════════════════
+  // !! ALL React hooks (useState, useEffect, useRef, useMemo,
+  // !! useCallback) MUST be declared ABOVE this line.
+  // !! Moving hooks below causes React error #310 on page load.
+  // ══════════════════════════════════════════════════════════════════
   if (loading) {
     return (
       <div style={{ textAlign: 'center', padding: 48, color: 'var(--text-secondary)' }}>
@@ -668,12 +1278,6 @@ export default function Analysis() {
   const clipSubjectX = clipPreview && job.scenes?.length
     ? computeClipSubjectX(job.scenes, clipPreview.start_time, clipPreview.end_time)
     : 50;
-
-  // Derive unique speakers from transcript
-  const speakers = [];
-  (job.transcript || []).forEach((seg) => {
-    if (!speakers.includes(seg.speaker)) speakers.push(seg.speaker);
-  });
 
   // Always use ClipPreview when a clip is selected so it responds to
   // aspect ratio and subtitle settings changes in real time.
@@ -716,28 +1320,605 @@ export default function Analysis() {
     return b.viral_score - a.viral_score;
   });
 
+  // ── Inline subtitle settings toolbar + panel (shared by both editors) ──
+  const builtinFonts = [
+    'DM Sans', 'Montserrat', 'Open Sans', 'Roboto', 'Poppins', 'Inter',
+    'Nunito', 'Lato', 'Oswald', 'Playfair Display', 'Bebas Neue',
+    'Liberation Sans', 'Liberation Serif', 'Liberation Mono',
+    'DejaVu Sans', 'DejaVu Serif', 'DejaVu Sans Mono', 'FreeSans',
+  ];
+  const inlineLabelStyle = { fontSize: 10, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' };
+  const inlineFieldStyle = { display: 'flex', flexDirection: 'column', gap: 3, minWidth: 80 };
+  const inlineChipStyle = (active) => ({
+    padding: '4px 8px', fontSize: 10, fontWeight: 600,
+    background: active ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+    color: active ? '#fff' : 'var(--text-secondary)',
+    border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer',
+  });
+  const updateCS = (key, val) => setClipSettings(prev => ({ ...prev, [key]: val }));
+
+  // ── Preset helpers for inline bar ──
+  const handleInlineSavePreset = async () => {
+    const name = inlinePresetName.trim();
+    if (!name) return;
+    const { speakerColors, ...settingsToSave } = clipSettings;
+    try {
+      const res = await fetch('/api/clip-presets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, settings: settingsToSave }),
+      });
+      if (res.ok) {
+        const preset = await res.json();
+        setClipPresets(prev => [...prev, preset]);
+        setInlinePresetName('');
+        setInlinePresetSaveOpen(false);
+        setInlineActivePreset(preset.name);
+        showToast(`Preset "${name}" saved`, 'success');
+      }
+    } catch { showToast('Failed to save preset', 'error'); }
+  };
+
+  const handleInlineLoadPreset = (presetId) => {
+    if (!presetId) return;
+    const preset = clipPresets.find(p => p.id === presetId);
+    if (!preset) return;
+    const merged = { ...clipSettings, ...sanitizeSubtitleSettings(preset.settings), speakerColors: clipSettings.speakerColors };
+    setClipSettings(merged);
+    setInlineActivePreset(preset.name);
+    showToast(`Preset "${preset.name}" loaded — speed: ${merged.playbackSpeed || 1}x, volume: ${merged.playbackVolume ?? 100}%`, 'info');
+  };
+
+  const handleApplyPresetToSegment = (presetId) => {
+    if (!activeSegment) {
+      showToast('No segment selected — place the playhead inside a timeline segment', 'warning');
+      return;
+    }
+    const preset = presetId ? clipPresets.find(p => p.id === presetId) : null;
+    const settingsToApply = preset ? { ...clipSettings, ...sanitizeSubtitleSettings(preset.settings), speakerColors: clipSettings.speakerColors } : clipSettings;
+    setEditorSegments(prev =>
+      prev.map(s => s.id === activeSegment.id ? {
+        ...s,
+        subtitlesEnabled: settingsToApply.subtitlesEnabled,
+        playbackSpeed: settingsToApply.playbackSpeed,
+        playbackVolume: settingsToApply.playbackVolume,
+        aspectRatio: settingsToApply.aspectRatio,
+        exportQuality: settingsToApply.exportQuality,
+        subtitleSettings: settingsToApply,
+      } : s)
+    );
+    if (preset) setClipSettings(settingsToApply);
+    showToast(`Settings applied to segment at ${formatDuration(activeSegment.start)}`, 'success');
+  };
+
+  const handleInlineDeletePreset = async (presetId) => {
+    const preset = clipPresets.find(p => p.id === presetId);
+    try {
+      const res = await fetch(`/api/clip-presets/${presetId}`, { method: 'DELETE' });
+      if (res.ok) {
+        setClipPresets(prev => prev.filter(p => p.id !== presetId));
+        if (preset && preset.name === inlineActivePreset) setInlineActivePreset('');
+        showToast(`Preset deleted`, 'success');
+      }
+    } catch {}
+  };
+
+  // ── Preset Bar (rendered below subtitle toolbar) ──
+  const renderPresetBar = () => (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '6px 12px',
+      background: 'var(--bg-panel)', borderTop: '1px solid var(--border)',
+      flexWrap: isMobile ? 'nowrap' : 'wrap', marginTop: -1,
+      overflowX: isMobile ? 'auto' : undefined,
+      WebkitOverflowScrolling: isMobile ? 'touch' : undefined,
+      scrollbarWidth: isMobile ? 'none' : undefined,
+      opacity: isProcessing ? 0.4 : 1,
+      pointerEvents: isProcessing ? 'none' : 'auto',
+    }}>
+      {/* Label */}
+      <span style={{
+        fontSize: 10, fontWeight: 600, color: 'var(--text-muted)',
+        textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap',
+      }}>Presets</span>
+
+      {/* Load dropdown */}
+      <select
+        value=""
+        onChange={(e) => handleInlineLoadPreset(e.target.value)}
+        style={{
+          padding: '4px 8px', fontSize: 11, minWidth: 140,
+          borderRadius: 'var(--radius-sm)',
+          background: 'var(--bg-elevated)', color: 'var(--text-primary)',
+          border: '1px solid var(--border)',
+        }}
+      >
+        <option value="">Load preset...</option>
+        {clipPresets.map(p => (
+          <option key={p.id} value={p.id}>{String(p.name || '')}</option>
+        ))}
+      </select>
+
+      {/* Save button */}
+      <button
+        onClick={() => setInlinePresetSaveOpen(v => !v)}
+        title="Save current settings as a preset"
+        style={{
+          padding: '4px 10px', fontSize: 10, fontWeight: 600,
+          background: inlinePresetSaveOpen ? 'var(--accent-cyan-dim)' : 'var(--bg-elevated)',
+          color: inlinePresetSaveOpen ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+          border: `1px solid ${inlinePresetSaveOpen ? 'var(--accent-cyan)' : 'var(--border)'}`,
+          borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
+        }}
+      >
+        + Save
+      </button>
+
+      {/* Apply to segment button */}
+      <button
+        onClick={() => handleApplyPresetToSegment(null)}
+        title={activeSegment ? `Apply current settings to segment at ${formatDuration(activeSegment.start)}` : 'Place playhead inside a segment first'}
+        style={{
+          padding: '4px 10px', fontSize: 10, fontWeight: 600,
+          background: activeSegment ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+          color: activeSegment ? '#fff' : 'var(--text-muted)',
+          border: 'none',
+          borderRadius: 'var(--radius-sm)',
+          cursor: activeSegment ? 'pointer' : 'default',
+          opacity: activeSegment ? 1 : 0.5,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        Apply to Segment
+      </button>
+
+      {/* Active preset indicator */}
+      {inlineActivePreset && (
+        <span style={{
+          fontSize: 10, fontFamily: 'var(--font-mono)',
+          color: 'var(--accent-cyan)', whiteSpace: 'nowrap',
+        }}>
+          Active: {String(inlineActivePreset || '')}
+        </span>
+      )}
+
+      {/* Delete dropdown — only when presets exist */}
+      {clipPresets.length > 0 && (
+        <select
+          value=""
+          onChange={(e) => { if (e.target.value) handleInlineDeletePreset(e.target.value); }}
+          title="Delete a preset"
+          style={{
+            marginLeft: isMobile ? undefined : 'auto',
+            padding: '4px 6px', fontSize: 10,
+            borderRadius: 'var(--radius-sm)',
+            background: 'var(--bg-elevated)', color: 'var(--text-muted)',
+            border: '1px solid var(--border)', maxWidth: 100,
+          }}
+        >
+          <option value="">Delete...</option>
+          {clipPresets.map(p => (
+            <option key={p.id} value={p.id}>{String(p.name || '')}</option>
+          ))}
+        </select>
+      )}
+
+      {/* Save input row (conditionally shown) */}
+      {inlinePresetSaveOpen && (
+        <div style={{ width: '100%', display: 'flex', gap: 6, marginTop: 4 }}>
+          <input
+            type="text"
+            placeholder="Preset name..."
+            value={inlinePresetName}
+            onChange={(e) => setInlinePresetName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleInlineSavePreset(); }}
+            autoFocus
+            style={{
+              flex: 1, padding: '5px 8px', fontSize: 11,
+              fontFamily: 'var(--font-mono)',
+              background: 'var(--bg-elevated)', color: 'var(--accent-cyan)',
+              border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+              outline: 'none',
+            }}
+          />
+          <button
+            onClick={handleInlineSavePreset}
+            disabled={!inlinePresetName.trim()}
+            style={{
+              padding: '5px 12px', fontSize: 10, fontWeight: 600,
+              background: inlinePresetName.trim() ? 'var(--accent-cyan)' : 'var(--bg-elevated)',
+              color: inlinePresetName.trim() ? '#fff' : 'var(--text-muted)',
+              border: 'none', borderRadius: 'var(--radius-sm)',
+              cursor: inlinePresetName.trim() ? 'pointer' : 'default',
+            }}
+          >
+            Save
+          </button>
+        </div>
+      )}
+    </div>
+  );
+
+  const renderInlineSubToolbar = (extraLeft) => (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
+      background: 'var(--bg-panel)', borderRadius: '0 0 var(--radius-md) var(--radius-md)',
+      borderTop: '1px solid var(--border)', flexWrap: 'wrap', marginTop: -1,
+      justifyContent: isMobile ? 'center' : undefined,
+      opacity: isProcessing ? 0.4 : 1,
+      pointerEvents: isProcessing ? 'none' : 'auto',
+    }}>
+      {extraLeft}
+      <button
+        onClick={handleSubsToggle}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 4,
+          padding: '5px 10px', fontSize: 11, fontWeight: 600,
+          background: effectiveSubsEnabled ? 'var(--accent-cyan-dim)' : 'var(--bg-elevated)',
+          color: effectiveSubsEnabled ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+          border: `1px solid ${effectiveSubsEnabled ? 'var(--accent-cyan)' : 'var(--border)'}`,
+          borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
+        }}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="1" y="4" width="22" height="16" rx="2" /><line x1="1" y1="14" x2="23" y2="14" />
+        </svg>
+        {activeSegment ? 'Segment ' : ''}Subs {effectiveSubsEnabled ? 'On' : 'Off'}
+      </button>
+      <button
+        onClick={() => !isProcessing && setShowInlineSubSettings(v => !v)}
+        disabled={isProcessing}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 3,
+          padding: '5px 8px', fontSize: 10, fontWeight: 500,
+          background: showInlineSubSettings ? 'var(--accent-cyan-dim)' : 'transparent',
+          color: 'var(--text-muted)',
+          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+          cursor: isProcessing ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+          opacity: isProcessing ? 0.4 : 1,
+        }}>
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+        </svg>
+        {showInlineSubSettings ? 'Hide Settings' : 'Subtitle Settings'}
+      </button>
+      {/* Mark Key Scene — adds current playhead position as a keyscene for AI clip generation */}
+      <button
+        onClick={() => !isProcessing && setShowMarkScene(v => !v)}
+        disabled={isProcessing}
+        title={isProcessing ? 'Available after analysis completes' : 'Mark current moment as a key scene for AI clip generation'}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 4,
+          padding: '5px 10px', fontSize: 11, fontWeight: 600,
+          background: showMarkScene ? 'var(--accent-amber-dim, rgba(255,159,10,0.12))' : 'var(--bg-elevated)',
+          color: showMarkScene ? 'var(--accent-amber, #FF9F0A)' : 'var(--text-secondary)',
+          border: `1px solid ${showMarkScene ? 'var(--accent-amber, #FF9F0A)' : 'var(--border)'}`,
+          borderRadius: 'var(--radius-sm)', cursor: isProcessing ? 'not-allowed' : 'pointer', whiteSpace: 'nowrap',
+          opacity: isProcessing ? 0.4 : 1,
+        }}>
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
+        </svg>
+        Mark Key Scene
+      </button>
+      {/* Apply Settings — confirms to user that current settings will be used for export */}
+      <button
+        onClick={() => {
+          setSettingsAppliedFlash(true);
+          if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current);
+          settingsAppliedTimerRef.current = setTimeout(() => setSettingsAppliedFlash(false), 2500);
+          showToast('Settings applied — your exported video will use these subtitle settings', 'info');
+        }}
+        style={{
+          marginLeft: isMobile ? undefined : 'auto',
+          display: 'flex', alignItems: 'center', gap: 4,
+          padding: '5px 12px', fontSize: 11, fontWeight: 600,
+          background: settingsAppliedFlash ? 'var(--success)' : 'var(--bg-elevated)',
+          color: settingsAppliedFlash ? '#fff' : 'var(--text-secondary)',
+          border: `1px solid ${settingsAppliedFlash ? 'var(--success)' : 'var(--border)'}`,
+          borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
+          transition: 'all 0.2s ease',
+        }}>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+          {settingsAppliedFlash
+            ? <polyline points="20 6 9 17 4 12" />
+            : <><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></>
+          }
+        </svg>
+        {settingsAppliedFlash ? 'Settings Applied' : 'Apply Settings'}
+      </button>
+    </div>
+  );
+
+  const renderMarkScenePanel = () => {
+    if (!showMarkScene) return null;
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
+        background: 'var(--bg-panel)', borderTop: '1px solid var(--border)',
+        flexWrap: 'wrap', marginTop: -1,
+      }}>
+        <span style={{
+          fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--accent-amber, #FF9F0A)',
+          textTransform: 'uppercase', letterSpacing: '0.05em', whiteSpace: 'nowrap',
+        }}>
+          {formatDuration(videoCurrentTime)}
+        </span>
+        <input
+          type="text"
+          value={markSceneDesc}
+          onChange={(e) => setMarkSceneDesc(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') handleMarkKeyScene(); }}
+          placeholder="Describe this moment (e.g. 'dramatic reveal', 'emotional reaction')..."
+          style={{
+            flex: 1, minWidth: 180, padding: '5px 10px', fontSize: 12,
+            background: 'var(--bg-elevated)', color: 'var(--text-primary)',
+            border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+            outline: 'none',
+          }}
+          autoFocus
+        />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ fontSize: 10, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>Score:</span>
+          <select
+            value={markSceneScore}
+            onChange={(e) => setMarkSceneScore(parseInt(e.target.value))}
+            style={{
+              padding: '4px 6px', fontSize: 11, background: 'var(--bg-elevated)',
+              color: 'var(--text-primary)', border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+            }}
+          >
+            {[10, 9, 8, 7, 6, 5, 4, 3, 2, 1].map(v => (
+              <option key={v} value={v}>{v}{v >= 9 ? ' - viral' : v >= 7 ? ' - compelling' : v >= 4 ? ' - interesting' : ''}</option>
+            ))}
+          </select>
+        </div>
+        <button
+          onClick={handleMarkKeyScene}
+          disabled={markSceneSaving || !markSceneDesc.trim()}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 4,
+            padding: '5px 12px', fontSize: 11, fontWeight: 600,
+            background: markSceneDesc.trim() ? 'var(--accent-amber, #FF9F0A)' : 'var(--bg-elevated)',
+            color: markSceneDesc.trim() ? '#fff' : 'var(--text-muted)',
+            border: 'none', borderRadius: 'var(--radius-sm)',
+            cursor: markSceneDesc.trim() ? 'pointer' : 'not-allowed',
+            whiteSpace: 'nowrap', opacity: markSceneSaving ? 0.6 : 1,
+          }}
+        >
+          {markSceneSaving ? 'Saving...' : 'Add'}
+        </button>
+        <button
+          onClick={() => { setShowMarkScene(false); setMarkSceneDesc(''); }}
+          style={{
+            padding: '5px 8px', fontSize: 11, background: 'transparent',
+            color: 'var(--text-muted)', border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+    );
+  };
+
+  const renderInlineSubPanel = () => {
+    if (!showInlineSubSettings) return null;
+    return (
+      <div style={{
+        padding: isMobile ? '8px 10px' : '12px 16px', background: 'var(--bg-panel)',
+        border: '1px solid var(--border)', borderTop: 'none',
+        borderRadius: '0 0 var(--radius-md) var(--radius-md)',
+      }}>
+        {/* Row 1: Font, Size, Weight, Color */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: isMobile ? 8 : 12, alignItems: 'flex-end', marginBottom: 10 }}>
+          <div style={{ ...inlineFieldStyle, minWidth: isMobile ? 90 : 120 }}>
+            <label style={inlineLabelStyle}>Font</label>
+            <select value={clipSettings.subtitleFont || 'DM Sans'} onChange={e => updateCS('subtitleFont', e.target.value)}
+              style={{ padding: '5px 8px', fontSize: 12, borderRadius: 'var(--radius-xs)', border: '1px solid var(--border)', background: 'var(--bg-elevated)', color: 'var(--text-primary)' }}>
+              {builtinFonts.map(f => <option key={f} value={f}>{f}</option>)}
+              {inlineCustomFonts.length > 0 && (
+                <optgroup label="Custom Fonts">
+                  {inlineCustomFonts.map(f => <option key={f.name} value={f.name}>{String(f.name ?? '')}</option>)}
+                </optgroup>
+              )}
+            </select>
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Size</label>
+            <div style={{ display: 'flex', gap: 2 }}>
+              {[{ l: 'S', v: 22 }, { l: 'M', v: 30 }, { l: 'L', v: 40 }].map(s => (
+                <button key={s.v} onClick={() => updateCS('subtitleSize', s.v)} style={inlineChipStyle((clipSettings.subtitleSize || 30) === s.v)}>{s.l}</button>
+              ))}
+            </div>
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Weight</label>
+            <div style={{ display: 'flex', gap: 2 }}>
+              {[{ v: 400, l: 'Regular' }, { v: 700, l: 'Bold' }].map(w => {
+                const cur = typeof clipSettings.subtitleFontWeight === 'number' ? clipSettings.subtitleFontWeight : (clipSettings.subtitleFontWeight === 'bold' ? 700 : 400);
+                return (
+                  <button key={w.v} onClick={() => updateCS('subtitleFontWeight', w.v)}
+                    style={{ ...inlineChipStyle(cur === w.v), fontWeight: w.v }}>{w.l}</button>
+                );
+              })}
+            </div>
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Color</label>
+            <input type="color" value={clipSettings.subtitleFontColor || '#FFFFFF'} onChange={e => updateCS('subtitleFontColor', e.target.value)}
+              style={{ width: 32, height: 28, border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer', padding: 1 }} />
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Position</label>
+            <div style={{ display: 'flex', gap: 2 }}>
+              {['top', 'center', 'bottom'].map(p => (
+                <button key={p} onClick={() => updateCS('subtitlePosition', p)} style={{ ...inlineChipStyle((clipSettings.subtitlePosition || 'bottom') === p), textTransform: 'capitalize' }}>{p}</button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* Row 2: Max Width, Offset, Outline, Max Words */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: isMobile ? 8 : 12, alignItems: 'flex-end', marginBottom: 10 }}>
+          <div style={{ ...inlineFieldStyle, minWidth: isMobile ? 90 : 120 }}>
+            <label style={inlineLabelStyle}>Max Width</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="range" min="20" max="100" step="5" value={Math.min(100, Math.max(20, clipSettings.subtitleMaxWidth))}
+                onChange={e => updateCS('subtitleMaxWidth', parseInt(e.target.value))}
+                style={{ flex: 1, accentColor: 'var(--accent-cyan)', minWidth: 60 }} />
+              <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 28, textAlign: 'right' }}>{String(clipSettings.subtitleMaxWidth ?? '')}%</span>
+            </div>
+          </div>
+          <div style={{ ...inlineFieldStyle, minWidth: 100 }}>
+            <label style={inlineLabelStyle}>Vertical Offset</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="range" min="0" max="40" step="1" value={clipSettings.subtitleOffsetV ?? 4}
+                onChange={e => updateCS('subtitleOffsetV', parseInt(e.target.value))}
+                style={{ flex: 1, accentColor: 'var(--accent-cyan)', minWidth: 60 }} />
+              <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 28, textAlign: 'right' }}>{String(clipSettings.subtitleOffsetV ?? 4)}%</span>
+            </div>
+          </div>
+          <div style={{ ...inlineFieldStyle, minWidth: 100 }}>
+            <label style={inlineLabelStyle}>Outline</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="range" min="0" max="10" step="1" value={clipSettings.subtitleOutlineWidth ?? 2}
+                onChange={e => updateCS('subtitleOutlineWidth', parseInt(e.target.value))}
+                style={{ flex: 1, accentColor: 'var(--accent-cyan)', minWidth: 60 }} />
+              <input type="color" value={clipSettings.subtitleOutlineColor || '#000000'} onChange={e => updateCS('subtitleOutlineColor', e.target.value)}
+                style={{ width: 24, height: 22, border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer', padding: 1 }} />
+            </div>
+          </div>
+          <div style={{ ...inlineFieldStyle, minWidth: 80 }}>
+            <label style={inlineLabelStyle}>Max Words</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <input type="range" min="0" max="12" step="1" value={clipSettings.subtitleMaxWords ?? 0}
+                onChange={e => updateCS('subtitleMaxWords', parseInt(e.target.value))}
+                style={{ flex: 1, accentColor: 'var(--accent-cyan)', minWidth: 50 }} />
+              <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', minWidth: 20, textAlign: 'right' }}>{typeof clipSettings.subtitleMaxWords === 'number' ? (clipSettings.subtitleMaxWords || 'Off') : 'Off'}</span>
+            </div>
+          </div>
+        </div>
+
+        {/* Row 3: Background, Active Word, Speaker Labels */}
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: isMobile ? 8 : 12, alignItems: 'flex-end' }}>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Background</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <button onClick={() => updateCS('subtitleBgEnabled', !clipSettings.subtitleBgEnabled)}
+                style={inlineChipStyle(clipSettings.subtitleBgEnabled)}>
+                {clipSettings.subtitleBgEnabled ? 'On' : 'Off'}
+              </button>
+              {clipSettings.subtitleBgEnabled && (
+                <>
+                  <input type="color" value={clipSettings.subtitleBgColor || '#000000'} onChange={e => updateCS('subtitleBgColor', e.target.value)}
+                    style={{ width: 24, height: 22, border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer', padding: 1 }} />
+                  <input type="range" min="0" max="100" step="5" value={clipSettings.subtitleBgOpacity ?? 75}
+                    onChange={e => updateCS('subtitleBgOpacity', parseInt(e.target.value))}
+                    style={{ width: 50, accentColor: 'var(--accent-cyan)' }} />
+                </>
+              )}
+            </div>
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Active Word</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+              <button onClick={() => updateCS('activeWordEnabled', !clipSettings.activeWordEnabled)}
+                style={inlineChipStyle(clipSettings.activeWordEnabled)}>
+                {clipSettings.activeWordEnabled ? 'On' : 'Off'}
+              </button>
+              {clipSettings.activeWordEnabled && (
+                <input type="color" value={clipSettings.activeWordColor || '#FFD700'} onChange={e => updateCS('activeWordColor', e.target.value)}
+                  style={{ width: 24, height: 22, border: '1px solid var(--border)', borderRadius: 'var(--radius-xs)', cursor: 'pointer', padding: 1 }} />
+              )}
+            </div>
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Speaker Labels</label>
+            <button onClick={() => updateCS('showSpeakerLabels', !(clipSettings.showSpeakerLabels ?? false))}
+              style={inlineChipStyle(clipSettings.showSpeakerLabels ?? false)}>
+              {(clipSettings.showSpeakerLabels ?? false) ? 'On' : 'Off'}
+            </button>
+          </div>
+          <div style={inlineFieldStyle}>
+            <label style={inlineLabelStyle}>Speaker Colors</label>
+            <button onClick={() => updateCS('useSpeakerColors', !(clipSettings.useSpeakerColors ?? true))}
+              style={inlineChipStyle(clipSettings.useSpeakerColors ?? true)}>
+              {(clipSettings.useSpeakerColors ?? true) ? 'On' : 'Off'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div>
-      {/* Video Player (sticky) */}
-      <div style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg-base)' }}>
+      {/* Video Player (sticky) — hidden on Transcript tab where we show side-by-side layout */}
+      <div ref={stickyPlayerRef} style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg-base)', display: (tab === 2 && !showExportPreview) ? 'none' : 'block' }}>
         {showExportPreview ? (
-          <div style={{ position: 'relative' }}>
-            <ClipPreview
+          <div style={{ position: 'relative', width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto' }}>
+            <VideoEditorBoundary>
+            <VideoEditor
               src={videoSrc}
               clipStart={clipPreview.start_time}
               clipEnd={clipPreview.end_time}
-              title={clipPreview.title || `Clip ${clipPreview.id}`}
+              title={String(clipPreview.title || `Clip ${clipPreview.id}`)}
               aspectRatio={clipSettings.aspectRatio || null}
               sourceWidth={sourceDims.w}
               sourceHeight={sourceDims.h}
               subjectX={clipSubjectX}
               scenes={job.scenes || []}
-              subtitlesEnabled={clipSettings.subtitlesEnabled || false}
-              subtitleSettings={clipSettings}
-              transcript={job.transcript || []}
-              onClose={() => setClipPreview(null)}
-              inline
+              initialVolume={clipSettings.playbackVolume}
+              initialSpeed={clipSettings.playbackSpeed}
+              onTimeUpdate={setVideoCurrentTime}
+              onTrimChange={setEditorTrim}
+              onApplyTrim={({ start, end }) => {
+                setClipPreview((prev) => prev ? { ...prev, start_time: start, end_time: end } : prev);
+                setEditorTrim({ trimStart: 0, trimEnd: 0 });
+                showToast('Trim applied — clip range updated', 'info');
+              }}
+              onAspectRatioChange={(ar) => setClipSettings((prev) => ({ ...prev, aspectRatio: ar }))}
+              onVolumeChange={setEditorVolume}
+              onSpeedChange={setEditorSpeed}
+              onSegmentsChange={(segs) => {
+                setEditorSegments(segs);
+                if (clipPreview) {
+                  clipSegmentsMapRef.current[clipPreview.id] = segs;
+                  saveSegmentsToStorage(clipPreview.id, segs);
+                }
+              }}
+              initialSegments={editorSegments}
+              settings={clipSettings}
+              speakers={speakers}
+              speakerNames={job.speaker_names}
+              onSettingsChange={setClipSettings}
+              jobId={jobId}
+              clipId={clipPreview.id}
+              transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
+              onTranscriptUpdated={fetchJob}
+              isProcessing={isProcessing}
+              onClose={() => {
+                if (clipPreview) {
+                  clipSegmentsMapRef.current[clipPreview.id] = editorSegments;
+                  saveSegmentsToStorage(clipPreview.id, editorSegments);
+                }
+                setClipPreview(null);
+              }}
+              subtitleOverlay={
+                <SubtitleOverlay
+                  currentTime={videoCurrentTime}
+                  transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
+                  clipStart={clipPreview.start_time}
+                  clipEnd={clipPreview.end_time}
+                  settings={clipSettings}
+                  aspectRatio={clipSettings.aspectRatio || null}
+                  sourceWidth={sourceDims.w}
+                  sourceHeight={sourceDims.h}
+                  segments={editorSegments}
+                />
+              }
             />
+            </VideoEditorBoundary>
             {/* Auto-applied settings indicator */}
             {settingsAppliedFlash && (
               <div style={{
@@ -759,18 +1940,91 @@ export default function Analysis() {
                 Settings applied to preview
               </div>
             )}
+            {/* Inline subtitle settings for clip preview */}
+            {renderInlineSubToolbar(null)}
+            {renderPresetBar()}
+            {renderMarkScenePanel()}
+            {renderInlineSubPanel()}
           </div>
         ) : (
-          <VideoPlayer
-            src={videoSrc}
-            clipStart={clipPreview?.start_time}
-            clipEnd={clipPreview?.end_time}
-            aspectRatio={clipSettings.aspectRatio || null}
-            sourceWidth={sourceDims.w}
-            sourceHeight={sourceDims.h}
-            subjectX={clipSubjectX}
-            scenes={job.scenes || []}
-          />
+          <div style={{ width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto' }}>
+            <VideoEditorBoundary>
+            <VideoEditor
+              src={videoSrc}
+              clipStart={fullVideoRange ? fullVideoRange.start : 0}
+              clipEnd={fullVideoRange ? fullVideoRange.end : (job.duration || 0)}
+              title={String(job.filename || 'Full Video')}
+              aspectRatio={clipSettings.aspectRatio || null}
+              sourceWidth={sourceDims.w}
+              sourceHeight={sourceDims.h}
+              subjectX={50}
+              scenes={job.scenes || []}
+              initialVolume={clipSettings.playbackVolume}
+              initialSpeed={clipSettings.playbackSpeed}
+              onTimeUpdate={setVideoCurrentTime}
+              onTrimChange={setEditorTrim}
+              onApplyTrim={({ start, end }) => {
+                setFullVideoRange({ start, end });
+                setEditorTrim({ trimStart: 0, trimEnd: 0 });
+                showToast('Trim applied — video range updated', 'info');
+              }}
+              onAspectRatioChange={(ar) => setClipSettings((prev) => ({ ...prev, aspectRatio: ar }))}
+              onVolumeChange={setEditorVolume}
+              onSpeedChange={setEditorSpeed}
+              onSegmentsChange={(segs) => {
+                setEditorSegments(segs);
+                saveSegmentsToStorage('full', segs);
+              }}
+              initialSegments={editorSegments}
+              settings={clipSettings}
+              speakers={speakers}
+              speakerNames={job.speaker_names}
+              onSettingsChange={setClipSettings}
+              jobId={jobId}
+              transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
+              onTranscriptUpdated={fetchJob}
+              isProcessing={isProcessing}
+              subtitleOverlay={
+                <SubtitleOverlay
+                  currentTime={videoCurrentTime}
+                  transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
+                  clipStart={fullVideoRange ? fullVideoRange.start : 0}
+                  clipEnd={fullVideoRange ? fullVideoRange.end : (job.duration || 0)}
+                  settings={clipSettings}
+                  aspectRatio={clipSettings.aspectRatio || null}
+                  sourceWidth={sourceDims.w}
+                  sourceHeight={sourceDims.h}
+                  segments={editorSegments}
+                />
+              }
+            />
+            </VideoEditorBoundary>
+
+            {/* ── Inline Editor Toolbar: Export + Subtitle Settings ── */}
+            {renderInlineSubToolbar(
+              <>
+                {fullVideoExporting ? (
+                  <span style={{ fontSize: 11, color: 'var(--accent-cyan)', fontFamily: 'var(--font-mono)' }}>Exporting...</span>
+                ) : (
+                  <button onClick={handleExportFullVideo} style={{
+                    display: 'flex', alignItems: 'center', gap: 5,
+                    padding: '6px 14px', fontSize: 11, fontWeight: 700,
+                    background: 'var(--accent-cyan)', color: '#fff',
+                    border: 'none', borderRadius: 'var(--radius-sm)', cursor: 'pointer', whiteSpace: 'nowrap',
+                  }}>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
+                    </svg>
+                    Export Full Video ({clipSettings?.exportQuality || '1080p'})
+                  </button>
+                )}
+                <div style={{ width: 1, height: 20, background: 'var(--border)', margin: '0 4px' }} />
+              </>
+            )}
+            {renderPresetBar()}
+            {renderMarkScenePanel()}
+            {renderInlineSubPanel()}
+          </div>
         )}
         {/* Export button — visible when a clip is loaded in the preview player */}
         {showExportPreview && clipPreview && (
@@ -807,75 +2061,6 @@ export default function Analysis() {
             </button>
           </div>
         )}
-        {/* Subject tracking controls */}
-        {job.scenes?.length > 0 && (
-          <div style={{ display: 'flex', gap: 8, padding: '6px 0', alignItems: 'center', flexWrap: 'wrap' }}>
-            <button
-              onClick={async () => {
-                try {
-                  const res = await fetch(`/api/jobs/${jobId}/recenter-subject`, { method: 'POST' });
-                  if (res.ok) {
-                    showToast('Subject reset to center — the crop will center on the subject in preview and export', 'success');
-                    await fetchJob();
-                  } else {
-                    showToast('Failed to reset subject position', 'error');
-                  }
-                } catch {
-                  showToast('Failed to reset subject position', 'error');
-                }
-              }}
-              style={{
-                padding: '5px 14px',
-                fontSize: 11,
-                fontWeight: 600,
-                background: 'var(--bg-elevated)',
-                color: 'var(--accent-cyan)',
-                border: '1px solid var(--accent-cyan)',
-                borderRadius: 'var(--radius-sm)',
-                cursor: 'pointer',
-                fontFamily: 'var(--font-mono)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.03em',
-              }}
-            >
-              Reset Subject to Center
-            </button>
-            <button
-              onClick={async () => {
-                try {
-                  showToast('Re-analyzing subject positions with AI — this may take a moment...', 'info');
-                  const res = await fetch(`/api/jobs/${jobId}/reanalyze-subject`, { method: 'POST' });
-                  if (res.ok) {
-                    showToast('AI is re-analyzing subject positions — updates will appear when complete', 'info');
-                  } else {
-                    const err = await res.json().catch(() => ({}));
-                    showToast(err.detail || 'Failed to start re-analysis', 'error');
-                  }
-                } catch {
-                  showToast('Failed to start re-analysis', 'error');
-                }
-              }}
-              style={{
-                padding: '5px 14px',
-                fontSize: 11,
-                fontWeight: 600,
-                background: 'var(--accent-cyan)',
-                color: 'var(--bg-base)',
-                border: 'none',
-                borderRadius: 'var(--radius-sm)',
-                cursor: 'pointer',
-                fontFamily: 'var(--font-mono)',
-                textTransform: 'uppercase',
-                letterSpacing: '0.03em',
-              }}
-            >
-              Re-analyze with AI
-            </button>
-            <span style={{ fontSize: 10, color: 'var(--text-muted)' }}>
-              {clipSettings.aspectRatio ? 'Subject tracking affects crop position in preview & export' : 'Select an aspect ratio (e.g. 9:16) to see subject tracking in action'}
-            </span>
-          </div>
-        )}
         {/* Current detected subject for previewed clip */}
         {clipPreview && job.scenes?.length > 0 && (() => {
           const inRange = (job.scenes || []).filter(
@@ -893,9 +2078,9 @@ export default function Analysis() {
               <span style={{ fontWeight: 600, color: 'var(--text-secondary)', fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.03em' }}>
                 Current subject (Clip {clipPreview.id}):
               </span>{' '}
-              {best.description.length > 150 ? best.description.slice(0, 150) + '...' : best.description}
+              {String(best.description || '').length > 150 ? String(best.description || '').slice(0, 150) + '...' : String(best.description || '')}
               <span style={{ marginLeft: 6, fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--accent-cyan)' }}>
-                x={best.subject_x ?? 50}%
+                x={typeof best.subject_x === 'number' ? best.subject_x : 50}%
               </span>
             </div>
           );
@@ -919,7 +2104,7 @@ export default function Analysis() {
           )}
           <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
             <div style={{ flex: 1 }}>
-              <ProgressBar progress={job.progress || 0} message={job.progress_message || 'Preparing analysis pipeline...'} />
+              <ProgressBar progress={job.progress || 0} message={String(job.progress_message || 'Preparing analysis pipeline...')} />
             </div>
             <button
               disabled={cancellingJob}
@@ -975,6 +2160,29 @@ export default function Analysis() {
         </div>
       )}
 
+      {/* Encoding progress bars — shown for any active exports on this job */}
+      {Object.entries(encoding.tasks).filter(([key, t]) => key.startsWith(`${jobId}_`) && t.status === 'encoding').length > 0 && (
+        <div style={{
+          padding: '10px 0',
+          display: 'flex', flexDirection: 'column', gap: 8,
+        }}>
+          {Object.entries(encoding.tasks)
+            .filter(([key, t]) => key.startsWith(`${jobId}_`) && t.status === 'encoding')
+            .map(([key, t]) => (
+              <div key={key} style={{
+                padding: '10px 14px', background: 'var(--bg-panel)',
+                border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+              }}>
+                <ProgressBar
+                  progress={t.progress || 0}
+                  message={t.message || `Encoding ${t.clipTitle || 'clip'}...`}
+                  variant="cyan"
+                />
+              </div>
+            ))}
+        </div>
+      )}
+
       {/* Activity Log */}
       {activityLog.length > 0 && (isProcessing || job.status === 'complete' || job.status === 'failed' || job.status === 'cancelled') && (
         <div style={{
@@ -1013,14 +2221,14 @@ export default function Analysis() {
                 };
                 return (
                   <div key={i} style={{ display: 'flex', gap: 8 }}>
-                    <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{entry.ts}</span>
+                    <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>{String(entry.ts || '')}</span>
                     {entry.progress !== undefined && (
                       <span style={{ color: 'var(--accent-cyan)', flexShrink: 0, minWidth: 30, textAlign: 'right' }}>
-                        {entry.progress}%
+                        {typeof entry.progress === 'number' ? entry.progress : String(entry.progress ?? '')}%
                       </span>
                     )}
                     <span style={{ color: colors[entry.type] || colors.status }}>
-                      {entry.message}
+                      {typeof entry.message === 'string' ? entry.message : String(entry.message ?? '')}
                     </span>
                   </div>
                 );
@@ -1041,18 +2249,18 @@ export default function Analysis() {
       {/* Error */}
       {job.status === 'failed' && job.error && (
         <div style={{ padding: '12px 16px', background: 'var(--danger-dim)', border: '1px solid var(--danger)', color: 'var(--danger)', fontSize: 13, margin: '12px 0', borderRadius: 'var(--radius-sm)' }}>
-          {job.error}
+          {typeof job.error === 'string' ? job.error : JSON.stringify(job.error)}
         </div>
       )}
 
       {/* Metadata bar */}
       <div style={{ display: 'flex', gap: 16, padding: '12px 0', flexWrap: 'wrap', fontSize: 12, color: 'var(--text-secondary)', borderBottom: '1px solid var(--border)', marginBottom: 16 }}>
         {job.duration > 0 && <span style={{ fontFamily: 'var(--font-mono)' }}>Duration: {formatDuration(job.duration)}</span>}
-        {job.resolution && <span style={{ fontFamily: 'var(--font-mono)' }}>{job.resolution}</span>}
+        {job.resolution && <span style={{ fontFamily: 'var(--font-mono)' }}>{String(job.resolution)}</span>}
         {job.fps > 0 && <span style={{ fontFamily: 'var(--font-mono)' }}>{job.fps} FPS</span>}
         {job.file_size_mb > 0 && <span style={{ fontFamily: 'var(--font-mono)' }}>{job.file_size_mb.toFixed(1)} MB</span>}
         {Object.keys(job.provider_used || {}).length > 0 && (
-          <span>Providers: {Object.entries(job.provider_used).map(([k, v]) => `${k}=${v}`).join(', ')}</span>
+          <span>Providers: {Object.entries(job.provider_used).map(([k, v]) => `${String(k)}=${typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(', ')}</span>
         )}
         {job.analysis_duration_seconds > 0 && (
           <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--success)' }}>
@@ -1063,34 +2271,78 @@ export default function Analysis() {
         )}
       </div>
 
-      {/* Tabs */}
-      <div className="responsive-tabs" style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)', marginBottom: 24 }}>
-        {TABS.map((t, i) => (
-          <button
-            key={t}
-            onClick={() => setTab(i)}
-            style={{
-              padding: isMobile ? '10px 14px' : '10px 20px',
-              background: 'none',
-              border: 'none',
-              borderBottom: tab === i ? '2px solid var(--accent-cyan)' : '2px solid transparent',
-              color: tab === i ? 'var(--accent-cyan)' : 'var(--text-secondary)',
-              fontSize: 13,
-              fontWeight: tab === i ? 600 : 400,
-              fontFamily: 'var(--font-mono)',
-              whiteSpace: 'nowrap',
-              flexShrink: 0,
-            }}
-          >
-            {t}
-            {i === 3 && job.clips?.length > 0 && (
-              <span style={{ marginLeft: 6, fontSize: 10, background: 'var(--accent-amber)', color: 'var(--bg-base)', padding: '1px 5px', borderRadius: 8, fontWeight: 700 }}>
-                {job.clips.length}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
+      {/* Tabs — iOS segmented control on mobile, standard tabs on desktop */}
+      {isMobile ? (
+        <div style={{
+          display: 'flex', gap: 2,
+          margin: '0 0 16px',
+          padding: 3,
+          background: 'var(--bg-elevated)',
+          borderRadius: 10,
+          overflow: 'hidden',
+        }}>
+          {TABS.map((t, i) => (
+            <button
+              key={t}
+              onClick={() => setTab(i)}
+              style={{
+                flex: 1,
+                padding: '8px 4px',
+                background: tab === i ? 'var(--bg-panel)' : 'transparent',
+                border: 'none',
+                borderRadius: 8,
+                color: tab === i ? 'var(--text-primary)' : 'var(--text-muted)',
+                fontSize: 11,
+                fontWeight: tab === i ? 600 : 400,
+                whiteSpace: 'nowrap',
+                transition: 'all 0.2s ease',
+                boxShadow: tab === i ? '0 1px 3px rgba(0,0,0,0.08)' : 'none',
+                position: 'relative',
+              }}
+            >
+              {i === 3 ? 'Clips' : t}
+              {i === 3 && job.clips?.length > 0 && (
+                <span style={{
+                  marginLeft: 3, fontSize: 9, fontWeight: 700,
+                  background: tab === i ? 'var(--accent-cyan)' : 'var(--accent-amber)',
+                  color: 'var(--bg-base)',
+                  padding: '1px 4px', borderRadius: 6,
+                }}>
+                  {job.clips.length}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      ) : (
+        <div className="responsive-tabs" style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)', marginBottom: 24 }}>
+          {TABS.map((t, i) => (
+            <button
+              key={t}
+              onClick={() => setTab(i)}
+              style={{
+                padding: '10px 20px',
+                background: 'none',
+                border: 'none',
+                borderBottom: tab === i ? '2px solid var(--accent-cyan)' : '2px solid transparent',
+                color: tab === i ? 'var(--accent-cyan)' : 'var(--text-secondary)',
+                fontSize: 13,
+                fontWeight: tab === i ? 600 : 400,
+                fontFamily: 'var(--font-mono)',
+                whiteSpace: 'nowrap',
+                flexShrink: 0,
+              }}
+            >
+              {t}
+              {i === 3 && job.clips?.length > 0 && (
+                <span style={{ marginLeft: 6, fontSize: 10, background: 'var(--accent-amber)', color: 'var(--bg-base)', padding: '1px 5px', borderRadius: 8, fontWeight: 700 }}>
+                  {job.clips.length}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Tab Content */}
       {tab === 0 && (
@@ -1099,7 +2351,7 @@ export default function Analysis() {
             <div className="slide-in">
               <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 20, marginBottom: 16, boxShadow: 'var(--shadow-sm)' }}>
                 <h3 style={{ fontSize: 14, marginBottom: 12, color: 'var(--accent-cyan)' }}>Overview</h3>
-                <p style={{ fontSize: 14, lineHeight: 1.6, color: 'var(--text-primary)' }}>{job.summary.overview}</p>
+                <p style={{ fontSize: 14, lineHeight: 1.6, color: 'var(--text-primary)' }}>{String(job.summary.overview || '')}</p>
               </div>
 
               <div style={{ display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: 16, flexWrap: 'wrap', marginBottom: 16 }}>
@@ -1107,16 +2359,16 @@ export default function Analysis() {
                   <h4 style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Key Topics</h4>
                   <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                     {(job.summary.key_topics || []).map((t, i) => (
-                      <span key={i} className="badge badge-cyan">{t}</span>
+                      <span key={i} className="badge badge-cyan">{typeof t === 'string' ? t : String(t)}</span>
                     ))}
                   </div>
                 </div>
                 <div style={{ background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 'var(--radius-md)', padding: 16, flex: 1, minWidth: 200, boxShadow: 'var(--shadow-sm)' }}>
                   <h4 style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Details</h4>
                   <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>
-                    <div style={{ marginBottom: 4 }}>Tone: <span className="badge badge-gray">{job.summary.tone}</span></div>
-                    <div style={{ marginBottom: 4 }}>Audience: {job.summary.estimated_audience}</div>
-                    <div>Category: <span className="badge badge-amber">{job.summary.content_category}</span></div>
+                    <div style={{ marginBottom: 4 }}>Tone: <span className="badge badge-gray">{String(job.summary.tone || '')}</span></div>
+                    <div style={{ marginBottom: 4 }}>Audience: {String(job.summary.estimated_audience || '')}</div>
+                    <div>Category: <span className="badge badge-amber">{String(job.summary.content_category || '')}</span></div>
                   </div>
                 </div>
               </div>
@@ -1157,7 +2409,7 @@ export default function Analysis() {
                       minWidth: 4,
                       transition: 'opacity 0.2s',
                     }}
-                    title={`${formatDuration(scene.timestamp)} - Score: ${scene.importance_score}/10`}
+                    title={`${formatDuration(scene.timestamp)} - Score: ${Number(scene.importance_score) || 0}/10`}
                   />
                 ))}
               </div>
@@ -1184,62 +2436,146 @@ export default function Analysis() {
       {tab === 2 && (
         <div>
           {job.transcript?.length > 0 ? (
-            <>
-              <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
-                <button
-                  onClick={async () => {
-                    await fetchJob();
-                    showToast('Transcript refreshed — subtitles updated for preview & export', 'success');
-                  }}
-                  style={{
-                    padding: '6px 14px',
-                    background: 'var(--accent-cyan-dim)',
-                    color: 'var(--accent-cyan)',
-                    border: '1px solid var(--accent-cyan)',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: 12,
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                >
-                  Update Subtitles
-                </button>
-                <a
-                  href={`/api/jobs/${jobId}/transcript.srt`}
-                  download
-                  style={{
-                    padding: '6px 14px',
-                    background: 'var(--bg-elevated)',
-                    color: 'var(--accent-cyan)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: 12,
-                    fontWeight: 600,
-                    textDecoration: 'none',
-                    fontFamily: 'var(--font-mono)',
-                  }}
-                >
-                  &#x2B07; Download SRT (with speakers)
-                </a>
-                <a
-                  href={`/api/jobs/${jobId}/transcript.srt?speakers=false`}
-                  download
-                  style={{
-                    padding: '6px 14px',
-                    background: 'var(--bg-elevated)',
-                    color: 'var(--text-secondary)',
-                    border: '1px solid var(--border)',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: 12,
-                    textDecoration: 'none',
-                    fontFamily: 'var(--font-mono)',
-                  }}
-                >
-                  &#x2B07; SRT (no speakers)
-                </a>
+            <div style={{
+              display: 'flex',
+              gap: 20,
+              flexDirection: isMobile ? 'column' : 'row',
+              alignItems: 'flex-start',
+            }}>
+              {/* Left: Video player (sticky on desktop) */}
+              <div style={{
+                width: isMobile ? '100%' : '45%',
+                maxWidth: isMobile ? '100%' : 560,
+                flexShrink: 0,
+                position: isMobile ? 'static' : 'sticky',
+                top: 12,
+                alignSelf: 'flex-start',
+              }}>
+                <VideoPlayer
+                  src={videoSrc}
+                  onTimeUpdate={setVideoCurrentTime}
+                  sourceWidth={sourceDims.w}
+                  sourceHeight={sourceDims.h}
+                  scenes={job.scenes || []}
+                  initialTime={transcriptInitTime}
+                />
               </div>
-              <TranscriptViewer transcript={job.transcript} onSeek={handleSeek} jobId={jobId} onSpeakerRenamed={fetchJob} onTranscriptUpdated={fetchJob} />
-            </>
+
+              {/* Right: Transcript actions + editable transcript */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap', alignItems: 'center' }}>
+                  <button
+                    onClick={async () => {
+                      await fetchJob();
+                      showToast('Transcript refreshed — subtitles updated for preview & export', 'success');
+                    }}
+                    style={{
+                      padding: '6px 14px',
+                      background: 'var(--accent-cyan-dim)',
+                      color: 'var(--accent-cyan)',
+                      border: '1px solid var(--accent-cyan)',
+                      borderRadius: 'var(--radius-sm)',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Update Subtitles
+                  </button>
+                  <a
+                    href={`/api/jobs/${jobId}/transcript.srt`}
+                    download
+                    style={{
+                      padding: '6px 14px',
+                      background: 'var(--bg-elevated)',
+                      color: 'var(--accent-cyan)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--radius-sm)',
+                      fontSize: 12,
+                      fontWeight: 600,
+                      textDecoration: 'none',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    &#x2B07; Download SRT (with speakers)
+                  </a>
+                  <a
+                    href={`/api/jobs/${jobId}/transcript.srt?speakers=false`}
+                    download
+                    style={{
+                      padding: '6px 14px',
+                      background: 'var(--bg-elevated)',
+                      color: 'var(--text-secondary)',
+                      border: '1px solid var(--border)',
+                      borderRadius: 'var(--radius-sm)',
+                      fontSize: 12,
+                      textDecoration: 'none',
+                      fontFamily: 'var(--font-mono)',
+                    }}
+                  >
+                    &#x2B07; SRT (no speakers)
+                  </a>
+                </div>
+                {/* Speaker Detection (post-processing diarization) */}
+                <div style={{
+                  padding: '12px 16px', background: 'var(--bg-panel)',
+                  border: '1px solid var(--border)', borderRadius: 'var(--radius-md)',
+                  marginBottom: 16,
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>
+                      Speaker Detection
+                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <label style={{ fontSize: 11, color: 'var(--text-muted)' }}>Speakers:</label>
+                      <select
+                        value={diarizeNumSpeakers}
+                        onChange={(e) => setDiarizeNumSpeakers(parseInt(e.target.value))}
+                        style={{
+                          padding: '4px 8px', fontSize: 12, background: 'var(--bg-base)',
+                          border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                          color: 'var(--text-primary)',
+                        }}
+                      >
+                        <option value={0}>Auto-detect</option>
+                        {[1,2,3,4,5,6,7,8,9,10].map(n => (
+                          <option key={n} value={n}>{n} speaker{n > 1 ? 's' : ''}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <button
+                      onClick={handleRunDiarization}
+                      disabled={diarizeLoading}
+                      style={{
+                        padding: '6px 16px', fontSize: 12, fontWeight: 600,
+                        background: 'var(--accent-cyan)', color: 'var(--bg-base)',
+                        border: 'none', borderRadius: 'var(--radius-sm)',
+                        opacity: diarizeLoading ? 0.5 : 1, cursor: diarizeLoading ? 'default' : 'pointer',
+                      }}
+                    >
+                      {diarizeLoading ? 'Detecting...' : 'Run Speaker Detection'}
+                    </button>
+                    {diarizeResult && (
+                      <span style={{ fontSize: 11, color: 'var(--success)' }}>
+                        {diarizeResult}
+                      </span>
+                    )}
+                  </div>
+                  <p style={{ fontSize: 10, color: 'var(--text-muted)', marginTop: 6, marginBottom: 0 }}>
+                    Analyzes the audio to identify who is speaking. Specify the exact number of speakers for best accuracy.
+                  </p>
+                </div>
+
+                <TranscriptViewer
+                  transcript={job.translated_transcript?.length ? job.translated_transcript : (job.transcript || [])}
+                  currentTime={videoCurrentTime}
+                  onSeek={handleSeek}
+                  jobId={jobId}
+                  onSpeakerRenamed={fetchJob}
+                  onTranscriptUpdated={fetchJob}
+                />
+              </div>
+            </div>
           ) : (
             <div style={{ textAlign: 'center', padding: 48, color: 'var(--text-muted)' }}>
               {isProcessing ? 'Transcribing audio...' : 'No transcript available'}
@@ -1261,26 +2597,28 @@ export default function Analysis() {
           {job.transcript?.length > 0 && job.scenes?.length > 0 && job.summary && (
             <div style={{
               display: 'flex',
-              gap: isMobile ? 10 : 16,
+              gap: isMobile ? 8 : 16,
               marginBottom: 16,
-              padding: isMobile ? '12px 14px' : '14px 18px',
+              padding: isMobile ? '12px' : '14px 18px',
               background: 'var(--bg-panel)',
               border: '1px solid var(--border)',
-              borderRadius: 'var(--radius-md)',
+              borderRadius: isMobile ? 14 : 'var(--radius-md)',
               alignItems: 'flex-end',
               flexWrap: 'wrap',
             }}>
               <div style={{ flex: isMobile ? '1 1 100%' : '0 0 auto', opacity: isGeneratingClips ? 0.5 : 1, pointerEvents: isGeneratingClips ? 'none' : 'auto', transition: 'opacity 0.3s' }}>
-                <div style={{
-                  fontSize: 11,
-                  fontFamily: 'var(--font-mono)',
-                  color: 'var(--text-primary)',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em',
-                  marginBottom: 8,
-                }}>
-                  Find Viral Moments
-                </div>
+                {!isMobile && (
+                  <div style={{
+                    fontSize: 11,
+                    fontFamily: 'var(--font-mono)',
+                    color: 'var(--text-primary)',
+                    textTransform: 'uppercase',
+                    letterSpacing: '0.05em',
+                    marginBottom: 8,
+                  }}>
+                    Find Viral Moments
+                  </div>
+                )}
                 <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
                   <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)' }}>
                     Clips
@@ -1472,49 +2810,50 @@ export default function Analysis() {
                   </div>
                 )}
                 {/* Clip Focus toggle */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10, width: '100%' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10, width: '100%' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                     <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Clip Focus</span>
                     <button
                       onClick={() => { if (!isGeneratingClips) setClipFocusEnabled(!clipFocusEnabled); }}
                       disabled={isGeneratingClips}
                       style={{
-                        width: 36, height: 20, borderRadius: 10, border: 'none',
+                        width: 42, height: 26, borderRadius: 13, border: 'none',
                         cursor: isGeneratingClips ? 'not-allowed' : 'pointer',
                         background: clipFocusEnabled ? 'var(--success)' : 'var(--border)',
-                        position: 'relative', transition: 'background 0.2s', flexShrink: 0,
+                        position: 'relative', transition: 'background 0.25s ease', flexShrink: 0,
                         opacity: isGeneratingClips ? 0.5 : 1,
                       }}
                     >
                       <div style={{
-                        width: 14, height: 14, borderRadius: '50%', background: 'white',
+                        width: 20, height: 20, borderRadius: '50%', background: 'white',
                         position: 'absolute', top: 3,
                         left: clipFocusEnabled ? 19 : 3,
-                        transition: 'left 0.2s',
+                        transition: 'left 0.25s cubic-bezier(0.4, 0, 0.2, 1)',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
                       }} />
                     </button>
                   </div>
                   {clipFocusEnabled && (
                     <textarea
-                      placeholder="e.g. fighting, cooking tips, funny moments..."
+                      placeholder={isMobile ? 'e.g. "funny cooking moments"' : "Try compound queries for best results:\n• \"funny cooking moments\"\n• \"emotional reveals\"\n• \"fighting scenes\""}
                       value={clipFocusText}
                       onChange={(e) => setClipFocusText(e.target.value)}
-                      rows={3}
+                      rows={isMobile ? 2 : 3}
                       disabled={isGeneratingClips}
                       style={{
-                        width: '100%', padding: '8px 10px', fontSize: 12,
-                        fontFamily: 'var(--font-mono)', background: 'var(--bg-elevated)',
+                        width: '100%', padding: '8px 10px', fontSize: 13,
+                        background: 'var(--bg-elevated)',
                         color: isGeneratingClips ? 'var(--text-muted)' : 'var(--text-primary)',
                         border: `1px solid ${isGeneratingClips ? 'var(--border)' : 'var(--success)'}`,
-                        borderRadius: 'var(--radius-sm)', outline: 'none',
-                        resize: 'vertical', minHeight: 60, lineHeight: 1.5,
+                        borderRadius: 'var(--radius-md)', outline: 'none',
+                        resize: 'none', minHeight: isMobile ? 44 : 60, lineHeight: 1.4,
                         opacity: isGeneratingClips ? 0.5 : 1,
                       }}
                     />
                   )}
-                  {clipFocusEnabled && (
+                  {clipFocusEnabled && !isMobile && (
                     <span style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.3 }}>
-                      Finds clips matching your topic instead of using the viral algorithm
+                      AI finds clips matching your topic with semantic expansion and relevance scoring.
                     </span>
                   )}
                 </div>
@@ -1578,6 +2917,8 @@ export default function Analysis() {
                   onSettingsChange={setClipSettings}
                   onApplySettings={handleApplyClipSettings}
                   onPresetsLoaded={setClipPresets}
+                  serverSettings={job.subtitle_settings}
+                  parentSettings={clipSettings}
                 />
 
                 {/* Export Full Video */}
@@ -1650,7 +2991,7 @@ export default function Analysis() {
                     </div>
                     <div style={{ fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.4 }}>
                       {clipSettings?.aspectRatio ? (
-                        <span>Aspect ratio: <strong style={{ color: 'var(--text-secondary)' }}>{clipSettings.aspectRatio}</strong></span>
+                        <span>Aspect ratio: <strong style={{ color: 'var(--text-secondary)' }}>{String(clipSettings.aspectRatio || '')}</strong></span>
                       ) : (
                         <span>Original aspect ratio</span>
                       )}
@@ -1662,6 +3003,100 @@ export default function Analysis() {
                       )}
                     </div>
                   </div>
+                </div>
+
+                {/* QA Validation Panel */}
+                <div style={{
+                  marginTop: 16,
+                  padding: 16,
+                  background: 'var(--bg-panel)',
+                  border: `1px solid ${qaResult?.overall === 'pass' ? 'var(--success)' : qaResult?.overall === 'warn' ? 'var(--accent-amber)' : qaResult?.overall === 'fail' ? 'var(--danger)' : 'var(--border)'}`,
+                  borderRadius: 'var(--radius-md)',
+                  boxShadow: 'var(--shadow-sm)',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                    <h4 style={{
+                      fontSize: 12,
+                      color: 'var(--text-muted)',
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.06em',
+                      fontFamily: 'var(--font-mono)',
+                      margin: 0,
+                    }}>
+                      Pipeline QA
+                    </h4>
+                    <button
+                      onClick={() => { setQaResult(null); runQaValidation(); }}
+                      disabled={qaLoading}
+                      style={{
+                        padding: '4px 10px',
+                        fontSize: 10,
+                        fontWeight: 600,
+                        background: 'var(--bg-elevated)',
+                        color: 'var(--text-secondary)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)',
+                        cursor: qaLoading ? 'wait' : 'pointer',
+                      }}
+                    >
+                      {qaLoading ? 'Checking...' : 'Re-run'}
+                    </button>
+                  </div>
+
+                  {qaResult ? (
+                    <div>
+                      <div style={{
+                        display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10,
+                        padding: '6px 10px',
+                        background: qaResult.overall === 'pass' ? 'rgba(16, 185, 129, 0.1)' : qaResult.overall === 'warn' ? 'rgba(245, 158, 11, 0.1)' : 'rgba(239, 68, 68, 0.1)',
+                        borderRadius: 'var(--radius-sm)',
+                      }}>
+                        <span style={{
+                          width: 8, height: 8, borderRadius: '50%',
+                          background: qaResult.overall === 'pass' ? 'var(--success)' : qaResult.overall === 'warn' ? 'var(--accent-amber)' : 'var(--danger)',
+                        }} />
+                        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                          {qaResult.overall === 'pass' ? 'All Checks Passed' : qaResult.overall === 'warn' ? 'Passed with Warnings' : 'Issues Detected'}
+                        </span>
+                        <span style={{ fontSize: 10, color: 'var(--text-muted)', marginLeft: 'auto' }}>
+                          {String(qaResult.summary || '')}
+                        </span>
+                      </div>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {qaResult.checks?.map((check, i) => (
+                          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
+                            <span style={{
+                              width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                              background: check.status === 'pass' ? 'var(--success)' : check.status === 'warn' ? 'var(--accent-amber)' : check.status === 'fail' ? 'var(--danger)' : 'var(--text-muted)',
+                            }} />
+                            <span style={{ color: 'var(--text-secondary)', fontWeight: 600, minWidth: 100 }}>{String(check.name || '')}</span>
+                            <span style={{ color: 'var(--text-muted)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{String(check.detail || '')}</span>
+                          </div>
+                        ))}
+                      </div>
+                      {qaResult.errors?.length > 0 && (
+                        <div style={{ marginTop: 8, padding: '6px 8px', background: 'rgba(239, 68, 68, 0.08)', borderRadius: 'var(--radius-sm)' }}>
+                          {qaResult.errors.map((e, i) => (
+                            <div key={i} style={{ fontSize: 10, color: 'var(--danger)', lineHeight: 1.4 }}>{String(e || '')}</div>
+                          ))}
+                        </div>
+                      )}
+                      {qaResult.warnings?.length > 0 && (
+                        <div style={{ marginTop: 6, padding: '6px 8px', background: 'rgba(245, 158, 11, 0.08)', borderRadius: 'var(--radius-sm)' }}>
+                          {qaResult.warnings.slice(0, 5).map((w, i) => (
+                            <div key={i} style={{ fontSize: 10, color: 'var(--accent-amber)', lineHeight: 1.4 }}>{String(w || '')}</div>
+                          ))}
+                          {qaResult.warnings.length > 5 && (
+                            <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>+{qaResult.warnings.length - 5} more warnings</div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                      {qaLoading ? 'Running validation checks...' : 'QA validation runs automatically when analysis completes'}
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -1844,7 +3279,7 @@ export default function Analysis() {
                       >
                         <option value="">Pick preset...</option>
                         {clipPresets.map((p) => (
-                          <option key={p.id} value={p.id}>{p.name}</option>
+                          <option key={p.id} value={p.id}>{String(p.name || '')}</option>
                         ))}
                       </select>
                       <button
@@ -1855,7 +3290,7 @@ export default function Analysis() {
                           // Merge preset settings with current (preserve speaker colors)
                           const merged = {
                             ...clipSettings,
-                            ...preset.settings,
+                            ...sanitizeSubtitleSettings(preset.settings),
                             speakerColors: clipSettings.speakerColors,
                           };
                           // Update UI settings panel to reflect the preset
@@ -1952,7 +3387,7 @@ export default function Analysis() {
                           color: 'var(--accent-cyan)',
                         }}
                       >
-                        {ec.filename}
+                        {String(ec.filename || '')}
                       </a>
                     ))}
                   </div>

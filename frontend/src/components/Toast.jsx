@@ -4,7 +4,9 @@ import useResponsive from '../hooks/useResponsive';
 let _addToast = null;
 
 export function showToast(message, type = 'info') {
-  if (_addToast) _addToast({ message, type, id: Date.now() });
+  // Ensure message is always a string to prevent React error #310
+  const safeMessage = typeof message === 'string' ? message : String(message ?? '');
+  if (_addToast) _addToast({ message: safeMessage, type, id: Date.now() });
 }
 
 export default function ToastContainer() {

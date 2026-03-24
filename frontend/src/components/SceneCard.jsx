@@ -167,7 +167,7 @@ export default function SceneCard({ scene, sceneIndex, jobId, onClick, onUpdated
               color: 'var(--text-secondary)',
             }}
           >
-            {scene.importance_score}/10
+            {Number(scene.importance_score) || 0}/10
           </span>
         </div>
 
@@ -241,7 +241,7 @@ export default function SceneCard({ scene, sceneIndex, jobId, onClick, onUpdated
           </div>
         ) : (
           <p style={{ fontSize: 12, color: 'var(--text-secondary)', lineHeight: 1.4 }}>
-            {scene.description}
+            {String(scene.description || '')}
           </p>
         )}
       </div>

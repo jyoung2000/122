@@ -1,25 +1,29 @@
+## Stage 1: Build frontend with Node
+FROM node:20-slim AS frontend-build
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install
+COPY frontend/ ./
+RUN npm run build
+
+## Stage 2: Runtime
 FROM python:3.11-slim
 
+# Make NVIDIA GPUs visible when passed through with --gpus
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+
 # Install system dependencies (ca-certificates ensures HTTPS model downloads work)
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     curl \
     git \
-    build-essential \
-    pkg-config \
     ca-certificates \
     fontconfig \
     fonts-dejavu-core \
     fonts-freefont-ttf \
     fonts-liberation2 \
     unzip \
-    libavformat-dev \
-    libavcodec-dev \
-    libavdevice-dev \
-    libavutil-dev \
-    libswscale-dev \
-    libswresample-dev \
-    libavfilter-dev \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
@@ -61,17 +65,36 @@ COPY backend/requirements.txt .
 RUN pip install --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
+# Install pyannote.audio for neural speaker diarization (CPU torch for non-GPU builds)
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
+    pip install --no-cache-dir pyannote.audio>=3.1.0
+
+# Install CUDA runtime libraries via pip for GPU passthrough support.
+# These PyPI packages provide the CUDA shared libraries that ctranslate2
+# and faster-whisper need — no NVIDIA apt repo or system CUDA required.
+# The "|| true" ensures the build succeeds on non-x86 architectures
+# where these wheels may not be available.
+RUN pip install --no-cache-dir \
+    nvidia-cuda-runtime-cu12 \
+    nvidia-cublas-cu12 \
+    nvidia-cufft-cu12 \
+    nvidia-cudnn-cu12 \
+    nvidia-cuda-nvrtc-cu12 \
+    2>/dev/null || true
+
+# Point LD_LIBRARY_PATH at the pip-installed NVIDIA libs so ctranslate2 finds them
+ENV LD_LIBRARY_PATH=/usr/local/lib/python3.11/dist-packages/nvidia/cuda_runtime/lib:\
+/usr/local/lib/python3.11/dist-packages/nvidia/cublas/lib:\
+/usr/local/lib/python3.11/dist-packages/nvidia/cufft/lib:\
+/usr/local/lib/python3.11/dist-packages/nvidia/cudnn/lib:\
+/usr/local/lib/python3.11/dist-packages/nvidia/cuda_nvrtc/lib:\
+${LD_LIBRARY_PATH}
+
 # Copy backend source
 COPY backend/ ./backend/
 
-# Build frontend
-COPY frontend/ ./frontend/
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
-    cd frontend && npm install && npm run build
-
-# Move built frontend to be served by FastAPI
-RUN mv frontend/dist ./static
+# Copy built frontend from stage 1
+COPY --from=frontend-build /app/frontend/dist ./static
 
 EXPOSE 1353
 

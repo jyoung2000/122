@@ -388,7 +388,7 @@ export default function Dashboard() {
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
                     <div>
                       <h4 style={{ fontSize: 14, marginBottom: 4, wordBreak: 'break-word' }}>
-                        {job.filename}
+                        {String(job.filename || '')}
                       </h4>
                       <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
                         {formatDate(job.created_at)}
@@ -417,7 +417,7 @@ export default function Dashboard() {
 
                   {job.progress_message && job.status !== 'complete' && (
                     <div style={{ marginTop: 8, fontSize: 11, color: 'var(--accent-cyan)' }}>
-                      {job.progress_message}
+                      {String(job.progress_message || '')}
                     </div>
                   )}
 
