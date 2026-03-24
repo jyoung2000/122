@@ -287,6 +287,22 @@ def _get_whisper_model():
                         vram_mb,
                     )
 
+            # ── VRAM safety check for user-selected models ──
+            # If the user manually selected a model larger than "small" but VRAM
+            # is <= 4GB, warn that it may OOM. Don't force-downgrade (respect
+            # user choice) but log prominently so the error is diagnosable.
+            if device == "cuda" and settings.WHISPER_MODEL not in ("small", "tiny", "base"):
+                gpus = _enumerate_gpus_nvidia_smi()
+                vram_mb = gpus[0]["vram_mb"] if gpus else 0
+                if vram_mb > 0 and vram_mb <= 4096:
+                    logger.warning(
+                        "User-selected Whisper model '%s' on %dMB VRAM GPU — "
+                        "this may cause CUDA OOM on long videos. "
+                        "Whisper 'medium' needs ~2.5GB VRAM in float16, leaving "
+                        "< 1.5GB headroom on 4GB GPUs. Consider 'small' for stability.",
+                        settings.WHISPER_MODEL, vram_mb,
+                    )
+
             logger.info(
                 "Loading Whisper model: %s (device=%s, compute=%s%s)",
                 settings.WHISPER_MODEL, device, compute_type,
@@ -845,9 +861,21 @@ def _transcribe_sync(
             if detected_lang and not language:
                 chunk_kwargs["language"] = detected_lang
 
-            chunk_segments_iter, chunk_info_obj = model.transcribe(
-                chunk_info["path"], **chunk_kwargs
-            )
+            try:
+                chunk_segments_iter, chunk_info_obj = model.transcribe(
+                    chunk_info["path"], **chunk_kwargs
+                )
+            except Exception as e:
+                error_str = str(e).lower()
+                if any(p in error_str for p in ["out of memory", "cuda", "cudamalloc", "oom"]):
+                    logger.error(
+                        "Whisper CUDA OOM during chunk %d/%d transcription "
+                        "(model=%s, device=%s). Audio: %s",
+                        ci + 1, len(chunks),
+                        settings.WHISPER_MODEL, whisper_device_info.get("device", "?"),
+                        chunk_info["path"],
+                    )
+                raise
 
             if ci == 0:
                 detected_lang = chunk_info_obj.language
@@ -937,7 +965,20 @@ def _transcribe_sync(
                 progress_state["raw_segments"] = raw_segments
     else:
         # Original single-pass path for short audio
-        segments_iter, info = model.transcribe(preprocessed_path, **transcribe_kwargs)
+        try:
+            segments_iter, info = model.transcribe(preprocessed_path, **transcribe_kwargs)
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(p in error_str for p in ["out of memory", "cuda", "cudamalloc", "oom"]):
+                logger.error(
+                    "Whisper CUDA OOM during transcription (model=%s, device=%s). "
+                    "The model is too large for available VRAM. "
+                    "Audio: %s, kwargs: beam=%s, best_of=%s",
+                    settings.WHISPER_MODEL, whisper_device_info.get("device", "?"),
+                    audio_path, transcribe_kwargs.get("beam_size"),
+                    transcribe_kwargs.get("best_of"),
+                )
+            raise
         detected_lang = info.language
         _last_detected_language["lang"] = detected_lang
         logger.info(f"Detected language: {detected_lang} (prob={info.language_probability:.2f})")

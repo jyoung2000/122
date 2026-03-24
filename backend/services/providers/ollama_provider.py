@@ -291,6 +291,27 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         except Exception:
             pass
 
+        # When loading vision model after Whisper release, check if VRAM is
+        # available and reset force_cpu flag so CLIP can use GPU
+        if model_name == self._vision_model and self._force_cpu:
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=memory.free",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    free_mb = int(result.stdout.strip().split('\n')[0])
+                    if free_mb > 1500:  # moondream needs ~1GB, want headroom
+                        logger.info(
+                            "VRAM available (%dMB free) — clearing force_cpu flag for %s",
+                            free_mb, model_name,
+                        )
+                        self._force_cpu = False
+            except Exception:
+                pass
+
     @property
     def supports_vision(self) -> bool:
         return True
@@ -796,24 +817,77 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             except asyncio.TimeoutError:
                 logger.warning(
                     "Ollama vision speed test timed out (>120s, model=%s) — "
-                    "generating timestamp-based descriptions instead. "
-                    "Consider switching to moondream:1.8b for faster vision.",
+                    "CLIP may be on CPU. Attempting to force GPU reload.",
                     self._vision_model,
                 )
-                scenes = []
-                for i, frame in enumerate(frames):
-                    mins = int(frame.timestamp // 60)
-                    secs = int(frame.timestamp % 60)
-                    scenes.append(SceneDescription(
-                        timestamp=frame.timestamp,
-                        description=f"Frame at {mins}:{secs:02d} (vision skipped — model too slow on CPU)",
-                        importance_score=5,
-                        thumbnail_path=frame.path,
-                        subject_x=50,
-                    ))
-                    if progress_callback:
-                        await progress_callback(i + 1, total)
-                return scenes
+                # Try to force GPU by unloading and reloading the model
+                await self._unload_model(self._vision_model)
+                await asyncio.sleep(3)
+                try:
+                    t0 = _t.monotonic()
+                    test_result = await asyncio.wait_for(
+                        self._call_vision(test_prompt, frames[0].base64),
+                        timeout=120.0,
+                    )
+                    elapsed_retry = _t.monotonic() - t0
+                    logger.info(
+                        "Ollama vision retry after reload: %.1fs (model=%s)",
+                        elapsed_retry, self._vision_model,
+                    )
+                    # If still slow, cap to 20 frames
+                    if elapsed_retry > 60:
+                        max_frames = 20
+                        step = max(1, total // max_frames)
+                        _speed_limited_indices = set()
+                        for i in range(0, total, step):
+                            _speed_limited_indices.add(i)
+                        _speed_limited_indices.add(0)
+                        _speed_limited_indices.add(total - 1)
+                except (asyncio.TimeoutError, Exception) as retry_err:
+                    logger.warning(
+                        "Ollama vision retry also failed (%s) — "
+                        "generating timestamp-based descriptions. "
+                        "CLIP is likely stuck on CPU. Consider restarting the Ollama container.",
+                        retry_err,
+                    )
+                    scenes = []
+                    for i, frame in enumerate(frames):
+                        mins = int(frame.timestamp // 60)
+                        secs = int(frame.timestamp % 60)
+                        scenes.append(SceneDescription(
+                            timestamp=frame.timestamp,
+                            description=f"Frame at {mins}:{secs:02d} (vision unavailable — CLIP on CPU, model needs GPU)",
+                            importance_score=5,
+                            thumbnail_path=frame.path,
+                            subject_x=50,
+                        ))
+                        if progress_callback:
+                            await progress_callback(i + 1, total)
+                    return scenes
+            except ProviderError as pe:
+                error_str = str(pe)
+                if "500" in error_str or "HTTP" in error_str:
+                    logger.error(
+                        "Ollama vision speed test returned server error (model=%s): %s — "
+                        "moondream may have crashed or CLIP is stuck on CPU. "
+                        "Falling back to timestamp-based descriptions.",
+                        self._vision_model, error_str[:200],
+                    )
+                    scenes = []
+                    for i, frame in enumerate(frames):
+                        mins = int(frame.timestamp // 60)
+                        secs = int(frame.timestamp % 60)
+                        scenes.append(SceneDescription(
+                            timestamp=frame.timestamp,
+                            description=f"Frame at {mins}:{secs:02d} (vision model crashed — check Ollama logs)",
+                            importance_score=5,
+                            thumbnail_path=frame.path,
+                            subject_x=50,
+                        ))
+                        if progress_callback:
+                            await progress_callback(i + 1, total)
+                    return scenes
+                logger.warning("Vision speed test failed (%s) — proceeding with all frames", pe)
             except Exception as e:
                 logger.warning("Vision speed test failed (%s) — proceeding with all frames", e)
 

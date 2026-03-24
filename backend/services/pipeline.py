@@ -75,6 +75,8 @@ async def _release_whisper_vram(job_id: str):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
+                # Reset peak memory stats so subsequent allocations start clean
+                torch.cuda.reset_peak_memory_stats()
 
                 # Log how much VRAM is now free
                 free_mb = torch.cuda.mem_get_info()[0] / (1024 * 1024)
@@ -95,6 +97,10 @@ async def _release_whisper_vram(job_id: str):
             # model and running gc.collect() releases the CUDA allocations
         except ImportError:
             pass
+
+        # Second GC pass after CUDA cleanup — catches references freed by
+        # torch.cuda.empty_cache() and ctranslate2 teardown
+        gc.collect()
 
         logger.info("[%s] Whisper model unloaded from VRAM for Ollama", job_id)
 
@@ -786,6 +792,41 @@ async def _run_analysis_inner(job_id: str):
             initial_prompt=initial_prompt, cancel_check=cancel_check,
             progress_callback=_transcribe_progress, audio_duration=audio_duration,
         )
+
+        # ── CRASH RECOVERY: If Whisper returned 0 segments on a video with
+        # real audio, it likely OOM'd or crashed. Retry with a smaller model.
+        if not result and audio_duration > 10:
+            logger.error(
+                "[%s] Whisper returned 0 segments for %.0fs audio — "
+                "likely OOM/crash. Retrying with 'small' model on CPU.",
+                job_id, audio_duration,
+            )
+            await _update_branch_progress("transcription", 10, JobStatus.TRANSCRIBING,
+                "Transcription failed — retrying with smaller model...")
+
+            from backend.services.transcription import reload_model
+            original_model = settings.WHISPER_MODEL
+            original_gpu = settings.GPU_ACCELERATION_ENABLED
+            try:
+                settings.WHISPER_MODEL = "small"
+                settings.GPU_ACCELERATION_ENABLED = False
+                reload_model()
+
+                result = await transcribe_audio(
+                    audio_path, language=job.language, task=whisper_task,
+                    initial_prompt=initial_prompt, cancel_check=cancel_check,
+                    progress_callback=_transcribe_progress, audio_duration=audio_duration,
+                )
+                logger.info(
+                    "[%s] Fallback transcription produced %d segments",
+                    job_id, len(result),
+                )
+            finally:
+                # Restore original settings for future jobs
+                settings.WHISPER_MODEL = original_model
+                settings.GPU_ACCELERATION_ENABLED = original_gpu
+                reload_model()
+
         await database.update_job_status(job_id, transcript=list(result))
 
         # If language was auto-detected, store the detected language on the job
@@ -900,8 +941,33 @@ async def _run_analysis_inner(job_id: str):
             scenes=list(scenes_result),
             provider_used={"scenes": provider},
         )
+
+        # Count real vs synthetic scenes to give honest reporting
+        real_scenes = [s for s in scenes_result
+                       if s.description
+                       and "vision skipped" not in s.description.lower()
+                       and "vision unavailable" not in s.description.lower()
+                       and "vision model crashed" not in s.description.lower()
+                       and "analysis skipped" not in s.description.lower()
+                       and not s.description.startswith("Frame at ")]
+        fake_count = len(scenes_result) - len(real_scenes)
+
+        if fake_count > 0 and len(real_scenes) == 0:
+            provider = f"{provider} (all synthetic — vision failed)"
+            logger.warning(
+                "[%s] Scene analysis produced 0 real descriptions — all %d are synthetic. "
+                "Check Ollama logs for CLIP/vision model errors.",
+                job_id, fake_count,
+            )
+        elif fake_count > 0:
+            logger.info(
+                "[%s] Scene analysis: %d real + %d synthetic descriptions",
+                job_id, len(real_scenes), fake_count,
+            )
+
         await _update_branch_progress("scene_analysis", 100, JobStatus.ANALYZING_SCENES,
-            f"Analyzed {len(scenes_result)} scenes via {provider}")
+            f"Analyzed {len(real_scenes)} scenes via {provider}"
+            + (f" ({fake_count} skipped)" if fake_count > 0 else ""))
 
         # Log subject tracking status
         if settings.SUBJECT_TRACKING_ENABLED:
@@ -982,6 +1048,35 @@ async def _run_analysis_inner(job_id: str):
             # Release Whisper VRAM before Ollama loads its models
             await _release_whisper_vram(job_id)
             _log_gpu_memory(job_id, "after Whisper release")
+
+            # ── Verify VRAM is actually free ──
+            # On GTX 1650, Whisper medium leaves residual VRAM allocations
+            # that prevent moondream from loading on GPU. Force a check and
+            # wait for the driver to reclaim memory if needed.
+            try:
+                import subprocess
+                result = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=memory.used,memory.free",
+                     "--format=csv,noheader,nounits"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    parts = result.stdout.strip().split(",")
+                    used_mb = int(parts[0].strip()) if len(parts) >= 2 else 0
+                    free_mb = int(parts[1].strip()) if len(parts) >= 2 else 0
+                    logger.info(
+                        "[%s] GPU VRAM after Whisper release: %dMB used, %dMB free",
+                        job_id, used_mb, free_mb,
+                    )
+                    if used_mb > 500:
+                        logger.warning(
+                            "[%s] Whisper left %dMB residual VRAM — waiting 5s for driver cleanup",
+                            job_id, used_mb,
+                        )
+                        await asyncio.sleep(5)
+            except Exception as e:
+                logger.debug("[%s] VRAM check failed: %s", job_id, e)
+
             await _update_progress(
                 job_id, JobStatus.ANALYZING_SCENES, 40,
                 "Released transcription GPU memory — preparing scene analysis...",
@@ -1044,10 +1139,54 @@ async def _run_analysis_inner(job_id: str):
         "[%s] Branches complete: %d transcript segments (%d speakers), %d scenes via %s",
         job_id, len(transcript), speaker_count, len(scenes), scenes_provider,
     )
+
+    # ── Pipeline health check: detect total failure ──
+    real_scenes = [s for s in scenes
+                   if s.description
+                   and not s.description.startswith("Frame at ")
+                   and "skipped" not in s.description.lower()
+                   and "crashed" not in s.description.lower()
+                   and "unavailable" not in s.description.lower()]
+
+    if len(transcript) == 0 and len(real_scenes) == 0:
+        logger.error(
+            "[%s] TOTAL PIPELINE FAILURE: 0 transcript segments AND 0 real scene descriptions. "
+            "Possible causes: (1) Whisper OOM on GPU, (2) Ollama vision model crashed, "
+            "(3) Audio extraction failed. Check container logs for errors.",
+            job_id,
+        )
+        await broadcast_ws(job_id, {
+            "type": "warning",
+            "message": (
+                "Analysis produced no usable results. Whisper transcription and "
+                "visual analysis both failed — likely due to GPU memory constraints. "
+                "Try: (1) Use Whisper 'small' instead of 'medium', "
+                "(2) Restart the Ollama container, "
+                "(3) Check the Logs page for detailed errors."
+            ),
+        })
+    elif len(transcript) == 0 and audio_duration > 10:
+        logger.error(
+            "[%s] Whisper returned 0 segments for %.0fs audio. "
+            "Model=%s, language=%s. "
+            "This usually means CUDA OOM on GPU.",
+            job_id, audio_duration,
+            settings.WHISPER_MODEL,
+            job.language or "auto",
+        )
+        await broadcast_ws(job_id, {
+            "type": "warning",
+            "message": (
+                f"Transcription produced 0 segments for {int(audio_duration / 60)} min audio. "
+                f"Whisper '{settings.WHISPER_MODEL}' may have crashed on your GPU. "
+                f"Try switching to 'small' model in Settings."
+            ),
+        })
+
     await _update_progress(
         job_id, JobStatus.ANALYZING_SCENES, 63,
         f"Transcribed {len(transcript)} segments ({speaker_count} speakers) + "
-        f"{len(scenes)} scenes via {scenes_provider}",
+        f"{len(real_scenes) if real_scenes != scenes else len(scenes)} scenes via {scenes_provider}",
     )
 
     # ── Steps 5+6 — Summary + audio/hot-zone analysis, THEN clip detection ──
