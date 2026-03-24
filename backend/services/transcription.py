@@ -287,20 +287,30 @@ def _get_whisper_model():
                         vram_mb,
                     )
 
-            # ── VRAM safety check for user-selected models ──
-            # If the user manually selected a model larger than "small" but VRAM
-            # is <= 4GB, warn that it may OOM. Don't force-downgrade (respect
-            # user choice) but log prominently so the error is diagnosable.
-            if device == "cuda" and settings.WHISPER_MODEL not in ("small", "tiny", "base"):
+            # ── VRAM safety: auto-DOWNGRADE user-selected models that won't fit ──
+            # Whisper VRAM requirements (float16, approximate):
+            #   tiny:  ~0.4GB    base:  ~0.5GB    small: ~1.0GB
+            #   medium: ~2.5GB   large-v3: ~3.5GB  large-v3-turbo: ~3.0GB
+            # On 4GB GPUs, medium+ models crash on long audio (KV cache grows
+            # with duration). Downgrade to small with a loud warning.
+            _VRAM_REQUIREMENTS = {
+                "large-v3": 6000,
+                "large-v3-turbo": 5000,
+                "medium": 5000,      # medium fits in 4GB but OOMs on long audio
+                "medium.en": 5000,
+            }
+            if device == "cuda" and settings.WHISPER_MODEL in _VRAM_REQUIREMENTS:
                 gpus = _enumerate_gpus_nvidia_smi()
                 vram_mb = gpus[0]["vram_mb"] if gpus else 0
-                if vram_mb > 0 and vram_mb <= 4096:
+                min_vram = _VRAM_REQUIREMENTS[settings.WHISPER_MODEL]
+                if 0 < vram_mb < min_vram:
+                    original = settings.WHISPER_MODEL
+                    settings.WHISPER_MODEL = "small"
                     logger.warning(
-                        "User-selected Whisper model '%s' on %dMB VRAM GPU — "
-                        "this may cause CUDA OOM on long videos. "
-                        "Whisper 'medium' needs ~2.5GB VRAM in float16, leaving "
-                        "< 1.5GB headroom on 4GB GPUs. Consider 'small' for stability.",
-                        settings.WHISPER_MODEL, vram_mb,
+                        "AUTO-DOWNGRADE: Whisper '%s' needs ~%dMB VRAM but GPU only has %dMB. "
+                        "Downgrading to 'small' to prevent CUDA OOM on long audio. "
+                        "To use '%s', you need a GPU with %dMB+ VRAM.",
+                        original, min_vram, vram_mb, original, min_vram,
                     )
 
             logger.info(

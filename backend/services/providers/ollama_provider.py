@@ -1232,6 +1232,19 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         cancel_check=None,
         custom_prompt=None,
     ) -> VideoSummary:
+        # Early exit: if no transcript and no real scenes, skip the Ollama call
+        if not transcript or len(transcript) == 0:
+            _synthetic_markers = ("skipped", "failed", "unavailable", "crashed")
+            real_scenes = [s for s in scenes
+                           if s.description
+                           and not s.description.startswith("Frame at ")
+                           and not any(m in s.description.lower() for m in _synthetic_markers)]
+            if not real_scenes:
+                logger.warning("Skipping Ollama summary — no transcript and no real scenes")
+                fb = build_summary_from_transcript(transcript, scenes)
+                return VideoSummary(**fb)
+            logger.info("Generating summary from %d scenes only (no transcript)", len(real_scenes))
+
         # Unload vision model before text-heavy summary generation
         await self._unload_model(self._vision_model)
         await self._ensure_model_active(self._text_model)

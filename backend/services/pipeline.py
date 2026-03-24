@@ -42,43 +42,38 @@ def _log_gpu_memory(job_id: str, label: str):
 
 
 async def _release_whisper_vram(job_id: str):
-    """Release Whisper model from VRAM so Ollama can use the GPU.
+    """Aggressively release Whisper VRAM so Ollama CLIP can use GPU.
 
-    On a 4GB GTX 1650, Whisper large-v3-turbo occupies ~3GB VRAM.
-    Without explicit release, Ollama gets only ~465MB — not enough
-    for any vision or text model, causing repeated SIGABRT/SIGSEGV
-    crashes from cudaMalloc failures.
-
-    This is only needed when Ollama shares the same physical GPU
-    (both containers get --gpus all in docker-compose.gpu.yml).
+    On a 4GB GTX 1650, Whisper occupies 1-3GB VRAM depending on model.
+    Without explicit release + verification, Ollama sees residual VRAM
+    and falls CLIP back to CPU — making vision analysis 100x slower.
     """
     try:
-        from backend.services.transcription import _whisper_model, _model_lock
         import gc
-
-        # Check if Whisper is loaded before doing anything
-        if _whisper_model is None:
-            logger.debug("[%s] Whisper model not loaded — nothing to release", job_id)
-            return
-
-        # Clear the cached model reference so it gets garbage collected
         from backend.services import transcription as _trans_mod
+
+        # Step 1: Delete the model reference explicitly
         with _trans_mod._model_lock:
-            _trans_mod._whisper_model = None
+            if _trans_mod._whisper_model is not None:
+                del _trans_mod._whisper_model
+                _trans_mod._whisper_model = None
+                logger.info("[%s] Whisper model reference deleted", job_id)
+            else:
+                logger.debug("[%s] Whisper model not loaded — nothing to release", job_id)
+                return
 
-        # Force garbage collection to release the GPU tensors
+        # Step 2: Force Python garbage collection (releases CTranslate2 C++ objects)
         gc.collect()
+        gc.collect()  # Second pass catches ref cycles
 
-        # Release CUDA memory back to the driver
+        # Step 3: Force PyTorch CUDA cache release
         try:
             import torch
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 torch.cuda.synchronize()
-                # Reset peak memory stats so subsequent allocations start clean
-                torch.cuda.reset_peak_memory_stats()
-
-                # Log how much VRAM is now free
+                for i in range(torch.cuda.device_count()):
+                    torch.cuda.reset_peak_memory_stats(i)
                 free_mb = torch.cuda.mem_get_info()[0] / (1024 * 1024)
                 total_mb = torch.cuda.mem_get_info()[1] / (1024 * 1024)
                 logger.info(
@@ -86,26 +81,17 @@ async def _release_whisper_vram(job_id: str):
                     job_id, free_mb, total_mb,
                 )
         except ImportError:
-            pass  # torch not available — ctranslate2 manages its own memory
-        except Exception as e:
-            logger.debug("[%s] torch.cuda.empty_cache failed (non-critical): %s", job_id, e)
-
-        # Also try ctranslate2's memory release (used by faster-whisper)
-        try:
-            import ctranslate2
-            # ctranslate2 doesn't have explicit memory release, but deleting the
-            # model and running gc.collect() releases the CUDA allocations
-        except ImportError:
             pass
+        except Exception as e:
+            logger.debug("[%s] PyTorch cleanup skipped: %s", job_id, e)
 
-        # Second GC pass after CUDA cleanup — catches references freed by
-        # torch.cuda.empty_cache() and ctranslate2 teardown
+        # Step 4: Final GC sweep
         gc.collect()
 
         logger.info("[%s] Whisper model unloaded from VRAM for Ollama", job_id)
 
     except Exception as e:
-        logger.warning("[%s] Failed to release Whisper VRAM (non-critical): %s", job_id, e)
+        logger.warning("[%s] VRAM release error: %s", job_id, e)
 
 
 # Dedicated thread pool for base64 frame encoding so it never competes
@@ -1047,42 +1033,60 @@ async def _run_analysis_inner(job_id: str):
 
             # Release Whisper VRAM before Ollama loads its models
             await _release_whisper_vram(job_id)
-            _log_gpu_memory(job_id, "after Whisper release")
 
-            # ── Verify VRAM is actually free ──
-            # On GTX 1650, Whisper medium leaves residual VRAM allocations
-            # that prevent moondream from loading on GPU. Force a check and
-            # wait for the driver to reclaim memory if needed.
-            try:
-                import subprocess
-                result = subprocess.run(
-                    ["nvidia-smi", "--query-gpu=memory.used,memory.free",
-                     "--format=csv,noheader,nounits"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                if result.returncode == 0:
-                    parts = result.stdout.strip().split(",")
-                    used_mb = int(parts[0].strip()) if len(parts) >= 2 else 0
-                    free_mb = int(parts[1].strip()) if len(parts) >= 2 else 0
-                    logger.info(
-                        "[%s] GPU VRAM after Whisper release: %dMB used, %dMB free",
-                        job_id, used_mb, free_mb,
+            # ── Verified VRAM recovery loop ──
+            # Whisper/CTranslate2 CUDA allocations are NOT freed instantly.
+            # The CUDA driver needs time to reclaim, and Ollama checks free
+            # VRAM at model-load time to decide CPU vs GPU for CLIP.
+            # Poll nvidia-smi in a loop until VRAM is actually free.
+            import subprocess as _sp
+            _vram_target = 3000  # Need 3GB free for moondream CLIP + LLM
+            _vram_wait_max = 15  # Max seconds to wait
+            _vram_poll_interval = 2
+            for _attempt in range(int(_vram_wait_max / _vram_poll_interval) + 1):
+                try:
+                    _smi = _sp.run(
+                        ["nvidia-smi", "--query-gpu=memory.free",
+                         "--format=csv,noheader,nounits"],
+                        capture_output=True, text=True, timeout=5,
                     )
-                    if used_mb > 500:
-                        logger.warning(
-                            "[%s] Whisper left %dMB residual VRAM — waiting 5s for driver cleanup",
-                            job_id, used_mb,
+                    if _smi.returncode == 0 and _smi.stdout.strip():
+                        _free_mb = int(_smi.stdout.strip().split('\n')[0])
+                        logger.info(
+                            "[%s] VRAM recovery check %d: %dMB free (target: %dMB)",
+                            job_id, _attempt + 1, _free_mb, _vram_target,
                         )
-                        await asyncio.sleep(5)
-            except Exception as e:
-                logger.debug("[%s] VRAM check failed: %s", job_id, e)
+                        if _free_mb >= _vram_target:
+                            break
+                except Exception:
+                    pass
+                if _attempt < int(_vram_wait_max / _vram_poll_interval):
+                    # Force additional cleanup on each iteration
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                            torch.cuda.synchronize()
+                    except Exception:
+                        pass
+                    try:
+                        import gc
+                        gc.collect()
+                    except Exception:
+                        pass
+                    await asyncio.sleep(_vram_poll_interval)
+            else:
+                logger.warning(
+                    "[%s] VRAM did not fully recover after %ds — "
+                    "moondream CLIP may fall back to CPU",
+                    job_id, _vram_wait_max,
+                )
 
+            _log_gpu_memory(job_id, "after VRAM recovery loop")
             await _update_progress(
                 job_id, JobStatus.ANALYZING_SCENES, 40,
                 "Released transcription GPU memory — preparing scene analysis...",
             )
-            # Brief pause to let CUDA driver reclaim memory across containers
-            await asyncio.sleep(2)
 
             try:
                 scene_result = await asyncio.wait_for(
@@ -1279,9 +1283,11 @@ async def _run_analysis_inner(job_id: str):
     # Without transcript, the AI has nothing to find clips in. Running 46 windows
     # of empty prompts wastes hours of CPU time for guaranteed 0 clips.
     # This saved 224 minutes in production on a 113-min video where Whisper crashed.
-    real_scenes = [s for s in scenes if "failed" not in s.description.lower()
-                   and "skipped" not in s.description.lower()
-                   and "vision analysis skipped" not in s.description.lower()]
+    _SYNTHETIC_MARKERS = ("failed", "skipped", "unavailable", "crashed", "synthetic")
+    real_scenes = [s for s in scenes
+                   if s.description
+                   and not s.description.startswith("Frame at ")
+                   and not any(m in s.description.lower() for m in _SYNTHETIC_MARKERS)]
     if not transcript and len(real_scenes) < 10:
         logger.warning(
             "[%s] Skipping clip detection: 0 transcript segments, %d useful scenes. "
