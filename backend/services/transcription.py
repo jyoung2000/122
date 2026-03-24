@@ -300,8 +300,18 @@ def _get_whisper_model():
                 "medium.en": 5000,
             }
             if device == "cuda" and settings.WHISPER_MODEL in _VRAM_REQUIREMENTS:
+                # Try nvidia-smi first, fall back to PyTorch CUDA reporting
+                # (nvidia-smi is NOT available in Docker containers without NVIDIA runtime)
                 gpus = _enumerate_gpus_nvidia_smi()
                 vram_mb = gpus[0]["vram_mb"] if gpus else 0
+                if vram_mb == 0:
+                    try:
+                        import torch
+                        if torch.cuda.is_available():
+                            vram_mb = int(torch.cuda.get_device_properties(0).total_mem / 1024 / 1024)
+                            logger.info("VRAM detected via PyTorch: %dMB", vram_mb)
+                    except Exception:
+                        pass
                 min_vram = _VRAM_REQUIREMENTS[settings.WHISPER_MODEL]
                 if 0 < vram_mb < min_vram:
                     original = settings.WHISPER_MODEL

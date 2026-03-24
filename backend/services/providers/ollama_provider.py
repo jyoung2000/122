@@ -219,12 +219,16 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 logger.info("Model %s known to exceed 4GB VRAM — forcing num_gpu=0 (CPU)", model_name)
                 return 0
 
-        # Small models that fit in 4GB VRAM
+        # Small models that fit in 4GB VRAM — force all layers on GPU.
+        # Using 99 instead of -1 (auto) because Ollama's auto-detection
+        # checks free VRAM at load time. After Whisper releases VRAM,
+        # residual allocations can trick Ollama into using CPU (GPULayers:[]).
+        # num_gpu=99 forces GPU loading — Ollama caps at actual layer count.
         small_models = ["moondream", "qwen2.5:3b", "qwen2.5:1.5b", "qwen2.5:0.5b",
                         "phi3:mini", "gemma:2b", "tinyllama", "llava:v1.6-mistral-7b"]
         for pattern in small_models:
             if pattern in model_lower:
-                return -1  # Let Ollama auto-decide
+                return 99  # Force all layers on GPU
 
         # Unknown model — check available VRAM
         if self._available_vram_mb > 0 and self._available_vram_mb < 2000:
@@ -1234,7 +1238,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
     ) -> VideoSummary:
         # Early exit: if no transcript and no real scenes, skip the Ollama call
         if not transcript or len(transcript) == 0:
-            _synthetic_markers = ("skipped", "failed", "unavailable", "crashed")
+            _synthetic_markers = ("skipped", "failed", "unavailable", "crashed", "vision")
             real_scenes = [s for s in scenes
                            if s.description
                            and not s.description.startswith("Frame at ")
