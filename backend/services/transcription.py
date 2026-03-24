@@ -1,4 +1,5 @@
 import logging
+import os
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -580,6 +581,110 @@ async def transcribe_audio(
     return []
 
 
+def _chunk_audio(audio_path: str, chunk_duration: int = 600, overlap: int = 30) -> list[dict]:
+    """Split audio into overlapping chunks for long-form transcription.
+
+    Args:
+        audio_path: Path to preprocessed audio file.
+        chunk_duration: Duration of each chunk in seconds (default 10 minutes).
+        overlap: Overlap between chunks in seconds (default 30s).
+
+    Returns:
+        List of {"path": str, "offset": float} dicts.
+        For short audio (<= chunk_duration), returns single chunk with offset 0.
+    """
+    import subprocess, tempfile, os, json as _json
+
+    probe = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", audio_path],
+        capture_output=True, text=True, timeout=30,
+    )
+    duration = float(_json.loads(probe.stdout)["format"]["duration"])
+
+    if duration <= chunk_duration:
+        return [{"path": audio_path, "offset": 0.0}]
+
+    chunks = []
+    start = 0.0
+    chunk_dir = tempfile.mkdtemp(prefix="whisper_chunks_")
+
+    while start < duration:
+        chunk_end = min(start + chunk_duration, duration)
+        chunk_path = os.path.join(chunk_dir, f"chunk_{len(chunks):04d}.wav")
+
+        cmd = [
+            "ffmpeg", "-y", "-i", audio_path,
+            "-ss", str(start),
+            "-t", str(chunk_end - start),
+            "-c:a", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            chunk_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, timeout=60)
+        if result.returncode == 0:
+            chunks.append({"path": chunk_path, "offset": start})
+        else:
+            logger.warning("Failed to create chunk at %.1fs: %s",
+                           start, result.stderr[-200:] if result.stderr else "unknown")
+
+        start += chunk_duration - overlap
+
+    logger.info("Split %.0fs audio into %d chunks (%ds each, %ds overlap)",
+                duration, len(chunks), chunk_duration, overlap)
+    return chunks
+
+
+def _merge_chunk_segments(all_chunks: list[list[dict]], overlap: int = 30) -> list[dict]:
+    """Merge segments from overlapping audio chunks, deduplicating overlap regions."""
+    if len(all_chunks) <= 1:
+        return all_chunks[0] if all_chunks else []
+
+    merged = list(all_chunks[0])
+
+    for chunk_idx in range(1, len(all_chunks)):
+        next_segments = all_chunks[chunk_idx]
+        if not next_segments:
+            continue
+        if not merged:
+            merged = list(next_segments)
+            continue
+
+        prev_last_end = merged[-1]["end"]
+        next_first_start = next_segments[0]["start"]
+        overlap_start = next_first_start
+        overlap_end = prev_last_end
+
+        if overlap_start >= overlap_end:
+            merged.extend(next_segments)
+            continue
+
+        midpoint = (overlap_start + overlap_end) / 2.0
+
+        # Trim prev chunk: remove segments that START after midpoint
+        while merged and merged[-1]["start"] > midpoint:
+            merged.pop()
+
+        # Trim next chunk: skip segments that END before midpoint
+        skip = 0
+        for seg in next_segments:
+            if seg["end"] < midpoint:
+                skip += 1
+            else:
+                break
+
+        merged.extend(next_segments[skip:])
+
+    # Final pass: remove remaining timestamp overlaps
+    deduped = []
+    for seg in merged:
+        if deduped and seg["start"] < deduped[-1]["end"] - 0.1:
+            if seg.get("confidence", 0) > deduped[-1].get("confidence", 0):
+                deduped[-1] = seg
+        else:
+            deduped.append(seg)
+
+    return deduped
+
+
 def _transcribe_sync(
     audio_path: str,
     language: str = "",
@@ -592,7 +697,7 @@ def _transcribe_sync(
     transcribe_kwargs = {
         "task": task,
         "beam_size": settings.WHISPER_BEAM_SIZE,
-        "best_of": 5,                        # Was 1 — Whisper default is 5 candidates per temperature
+        "best_of": 3,                        # Only active during temperature fallback (temp > 0)
         "vad_filter": settings.WHISPER_VAD_FILTER,
         "condition_on_previous_text": True,
         "word_timestamps": True,
@@ -610,9 +715,16 @@ def _transcribe_sync(
     }
     if settings.WHISPER_VAD_FILTER:
         transcribe_kwargs["vad_parameters"] = {
-            "min_silence_duration_ms": 500,
-            "speech_pad_ms": 200,
+            "min_silence_duration_ms": 300,   # Was 500 — shorter threshold preserves natural pauses
+            "speech_pad_ms": 400,              # Was 200 — wider padding prevents clipping plosives
+            "threshold": 0.35,                 # Lower than default 0.5 — captures softer speech
+            "min_speech_duration_ms": 100,     # Don't discard very short utterances
         }
+    # CJK languages have higher natural compression ratios — relax threshold
+    _is_cjk_hint = language.lower() in ("ja", "ko", "zh", "zh-cn", "zh-tw") if language else False
+    if _is_cjk_hint:
+        transcribe_kwargs["compression_ratio_threshold"] = 3.0
+
     if language:
         transcribe_kwargs["language"] = language
         logger.info(f"Transcribing with explicit language: {language}, task: {task}")
@@ -640,85 +752,252 @@ def _transcribe_sync(
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             preprocessed_path = tmp.name
-        cmd = [
+
+        # Two-pass loudnorm for precise normalization
+        # Pass 1: Measure loudness statistics
+        measure_cmd = [
             "ffmpeg", "-y", "-i", audio_path,
-            "-af", "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=11",
-            "-ar", "16000",  # Whisper expects 16kHz
-            "-ac", "1",      # Mono
-            preprocessed_path,
+            "-af", "highpass=f=50,loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
+            "-f", "null", "-",
         ]
-        result = subprocess.run(cmd, capture_output=True, timeout=120)
-        if result.returncode != 0:
-            logger.warning("Audio preprocessing failed, using original: %s",
-                           result.stderr[-200:] if result.stderr else "unknown error")
-            preprocessed_path = audio_path
+        measure_result = subprocess.run(measure_cmd, capture_output=True, text=True, timeout=120)
+
+        loudnorm_stats = None
+        if measure_result.returncode == 0 and measure_result.stderr:
+            import json as _json
+            stderr_text = measure_result.stderr
+            json_start = stderr_text.rfind('{')
+            json_end = stderr_text.rfind('}')
+            if json_start >= 0 and json_end > json_start:
+                try:
+                    loudnorm_stats = _json.loads(stderr_text[json_start:json_end + 1])
+                except (ValueError, KeyError):
+                    pass
+
+        if loudnorm_stats:
+            # Pass 2: Apply measured corrections (precise normalization)
+            measured_i = loudnorm_stats.get("input_i", "-24.0")
+            measured_tp = loudnorm_stats.get("input_tp", "-2.0")
+            measured_lra = loudnorm_stats.get("input_lra", "7.0")
+            measured_thresh = loudnorm_stats.get("input_thresh", "-34.0")
+            target_offset = loudnorm_stats.get("target_offset", "0.0")
+
+            normalize_filter = (
+                f"highpass=f=50,"
+                f"loudnorm=I=-16:TP=-1.5:LRA=11:linear=true"
+                f":measured_I={measured_i}:measured_TP={measured_tp}"
+                f":measured_LRA={measured_lra}:measured_thresh={measured_thresh}"
+                f":offset={target_offset}"
+            )
+            cmd = [
+                "ffmpeg", "-y", "-i", audio_path,
+                "-af", normalize_filter,
+                "-ar", "16000", "-ac", "1",
+                preprocessed_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, timeout=120)
+            if result.returncode != 0:
+                logger.warning("Two-pass loudnorm failed, falling back to single-pass")
+                cmd_fallback = [
+                    "ffmpeg", "-y", "-i", audio_path,
+                    "-af", "highpass=f=50,loudnorm=I=-16:TP=-1.5:LRA=11",
+                    "-ar", "16000", "-ac", "1",
+                    preprocessed_path,
+                ]
+                subprocess.run(cmd_fallback, capture_output=True, timeout=120)
+            else:
+                logger.info("Audio preprocessed: two-pass loudnorm to -16 LUFS, 16kHz mono")
         else:
-            logger.info("Audio preprocessed: normalized to -16 LUFS, 16kHz mono")
+            # Fallback: single-pass if measurement failed
+            cmd = [
+                "ffmpeg", "-y", "-i", audio_path,
+                "-af", "highpass=f=50,loudnorm=I=-16:TP=-1.5:LRA=11",
+                "-ar", "16000", "-ac", "1",
+                preprocessed_path,
+            ]
+            result = subprocess.run(cmd, capture_output=True, timeout=120)
+            if result.returncode != 0:
+                preprocessed_path = audio_path
+            else:
+                logger.info("Audio preprocessed: single-pass loudnorm (measurement failed)")
     except Exception as e:
         logger.warning("Audio preprocessing skipped: %s", e)
         preprocessed_path = audio_path
 
-    segments_iter, info = model.transcribe(preprocessed_path, **transcribe_kwargs)
-    detected_lang = info.language
-    _last_detected_language["lang"] = detected_lang
-    logger.info(f"Detected language: {detected_lang} (prob={info.language_probability:.2f})")
+    # ── Chunked transcription for long audio ──
+    # Whisper's 30-second attention window causes accuracy degradation on long files.
+    # Split into 10-min chunks with 30s overlap, then merge.
+    chunks = _chunk_audio(preprocessed_path, chunk_duration=600, overlap=30)
 
-    wall_start = time.monotonic()
-    if progress_state and progress_lock:
-        with progress_lock:
-            progress_state["language"] = detected_lang
-            progress_state["start_time"] = wall_start
+    if len(chunks) > 1:
+        logger.info("Using chunked transcription: %d chunks for long audio", len(chunks))
+        all_chunk_segments: list[list[dict]] = []
+        detected_lang = None
 
-    raw_segments = []
-    for segment in segments_iter:
-        text = segment.text.strip()
-        # Capture per-word timestamps when available
-        word_list = None
-        if hasattr(segment, "words") and segment.words:
-            word_list = [
-                {"start": round(w.start, 3), "end": round(w.end, 3), "word": w.word.strip()}
-                for w in segment.words
-                if w.word.strip()
-            ]
-        # Extend segment end to cover last word if Whisper's word timestamps
-        # exceed the segment boundary (common floating-point/overlap issue).
-        seg_end = segment.end
-        if word_list:
-            last_word_end = max(w["end"] for w in word_list)
-            if last_word_end > seg_end:
-                seg_end = last_word_end + 0.05
-
-        # Convert avg_logprob to a 0-1 confidence score
-        # avg_logprob typically ranges from -2.0 (garbage) to 0.0 (perfect)
-        avg_lp = getattr(segment, 'avg_logprob', -1.0)
-        no_speech = getattr(segment, 'no_speech_prob', 0.0)
-        confidence = max(0.0, min(1.0, 1.0 + avg_lp))  # -1.0 → 0.0, 0.0 → 1.0
-        # Penalize if high no_speech probability
-        if no_speech > 0.3:
-            confidence *= (1.0 - no_speech)
-
-        seg_dict = {
-            "start": segment.start,
-            "end": seg_end,
-            "text": text,
-            "words": word_list,
-            "confidence": round(confidence, 3),
-            "avg_logprob": round(avg_lp, 4) if avg_lp is not None else None,
-            "no_speech_prob": round(no_speech, 4) if no_speech is not None else None,
-        }
-        raw_segments.append(seg_dict)
-        # Update shared progress state (read by async polling loop).
-        # Also store raw_segments so the timeout path can return partial results.
+        wall_start = time.monotonic()
         if progress_state and progress_lock:
             with progress_lock:
-                progress_state["segments"] = len(raw_segments)
-                progress_state["latest_end"] = segment.end
-                progress_state["last_text"] = text[:80] if text else ""
-                progress_state["raw_segments"] = raw_segments
+                progress_state["start_time"] = wall_start
 
-    if progress_state and progress_lock:
-        with progress_lock:
-            progress_state["done"] = True
+        for ci, chunk_info in enumerate(chunks):
+            chunk_kwargs = dict(transcribe_kwargs)
+            # For chunks after the first, use detected language (don't re-detect)
+            if detected_lang and not language:
+                chunk_kwargs["language"] = detected_lang
+
+            chunk_segments_iter, chunk_info_obj = model.transcribe(
+                chunk_info["path"], **chunk_kwargs
+            )
+
+            if ci == 0:
+                detected_lang = chunk_info_obj.language
+                _last_detected_language["lang"] = detected_lang
+                logger.info("Detected language: %s (prob=%.2f)",
+                            detected_lang, chunk_info_obj.language_probability)
+                if progress_state and progress_lock:
+                    with progress_lock:
+                        progress_state["language"] = detected_lang
+
+            chunk_raw = []
+            for segment in chunk_segments_iter:
+                text = segment.text.strip()
+                word_list = None
+                if hasattr(segment, "words") and segment.words:
+                    word_list = []
+                    for w in segment.words:
+                        word_text = w.word.strip()
+                        if not word_text:
+                            continue
+                        # Skip phantom words with extremely low probability
+                        word_prob = getattr(w, 'probability', 1.0)
+                        if word_prob < 0.01:
+                            logger.debug("Skipping low-probability word at %.2fs: '%s' (p=%.4f)",
+                                         w.start + chunk_info["offset"], word_text, word_prob)
+                            continue
+                        word_list.append({
+                            "start": round(w.start + chunk_info["offset"], 3),
+                            "end": round(w.end + chunk_info["offset"], 3),
+                            "word": word_text,
+                        })
+
+                seg_end = segment.end + chunk_info["offset"]
+                seg_start = segment.start + chunk_info["offset"]
+                if word_list:
+                    last_word_end = max(w["end"] for w in word_list)
+                    if last_word_end > seg_end:
+                        seg_end = last_word_end + 0.05
+
+                avg_lp = getattr(segment, 'avg_logprob', -1.0)
+                no_speech = getattr(segment, 'no_speech_prob', 0.0)
+                confidence = max(0.0, min(1.0, 1.0 + avg_lp))
+                if no_speech > 0.3:
+                    confidence *= (1.0 - no_speech)
+
+                chunk_raw.append({
+                    "start": seg_start,
+                    "end": seg_end,
+                    "text": text,
+                    "words": word_list,
+                    "confidence": round(confidence, 3),
+                    "avg_logprob": round(avg_lp, 4) if avg_lp is not None else None,
+                    "no_speech_prob": round(no_speech, 4) if no_speech is not None else None,
+                })
+
+            all_chunk_segments.append(chunk_raw)
+
+            # Update progress
+            if progress_state and progress_lock:
+                total_so_far = sum(len(c) for c in all_chunk_segments)
+                last_end = chunk_raw[-1]["end"] if chunk_raw else 0
+                with progress_lock:
+                    progress_state["segments"] = total_so_far
+                    progress_state["latest_end"] = last_end
+                    progress_state["last_text"] = chunk_raw[-1]["text"][:80] if chunk_raw else ""
+                    progress_state["language"] = detected_lang or ""
+                    # Store flat list for partial recovery
+                    progress_state["raw_segments"] = [
+                        seg for chunk in all_chunk_segments for seg in chunk
+                    ]
+
+            logger.info("Chunk %d/%d: %d segments (offset=%.1fs)",
+                        ci + 1, len(chunks), len(chunk_raw), chunk_info["offset"])
+
+        # Merge overlapping chunks
+        raw_segments = _merge_chunk_segments(all_chunk_segments, overlap=30)
+
+        # Cleanup chunk temp files
+        import shutil, tempfile as _tmpmod
+        chunk_dir = os.path.dirname(chunks[0]["path"]) if chunks[0]["path"] != preprocessed_path else None
+        if chunk_dir and chunk_dir.startswith(_tmpmod.gettempdir()):
+            shutil.rmtree(chunk_dir, ignore_errors=True)
+
+        if progress_state and progress_lock:
+            with progress_lock:
+                progress_state["done"] = True
+                progress_state["raw_segments"] = raw_segments
+    else:
+        # Original single-pass path for short audio
+        segments_iter, info = model.transcribe(preprocessed_path, **transcribe_kwargs)
+        detected_lang = info.language
+        _last_detected_language["lang"] = detected_lang
+        logger.info(f"Detected language: {detected_lang} (prob={info.language_probability:.2f})")
+
+        wall_start = time.monotonic()
+        if progress_state and progress_lock:
+            with progress_lock:
+                progress_state["language"] = detected_lang
+                progress_state["start_time"] = wall_start
+
+        raw_segments = []
+        for segment in segments_iter:
+            text = segment.text.strip()
+            word_list = None
+            if hasattr(segment, "words") and segment.words:
+                word_list = []
+                for w in segment.words:
+                    word_text = w.word.strip()
+                    if not word_text:
+                        continue
+                    word_prob = getattr(w, 'probability', 1.0)
+                    if word_prob < 0.01:
+                        logger.debug("Skipping low-probability word at %.2fs: '%s' (p=%.4f)",
+                                     w.start, word_text, word_prob)
+                        continue
+                    word_list.append({
+                        "start": round(w.start, 3), "end": round(w.end, 3), "word": word_text,
+                    })
+            seg_end = segment.end
+            if word_list:
+                last_word_end = max(w["end"] for w in word_list)
+                if last_word_end > seg_end:
+                    seg_end = last_word_end + 0.05
+
+            avg_lp = getattr(segment, 'avg_logprob', -1.0)
+            no_speech = getattr(segment, 'no_speech_prob', 0.0)
+            confidence = max(0.0, min(1.0, 1.0 + avg_lp))
+            if no_speech > 0.3:
+                confidence *= (1.0 - no_speech)
+
+            seg_dict = {
+                "start": segment.start,
+                "end": seg_end,
+                "text": text,
+                "words": word_list,
+                "confidence": round(confidence, 3),
+                "avg_logprob": round(avg_lp, 4) if avg_lp is not None else None,
+                "no_speech_prob": round(no_speech, 4) if no_speech is not None else None,
+            }
+            raw_segments.append(seg_dict)
+            if progress_state and progress_lock:
+                with progress_lock:
+                    progress_state["segments"] = len(raw_segments)
+                    progress_state["latest_end"] = segment.end
+                    progress_state["last_text"] = text[:80] if text else ""
+                    progress_state["raw_segments"] = raw_segments
+
+        if progress_state and progress_lock:
+            with progress_lock:
+                progress_state["done"] = True
 
     if not raw_segments:
         return []
@@ -774,7 +1053,12 @@ def _extract_word_timestamps_sync(audio_path: str, language: str = "") -> list[W
         "word_timestamps": True,
     }
     if settings.WHISPER_VAD_FILTER:
-        kwargs["vad_parameters"] = {"min_silence_duration_ms": 500, "speech_pad_ms": 200}
+        kwargs["vad_parameters"] = {
+            "min_silence_duration_ms": 300,
+            "speech_pad_ms": 400,
+            "threshold": 0.35,
+            "min_speech_duration_ms": 100,
+        }
     if language:
         kwargs["language"] = language
 
@@ -982,20 +1266,25 @@ def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
         # Check 0a: Non-speech segment (silence/music hallucination)
         no_speech = seg.get("no_speech_prob", 0.0)
         confidence = seg.get("confidence", 1.0)
-        if no_speech and no_speech > 0.7 and confidence is not None and confidence < 0.3:
+        if no_speech and no_speech > 0.85 and confidence is not None and confidence < 0.15:
             logger.warning(
                 "Hallucination filter: removed non-speech segment at %.1fs (no_speech=%.2f, conf=%.2f): %s...",
                 seg["start"], no_speech, confidence, text[:60],
             )
             continue
 
-        # Check 0b: Whisper boilerplate phrases
-        if text.lower().strip().rstrip('.!') in _WHISPER_BOILERPLATE:
-            logger.warning(
-                "Hallucination filter: removed boilerplate at %.1fs: %s",
-                seg["start"], text[:60],
-            )
-            continue
+        # Check 0b: Whisper boilerplate phrases — only at transcript edges with low confidence
+        boilerplate_text = text.lower().strip().rstrip('.!')
+        if boilerplate_text in _WHISPER_BOILERPLATE:
+            is_edge = (not filtered) or (seg is raw_segments[-1]) or (
+                len(raw_segments) > 1 and seg is raw_segments[-2])
+            is_low_conf = confidence is not None and confidence < 0.5
+            if is_edge and is_low_conf:
+                logger.warning(
+                    "Hallucination filter: removed boilerplate at %.1fs: %s",
+                    seg["start"], text[:60],
+                )
+                continue
 
         # Check 0c: Temporal ordering — segment start must not jump backward
         if filtered and seg["start"] < filtered[-1]["start"]:
@@ -1064,8 +1353,9 @@ def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
             from difflib import SequenceMatcher
             ratio = SequenceMatcher(None, prev_text.lower(), text.lower()).ratio()
             seg_duration = seg["end"] - seg["start"]
-            # Only filter if very high similarity AND segment is short (< 5 seconds)
-            if ratio > 0.85 and seg_duration < 5.0:
+            # Only filter near-identical duplicates at nearly the same timestamp
+            # (0.85 was catching legitimate repeated phrases like "let's go, let's go")
+            if ratio > 0.92 and seg_duration < 3.0 and abs(seg["start"] - filtered[-1]["start"]) < 2.0:
                 logger.warning(
                     "Hallucination filter: removed duplicate segment at %.1fs (%.0f%% similar): %s...",
                     seg["start"], ratio * 100, text[:60],

@@ -327,10 +327,24 @@ async def correct_transcript(
                         if isinstance(new_text, str) and new_text.strip():
                             idx = batch_start + i
                             old_text = corrected[idx].text
+                            new_stripped = new_text.strip()
+
+                            # Safety: reject corrections that remove >30% of words
+                            old_word_count = len(old_text.split())
+                            new_word_count = len(new_stripped.split())
+                            if old_word_count > 3 and new_word_count < old_word_count * 0.7:
+                                logger.warning(
+                                    "Rejecting correction that drops too many words "
+                                    "(was %d words, now %d): '%s' → '%s'",
+                                    old_word_count, new_word_count,
+                                    old_text[:60], new_stripped[:60],
+                                )
+                                continue
+
                             corrected[idx] = corrected[idx].model_copy(
-                                update={"text": new_text.strip()}
+                                update={"text": new_stripped}
                             )
-                            if old_text != new_text.strip() and corrected[idx].words:
+                            if old_text != new_stripped and corrected[idx].words:
                                 corrected[idx] = _realign_word_timestamps(corrected[idx], old_text)
 
                     logger.info("Corrected %s successfully", batch_label)

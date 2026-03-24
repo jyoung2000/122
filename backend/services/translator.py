@@ -280,15 +280,28 @@ async def translate_segments(
                 response = await orchestrator.text_completion(prompt, timeout=120)
                 translations = _parse_translation_response(response)
 
-                if isinstance(translations, list) and len(translations) == len(batch):
-                    translated.extend(_apply_batch_translations(batch, translations))
-                    batch_success = True
-                    break
+                if isinstance(translations, list):
+                    if len(translations) == len(batch):
+                        translated.extend(_apply_batch_translations(batch, translations))
+                        batch_success = True
+                        break
+                    elif len(translations) > 0 and len(translations) < len(batch):
+                        logger.warning(
+                            "Translation batch %d: got %d/%d translations — applying partial",
+                            batch_idx, len(translations), len(batch),
+                        )
+                        partial = _apply_batch_translations(batch[:len(translations)], translations)
+                        partial.extend(batch[len(translations):])
+                        translated.extend(partial)
+                        batch_success = True
+                        break
+                    else:
+                        logger.warning("Translation batch %d attempt %d: wrong count (got %d, expected %d)",
+                                       batch_idx, attempt + 1,
+                                       len(translations), len(batch))
                 else:
-                    logger.warning("Translation batch %d attempt %d: wrong count (got %d, expected %d)",
-                                   batch_idx, attempt + 1,
-                                   len(translations) if isinstance(translations, list) else -1,
-                                   len(batch))
+                    logger.warning("Translation batch %d attempt %d: invalid response type",
+                                   batch_idx, attempt + 1)
             except Exception as e:
                 logger.warning("Translation batch %d attempt %d failed: %s",
                                batch_idx, attempt + 1, e)
@@ -430,15 +443,28 @@ async def translate_segments_with_fallback(
                 response = await _translate_batch_via_ollama(prompt, translation_model, timeout=180.0)
                 translations = _parse_translation_response(response)
 
-                if isinstance(translations, list) and len(translations) == len(batch):
-                    translated.extend(_apply_batch_translations(batch, translations))
-                    batch_success = True
-                    break
+                if isinstance(translations, list):
+                    if len(translations) == len(batch):
+                        translated.extend(_apply_batch_translations(batch, translations))
+                        batch_success = True
+                        break
+                    elif len(translations) > 0 and len(translations) < len(batch):
+                        logger.warning(
+                            "Ollama fallback batch %d: got %d/%d translations — applying partial",
+                            batch_idx, len(translations), len(batch),
+                        )
+                        partial = _apply_batch_translations(batch[:len(translations)], translations)
+                        partial.extend(batch[len(translations):])
+                        translated.extend(partial)
+                        batch_success = True
+                        break
+                    else:
+                        logger.warning("Ollama fallback batch %d attempt %d: wrong count (got %d, expected %d)",
+                                       batch_idx, attempt + 1,
+                                       len(translations), len(batch))
                 else:
-                    logger.warning("Ollama fallback batch %d attempt %d: wrong count (got %d, expected %d)",
-                                   batch_idx, attempt + 1,
-                                   len(translations) if isinstance(translations, list) else -1,
-                                   len(batch))
+                    logger.warning("Ollama fallback batch %d attempt %d: invalid response type",
+                                   batch_idx, attempt + 1)
             except Exception as e:
                 logger.warning("Ollama fallback batch %d attempt %d failed: %s",
                                batch_idx, attempt + 1, e)
