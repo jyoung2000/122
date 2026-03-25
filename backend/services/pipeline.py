@@ -18,7 +18,7 @@ from backend.services.frame_extractor import (
     extract_audio,
     frame_to_base64,
 )
-from backend.services.transcription import transcribe_audio
+from backend.services.transcription import transcribe_audio, transcribe_audio_subprocess
 from backend.services.ai_orchestrator import AIOrchestrator
 from backend.services.prompts import load_prompts
 from backend.services.providers.base import build_summary_from_transcript, has_real_summary_content, AllProvidersFailedError
@@ -854,6 +854,9 @@ async def _run_analysis_inner(job_id: str):
         eta = _pipeline_eta(pipeline_pct)
         await _update_progress(job_id, status, min(62, pipeline_pct), message + eta)
 
+    # Shared flag: was subprocess Whisper used? (accessible from VRAM release code)
+    _subprocess_whisper_used = [False]
+
     # ── Branch A: Transcription (audio already extracted in Step 2) ──
     async def _branch_transcription():
         cancel_check()
@@ -910,11 +913,25 @@ async def _run_analysis_inner(job_id: str):
                 initial_prompt_parts.append(name_clean)
         initial_prompt = ". ".join(initial_prompt_parts) if initial_prompt_parts else ""
 
-        result = await transcribe_audio(
-            audio_path, language=job.language, task=whisper_task,
-            initial_prompt=initial_prompt, cancel_check=cancel_check,
-            progress_callback=_transcribe_progress, audio_duration=audio_duration,
-        )
+        # Use subprocess transcription when GPU is enabled to fully release
+        # CTranslate2's CUDA context (~1.6GB) after Whisper completes.
+        # torch.cuda.empty_cache() is a no-op (CUDA version mismatch).
+        # Subprocess exit is the ONLY way to reclaim CTranslate2's VRAM.
+        _use_subprocess_whisper = settings.GPU_ACCELERATION_ENABLED and is_ollama_primary
+        _subprocess_whisper_used[0] = _use_subprocess_whisper
+        if _use_subprocess_whisper:
+            logger.info("[%s] Using subprocess Whisper (GPU mode) to release CUDA memory after", job_id)
+            result = await transcribe_audio_subprocess(
+                audio_path, language=job.language, task=whisper_task,
+                initial_prompt=initial_prompt, audio_duration=audio_duration,
+            )
+            logger.info("[%s] Whisper subprocess exited — CTranslate2 CUDA memory fully reclaimed", job_id)
+        else:
+            result = await transcribe_audio(
+                audio_path, language=job.language, task=whisper_task,
+                initial_prompt=initial_prompt, cancel_check=cancel_check,
+                progress_callback=_transcribe_progress, audio_duration=audio_duration,
+            )
 
         # ── CRASH RECOVERY: If Whisper returned 0 segments on a video with
         # real audio, it likely OOM'd or crashed. Retry with a smaller model.
@@ -1198,7 +1215,10 @@ async def _run_analysis_inner(job_id: str):
                     logger.warning("[%s] Hot zone pre-scoring failed (non-fatal): %s", job_id, e)
 
             # Release Whisper VRAM before Ollama loads its models
-            await _release_whisper_vram(job_id)
+            if _subprocess_whisper_used[0]:
+                logger.info("[%s] Subprocess Whisper — CUDA memory already released, skipping torch cleanup", job_id)
+            else:
+                await _release_whisper_vram(job_id)
 
             # ── Verified VRAM recovery ──
             # Use PyTorch's CUDA reporting (works inside Docker without nvidia-smi).

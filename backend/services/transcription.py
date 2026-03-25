@@ -39,6 +39,134 @@ _MODEL_LOAD_TIMEOUT = 600  # 10 minutes
 _SEGMENT_STALL_TIMEOUT = 120  # 2 minutes
 
 
+async def transcribe_audio_subprocess(
+    audio_path: str,
+    language: str = "",
+    task: str = "transcribe",
+    initial_prompt: str = "",
+    audio_duration: float = 0,
+) -> list[TranscriptSegment]:
+    """Run Whisper in a subprocess to fully release CTranslate2's CUDA memory.
+
+    CTranslate2 (used by faster-whisper) holds ~1.6GB VRAM in its CUDA context
+    even after the model is deleted. torch.cuda.empty_cache() is a no-op because
+    PyTorch's CUDA 13.0 is incompatible with the driver's CUDA 12.9.
+
+    Running in a subprocess ensures ALL GPU memory is reclaimed when the process
+    exits — model weights, CUDA context, memory pool, everything.
+
+    Returns the same list[TranscriptSegment] as transcribe_audio().
+    """
+    import asyncio
+    import json
+    import sys
+    import tempfile
+
+    model_name = settings.WHISPER_MODEL
+    beam_size = settings.WHISPER_BEAM_SIZE
+    vad_filter = settings.WHISPER_VAD_FILTER
+
+    # Detect device settings (reuse the same logic as in-process mode)
+    device = "cpu"
+    compute_type = "int8"
+    device_index = 0
+    if settings.GPU_ACCELERATION_ENABLED:
+        cuda_available, cuda_count, _, best_idx = _detect_cuda_available()
+        if cuda_available and cuda_count > 0:
+            device = "cuda"
+            compute_type = "float16"
+            device_index = best_idx
+            gpu_idx = (settings.GPU_DEVICE_INDEX or "").strip()
+            if gpu_idx and gpu_idx.isdigit():
+                idx = int(gpu_idx)
+                if idx < cuda_count:
+                    device_index = idx
+
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, dir="/tmp") as tmp:
+        output_path = tmp.name
+
+    try:
+        cmd = [
+            sys.executable, "-m", "backend.services.whisper_worker",
+            "--audio", audio_path,
+            "--output", output_path,
+            "--model", model_name,
+            "--device", device,
+            "--device-index", str(device_index),
+            "--compute-type", compute_type,
+            "--beam-size", str(beam_size),
+            "--task", task,
+        ]
+        if vad_filter:
+            cmd.append("--vad-filter")
+        cmd.append("--word-timestamps")
+        if language:
+            cmd.extend(["--language", language])
+        if initial_prompt:
+            cmd.extend(["--initial-prompt", initial_prompt])
+
+        logger.info("Starting Whisper subprocess: model=%s device=%s", model_name, device)
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ},
+        )
+
+        stdout, stderr = await proc.communicate()
+
+        if stderr:
+            for line in stderr.decode(errors="replace").strip().split("\n"):
+                if line.strip():
+                    logger.info("[whisper-worker] %s", line)
+
+        if proc.returncode != 0:
+            error_msg = stderr.decode(errors="replace")[-500:] if stderr else "Unknown error"
+            raise RuntimeError(f"Whisper subprocess failed (exit {proc.returncode}): {error_msg}")
+
+        with open(output_path, "r") as f:
+            raw = json.load(f)
+
+        if raw.get("status") == "error":
+            raise RuntimeError(f"Whisper worker error: {raw.get('error')}")
+
+        # Convert raw JSON to TranscriptSegment objects
+        segments = []
+        for seg in raw.get("segments", []):
+            words = None
+            if seg.get("words"):
+                words = [WordTimestamp(start=w["start"], end=w["end"], word=w["word"]) for w in seg["words"]]
+            segments.append(TranscriptSegment(
+                start=round(seg["start"], 2),
+                end=round(seg["end"], 2),
+                text=seg["text"],
+                speaker="Speaker 1",
+                words=words,
+                avg_logprob=seg.get("avg_logprob"),
+                no_speech_prob=seg.get("no_speech_prob"),
+            ))
+
+        # Store detected language for pipeline to read
+        info = raw.get("info", {})
+        if info.get("language"):
+            _last_detected_language["lang"] = info["language"]
+
+        _last_diarization_method["method"] = "deferred"
+
+        logger.info(
+            "Whisper subprocess completed: %d segments, CUDA memory fully released",
+            len(segments),
+        )
+        return segments
+
+    finally:
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+
+
 def _detect_cuda_available() -> tuple[bool, int, str, int]:
     """Try multiple methods to detect CUDA GPU availability.
 

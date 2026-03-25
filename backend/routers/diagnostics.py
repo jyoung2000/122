@@ -634,10 +634,28 @@ async def test_pipeline(request: Request):
                         "message": f"Torch GPU memory OK ({torch_reserved:.0f}MB reserved)",
                     })
             else:
-                yield _sse_event("phase_result", {
-                    "phase": "torch_vram", "status": "pass",
-                    "message": "No CUDA — torch not using GPU",
-                })
+                # torch.cuda is unavailable (CUDA version mismatch) — but CTranslate2
+                # may still be using GPU via its own CUDA runtime
+                ct2_devices = 0
+                try:
+                    import ctranslate2
+                    ct2_devices = ctranslate2.get_cuda_device_count()
+                except Exception:
+                    pass
+                if ct2_devices > 0:
+                    yield _sse_event("phase_result", {
+                        "phase": "torch_vram", "status": "warn",
+                        "message": (
+                            f"PyTorch CUDA unavailable (version mismatch) but CTranslate2 sees {ct2_devices} GPU(s). "
+                            f"Whisper uses CTranslate2 for GPU inference. "
+                            f"Pipeline uses subprocess mode to release CTranslate2 VRAM after transcription."
+                        ),
+                    })
+                else:
+                    yield _sse_event("phase_result", {
+                        "phase": "torch_vram", "status": "pass",
+                        "message": "No CUDA — torch not using GPU",
+                    })
         except ImportError:
             yield _sse_event("phase_result", {
                 "phase": "torch_vram", "status": "pass",
