@@ -53,6 +53,14 @@ services:
       - OLLAMA_KEEP_ALIVE=30m
       - OLLAMA_MAX_LOADED_MODELS=1
       - OLLAMA_NUM_PARALLEL=1
+      # Force Ollama to use all available GPU layers
+      - OLLAMA_GPU_LAYERS=-1
+      # Set VRAM budget to leave headroom (GTX 1650 = 4GB, reserve 512MB for system)
+      - OLLAMA_MAX_VRAM=3758096384
+      # Enable flash attention for memory efficiency
+      - OLLAMA_FLASH_ATTENTION=1
+      # Reduce KV cache to fit in VRAM
+      - OLLAMA_KV_CACHE_TYPE=q8_0
     # Enable GPU passthrough so Ollama can use NVIDIA GPUs for inference.
     # Without this, models run on CPU (~30x slower for vision).
     # If no GPU is available, the container still starts normally on CPU.
@@ -63,6 +71,8 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu, compute]
+    # Add CPU quota to fix the cgroup parsing warning
+    cpus: '4.0'
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s

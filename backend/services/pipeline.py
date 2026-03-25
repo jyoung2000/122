@@ -1362,6 +1362,20 @@ async def _run_analysis_inner(job_id: str):
 
         # Scale clip count with video duration — use tier if available
         dynamic_clip_count = tier.max_clip_candidates
+
+        # Cap clip count for CPU-only processing to avoid excessive stalls
+        if is_ollama_primary and _primary_provider and hasattr(_primary_provider, 'is_gpu_available'):
+            try:
+                _gpu_avail = await _primary_provider.is_gpu_available()
+                if not _gpu_avail and dynamic_clip_count > 15:
+                    logger.info(
+                        "[%s] CPU-only mode: capping clip count from %d to 15",
+                        job_id, dynamic_clip_count,
+                    )
+                    dynamic_clip_count = 15
+            except Exception:
+                pass
+
         logger.info(
             "[%s] Dynamic clip count: %d (%.0f min video, default=%d)",
             job_id, dynamic_clip_count, vid_minutes, settings.MAX_CLIP_CANDIDATES,

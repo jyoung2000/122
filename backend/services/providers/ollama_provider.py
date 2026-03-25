@@ -142,6 +142,11 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         self._force_cpu: bool = False
         self._vram_checked: bool = False
         self._available_vram_mb: int = 0
+        # Cached GPU availability detection
+        self._gpu_available: bool | None = None
+        # Stall timeouts — adaptive based on GPU availability
+        self.STALL_TIMEOUT_GPU: float = 120.0   # 2 minutes for GPU
+        self.STALL_TIMEOUT_CPU: float = 300.0   # 5 minutes for CPU (3B model on CPU is slow)
 
     async def close(self):
         """Close the shared HTTP client. Call when provider is no longer needed."""
@@ -158,6 +163,97 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 logger.info("Unloaded Ollama model from VRAM: %s", model)
             except Exception as e:
                 logger.debug("Failed to unload Ollama model %s: %s", model, e)
+
+    async def _detect_gpu_available(self) -> bool:
+        """Check if Ollama has GPU acceleration available."""
+        try:
+            # Check if any loaded model is using VRAM
+            resp = await self._client.get(f"{self._host}/api/ps", timeout=10.0)
+            if resp.status_code == 200:
+                ps_data = resp.json()
+                models = ps_data.get("models", [])
+                for m in models:
+                    size_vram = m.get("size_vram", 0)
+                    if size_vram > 0:
+                        return True
+            # Fallback: check nvidia-smi from app container
+            import subprocess
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return True
+        except Exception:
+            pass
+        return False
+
+    async def is_gpu_available(self) -> bool:
+        """Cached check for GPU availability."""
+        if self._gpu_available is None:
+            self._gpu_available = await self._detect_gpu_available()
+        return self._gpu_available
+
+    async def clear_vram(self) -> None:
+        """Unload all models from Ollama to free VRAM before loading a new model."""
+        try:
+            resp = await self._client.get(f"{self._host}/api/ps", timeout=10.0)
+            if resp.status_code == 200:
+                ps_data = resp.json()
+                models = ps_data.get("models", [])
+                for model in models:
+                    model_name = model.get("name", "")
+                    if model_name:
+                        logger.info("Unloading model %s to free VRAM", model_name)
+                        await self._client.post(
+                            f"{self._host}/api/generate",
+                            json={"model": model_name, "keep_alive": 0},
+                            timeout=10.0,
+                        )
+                        logger.info("Model %s unloaded successfully", model_name)
+        except Exception as e:
+            logger.warning("Failed to clear VRAM: %s", e)
+
+    async def _get_stall_timeout(self) -> float:
+        """Return appropriate stall timeout based on GPU availability."""
+        gpu = await self.is_gpu_available()
+        return self.STALL_TIMEOUT_GPU if gpu else self.STALL_TIMEOUT_CPU
+
+    async def recover_from_overload(self, model: str) -> bool:
+        """Attempt to recover from an overloaded model by clearing VRAM and reloading."""
+        logger.info("Attempting overload recovery for model %s", model)
+        try:
+            # Step 1: Clear all loaded models
+            await self.clear_vram()
+
+            # Step 2: Wait briefly for VRAM to fully release
+            await asyncio.sleep(2)
+
+            # Step 3: Warm up the model with a minimal prompt to reload it
+            resp = await self._client.post(
+                f"{self._host}/api/generate",
+                json={
+                    "model": model,
+                    "prompt": "Hi",
+                    "stream": False,
+                    "options": {
+                        "num_gpu": self._get_num_gpu(model),
+                        "num_predict": 1,  # Generate only 1 token for warmup
+                    },
+                },
+                timeout=120.0,
+            )
+            if resp.status_code == 200:
+                logger.info("Model %s reloaded successfully after overload recovery", model)
+                # Reset GPU detection cache in case it changed
+                self._gpu_available = None
+                return True
+            else:
+                logger.warning("Model reload returned status %d", resp.status_code)
+                return False
+        except Exception as e:
+            logger.error("Overload recovery failed: %s", e)
+            return False
 
     async def _detect_vram(self) -> int:
         """Detect available GPU VRAM in MB via nvidia-smi.
@@ -355,8 +451,10 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         On 4GB GPUs, this is where we detect that large models need CPU-only
         mode, BEFORE the first real analysis call can crash.
         """
-        # Detect available VRAM first
+        # Detect available VRAM and GPU availability
         await self._detect_vram()
+        await self.is_gpu_available()
+        logger.info("Ollama GPU detection: gpu_available=%s, vram=%dMB", self._gpu_available, self._available_vram_mb)
 
         # Warn if user-selected models are too large for available VRAM
         if self._available_vram_mb > 0 and self._available_vram_mb <= 4500:
@@ -533,9 +631,10 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             try:
                 options = {
                     "num_ctx": self._get_effective_ctx(self._vision_model),
+                    "num_gpu": num_gpu if num_gpu >= 0 else -1,
+                    "num_thread": 4,
+                    "f16_kv": True,
                 }
-                if num_gpu >= 0:
-                    options["num_gpu"] = num_gpu
                 # On second attempt (after OOM), always force CPU
                 if attempt == 1:
                     options["num_gpu"] = 0
@@ -629,8 +728,11 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         min_timeout = eval_time + gen_time + 30
         effective_timeout = max(timeout, min_timeout)
 
-        # Stall timeout: max seconds between chunks before we consider it stuck
-        stall_timeout = max(60.0, effective_timeout * 0.3)
+        # Stall timeout: adaptive based on GPU availability
+        # GPU: 2 min (inference is fast), CPU: 5 min (3B model on CPU is slow)
+        gpu_available = self._gpu_available if self._gpu_available is not None else False
+        base_stall = self.STALL_TIMEOUT_GPU if gpu_available else self.STALL_TIMEOUT_CPU
+        stall_timeout = max(base_stall, effective_timeout * 0.3)
 
         num_gpu = self._get_num_gpu(self._text_model)
 
@@ -641,14 +743,14 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             "options": {
                 "num_predict": max_tokens,
                 "num_ctx": self._get_effective_ctx(self._text_model),
+                "num_gpu": num_gpu if num_gpu >= 0 else -1,  # Always request GPU layers (-1 = all)
+                "num_thread": 4,          # CPU threads for any remaining CPU work
+                "f16_kv": True,           # Use f16 for KV cache (saves VRAM)
                 "temperature": 0.5,  # Small models need more diversity to avoid repetitive descriptions
                 "top_p": 0.9,        # Better variety in sampling
                 "repeat_penalty": 1.15,  # Penalize repetitive phrasing
             },
         }
-        # VRAM-aware GPU offloading
-        if num_gpu >= 0:
-            payload["options"]["num_gpu"] = num_gpu
         if json_mode:
             payload["format"] = "json"
 
@@ -739,6 +841,15 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 return result
 
             except httpx.ReadTimeout:
+                # Attempt overload recovery before giving up
+                if attempt == 0:
+                    logger.warning(
+                        "Ollama text stalled (no data for %.0fs) — attempting overload recovery",
+                        stall_timeout,
+                    )
+                    recovered = await self.recover_from_overload(self._text_model)
+                    if recovered:
+                        continue  # Retry with recovered model
                 raise ProviderError(
                     f"Ollama text stalled (no data for {stall_timeout:.0f}s) — "
                     f"model={self._text_model}, the model may be overloaded"
