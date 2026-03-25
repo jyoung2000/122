@@ -201,18 +201,64 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             if resp.status_code == 200:
                 ps_data = resp.json()
                 models = ps_data.get("models", [])
+                if not models:
+                    logger.debug("Ollama: no models currently loaded — VRAM already free")
+                    return
                 for model in models:
                     model_name = model.get("name", "")
+                    size_vram = model.get("size_vram", 0)
+                    size = model.get("size", 0)
                     if model_name:
-                        logger.info("Unloading model %s to free VRAM", model_name)
+                        logger.info(
+                            "Unloading '%s' (VRAM: %.0fMB, Total: %.0fMB) to free GPU memory",
+                            model_name, size_vram / 1024 / 1024, size / 1024 / 1024,
+                        )
                         await self._client.post(
                             f"{self._host}/api/generate",
                             json={"model": model_name, "keep_alive": 0},
                             timeout=10.0,
                         )
-                        logger.info("Model %s unloaded successfully", model_name)
+                logger.info("Unloaded %d model(s) from Ollama", len(models))
         except Exception as e:
             logger.warning("Failed to clear VRAM: %s", e)
+
+    async def log_gpu_status(self) -> None:
+        """Log current Ollama GPU and loaded model status for diagnostics."""
+        try:
+            resp = await self._client.get(f"{self._host}/api/ps", timeout=10.0)
+            if resp.status_code == 200:
+                data = resp.json()
+                models = data.get("models", [])
+                if models:
+                    for m in models:
+                        name = m.get("name", "unknown")
+                        size = m.get("size", 0) / 1024 / 1024
+                        size_vram = m.get("size_vram", 0) / 1024 / 1024
+                        gpu_pct = (m.get("size_vram", 0) / m.get("size", 1)) * 100 if m.get("size", 0) > 0 else 0
+                        logger.info(
+                            "Ollama model loaded: %s | Total: %.0fMB | VRAM: %.0fMB (%.0f%% GPU)",
+                            name, size, size_vram, gpu_pct,
+                        )
+                else:
+                    logger.info("Ollama: no models currently loaded")
+        except Exception as e:
+            logger.debug("Could not query Ollama status: %s", e)
+
+    async def is_model_on_gpu(self, model_name: str) -> bool:
+        """Check if a specific model is currently loaded on GPU."""
+        try:
+            resp = await self._client.get(f"{self._host}/api/ps", timeout=10.0)
+            if resp.status_code == 200:
+                for m in resp.json().get("models", []):
+                    name = m.get("name", "")
+                    if model_name.split(":")[0] in name:
+                        size_vram = m.get("size_vram", 0)
+                        size = m.get("size", 0)
+                        if size > 0 and size_vram > 0:
+                            return (size_vram / size) > 0.5  # More than 50% on GPU
+            return False
+        except Exception:
+            return False
 
     async def _get_stall_timeout(self) -> float:
         """Return appropriate stall timeout based on GPU availability."""
@@ -662,13 +708,14 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                     error_text = response.text[:500]
                     if self._is_oom_error(error_text) and attempt == 0:
                         logger.warning(
-                            "Ollama vision OOM on attempt %d (model=%s) — "
-                            "retrying with CPU-only. Error: %s",
-                            attempt + 1, self._vision_model, error_text[:200],
+                            "Ollama vision CUDA OOM (model=%s) — clearing VRAM and retrying on GPU. Error: %s",
+                            self._vision_model, error_text[:200],
                         )
-                        self._force_cpu = True
-                        # Brief pause for Ollama to recover from the crash
+                        # Clear all models (likely text model still resident) and retry on GPU
+                        await self.clear_vram()
                         await asyncio.sleep(3)
+                        self._force_cpu = False
+                        options["num_gpu"] = self._get_num_gpu(self._vision_model)
                         continue
                     # Non-OOM 500 or second attempt 500 — raise
                     response.raise_for_status()
@@ -728,9 +775,10 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         min_timeout = eval_time + gen_time + 30
         effective_timeout = max(timeout, min_timeout)
 
-        # Stall timeout: adaptive based on GPU availability
+        # Stall timeout: adaptive based on whether model is actually on GPU
         # GPU: 2 min (inference is fast), CPU: 5 min (3B model on CPU is slow)
-        gpu_available = self._gpu_available if self._gpu_available is not None else False
+        # Check both hardware availability AND force_cpu flag (sticky CPU fallback)
+        gpu_available = (self._gpu_available if self._gpu_available is not None else False) and not self._force_cpu
         base_stall = self.STALL_TIMEOUT_GPU if gpu_available else self.STALL_TIMEOUT_CPU
         stall_timeout = max(base_stall, effective_timeout * 0.3)
 
@@ -860,19 +908,33 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 error_text = e.response.text[:500] if e.response else ""
                 if self._is_oom_error(error_text) and attempt == 0:
                     logger.warning(
-                        "Ollama text HTTP error with OOM pattern — retrying CPU-only: %s",
+                        "Ollama text CUDA OOM — clearing all models and retrying on GPU: %s",
                         error_text[:200],
                     )
-                    self._force_cpu = True
+                    # First try: clear VRAM (likely vision model still resident) and retry on GPU
+                    await self.clear_vram()
                     await asyncio.sleep(3)
+                    # Reset force_cpu so retry uses GPU
+                    self._force_cpu = False
+                    # Rebuild payload with GPU layers
+                    payload["options"]["num_gpu"] = self._get_num_gpu(self._text_model)
                     continue
+                # Second OOM or non-OOM error — fall back to CPU
+                if self._is_oom_error(error_text):
+                    logger.warning("Ollama text OOM persists after VRAM clear — falling back to CPU")
+                    self._force_cpu = True
                 raise ProviderError(f"Ollama HTTP {e.response.status_code}: {e.response.text[:200]}")
             except Exception as e:
                 error_str = str(e)
                 if self._is_oom_error(error_str) and attempt == 0:
-                    logger.warning("Ollama text OOM — retrying CPU-only: %s", error_str[:200])
-                    self._force_cpu = True
+                    logger.warning(
+                        "Ollama text CUDA OOM — clearing all models and retrying on GPU: %s",
+                        error_str[:200],
+                    )
+                    await self.clear_vram()
                     await asyncio.sleep(3)
+                    self._force_cpu = False
+                    payload["options"]["num_gpu"] = self._get_num_gpu(self._text_model)
                     continue
                 raise ProviderError(f"Ollama text error ({type(e).__name__}): {e}")
 

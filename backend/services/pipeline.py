@@ -562,6 +562,9 @@ async def _run_analysis_inner(job_id: str):
         try:
             await _update_progress(job_id, JobStatus.EXTRACTING_FRAMES, 3, "Warming up local AI models...")
             await _primary_provider.warmup()
+            # Log GPU status after warmup for diagnostics
+            if hasattr(_primary_provider, 'log_gpu_status'):
+                await _primary_provider.log_gpu_status()
         except Exception:
             pass
 
@@ -1133,6 +1136,16 @@ async def _run_analysis_inner(job_id: str):
             # Extra pause for CUDA driver to reclaim across Docker containers
             await asyncio.sleep(5)
 
+            # Ensure Ollama has no models resident before scene analysis loads vision model
+            if is_ollama_primary and _primary_provider and hasattr(_primary_provider, 'clear_vram'):
+                try:
+                    await _primary_provider.clear_vram()
+                    logger.info("[%s] Ollama models cleared before scene analysis — full VRAM available for vision model", job_id)
+                    if hasattr(_primary_provider, '_force_cpu'):
+                        _primary_provider._force_cpu = False  # Allow GPU retry
+                except Exception as e:
+                    logger.warning("[%s] Failed to clear Ollama models before scene analysis: %s", job_id, e)
+
             await _update_progress(
                 job_id, JobStatus.ANALYZING_SCENES, 40,
                 "Released transcription GPU memory — preparing scene analysis...",
@@ -1247,6 +1260,26 @@ async def _run_analysis_inner(job_id: str):
     # Summary runs first so clip detection can use content context.
     # Audio energy + hot zone scoring run concurrently with summary (no AI needed).
     cancel_check()
+
+    # ── CRITICAL: Unload vision model before text summarization ──
+    # On GTX 1650 (3.6GB VRAM), the vision model (~1.1GB) and text model (~2.2GB)
+    # cannot coexist. If OLLAMA_KEEP_ALIVE keeps the vision model resident,
+    # loading the text model causes cudaMalloc OOM → sticky CPU fallback.
+    # Explicitly unload ALL models so the text model gets full GPU access.
+    if is_ollama_primary and _primary_provider:
+        try:
+            await _primary_provider.clear_vram()
+            logger.info("[%s] Vision model unloaded after scene analysis — GPU freed for text model", job_id)
+            await asyncio.sleep(2)  # Let CUDA driver reclaim VRAM
+            # Reset force_cpu flag so text model tries GPU
+            if hasattr(_primary_provider, '_force_cpu'):
+                _primary_provider._force_cpu = False
+            # Log GPU status for diagnostics
+            if hasattr(_primary_provider, 'log_gpu_status'):
+                await _primary_provider.log_gpu_status()
+        except Exception as e:
+            logger.warning("[%s] Failed to unload vision model before summary: %s", job_id, e)
+
     await _update_progress(
         job_id, JobStatus.GENERATING_SUMMARY, 65,
         f"Generating video summary...{_pipeline_eta(65)}",
