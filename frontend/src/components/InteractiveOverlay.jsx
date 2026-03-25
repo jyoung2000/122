@@ -416,10 +416,11 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
     padding: boxPad > 0 ? boxPad : undefined,
     transform: `translate(-50%, -50%) ${rotation ? `rotate(${rotation}deg)` : ''}`,
     cursor: isLocked ? 'not-allowed' : isDragging ? 'grabbing' : (isVideo ? 'default' : 'grab'),
-    // Video items: always use pointer-events none EXCEPT when actively being
-    // dragged/resized/rotated. This prevents the full-viewport video handle from
-    // blocking clicks on text/shape/image overlays.
-    pointerEvents: isVideo ? 'none' : 'auto',
+    // Video items: pointer-events none so they don't block overlays.
+    // Exception: during active manipulation, allow events for smooth tracking.
+    pointerEvents: isVideo
+      ? (isDragging || isResizing || isRotating ? 'auto' : 'none')
+      : 'auto',
     minWidth: 20,
     minHeight: 20,
     // Video items always sit behind overlays (z:1). Other items at z:10, selected at z:15.
@@ -488,15 +489,20 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
       {/* Selection outline */}
       {isSelected && (
         <>
-          {/* Dashed border */}
-          <div style={{
-            position: 'absolute',
-            inset: -2,
-            border: '2px solid #0A84FF',
-            borderRadius: 2,
-            pointerEvents: 'none',
-            boxShadow: '0 0 0 1px rgba(10, 132, 255, 0.3)',
-          }} />
+          {/* Selection border — interactive: enables drag-from-border for video items */}
+          <div
+            style={{
+              position: 'absolute',
+              inset: -2,
+              border: '2px solid #0A84FF',
+              borderRadius: 2,
+              pointerEvents: 'auto',
+              boxShadow: '0 0 0 1px rgba(10, 132, 255, 0.3)',
+              cursor: isLocked ? 'not-allowed' : (isDragging ? 'grabbing' : 'grab'),
+              background: 'transparent',
+            }}
+            onMouseDown={isEditing ? undefined : handleDragStart}
+          />
 
           {/* Resize handles */}
           {HANDLES.map((h) => (
@@ -515,6 +521,7 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
                 cursor: h.cursor,
                 zIndex: 30,
                 boxShadow: '0 1px 3px rgba(0,0,0,0.3)',
+                pointerEvents: 'auto',
               }}
               onMouseDown={(e) => handleResizeStart(e, h.id)}
             />
@@ -530,6 +537,7 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
             flexDirection: 'column',
             alignItems: 'center',
             zIndex: 30,
+            pointerEvents: 'auto',
           }}>
             {/* Stem line connecting to element */}
             <div style={{
@@ -552,6 +560,7 @@ function InteractiveElement({ item, isSelected, isLocked, containerRef, onSelect
                 alignItems: 'center',
                 justifyContent: 'center',
                 boxShadow: '0 1px 4px rgba(0,0,0,0.3)',
+                pointerEvents: 'auto',
               }}
               onMouseDown={handleRotateStart}
               title="Rotate"
