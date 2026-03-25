@@ -871,7 +871,7 @@ def _transcribe_sync(
         transcribe_kwargs["vad_parameters"] = {
             "min_silence_duration_ms": 300,   # Was 500 — shorter threshold preserves natural pauses
             "speech_pad_ms": 400,              # Was 200 — wider padding prevents clipping plosives
-            "threshold": 0.35,                 # Lower than default 0.5 — captures softer speech
+            "onset": 0.35,                     # Lower than default 0.5 — captures softer speech
             "min_speech_duration_ms": 100,     # Don't discard very short utterances
         }
     # CJK languages have higher natural compression ratios — relax threshold
@@ -1349,7 +1349,7 @@ def _extract_word_timestamps_sync(audio_path: str, language: str = "") -> list[W
         kwargs["vad_parameters"] = {
             "min_silence_duration_ms": 300,
             "speech_pad_ms": 400,
-            "threshold": 0.35,
+            "onset": 0.35,
             "min_speech_duration_ms": 100,
         }
     if language:
