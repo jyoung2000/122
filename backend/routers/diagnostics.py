@@ -195,11 +195,12 @@ async def _unload_and_wait(max_wait: int = 15) -> bool:
                     models = resp.json().get("models", [])
                     if not models:
                         # Models removed from Ollama's list, but CUDA driver
-                        # may still hold GPU memory for a few seconds.
-                        # Extra delay is critical on 4GB GPUs where the margin
-                        # between vision model VRAM and text model needs is <200MB.
-                        logger.info("Ollama reports no models after %ds — waiting 3s for CUDA driver to reclaim", attempt + 1)
-                        await asyncio.sleep(3)
+                        # may still hold GPU memory for several seconds.
+                        # Ollama also spawns 10-20 runners during unload/reload
+                        # which compete for GPU resources.
+                        # On GTX 1650 with <200MB margin, we need a generous wait.
+                        logger.info("Ollama reports no models after %ds — waiting 5s for CUDA driver + runners to settle", attempt + 1)
+                        await asyncio.sleep(5)
                         return True
                     # Models still present — send another unload
                     for m in models:
@@ -257,7 +258,11 @@ async def _test_vision_model(model: str) -> dict:
                         "images": [test_image_b64],
                     }],
                     "stream": False,
-                    "options": {"num_gpu": 99, "num_predict": 50},
+                    "options": {
+                        "num_gpu": 99,
+                        "num_predict": 50,
+                        "num_batch": 128,  # Reduce batch to lower compute buffer
+                    },
                 },
                 timeout=120,
             )
@@ -324,7 +329,12 @@ async def _test_text_model(model: str) -> dict:
                         "content": "Summarize in one sentence: A man walks into a coffee shop and orders a latte.",
                     }],
                     "stream": False,
-                    "options": {"num_gpu": 99, "num_predict": 50, "num_ctx": 2048},
+                    "options": {
+                        "num_gpu": 99,
+                        "num_predict": 50,
+                        "num_ctx": 1024,    # Minimal context for test — reduces compute graph from 300MB to ~150MB
+                        "num_batch": 128,   # Reduce batch size to lower compute buffer allocation
+                    },
                 },
                 timeout=120,
             )

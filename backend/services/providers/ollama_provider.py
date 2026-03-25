@@ -721,7 +721,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         # GPU mode — VRAM is the bottleneck
         detected = self._model_ctx.get(model_name, 0)
         if detected > 0:
-            return min(detected, 4096)  # Hard cap at 4096 for GPU mode
+            return min(detected, 2048)  # Hard cap at 2048 for GPU mode on 4GB GPUs
 
         model_lower = model_name.lower()
         if "moondream" in model_lower:
@@ -729,7 +729,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         elif "llava" in model_lower or "vision" in model_lower:
             return 2048  # Vision models: keep context small to save VRAM for image embeddings
         elif any(s in model_lower for s in ["3b", "1b", "0.5b"]):
-            return 4096
+            return 2048  # On 4GB GPU: 4096 ctx produces 300MB compute graph → OOM
         elif any(s in model_lower for s in ["7b", "8b"]):
             return 2048  # Reduced from 4096 to save VRAM
         return 2048
@@ -880,6 +880,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 "num_predict": max_tokens,
                 "num_ctx": self._get_effective_ctx(self._text_model),
                 "num_gpu": 99,  # Force all layers on GPU (overrides poisoned scheduler)
+                "num_batch": 256,  # Reduce from 512 to lower compute graph VRAM (~150MB vs ~300MB)
                 "num_thread": 4,          # CPU threads for any remaining CPU work
                 "temperature": 0.5,  # Small models need more diversity to avoid repetitive descriptions
                 "top_p": 0.9,        # Better variety in sampling

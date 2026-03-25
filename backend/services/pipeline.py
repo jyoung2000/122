@@ -1396,8 +1396,8 @@ async def _run_analysis_inner(job_id: str):
                     async with httpx.AsyncClient(timeout=5) as _hc:
                         _ps = await _hc.get(f"{settings.OLLAMA_HOST}/api/ps")
                         if _ps.status_code == 200 and not _ps.json().get("models", []):
-                            logger.info("[%s] Ollama reports no models after %ds — waiting 3s for CUDA driver to reclaim", job_id, _vram_wait + 1)
-                            await asyncio.sleep(3)  # Extra delay for CUDA driver to free GPU memory
+                            logger.info("[%s] Ollama reports no models after %ds — waiting 5s for CUDA driver + runners to settle", job_id, _vram_wait + 1)
+                            await asyncio.sleep(5)  # Extra delay: CUDA driver reclaim + Ollama runner cleanup
                             break
                 except Exception:
                     pass
