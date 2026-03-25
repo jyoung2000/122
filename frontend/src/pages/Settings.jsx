@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import ModelBrowser from '../components/ModelBrowser';
+import PipelineDiagnostics from '../components/PipelineDiagnostics';
 import CostTracker from '../components/CostTracker';
 import { showToast } from '../components/Toast';
 import useResponsive from '../hooks/useResponsive';
@@ -2125,6 +2126,9 @@ export default function Settings() {
                 </div>
               )}
             </div>
+
+            {/* ── Pipeline Diagnostics ── */}
+            <PipelineDiagnostics />
 
             {/* ── Client GPU (Browser) ── */}
             <div style={{ marginBottom: 32 }}>
