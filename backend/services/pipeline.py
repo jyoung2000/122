@@ -556,12 +556,25 @@ async def _run_analysis_inner(job_id: str):
             "window=%ds, timeout=%ds, summary=%s, sequential=True",
             job_id, tier.window_duration, tier.per_call_timeout_base, tier.summary_strategy,
         )
-        # Warm up models to avoid cold-start timeout on first analysis call
+        # Warm up models to detect capabilities and VRAM constraints,
+        # then immediately unload so Whisper gets exclusive GPU access.
+        # Models reload automatically when scene analysis starts.
         try:
             await _update_progress(job_id, JobStatus.EXTRACTING_FRAMES, 3, "Warming up local AI models...")
             await _primary_provider.warmup()
         except Exception:
             pass
+
+        # ── Critical: free GPU for Whisper ──
+        # warmup() loaded Ollama models (qwen2.5:3b = 2.3GB) onto the GPU.
+        # On a 4GB GPU, this leaves only ~1.5GB for Whisper → silent OOM.
+        # Unload now — models reload when pipeline reaches scene analysis.
+        try:
+            await _primary_provider.unload_models()
+            logger.info("[%s] Ollama models unloaded after warmup — GPU freed for Whisper", job_id)
+            await asyncio.sleep(2)  # Let CUDA driver reclaim across containers
+        except Exception as e:
+            logger.warning("[%s] Failed to unload Ollama after warmup: %s", job_id, e)
 
     logger.info(
         "[%s] Duration tier: %s (%.1f min) — frame_rate=%ds, summary=%s, "
@@ -1031,6 +1044,30 @@ async def _run_analysis_inner(job_id: str):
 
     if _uses_local_gpu:
         logger.info("[%s] Sequential mode: transcription first, then scene analysis (local GPU)", job_id)
+
+        # Safety: ensure Ollama models are unloaded before Whisper.
+        # On a 4GB GPU, qwen2.5:3b (2.3GB) + Whisper small (1GB) = OOM.
+        if is_ollama_primary and _primary_provider:
+            try:
+                await _primary_provider.unload_models()
+                logger.info("[%s] Pre-transcription: Ollama models unloaded from GPU", job_id)
+                await asyncio.sleep(1)
+            except Exception:
+                pass
+
+        # Log VRAM state so we can verify GPU is actually free
+        try:
+            import torch
+            if torch.cuda.is_available():
+                free_mb = torch.cuda.mem_get_info()[0] / (1024 * 1024)
+                total_mb = torch.cuda.mem_get_info()[1] / (1024 * 1024)
+                logger.info(
+                    "[%s] VRAM before transcription: %.0fMB free / %.0fMB total",
+                    job_id, free_mb, total_mb,
+                )
+        except Exception:
+            pass
+
         async with _stage_timer(job_id, "transcription+scene_analysis"):
             try:
                 trans_result = await asyncio.wait_for(

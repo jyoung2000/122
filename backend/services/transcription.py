@@ -858,7 +858,7 @@ def _transcribe_sync(
 
     opts = (
         f"task={task}, beam={effective_beam}"
-        f"{' (reduced for VRAM)' if _recommended_beam is not None else ''}, "
+        f"{' (VRAM-reduced)' if _recommended_beam is not None else ''}, "
         f"best_of={effective_best_of}, "
         f"vad={'on' if settings.WHISPER_VAD_FILTER else 'off'}, "
         f"no_repeat_ngram=3, temp_fallback=6_steps"
