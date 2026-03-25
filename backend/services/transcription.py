@@ -372,6 +372,36 @@ def _get_whisper_model():
                         original, min_vram, vram_mb, original, min_vram,
                     )
 
+            # ── VRAM-aware beam size for inference ──
+            # beam_size=5 on ≤4GB GPUs causes silent CUDA OOM during chunk
+            # iteration — CTranslate2 catches the cudaMalloc failure internally
+            # and returns empty results without raising a Python exception.
+            # Reduce to beam_size=1 (greedy) on low-VRAM GPUs.
+            if device == "cuda":
+                _gpus = _enumerate_gpus_nvidia_smi()
+                _vram = _gpus[0]["vram_mb"] if _gpus else 0
+                if _vram == 0:
+                    try:
+                        import torch as _torch
+                        if _torch.cuda.is_available():
+                            _vram = int(_torch.cuda.get_device_properties(0).total_mem / 1024 / 1024)
+                    except Exception:
+                        pass
+                if 0 < _vram <= 4500:
+                    whisper_device_info["recommended_beam_size"] = 1
+                    logger.info(
+                        "VRAM-aware: reducing beam_size to 1 (greedy) for %dMB GPU "
+                        "to prevent silent CUDA OOM during chunk inference",
+                        _vram,
+                    )
+                elif 0 < _vram <= 6000:
+                    whisper_device_info["recommended_beam_size"] = 3
+                    logger.info(
+                        "VRAM-aware: reducing beam_size to 3 for %dMB GPU", _vram,
+                    )
+                else:
+                    whisper_device_info["recommended_beam_size"] = None  # Use settings default
+
             logger.info(
                 "Loading Whisper model: %s (device=%s, compute=%s%s)",
                 settings.WHISPER_MODEL, device, compute_type,
@@ -781,10 +811,14 @@ def _transcribe_sync(
     progress_lock: Optional[threading.Lock] = None,
 ) -> list[TranscriptSegment]:
     model = _get_whisper_model()
+    # Use VRAM-aware beam size if available (prevents silent CUDA OOM on ≤4GB GPUs)
+    _recommended_beam = whisper_device_info.get("recommended_beam_size")
+    effective_beam = _recommended_beam if _recommended_beam is not None else settings.WHISPER_BEAM_SIZE
+    effective_best_of = 1 if effective_beam <= 1 else 3
     transcribe_kwargs = {
         "task": task,
-        "beam_size": settings.WHISPER_BEAM_SIZE,
-        "best_of": 3,                        # Only active during temperature fallback (temp > 0)
+        "beam_size": effective_beam,
+        "best_of": effective_best_of,
         "vad_filter": settings.WHISPER_VAD_FILTER,
         "condition_on_previous_text": True,
         "word_timestamps": True,
@@ -823,7 +857,9 @@ def _transcribe_sync(
         logger.info(f"Using initial_prompt ({len(initial_prompt)} chars)")
 
     opts = (
-        f"task={task}, beam={settings.WHISPER_BEAM_SIZE}, best_of=5, "
+        f"task={task}, beam={effective_beam}"
+        f"{' (reduced for VRAM)' if _recommended_beam is not None else ''}, "
+        f"best_of={effective_best_of}, "
         f"vad={'on' if settings.WHISPER_VAD_FILTER else 'off'}, "
         f"no_repeat_ngram=3, temp_fallback=6_steps"
     )
@@ -911,6 +947,42 @@ def _transcribe_sync(
         logger.warning("Audio preprocessing skipped: %s", e)
         preprocessed_path = audio_path
 
+    # ── Validate preprocessed audio ──
+    # If loudnorm produced a corrupt/empty file, fall back to the original.
+    if preprocessed_path != audio_path:
+        try:
+            import os as _os
+            file_size = _os.path.getsize(preprocessed_path)
+            if file_size < 1000:  # WAV header alone is 44 bytes; <1KB = certainly empty
+                logger.warning(
+                    "Preprocessed audio is suspiciously small (%d bytes) — "
+                    "falling back to original audio",
+                    file_size,
+                )
+                preprocessed_path = audio_path
+            else:
+                import subprocess as _sp
+                probe = _sp.run(
+                    ["ffprobe", "-v", "error", "-select_streams", "a:0",
+                     "-show_entries", "stream=duration,sample_rate,channels",
+                     "-of", "csv=p=0", preprocessed_path],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if probe.returncode != 0 or not probe.stdout.strip():
+                    logger.warning(
+                        "Preprocessed audio has no valid audio stream — "
+                        "falling back to original: %s",
+                        (probe.stderr or "unknown error")[:200],
+                    )
+                    preprocessed_path = audio_path
+                else:
+                    logger.info(
+                        "Preprocessed audio validated: %d bytes, %s",
+                        file_size, probe.stdout.strip(),
+                    )
+        except Exception as val_err:
+            logger.warning("Audio validation failed (%s) — using preprocessed file anyway", val_err)
+
     # ── Chunked transcription for long audio ──
     # Whisper's 30-second attention window causes accuracy degradation on long files.
     # Split into 10-min chunks with 30s overlap, then merge.
@@ -958,49 +1030,75 @@ def _transcribe_sync(
                         progress_state["language"] = detected_lang
 
             chunk_raw = []
-            for segment in chunk_segments_iter:
-                text = segment.text.strip()
-                word_list = None
-                if hasattr(segment, "words") and segment.words:
-                    word_list = []
-                    for w in segment.words:
-                        word_text = w.word.strip()
-                        if not word_text:
-                            continue
-                        # Skip phantom words with extremely low probability
-                        word_prob = getattr(w, 'probability', 1.0)
-                        if word_prob < 0.01:
-                            logger.debug("Skipping low-probability word at %.2fs: '%s' (p=%.4f)",
-                                         w.start + chunk_info["offset"], word_text, word_prob)
-                            continue
-                        word_list.append({
-                            "start": round(w.start + chunk_info["offset"], 3),
-                            "end": round(w.end + chunk_info["offset"], 3),
-                            "word": word_text,
-                        })
+            try:
+                for segment in chunk_segments_iter:
+                    text = segment.text.strip()
+                    word_list = None
+                    if hasattr(segment, "words") and segment.words:
+                        word_list = []
+                        for w in segment.words:
+                            word_text = w.word.strip()
+                            if not word_text:
+                                continue
+                            # Skip phantom words with extremely low probability
+                            word_prob = getattr(w, 'probability', 1.0)
+                            if word_prob < 0.01:
+                                logger.debug("Skipping low-probability word at %.2fs: '%s' (p=%.4f)",
+                                             w.start + chunk_info["offset"], word_text, word_prob)
+                                continue
+                            word_list.append({
+                                "start": round(w.start + chunk_info["offset"], 3),
+                                "end": round(w.end + chunk_info["offset"], 3),
+                                "word": word_text,
+                            })
 
-                seg_end = segment.end + chunk_info["offset"]
-                seg_start = segment.start + chunk_info["offset"]
-                if word_list:
-                    last_word_end = max(w["end"] for w in word_list)
-                    if last_word_end > seg_end:
-                        seg_end = last_word_end + 0.05
+                    seg_end = segment.end + chunk_info["offset"]
+                    seg_start = segment.start + chunk_info["offset"]
+                    if word_list:
+                        last_word_end = max(w["end"] for w in word_list)
+                        if last_word_end > seg_end:
+                            seg_end = last_word_end + 0.05
 
-                avg_lp = getattr(segment, 'avg_logprob', -1.0)
-                no_speech = getattr(segment, 'no_speech_prob', 0.0)
-                confidence = max(0.0, min(1.0, 1.0 + avg_lp))
-                if no_speech > 0.3:
-                    confidence *= (1.0 - no_speech)
+                    avg_lp = getattr(segment, 'avg_logprob', -1.0)
+                    no_speech = getattr(segment, 'no_speech_prob', 0.0)
+                    confidence = max(0.0, min(1.0, 1.0 + avg_lp))
+                    if no_speech > 0.3:
+                        confidence *= (1.0 - no_speech)
 
-                chunk_raw.append({
-                    "start": seg_start,
-                    "end": seg_end,
-                    "text": text,
-                    "words": word_list,
-                    "confidence": round(confidence, 3),
-                    "avg_logprob": round(avg_lp, 4) if avg_lp is not None else None,
-                    "no_speech_prob": round(no_speech, 4) if no_speech is not None else None,
-                })
+                    chunk_raw.append({
+                        "start": seg_start,
+                        "end": seg_end,
+                        "text": text,
+                        "words": word_list,
+                        "confidence": round(confidence, 3),
+                        "avg_logprob": round(avg_lp, 4) if avg_lp is not None else None,
+                        "no_speech_prob": round(no_speech, 4) if no_speech is not None else None,
+                    })
+            except Exception as iter_err:
+                error_str = str(iter_err).lower()
+                is_oom = any(p in error_str for p in [
+                    "out of memory", "cuda", "cudamalloc", "oom", "cublaslt",
+                ])
+                logger.error(
+                    "Whisper %s during chunk %d/%d iteration "
+                    "(model=%s, device=%s, beam=%d, collected %d segments before crash): %s",
+                    "CUDA OOM" if is_oom else "error",
+                    ci + 1, len(chunks),
+                    settings.WHISPER_MODEL, whisper_device_info.get("device", "?"),
+                    effective_beam, len(chunk_raw),
+                    str(iter_err)[:300],
+                )
+                if is_oom:
+                    logger.warning(
+                        "Continuing with remaining chunks after CUDA OOM in chunk %d. "
+                        "Collected %d segments from this chunk before failure.",
+                        ci + 1, len(chunk_raw),
+                    )
+                else:
+                    logger.warning(
+                        "Non-CUDA error during chunk %d iteration — continuing with %d segments",
+                        ci + 1, len(chunk_raw),
+                    )
 
             all_chunk_segments.append(chunk_raw)
 
@@ -1018,8 +1116,44 @@ def _transcribe_sync(
                         seg for chunk in all_chunk_segments for seg in chunk
                     ]
 
-            logger.info("Chunk %d/%d: %d segments (offset=%.1fs)",
-                        ci + 1, len(chunks), len(chunk_raw), chunk_info["offset"])
+            if len(chunk_raw) == 0:
+                _chunk_size = 0
+                try:
+                    import os as _os
+                    _chunk_size = _os.path.getsize(chunk_info["path"])
+                except Exception:
+                    pass
+                logger.warning(
+                    "Chunk %d/%d: 0 SEGMENTS (offset=%.1fs, file=%s, size=%d bytes). "
+                    "Possible causes: (1) CUDA OOM during beam search — reduce beam_size, "
+                    "(2) audio chunk is silent/corrupt, (3) VAD filtered everything. "
+                    "Model=%s, device=%s, beam=%d",
+                    ci + 1, len(chunks), chunk_info["offset"],
+                    chunk_info["path"], _chunk_size,
+                    settings.WHISPER_MODEL, whisper_device_info.get("device", "?"),
+                    effective_beam,
+                )
+            else:
+                logger.info("Chunk %d/%d: %d segments (offset=%.1fs)",
+                            ci + 1, len(chunks), len(chunk_raw), chunk_info["offset"])
+
+        # Summary diagnostic: warn if most/all chunks produced nothing
+        _empty_chunks = sum(1 for c in all_chunk_segments if len(c) == 0)
+        _total_segs = sum(len(c) for c in all_chunk_segments)
+        if _empty_chunks == len(all_chunk_segments):
+            logger.error(
+                "ALL %d chunks produced 0 segments (model=%s, device=%s, beam=%d). "
+                "Whisper is completely failing on this audio. "
+                "This is almost certainly a silent CUDA OOM — try beam_size=1 or CPU mode.",
+                len(chunks), settings.WHISPER_MODEL,
+                whisper_device_info.get("device", "?"), effective_beam,
+            )
+        elif _empty_chunks > 0:
+            logger.warning(
+                "%d/%d chunks produced 0 segments (%d total segments). "
+                "Partial transcription — some chunks may have hit CUDA memory limits.",
+                _empty_chunks, len(all_chunk_segments), _total_segs,
+            )
 
         # Merge overlapping chunks
         raw_segments = _merge_chunk_segments(all_chunk_segments, overlap=30)
@@ -1061,51 +1195,65 @@ def _transcribe_sync(
                 progress_state["start_time"] = wall_start
 
         raw_segments = []
-        for segment in segments_iter:
-            text = segment.text.strip()
-            word_list = None
-            if hasattr(segment, "words") and segment.words:
-                word_list = []
-                for w in segment.words:
-                    word_text = w.word.strip()
-                    if not word_text:
-                        continue
-                    word_prob = getattr(w, 'probability', 1.0)
-                    if word_prob < 0.01:
-                        logger.debug("Skipping low-probability word at %.2fs: '%s' (p=%.4f)",
-                                     w.start, word_text, word_prob)
-                        continue
-                    word_list.append({
-                        "start": round(w.start, 3), "end": round(w.end, 3), "word": word_text,
-                    })
-            seg_end = segment.end
-            if word_list:
-                last_word_end = max(w["end"] for w in word_list)
-                if last_word_end > seg_end:
-                    seg_end = last_word_end + 0.05
+        try:
+            for segment in segments_iter:
+                text = segment.text.strip()
+                word_list = None
+                if hasattr(segment, "words") and segment.words:
+                    word_list = []
+                    for w in segment.words:
+                        word_text = w.word.strip()
+                        if not word_text:
+                            continue
+                        word_prob = getattr(w, 'probability', 1.0)
+                        if word_prob < 0.01:
+                            logger.debug("Skipping low-probability word at %.2fs: '%s' (p=%.4f)",
+                                         w.start, word_text, word_prob)
+                            continue
+                        word_list.append({
+                            "start": round(w.start, 3), "end": round(w.end, 3), "word": word_text,
+                        })
+                seg_end = segment.end
+                if word_list:
+                    last_word_end = max(w["end"] for w in word_list)
+                    if last_word_end > seg_end:
+                        seg_end = last_word_end + 0.05
 
-            avg_lp = getattr(segment, 'avg_logprob', -1.0)
-            no_speech = getattr(segment, 'no_speech_prob', 0.0)
-            confidence = max(0.0, min(1.0, 1.0 + avg_lp))
-            if no_speech > 0.3:
-                confidence *= (1.0 - no_speech)
+                avg_lp = getattr(segment, 'avg_logprob', -1.0)
+                no_speech = getattr(segment, 'no_speech_prob', 0.0)
+                confidence = max(0.0, min(1.0, 1.0 + avg_lp))
+                if no_speech > 0.3:
+                    confidence *= (1.0 - no_speech)
 
-            seg_dict = {
-                "start": segment.start,
-                "end": seg_end,
-                "text": text,
-                "words": word_list,
-                "confidence": round(confidence, 3),
-                "avg_logprob": round(avg_lp, 4) if avg_lp is not None else None,
-                "no_speech_prob": round(no_speech, 4) if no_speech is not None else None,
-            }
-            raw_segments.append(seg_dict)
-            if progress_state and progress_lock:
-                with progress_lock:
-                    progress_state["segments"] = len(raw_segments)
-                    progress_state["latest_end"] = segment.end
-                    progress_state["last_text"] = text[:80] if text else ""
-                    progress_state["raw_segments"] = raw_segments
+                seg_dict = {
+                    "start": segment.start,
+                    "end": seg_end,
+                    "text": text,
+                    "words": word_list,
+                    "confidence": round(confidence, 3),
+                    "avg_logprob": round(avg_lp, 4) if avg_lp is not None else None,
+                    "no_speech_prob": round(no_speech, 4) if no_speech is not None else None,
+                }
+                raw_segments.append(seg_dict)
+                if progress_state and progress_lock:
+                    with progress_lock:
+                        progress_state["segments"] = len(raw_segments)
+                        progress_state["latest_end"] = segment.end
+                        progress_state["last_text"] = text[:80] if text else ""
+                        progress_state["raw_segments"] = raw_segments
+        except Exception as iter_err:
+            error_str = str(iter_err).lower()
+            is_oom = any(p in error_str for p in [
+                "out of memory", "cuda", "cudamalloc", "oom", "cublaslt",
+            ])
+            logger.error(
+                "Whisper %s during single-pass iteration "
+                "(model=%s, device=%s, beam=%d, collected %d segments before crash): %s",
+                "CUDA OOM" if is_oom else "error",
+                settings.WHISPER_MODEL, whisper_device_info.get("device", "?"),
+                effective_beam, len(raw_segments),
+                str(iter_err)[:300],
+            )
 
         if progress_state and progress_lock:
             with progress_lock:

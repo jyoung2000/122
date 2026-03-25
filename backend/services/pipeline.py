@@ -816,6 +816,10 @@ async def _run_analysis_inner(job_id: str):
             try:
                 settings.WHISPER_MODEL = "small"
                 settings.GPU_ACCELERATION_ENABLED = False
+                # Reduce beam size for CPU — beam=5 on CPU is 5x slower per chunk,
+                # making the retry timeout before completing all chunks.
+                original_beam = settings.WHISPER_BEAM_SIZE
+                settings.WHISPER_BEAM_SIZE = 1  # Greedy decode — fastest on CPU
                 reload_model()
 
                 result = await transcribe_audio(
@@ -831,6 +835,7 @@ async def _run_analysis_inner(job_id: str):
                 # Restore original settings for future jobs
                 settings.WHISPER_MODEL = original_model
                 settings.GPU_ACCELERATION_ENABLED = original_gpu
+                settings.WHISPER_BEAM_SIZE = original_beam
                 reload_model()
 
         await database.update_job_status(job_id, transcript=list(result))
