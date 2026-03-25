@@ -1143,6 +1143,12 @@ async def _run_analysis_inner(job_id: str):
                     logger.info("[%s] Ollama models cleared before scene analysis — full VRAM available for vision model", job_id)
                     if hasattr(_primary_provider, '_force_cpu'):
                         _primary_provider._force_cpu = False  # Allow GPU retry
+                    # Verify GPU health — if poisoned from a prior OOM, reset scheduler
+                    if hasattr(_primary_provider, 'verify_gpu_health'):
+                        gpu_ok = await _primary_provider.verify_gpu_health()
+                        if not gpu_ok and hasattr(_primary_provider, 'reset_gpu_scheduler'):
+                            logger.warning("[%s] GPU scheduler poisoned — attempting reset before scene analysis", job_id)
+                            await _primary_provider.reset_gpu_scheduler()
                 except Exception as e:
                     logger.warning("[%s] Failed to clear Ollama models before scene analysis: %s", job_id, e)
 
@@ -1277,6 +1283,16 @@ async def _run_analysis_inner(job_id: str):
             # Log GPU status for diagnostics
             if hasattr(_primary_provider, 'log_gpu_status'):
                 await _primary_provider.log_gpu_status()
+            # Verify GPU is not poisoned before loading text model
+            if hasattr(_primary_provider, 'verify_gpu_health'):
+                gpu_ok = await _primary_provider.verify_gpu_health()
+                if not gpu_ok and hasattr(_primary_provider, 'reset_gpu_scheduler'):
+                    logger.warning("[%s] GPU scheduler poisoned — attempting reset before text summarization", job_id)
+                    reset_ok = await _primary_provider.reset_gpu_scheduler()
+                    if reset_ok:
+                        logger.info("[%s] GPU scheduler reset successful — text model will load on GPU", job_id)
+                    else:
+                        logger.warning("[%s] GPU scheduler reset failed — text model will run on CPU", job_id)
         except Exception as e:
             logger.warning("[%s] Failed to unload vision model before summary: %s", job_id, e)
 

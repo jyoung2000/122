@@ -283,7 +283,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                     "prompt": "Hi",
                     "stream": False,
                     "options": {
-                        "num_gpu": self._get_num_gpu(model),
+                        "num_gpu": 99,  # Force GPU — overrides poisoned scheduler
                         "num_predict": 1,  # Generate only 1 token for warmup
                     },
                 },
@@ -300,6 +300,91 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         except Exception as e:
             logger.error("Overload recovery failed: %s", e)
             return False
+
+    async def reset_gpu_scheduler(self) -> bool:
+        """Reset Ollama's GPU scheduler after a CUDA OOM poisoning event.
+
+        After a CUDA OOM, Ollama's internal scheduler permanently marks the GPU
+        as unusable (GPULayers:[], device=CPU). The only way to reset this is to
+        unload all models, then force a fresh load with num_gpu=99 which makes
+        Ollama re-evaluate GPU availability.
+
+        Returns True if GPU is usable after reset.
+        """
+        logger.info("Attempting GPU scheduler reset (clearing OOM poison state)...")
+        try:
+            # Step 1: Unload everything
+            await self.clear_vram()
+            await asyncio.sleep(3)
+
+            # Step 2: Load smallest model with explicit GPU request
+            # Use vision model (moondream ~788MB) as it's the smallest
+            probe_model = self._vision_model
+            resp = await self._client.post(
+                f"{self._host}/api/generate",
+                json={
+                    "model": probe_model,
+                    "prompt": "hi",
+                    "stream": False,
+                    "options": {
+                        "num_gpu": 99,  # Force GPU — overrides poisoned scheduler
+                        "num_predict": 1,
+                    },
+                },
+                timeout=60.0,
+            )
+
+            if resp.status_code == 200:
+                # Step 3: Check if it actually loaded on GPU
+                ps_resp = await self._client.get(f"{self._host}/api/ps", timeout=10.0)
+                if ps_resp.status_code == 200:
+                    models = ps_resp.json().get("models", [])
+                    for m in models:
+                        if m.get("size_vram", 0) > 0:
+                            logger.info(
+                                "GPU scheduler reset SUCCESSFUL — %s loaded on GPU (VRAM: %.0fMB)",
+                                m.get("name", "unknown"), m.get("size_vram", 0) / 1024 / 1024,
+                            )
+                            # Unload the probe model
+                            await self.clear_vram()
+                            self._force_cpu = False
+                            self._gpu_available = None  # Reset cache
+                            return True
+
+                logger.warning("GPU scheduler still poisoned — model loaded on CPU despite num_gpu=99")
+                await self.clear_vram()
+                return False
+            else:
+                logger.error("GPU reset probe failed: status %d", resp.status_code)
+                await self.clear_vram()
+                return False
+        except Exception as e:
+            logger.error("GPU scheduler reset failed: %s", e)
+            return False
+
+    async def verify_gpu_health(self) -> bool:
+        """Check if GPU is available and not in a poisoned state.
+
+        Returns True if GPU appears healthy, False if poisoned.
+        When no models are loaded, returns True (can't determine state).
+        """
+        try:
+            resp = await self._client.get(f"{self._host}/api/ps", timeout=10.0)
+            if resp.status_code == 200:
+                models = resp.json().get("models", [])
+                if not models:
+                    return True  # No models loaded — can't determine, assume OK
+                for m in models:
+                    if m.get("size_vram", 0) > 0:
+                        return True  # At least one model on GPU
+                # Models loaded but none on GPU — likely poisoned
+                logger.warning(
+                    "GPU health check: models loaded but none on GPU — scheduler may be poisoned"
+                )
+                return False
+            return True  # Can't determine — assume OK
+        except Exception:
+            return True  # Can't determine — assume OK
 
     async def _detect_vram(self) -> int:
         """Detect available GPU VRAM in MB via nvidia-smi.
@@ -623,8 +708,10 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             # CPU mode — system RAM is plentiful, can use larger context
             # But still cap to avoid extremely slow generation
             model_lower = model_name.lower()
-            if "llava" in model_lower or "vision" in model_lower or "moondream" in model_lower:
-                return 4096  # Needs room for image embedding + full response
+            if "moondream" in model_lower:
+                return 2048  # Moondream only supports 2048 context (n_ctx_train=2048)
+            elif "llava" in model_lower or "vision" in model_lower:
+                return 2048  # Vision models: respect training context limit
             elif any(s in model_lower for s in ["3b", "1b", "0.5b"]):
                 return 8192
             elif any(s in model_lower for s in ["7b", "8b"]):
@@ -637,8 +724,10 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             return min(detected, 4096)  # Hard cap at 4096 for GPU mode
 
         model_lower = model_name.lower()
-        if "llava" in model_lower or "vision" in model_lower or "moondream" in model_lower:
-            return 4096  # Moondream needs room for image tokens + response
+        if "moondream" in model_lower:
+            return 2048  # Moondream only supports 2048 context (n_ctx_train=2048)
+        elif "llava" in model_lower or "vision" in model_lower:
+            return 2048  # Vision models: keep context small to save VRAM for image embeddings
         elif any(s in model_lower for s in ["3b", "1b", "0.5b"]):
             return 4096
         elif any(s in model_lower for s in ["7b", "8b"]):
@@ -677,9 +766,8 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             try:
                 options = {
                     "num_ctx": self._get_effective_ctx(self._vision_model),
-                    "num_gpu": num_gpu if num_gpu >= 0 else -1,
+                    "num_gpu": 99,  # Force all layers on GPU (Ollama caps at actual count)
                     "num_thread": 4,
-                    "f16_kv": True,
                 }
                 # On second attempt (after OOM), always force CPU
                 if attempt == 1:
@@ -791,9 +879,8 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             "options": {
                 "num_predict": max_tokens,
                 "num_ctx": self._get_effective_ctx(self._text_model),
-                "num_gpu": num_gpu if num_gpu >= 0 else -1,  # Always request GPU layers (-1 = all)
+                "num_gpu": 99,  # Force all layers on GPU (overrides poisoned scheduler)
                 "num_thread": 4,          # CPU threads for any remaining CPU work
-                "f16_kv": True,           # Use f16 for KV cache (saves VRAM)
                 "temperature": 0.5,  # Small models need more diversity to avoid repetitive descriptions
                 "top_p": 0.9,        # Better variety in sampling
                 "repeat_penalty": 1.15,  # Penalize repetitive phrasing
@@ -1015,12 +1102,20 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             except asyncio.TimeoutError:
                 logger.warning(
                     "Ollama vision speed test timed out (>120s, model=%s) — "
-                    "CLIP may be on CPU. Attempting to force GPU reload.",
+                    "CLIP likely on CPU due to GPU scheduler poisoning. "
+                    "Attempting GPU scheduler reset...",
                     self._vision_model,
                 )
-                # Try to force GPU by unloading and reloading the model
-                await self._unload_model(self._vision_model)
-                await asyncio.sleep(3)
+                # GPU scheduler is likely poisoned from a prior OOM.
+                # Reset it before retrying.
+                gpu_reset_ok = await self.reset_gpu_scheduler()
+                if gpu_reset_ok:
+                    logger.info("GPU scheduler reset successful — retrying vision speed test on GPU")
+                else:
+                    logger.warning(
+                        "GPU scheduler is poisoned (likely from prior CUDA OOM). "
+                        "Ollama container restart may be needed. Retrying on CPU..."
+                    )
                 try:
                     t0 = _t.monotonic()
                     test_result = await asyncio.wait_for(
