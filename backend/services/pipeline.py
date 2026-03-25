@@ -1390,18 +1390,19 @@ async def _run_analysis_inner(job_id: str):
             await _primary_provider.clear_vram()
             logger.info("[%s] Vision model unload sent — waiting for VRAM release", job_id)
             # Poll until Ollama confirms no models loaded (VRAM takes 5-10s to free on GTX 1650)
-            for _vram_wait in range(10):
+            for _vram_wait in range(12):
                 await asyncio.sleep(1)
                 try:
                     async with httpx.AsyncClient(timeout=5) as _hc:
                         _ps = await _hc.get(f"{settings.OLLAMA_HOST}/api/ps")
                         if _ps.status_code == 200 and not _ps.json().get("models", []):
-                            logger.info("[%s] VRAM freed after %ds — no models loaded", job_id, _vram_wait + 1)
+                            logger.info("[%s] Ollama reports no models after %ds — waiting 3s for CUDA driver to reclaim", job_id, _vram_wait + 1)
+                            await asyncio.sleep(3)  # Extra delay for CUDA driver to free GPU memory
                             break
                 except Exception:
                     pass
             else:
-                logger.warning("[%s] Models may still be unloading after 10s wait", job_id)
+                logger.warning("[%s] Models may still be unloading after 12s wait", job_id)
             # Reset force_cpu flag so text model tries GPU
             if hasattr(_primary_provider, '_force_cpu'):
                 _primary_provider._force_cpu = False

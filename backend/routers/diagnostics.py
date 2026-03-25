@@ -179,6 +179,9 @@ async def _unload_and_wait(max_wait: int = 15) -> bool:
     keep_alive=0. Simply sleeping 2s is not enough — the text model OOMs
     because the vision model's VRAM hasn't been released yet.
 
+    After /api/ps confirms no models, we add an extra 3s delay to let
+    the CUDA driver fully reclaim GPU memory across container boundaries.
+
     Returns True if no models remain loaded.
     """
     await _unload_all_models()
@@ -191,7 +194,12 @@ async def _unload_and_wait(max_wait: int = 15) -> bool:
                 if resp.status_code == 200:
                     models = resp.json().get("models", [])
                     if not models:
-                        logger.info("VRAM freed after %ds (no models loaded)", attempt + 1)
+                        # Models removed from Ollama's list, but CUDA driver
+                        # may still hold GPU memory for a few seconds.
+                        # Extra delay is critical on 4GB GPUs where the margin
+                        # between vision model VRAM and text model needs is <200MB.
+                        logger.info("Ollama reports no models after %ds — waiting 3s for CUDA driver to reclaim", attempt + 1)
+                        await asyncio.sleep(3)
                         return True
                     # Models still present — send another unload
                     for m in models:
