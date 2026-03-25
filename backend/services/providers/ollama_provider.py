@@ -193,6 +193,17 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         except Exception:
             pass
 
+        # Method 3: PyTorch CUDA fallback (works inside Docker without nvidia-smi)
+        if self._available_vram_mb == 0:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    free_mb = int(torch.cuda.mem_get_info()[0] / 1024 / 1024)
+                    self._available_vram_mb = free_mb
+                    logger.info("Detected %d MB free VRAM via PyTorch CUDA", free_mb)
+            except Exception:
+                pass
+
         return self._available_vram_mb
 
     def _get_num_gpu(self, model_name: str) -> int:
@@ -298,6 +309,8 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         # When loading vision model after Whisper release, check if VRAM is
         # available and reset force_cpu flag so CLIP can use GPU
         if model_name == self._vision_model and self._force_cpu:
+            free_mb = 0
+            # Method 1: nvidia-smi
             try:
                 import subprocess
                 result = subprocess.run(
@@ -307,14 +320,22 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 )
                 if result.returncode == 0:
                     free_mb = int(result.stdout.strip().split('\n')[0])
-                    if free_mb > 1500:  # moondream needs ~1GB, want headroom
-                        logger.info(
-                            "VRAM available (%dMB free) — clearing force_cpu flag for %s",
-                            free_mb, model_name,
-                        )
-                        self._force_cpu = False
             except Exception:
                 pass
+            # Method 2: PyTorch fallback
+            if free_mb == 0:
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        free_mb = int(torch.cuda.mem_get_info()[0] / 1024 / 1024)
+                except Exception:
+                    pass
+            if free_mb > 1500:
+                logger.info(
+                    "VRAM available (%dMB free) — clearing force_cpu flag for %s",
+                    free_mb, model_name,
+                )
+                self._force_cpu = False
 
     @property
     def supports_vision(self) -> bool:

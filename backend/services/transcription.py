@@ -342,11 +342,15 @@ def _get_whisper_model():
             #   medium: ~2.5GB   large-v3: ~3.5GB  large-v3-turbo: ~3.0GB
             # On 4GB GPUs, medium+ models crash on long audio (KV cache grows
             # with duration). Downgrade to small with a loud warning.
+            # VRAM requirements = minimum TOTAL GPU memory needed.
+            # These assume exclusive GPU access (Ollama unloaded before Whisper).
+            # medium (~1.5GB model + ~0.5GB beam/KV + ~0.3GB buffers = ~2.3GB peak)
+            # needs ~3GB total to leave headroom for CUDA spikes on complex audio.
             _VRAM_REQUIREMENTS = {
-                "large-v3": 6000,
-                "large-v3-turbo": 5000,
-                "medium": 5000,      # medium fits in 4GB but OOMs on long audio
-                "medium.en": 5000,
+                "large-v3": 6000,       # ~3.5GB model alone
+                "large-v3-turbo": 5000, # ~3.0GB model alone
+                "medium": 3000,         # ~1.5GB model + ~0.5GB beam + ~0.3GB buffers
+                "medium.en": 3000,
             }
             if device == "cuda" and settings.WHISPER_MODEL in _VRAM_REQUIREMENTS:
                 # Try nvidia-smi first, fall back to PyTorch CUDA reporting
@@ -373,10 +377,9 @@ def _get_whisper_model():
                     )
 
             # ── VRAM-aware beam size for inference ──
-            # beam_size=5 on ≤4GB GPUs causes silent CUDA OOM during chunk
-            # iteration — CTranslate2 catches the cudaMalloc failure internally
-            # and returns empty results without raising a Python exception.
-            # Reduce to beam_size=1 (greedy) on low-VRAM GPUs.
+            # Estimate whether model + beam_size will fit in available VRAM.
+            # Only reduce beam when the combination would actually exceed safe limits.
+            # CTranslate2 catches cudaMalloc failures silently — returns empty results.
             if device == "cuda":
                 _gpus = _enumerate_gpus_nvidia_smi()
                 _vram = _gpus[0]["vram_mb"] if _gpus else 0
@@ -387,20 +390,50 @@ def _get_whisper_model():
                             _vram = int(_torch.cuda.get_device_properties(0).total_mem / 1024 / 1024)
                     except Exception:
                         pass
-                if 0 < _vram <= 4500:
-                    whisper_device_info["recommended_beam_size"] = 1
-                    logger.info(
-                        "VRAM-aware: reducing beam_size to 1 (greedy) for %dMB GPU "
-                        "to prevent silent CUDA OOM during chunk inference",
-                        _vram,
-                    )
-                elif 0 < _vram <= 6000:
-                    whisper_device_info["recommended_beam_size"] = 3
-                    logger.info(
-                        "VRAM-aware: reducing beam_size to 3 for %dMB GPU", _vram,
-                    )
+
+                # Estimate peak VRAM for current model + beam=N
+                # Model weights (float16): tiny=400, base=500, small=1000, medium=1500,
+                #   large-v3-turbo=3000, large-v3=3500
+                _MODEL_VRAM_MB = {
+                    "tiny": 400, "tiny.en": 400,
+                    "base": 500, "base.en": 500,
+                    "small": 1000, "small.en": 1000,
+                    "medium": 1500, "medium.en": 1500,
+                    "large-v3-turbo": 3000,
+                    "large-v3": 3500, "large-v2": 3500, "large": 3500,
+                }
+                _model_mb = _MODEL_VRAM_MB.get(settings.WHISPER_MODEL, 1000)
+                # Beam overhead: ~50MB per beam (KV cache + workspace)
+                _beam_overhead = settings.WHISPER_BEAM_SIZE * 50
+                # CUDA driver/context: ~400MB
+                _cuda_overhead = 400
+                _estimated_peak = _model_mb + _beam_overhead + _cuda_overhead
+                # Usable VRAM (total minus driver)
+                _usable = _vram - _cuda_overhead if _vram > 0 else 0
+
+                if _vram > 0 and _estimated_peak > _vram * 0.85:
+                    # Would exceed 85% of total VRAM — find safe beam size
+                    # Work backward: max_beam = (usable * 0.85 - model) / 50
+                    _safe_beam = max(1, int((_usable * 0.85 - _model_mb) / 50))
+                    _safe_beam = min(_safe_beam, settings.WHISPER_BEAM_SIZE)
+                    if _safe_beam < settings.WHISPER_BEAM_SIZE:
+                        whisper_device_info["recommended_beam_size"] = _safe_beam
+                        logger.info(
+                            "VRAM-aware: beam %d→%d for %s on %dMB GPU "
+                            "(est. peak %dMB, usable %dMB)",
+                            settings.WHISPER_BEAM_SIZE, _safe_beam,
+                            settings.WHISPER_MODEL, _vram, _estimated_peak, _usable,
+                        )
+                    else:
+                        whisper_device_info["recommended_beam_size"] = None
+                        logger.info(
+                            "VRAM OK: %s + beam=%d fits on %dMB GPU "
+                            "(est. peak %dMB, usable %dMB)",
+                            settings.WHISPER_MODEL, settings.WHISPER_BEAM_SIZE,
+                            _vram, _estimated_peak, _usable,
+                        )
                 else:
-                    whisper_device_info["recommended_beam_size"] = None  # Use settings default
+                    whisper_device_info["recommended_beam_size"] = None  # Fits fine
 
             logger.info(
                 "Loading Whisper model: %s (device=%s, compute=%s%s)",

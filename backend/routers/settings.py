@@ -1451,6 +1451,7 @@ async def save_models(req: SaveModelsRequest):
         settings.WHISPER_MODEL_USER_SET = True  # Mark as explicitly chosen by user
         if env_path:
             _upsert_env_var(env_path, "WHISPER_MODEL", req.transcript_model)
+            _upsert_env_var(env_path, "WHISPER_MODEL_USER_SET", "true")
         # Force reload if model changed — without this, the _whisper_model
         # singleton holds the old model and _get_whisper_model() returns it.
         if req.transcript_model != old_model:

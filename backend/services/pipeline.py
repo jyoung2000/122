@@ -52,12 +52,12 @@ async def _release_whisper_vram(job_id: str):
         import gc
         from backend.services import transcription as _trans_mod
 
-        # Step 1: Delete the model reference explicitly
+        # Step 1: Use the canonical cleanup (handles del + gc + CUDA)
         with _trans_mod._model_lock:
             if _trans_mod._whisper_model is not None:
-                del _trans_mod._whisper_model
-                _trans_mod._whisper_model = None
-                logger.info("[%s] Whisper model reference deleted", job_id)
+                _trans_mod._cleanup_old_model()
+                _trans_mod._loaded_model_name = None  # Reset identity tracking
+                logger.info("[%s] Whisper model cleaned up via _cleanup_old_model()", job_id)
             else:
                 logger.debug("[%s] Whisper model not loaded — nothing to release", job_id)
                 return
