@@ -298,9 +298,17 @@ export default function VideoEditor({
 
     // Re-init if clipEnd becomes available for the first time, or changes significantly
     const needsInit = !multiTrackInitialized.current || (lastInitClipEnd.current === 0 && effectiveEnd > 0);
-    if (!needsInit) return;
 
-    if (!recovered || timelineStoreItems.length === 0 || lastInitClipEnd.current === 0) {
+    // Also re-init if the store's video item doesn't match our clip range
+    // (can happen when useTimelinePersistence recovers stale state)
+    const videoItem = timelineStoreItems.find(it => it.type === 'video');
+    const storeClipMismatch = videoItem &&
+        (Math.abs((videoItem.trimStart || 0) - clipStart) > 0.5 ||
+         Math.abs((videoItem.trimEnd || 0) - effectiveEnd) > 0.5);
+
+    if (!needsInit && !storeClipMismatch) return;
+
+    if (!recovered || timelineStoreItems.length === 0 || lastInitClipEnd.current === 0 || storeClipMismatch) {
       // Fresh init — populate with transcript subtitles
       initFromClip({ src, clipStart, clipEnd: effectiveEnd, subtitleSegments: transcript || [] });
     } else if (recovered && transcript && transcript.length > 0) {
