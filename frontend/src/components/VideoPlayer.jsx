@@ -207,29 +207,49 @@ export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, asp
   );
 
   // Update objectPosition dynamically via rAF for smooth ~60fps updates
+  const lastAppliedPctRef = useRef(null);
+  const transitionStartRef = useRef(null);
+  const TRANSITION_DURATION = 0.3; // 300ms for aspect ratio transitions
   useEffect(() => {
     if (!hasDynamicSubject) return;
     const video = videoRef.current;
     if (!video) return;
+    // If we have a previous position, start a smooth transition
+    if (lastAppliedPctRef.current !== null) {
+      transitionStartRef.current = performance.now();
+    }
     let animId;
     let lastPct = null;
     const tick = () => {
       const relTime = video.currentTime - (clipStart || 0);
       const sx = interpolateSubjectX(subjectKeyframes, relTime);
-      const centerPct = subjectXToCenterPct(sx, srcRatio, targetRatio);
+      let centerPct = subjectXToCenterPct(sx, srcRatio, targetRatio);
+      // Smooth transition when aspect ratio just changed
+      if (transitionStartRef.current !== null && lastAppliedPctRef.current !== null) {
+        const elapsed = (performance.now() - transitionStartRef.current) / 1000;
+        if (elapsed < TRANSITION_DURATION) {
+          const t = elapsed / TRANSITION_DURATION;
+          const eased = t * t * (3 - 2 * t); // smoothstep
+          centerPct = lastAppliedPctRef.current + (centerPct - lastAppliedPctRef.current) * eased;
+        } else {
+          transitionStartRef.current = null;
+        }
+      }
       // Only update DOM if value actually changed (avoid layout thrashing)
-      const rounded = Math.round(centerPct * 100) / 100;
+      const rounded = Math.round(centerPct * 10000) / 10000;
       if (rounded !== lastPct) {
         video.style.objectPosition = `${centerPct}% 50%`;
         lastPct = rounded;
+        lastAppliedPctRef.current = centerPct;
       }
       animId = requestAnimationFrame(tick);
     };
     animId = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(animId);
-      // Clear direct DOM style so React's declarative objectPosition takes over
-      video.style.objectPosition = '';
+      // Do NOT clear video.style.objectPosition here — the cleanup runs
+      // after React's DOM commit, so clearing would overwrite the correct
+      // static objectPosition that React just applied.
     };
   }, [hasDynamicSubject, subjectKeyframes, clipStart, srcRatio, targetRatio]);
 

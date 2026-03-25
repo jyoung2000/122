@@ -702,10 +702,11 @@ export default function ViralClips() {
     });
 
     if (hasAiData) {
-      // AI data already exists — remount preview to apply per-clip tracking
-      // at the current aspect ratio. ClipPreview's buildSubjectKeyframes()
-      // filters scenes to this clip's [start_time, end_time] range.
-      setPreviewKey((k) => k + 1);
+      // AI data already exists — ClipPreview handles ratio changes reactively
+      // via its useMemo deps. Only remount if the CLIP changed, not just the ratio.
+      if (clipChanged) {
+        setPreviewKey((k) => k + 1);
+      }
       setTrackingApplied(true);
       setTimeout(() => setTrackingApplied(false), 2000);
     } else {

@@ -2338,8 +2338,22 @@ def _apply_dead_zone(
     snapped_count = 0
     for i in range(1, len(keyframes)):
         t, sx = keyframes[i]
+        prev_t, prev_sx = keyframes[i - 1]
+        dt = t - prev_t
+        # Velocity-aware dead zone: reduce threshold when subject moves consistently
+        actual_threshold = effective_threshold
+        if dt > 0:
+            velocity = (sx - prev_sx) / dt
+            same_direction = False
+            if i >= 2:
+                prev_prev_t, prev_prev_sx = keyframes[i - 2]
+                prev_dt = prev_t - prev_prev_t
+                if prev_dt > 0:
+                    prev_velocity = (prev_sx - prev_prev_sx) / prev_dt
+                    same_direction = (velocity > 0 and prev_velocity > 0) or (velocity < 0 and prev_velocity < 0)
+            actual_threshold = effective_threshold * (0.6 if same_direction else 1.0)
         drift_from_anchor = abs(sx - anchor)
-        if drift_from_anchor >= effective_threshold:
+        if drift_from_anchor >= actual_threshold:
             # Subject has drifted far enough from anchor — move to new position
             result.append((t, sx))
             anchor = sx  # Reset anchor to new committed position
@@ -2359,7 +2373,7 @@ def _apply_dead_zone(
 
 def _smooth_keyframes_bidirectional(
     keyframes: list[tuple[float, int]],
-    max_speed: float = 15.0,
+    max_speed: float = 22.0,
 ) -> list[tuple[float, int]]:
     """Damped-lerp with hold-then-move for human-like camera motion.
 
@@ -2371,8 +2385,8 @@ def _smooth_keyframes_bidirectional(
     if len(keyframes) <= 1:
         return list(keyframes)
 
-    MIN_HOLD_TIME = 0.5    # Seconds to hold before panning
-    EASE_FACTOR = 0.12     # Per-step lerp factor
+    MIN_HOLD_TIME = 0.3    # Seconds to hold before panning
+    EASE_FACTOR = 0.18     # Per-step lerp factor
     dt_step = 0.016        # 16ms simulation step
 
     result = [keyframes[0]]
@@ -2464,7 +2478,7 @@ def _merge_holds(
 
 def _compress_range(
     keyframes: list[tuple[float, int]],
-    max_range: int = 20,
+    max_range: int = 30,
 ) -> list[tuple[float, int]]:
     """Compress the range of subject_x values to prevent erratic swinging.
 

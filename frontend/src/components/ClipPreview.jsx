@@ -510,6 +510,9 @@ export default function ClipPreview({
 
   // --- Dynamic subject tracking: update objectPosition via rAF for smooth ~60fps updates ---
   const srcRatio = sourceWidth / sourceHeight;
+  const lastAppliedPctRef = useRef(null);
+  const transitionStartRef = useRef(null);
+  const TRANSITION_DURATION = 0.3; // 300ms for aspect ratio transitions
   useEffect(() => {
     if (!hasDynamicSubject) return;
     const video = fgVideoRef.current;
@@ -521,11 +524,26 @@ export default function ClipPreview({
       `[SubjectTracking] DYNAMIC mode active (rAF): R=${R.toFixed(3)} (src=${srcRatio.toFixed(3)}, target=${targetRatio.toFixed(3)}), ` +
       `${subjectKeyframes.length} keyframes`
     );
+    // If we have a previous position, start a smooth transition
+    if (lastAppliedPctRef.current !== null) {
+      transitionStartRef.current = performance.now();
+    }
     let animId;
     const tick = () => {
       const relTime = video.currentTime - clipStart;
       const sx = interpolateSubjectX(subjectKeyframes, relTime);
-      const centerPct = subjectXToCenterPct(Math.max(0, Math.min(100, sx)), srcRatio, targetRatio);
+      let centerPct = subjectXToCenterPct(Math.max(0, Math.min(100, sx)), srcRatio, targetRatio);
+      // Smooth transition when aspect ratio just changed
+      if (transitionStartRef.current !== null && lastAppliedPctRef.current !== null) {
+        const elapsed = (performance.now() - transitionStartRef.current) / 1000;
+        if (elapsed < TRANSITION_DURATION) {
+          const t = elapsed / TRANSITION_DURATION;
+          const eased = t * t * (3 - 2 * t); // smoothstep
+          centerPct = lastAppliedPctRef.current + (centerPct - lastAppliedPctRef.current) * eased;
+        } else {
+          transitionStartRef.current = null;
+        }
+      }
       // Only update DOM if value actually changed (avoid layout thrashing)
       // Use higher precision — 4 decimal places eliminates visible stepping
       // while still preventing unnecessary DOM updates
@@ -533,6 +551,7 @@ export default function ClipPreview({
       if (rounded !== lastPct) {
         video.style.objectPosition = `${centerPct}% 50%`;
         lastPct = rounded;
+        lastAppliedPctRef.current = centerPct;
         // Log first 5 updates and then every 30th for debugging
         if (logCount < 5 || logCount % 30 === 0) {
           console.log(

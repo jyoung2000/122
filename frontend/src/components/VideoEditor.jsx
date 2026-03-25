@@ -1371,10 +1371,17 @@ export default function VideoEditor({
   }, [trimmedEnd, syncTime, segments, volume, isMuted, speed]);
 
   // ── Dynamic subject tracking via rAF ───────────────
+  const lastAppliedPctRef = useRef(null);
+  const transitionStartRef = useRef(null);
+  const TRANSITION_DURATION = 0.3; // 300ms for aspect ratio transitions
   useEffect(() => {
     if (!hasDynamicSubject) return;
     const video = videoRef.current;
     if (!video) return;
+    // If we have a previous position, start a smooth transition
+    if (lastAppliedPctRef.current !== null) {
+      transitionStartRef.current = performance.now();
+    }
     let animId;
     let lastPct = null;
     const tick = () => {
@@ -1386,11 +1393,23 @@ export default function VideoEditor({
       const sx = trackingOn
         ? interpolateSubjectX(subjectKeyframes, relTime)
         : (safeSubjectX ? safeSubjectX(subjectX) : subjectX);
-      const centerPct = subjectXToCenterPct(sx, srcRatio, targetRatio);
+      let centerPct = subjectXToCenterPct(sx, srcRatio, targetRatio);
+      // Smooth transition when aspect ratio just changed
+      if (transitionStartRef.current !== null && lastAppliedPctRef.current !== null) {
+        const elapsed = (performance.now() - transitionStartRef.current) / 1000;
+        if (elapsed < TRANSITION_DURATION) {
+          const t = elapsed / TRANSITION_DURATION;
+          const eased = t * t * (3 - 2 * t); // smoothstep
+          centerPct = lastAppliedPctRef.current + (centerPct - lastAppliedPctRef.current) * eased;
+        } else {
+          transitionStartRef.current = null;
+        }
+      }
       const rounded = Math.round(centerPct * 10000) / 10000;
       if (rounded !== lastPct) {
         video.style.objectPosition = `${centerPct}% 50%`;
         lastPct = rounded;
+        lastAppliedPctRef.current = centerPct;
       }
       animId = requestAnimationFrame(tick);
     };

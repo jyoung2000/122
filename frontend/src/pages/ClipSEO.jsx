@@ -451,9 +451,14 @@ export default function ClipSEO() {
   const subjectKeyframes = useMemo(
     () => {
       if (!job?.scenes?.length || startTime === null || endTime === null) return null;
-      return processKeyframes(job.scenes, startTime, endTime);
+      const _srcRatio = sourceDims.w / sourceDims.h;
+      const _targetRatio = (aspectRatio && ASPECT_RATIO_VALUES[aspectRatio])
+        ? ASPECT_RATIO_VALUES[aspectRatio]
+        : _srcRatio;
+      const _isCrop = Math.abs(_srcRatio - _targetRatio) > 0.01;
+      return processKeyframes(job.scenes, startTime, endTime, _isCrop ? _srcRatio : null, _isCrop ? _targetRatio : null);
     },
-    [job?.scenes, startTime, endTime],
+    [job?.scenes, startTime, endTime, aspectRatio, sourceDims],
   );
 
   const clipTimeRange = useMemo(() => {

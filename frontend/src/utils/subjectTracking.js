@@ -200,7 +200,7 @@ export function handleSceneCuts(keyframes, jumpThreshold = 15) {
  * @param {number} maxRange - Maximum allowed range of sx values (default 25)
  * @returns {Array<{t: number, x: number}>}
  */
-export function compressRange(keyframes, maxRange = 20) {
+export function compressRange(keyframes, maxRange = 30) {
   if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
 
   const xs = keyframes.map(k => k.x);
@@ -255,8 +255,25 @@ export function applyDeadZone(keyframes, threshold = 5, srcRatio = null, targetR
   let anchor = keyframes[0].x; // The position the camera is "committed to"
   for (let i = 1; i < keyframes.length; i++) {
     const cur = keyframes[i];
+    const prev = keyframes[i - 1];
+    const dt = cur.t - prev.t;
+    // Velocity-aware dead zone: reduce threshold when subject moves consistently
+    let actualThreshold = effectiveThreshold;
+    if (dt > 0) {
+      const velocity = (cur.x - prev.x) / dt;
+      let sameDirection = false;
+      if (i >= 2) {
+        const prevPrev = keyframes[i - 2];
+        const prevDt = prev.t - prevPrev.t;
+        if (prevDt > 0) {
+          const prevVelocity = (prev.x - prevPrev.x) / prevDt;
+          sameDirection = (velocity > 0 && prevVelocity > 0) || (velocity < 0 && prevVelocity < 0);
+        }
+      }
+      actualThreshold = effectiveThreshold * (sameDirection ? 0.6 : 1.0);
+    }
     const driftFromAnchor = Math.abs(cur.x - anchor);
-    if (driftFromAnchor >= effectiveThreshold) {
+    if (driftFromAnchor >= actualThreshold) {
       // Subject has drifted far enough from anchor — move to new position
       result.push({ t: cur.t, x: cur.x });
       anchor = cur.x; // Reset anchor to new committed position
@@ -281,7 +298,7 @@ export function applyDeadZone(keyframes, threshold = 5, srcRatio = null, targetR
  * @param {number} maxSpeed - Maximum subject_x units per second (default 15)
  * @returns {Array<{t: number, x: number}>} Smoothed keyframes
  */
-export function smoothKeyframesBidirectional(keyframes, maxSpeed = 15) {
+export function smoothKeyframesBidirectional(keyframes, maxSpeed = 22) {
   if (!keyframes || keyframes.length <= 1) return keyframes ? [...keyframes] : [];
 
   // Human camera operator model:
@@ -290,8 +307,8 @@ export function smoothKeyframesBidirectional(keyframes, maxSpeed = 15) {
   // 3. Never exceed maxSpeed units per second
   // 4. When target changes significantly, re-enter hold period (deliberate, not reactive)
 
-  const MIN_HOLD_TIME = 0.5;   // Seconds to hold before panning
-  const EASE_FACTOR = 0.12;    // Per-step lerp factor (lower = smoother/slower)
+  const MIN_HOLD_TIME = 0.3;   // Seconds to hold before panning
+  const EASE_FACTOR = 0.18;    // Per-step lerp factor (lower = smoother/slower)
   const dt_step = 0.016;       // 16ms simulation step
 
   const result = [{ t: keyframes[0].t, x: keyframes[0].x }];
