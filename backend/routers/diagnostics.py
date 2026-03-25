@@ -22,14 +22,29 @@ _gpu_info_cache: dict | None = None
 
 
 async def _get_gpu_info() -> dict:
-    """Get GPU hardware info, cached after first call."""
+    """Get GPU hardware info, cached after first call.
+
+    Distinguishes between:
+    - No GPU hardware at all
+    - GPU hardware exists (cuda_available=True)
+    The gpu_poisoned/gpu_in_use flags are computed per-request in the endpoint
+    since they depend on loaded model state.
+    """
     global _gpu_info_cache
     if _gpu_info_cache is not None:
-        return _gpu_info_cache
+        return {**_gpu_info_cache}  # Return a copy so callers can mutate
 
-    info = {"name": None, "vram_total_bytes": 0, "cuda_available": False}
+    info = {
+        "gpu_available": False,
+        "gpu_in_use": False,
+        "gpu_poisoned": False,
+        "gpu_name": None,
+        "vram_total_bytes": 0,
+        "vram_used_bytes": 0,
+        "cuda_available": False,
+    }
 
-    # Try nvidia-smi
+    # Try nvidia-smi (works even when Ollama's scheduler is poisoned)
     try:
         import subprocess
         result = subprocess.run(
@@ -40,25 +55,27 @@ async def _get_gpu_info() -> dict:
         if result.returncode == 0 and result.stdout.strip():
             parts = result.stdout.strip().split(",")
             if len(parts) >= 2:
-                info["name"] = parts[0].strip()
+                info["gpu_name"] = parts[0].strip()
                 info["vram_total_bytes"] = int(parts[1].strip()) * 1024 * 1024
+                info["gpu_available"] = True
                 info["cuda_available"] = True
     except Exception:
         pass
 
-    # Fallback: PyTorch
-    if not info["cuda_available"]:
+    # Fallback: PyTorch CUDA detection
+    if not info["gpu_available"]:
         try:
             import torch
             if torch.cuda.is_available():
-                info["name"] = torch.cuda.get_device_name(0)
+                info["gpu_name"] = torch.cuda.get_device_name(0)
                 info["vram_total_bytes"] = torch.cuda.get_device_properties(0).total_mem
+                info["gpu_available"] = True
                 info["cuda_available"] = True
         except Exception:
             pass
 
     _gpu_info_cache = info
-    return info
+    return {**info}
 
 
 async def _get_ollama_loaded_models() -> list[dict]:
@@ -292,10 +309,16 @@ async def get_gpu_status():
     gpu = await _get_gpu_info()
     loaded_models = await _get_ollama_loaded_models()
 
-    # Compute VRAM used from loaded models
+    # Compute dynamic VRAM and poisoning state from loaded models
     vram_used = sum(m["vram_bytes"] for m in loaded_models)
-    if gpu.get("vram_total_bytes"):
-        gpu["vram_used_bytes"] = vram_used
+    gpu["vram_used_bytes"] = vram_used
+    gpu["gpu_in_use"] = any(m["vram_bytes"] > 0 for m in loaded_models)
+
+    # Detect GPU scheduler poisoning: hardware exists but loaded models are on CPU
+    if gpu["gpu_available"] and loaded_models and not gpu["gpu_in_use"]:
+        gpu["gpu_poisoned"] = True
+    else:
+        gpu["gpu_poisoned"] = False
 
     ollama_available = False
     try:
@@ -317,6 +340,40 @@ async def unload_models():
     """Manually unload all Ollama models to free VRAM."""
     await _unload_all_models()
     return {"status": "ok", "message": "All models unloaded"}
+
+
+@router.post("/restart-ollama")
+async def restart_ollama():
+    """Restart the Ollama container to reset a poisoned GPU scheduler.
+
+    After a CUDA OOM, Ollama's scheduler permanently blacklists the GPU.
+    The only fix is restarting the Ollama process/container.
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["docker", "restart", "clipai-ollama"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            # Invalidate GPU cache so next poll re-detects
+            global _gpu_info_cache
+            _gpu_info_cache = None
+            return {"status": "ok", "message": "Ollama container restarting — GPU scheduler will be reset. Wait ~15 seconds."}
+        return {
+            "status": "manual",
+            "message": f"Cannot restart from app container (exit {result.returncode}). Run manually: docker restart clipai-ollama",
+        }
+    except FileNotFoundError:
+        return {
+            "status": "manual",
+            "message": "Docker CLI not available in app container. Run on your server: docker restart clipai-ollama",
+        }
+    except Exception as e:
+        return {
+            "status": "manual",
+            "message": f"Restart failed: {str(e)[:200]}. Run manually: docker restart clipai-ollama",
+        }
 
 
 @router.post("/test-pipeline")
