@@ -802,7 +802,8 @@ export default function Analysis() {
     clipSegmentsMapRef.current[clip.id] = savedSegments;
     setEditorSegments(savedSegments);
     setClipPreview(clip);
-    handleSeek(clip.start_time);
+    // NOTE: handleSeek removed — VideoEditor auto-seeks to clipStart on remount
+    // via key={`clip-${clipPreview.id}`} triggering fresh mount with auto-seek effect.
     setTab(3);
   };
 
@@ -1831,6 +1832,7 @@ export default function Analysis() {
           <div style={{ position: 'relative', width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto' }}>
             <VideoEditorBoundary>
             <VideoEditor
+              key={`clip-${clipPreview.id}`}
               src={videoSrc}
               clipStart={clipPreview.start_time}
               clipEnd={clipPreview.end_time}

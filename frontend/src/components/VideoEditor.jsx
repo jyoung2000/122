@@ -1636,6 +1636,31 @@ export default function VideoEditor({
     useTimelineStore.getState().setPlayhead(clamped - clipStart);
   }, [clipStart, effectiveClipEnd]);
 
+  // Expose seekTo globally so Analysis.handleSeek works when VideoEditor is active.
+  // Mirrors VideoPlayer.jsx's window.__clipai_seekTo registration.
+  useEffect(() => {
+    const mySeekTo = seekTo;
+    window.__clipai_seekTo = seekTo;
+    window.__clipai_pausePlayer = () => {
+      const video = videoRef.current;
+      if (video && !video.paused) {
+        video.pause();
+        setPlaying(false);
+      }
+    };
+    window.__clipai_getPlayerTime = () => {
+      return videoRef.current?.currentTime ?? 0;
+    };
+    return () => {
+      // Only clean up if this instance still owns the globals
+      if (window.__clipai_seekTo === mySeekTo) {
+        delete window.__clipai_seekTo;
+        delete window.__clipai_pausePlayer;
+        delete window.__clipai_getPlayerTime;
+      }
+    };
+  }, [seekTo]);
+
   const skipTime = useCallback((delta) => {
     const video = videoRef.current;
     if (!video) return;
