@@ -85,19 +85,32 @@ async def _release_whisper_vram(job_id: str):
                     job_id, free_mb, total_mb, allocated, reserved,
                 )
 
-                # If PyTorch still holds reserved memory, force full release
+                # If PyTorch still holds reserved memory, force aggressive release.
+                # PYTORCH_CUDA_ALLOC_CONF helps but doesn't guarantee full release.
+                # The nuclear option is resetting the allocator settings.
                 if reserved > 100:
                     logger.warning(
-                        "[%s] PyTorch still reserving %.0fMB — forcing full cache release",
+                        "[%s] PyTorch still reserving %.0fMB — forcing aggressive release",
                         job_id, reserved,
                     )
                     torch.cuda.empty_cache()
                     gc.collect()
                     torch.cuda.empty_cache()
+
+                    # Try resetting the CUDA memory allocator (torch >= 2.0)
+                    if reserved > 200:
+                        try:
+                            if hasattr(torch.cuda, 'memory') and hasattr(torch.cuda.memory, '_set_allocator_settings'):
+                                torch.cuda.memory._set_allocator_settings("")
+                                gc.collect()
+                                torch.cuda.empty_cache()
+                        except Exception as e:
+                            logger.debug("[%s] Allocator reset unavailable: %s", job_id, e)
+
                     allocated = torch.cuda.memory_allocated() / 1024 / 1024
                     reserved = torch.cuda.memory_reserved() / 1024 / 1024
                     logger.info(
-                        "[%s] After forced release: %.0fMB allocated, %.0fMB reserved",
+                        "[%s] After aggressive release: %.0fMB allocated, %.0fMB reserved",
                         job_id, allocated, reserved,
                     )
         except ImportError:
@@ -112,6 +125,92 @@ async def _release_whisper_vram(job_id: str):
 
     except Exception as e:
         logger.warning("[%s] VRAM release error: %s", job_id, e)
+
+
+def release_torch_gpu_memory():
+    """Release all torch GPU memory. Safe to call multiple times, even if torch not loaded."""
+    try:
+        import gc
+        import torch
+        if not torch.cuda.is_available():
+            return
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        gc.collect()
+        torch.cuda.empty_cache()
+        # Try allocator reset for stubborn cached memory
+        try:
+            if hasattr(torch.cuda, 'memory') and hasattr(torch.cuda.memory, '_set_allocator_settings'):
+                torch.cuda.memory._set_allocator_settings("")
+                gc.collect()
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        reserved = torch.cuda.memory_reserved() / 1024 / 1024
+        logger.info("Torch GPU memory released: %.0fMB still reserved", reserved)
+    except ImportError:
+        pass
+    except Exception as e:
+        logger.debug("Torch GPU release error: %s", e)
+
+
+async def _trigger_ollama_gpu_rediscovery(job_id: str, provider):
+    """After releasing torch VRAM, force Ollama to re-discover GPU.
+
+    Ollama caches GPU state from startup. If discovery failed (timeout) or
+    the GPU was full (torch hogging VRAM), all subsequent loads use CPU.
+    Loading a model with num_gpu=99 triggers a fresh GPU scan.
+    """
+    if not hasattr(provider, '_host'):
+        return False
+    try:
+        host = provider._host
+        vision_model = provider._vision_model
+        logger.info("[%s] Triggering Ollama GPU re-discovery after VRAM release...", job_id)
+
+        # First clear any CPU-loaded models
+        if hasattr(provider, 'clear_vram'):
+            await provider.clear_vram()
+        await asyncio.sleep(2)
+
+        # Load smallest model with GPU forced — triggers GPU re-scan
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                f"{host}/api/generate",
+                json={
+                    "model": vision_model,
+                    "prompt": "test",
+                    "stream": False,
+                    "options": {"num_gpu": 99, "num_predict": 1},
+                },
+                timeout=120,
+            )
+            if resp.status_code == 200:
+                ps = await client.get(f"{host}/api/ps", timeout=10)
+                if ps.status_code == 200:
+                    for m in ps.json().get("models", []):
+                        if m.get("size_vram", 0) > 0:
+                            logger.info(
+                                "[%s] Ollama GPU re-discovery succeeded — %s on GPU (%.0fMB VRAM)",
+                                job_id, m.get("name", ""), m.get("size_vram", 0) / 1024 / 1024,
+                            )
+                            # Clear the probe model
+                            if hasattr(provider, 'clear_vram'):
+                                await provider.clear_vram()
+                            if hasattr(provider, '_force_cpu'):
+                                provider._force_cpu = False
+                            return True
+                logger.warning("[%s] Ollama GPU re-discovery: model still on CPU", job_id)
+                if hasattr(provider, 'clear_vram'):
+                    await provider.clear_vram()
+                return False
+            else:
+                logger.warning("[%s] Ollama GPU re-discovery failed: HTTP %d", job_id, resp.status_code)
+                return False
+    except Exception as e:
+        logger.warning("[%s] Ollama GPU re-discovery error: %s", job_id, e)
+        return False
 
 
 # Dedicated thread pool for base64 frame encoding so it never competes
@@ -1133,8 +1232,20 @@ async def _run_analysis_inner(job_id: str):
 
             _log_gpu_memory(job_id, "after VRAM recovery")
 
+            # Final torch release — ensure CUDA context isn't hogging VRAM
+            release_torch_gpu_memory()
+
             # Extra pause for CUDA driver to reclaim across Docker containers
             await asyncio.sleep(5)
+
+            # Trigger Ollama GPU re-discovery if torch was hogging VRAM at Ollama's boot
+            if is_ollama_primary and _primary_provider:
+                try:
+                    gpu_ok = await _trigger_ollama_gpu_rediscovery(job_id, _primary_provider)
+                    if gpu_ok:
+                        logger.info("[%s] Ollama confirmed GPU access after torch VRAM release", job_id)
+                except Exception as e:
+                    logger.warning("[%s] Ollama GPU re-discovery failed (non-fatal): %s", job_id, e)
 
             # Ensure Ollama has no models resident before scene analysis loads vision model
             if is_ollama_primary and _primary_provider and hasattr(_primary_provider, 'clear_vram'):

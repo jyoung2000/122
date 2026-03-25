@@ -17,6 +17,9 @@ services:
       - PYTHONUNBUFFERED=1
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      # Tell PyTorch to release memory back to OS aggressively.
+      # Without this, torch caches 1.6GB+ VRAM after Whisper, starving Ollama.
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.6
     # Enable GPU passthrough when NVIDIA Container Toolkit is installed.
     # If no GPU is available, the container still starts normally on CPU.
     deploy:
@@ -61,6 +64,10 @@ services:
       - OLLAMA_FLASH_ATTENTION=1
       # Reduce KV cache to fit in VRAM
       - OLLAMA_KV_CACHE_TYPE=q8_0
+      # Increase GPU discovery timeout (default 30s can fail on slow CUDA init)
+      - OLLAMA_LOAD_TIMEOUT=5m
+      # Ensure CUDA device is visible
+      - CUDA_VISIBLE_DEVICES=0
     # Enable GPU passthrough so Ollama can use NVIDIA GPUs for inference.
     # Without this, models run on CPU (~30x slower for vision).
     # If no GPU is available, the container still starts normally on CPU.
@@ -76,9 +83,9 @@ services:
     healthcheck:
       test: ["CMD", "ollama", "list"]
       interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
+      timeout: 10s
+      retries: 8
+      start_period: 45s
 
 
 volumes:

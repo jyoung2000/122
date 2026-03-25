@@ -328,10 +328,25 @@ async def get_gpu_status():
     except Exception:
         pass
 
+    # Torch GPU memory info (separate from Ollama — this is the app container)
+    torch_gpu = None
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch_gpu = {
+                "allocated_bytes": torch.cuda.memory_allocated(),
+                "reserved_bytes": torch.cuda.memory_reserved(),
+            }
+            # Torch reserved memory counts as VRAM used (it's unavailable to Ollama)
+            gpu["vram_used_bytes"] = vram_used + torch_gpu["reserved_bytes"]
+    except (ImportError, Exception):
+        pass
+
     return {
         "gpu": gpu,
         "loaded_models": loaded_models,
         "ollama_available": ollama_available,
+        "torch_gpu": torch_gpu,
     }
 
 
@@ -340,6 +355,32 @@ async def unload_models():
     """Manually unload all Ollama models to free VRAM."""
     await _unload_all_models()
     return {"status": "ok", "message": "All models unloaded"}
+
+
+@router.post("/release-gpu")
+async def release_gpu():
+    """Release all torch GPU memory AND unload Ollama models."""
+    released_mb = 0
+    try:
+        from backend.services.pipeline import release_torch_gpu_memory
+        import torch
+        before = torch.cuda.memory_reserved() / 1024 / 1024 if torch.cuda.is_available() else 0
+        release_torch_gpu_memory()
+        after = torch.cuda.memory_reserved() / 1024 / 1024 if torch.cuda.is_available() else 0
+        released_mb = max(0, before - after)
+    except (ImportError, Exception):
+        pass
+
+    await _unload_all_models()
+
+    # Invalidate GPU info cache
+    global _gpu_info_cache
+    _gpu_info_cache = None
+
+    return {
+        "status": "ok",
+        "message": f"GPU memory released ({released_mb:.0f}MB torch freed). Ollama models unloaded.",
+    }
 
 
 @router.post("/restart-ollama")
@@ -446,29 +487,65 @@ async def test_pipeline(request: Request):
             yield _sse_event("complete", {"overall_status": "fail"})
             return
 
-        # Phase 1: Clear VRAM
+        # Phase 1: Check + release torch VRAM
         yield _sse_event("phase_start", {
-            "phase": "vram_clear", "label": "Clearing VRAM...",
-            "phase_index": 1, "total_phases": 5,
+            "phase": "torch_vram", "label": "Checking torch GPU memory...",
+            "phase_index": 1, "total_phases": 6,
+        })
+        torch_reserved = 0
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch_reserved = torch.cuda.memory_reserved() / 1024 / 1024
+                if torch_reserved > 100:
+                    from backend.services.pipeline import release_torch_gpu_memory
+                    release_torch_gpu_memory()
+                    await asyncio.sleep(2)
+                    torch_after = torch.cuda.memory_reserved() / 1024 / 1024
+                    yield _sse_event("phase_result", {
+                        "phase": "torch_vram",
+                        "status": "warn" if torch_after > 100 else "pass",
+                        "message": f"Torch was holding {torch_reserved:.0f}MB, released to {torch_after:.0f}MB",
+                    })
+                else:
+                    yield _sse_event("phase_result", {
+                        "phase": "torch_vram", "status": "pass",
+                        "message": f"Torch GPU memory OK ({torch_reserved:.0f}MB reserved)",
+                    })
+            else:
+                yield _sse_event("phase_result", {
+                    "phase": "torch_vram", "status": "pass",
+                    "message": "No CUDA — torch not using GPU",
+                })
+        except ImportError:
+            yield _sse_event("phase_result", {
+                "phase": "torch_vram", "status": "pass",
+                "message": "Torch not loaded",
+            })
+
+        # Phase 2: Clear Ollama VRAM
+        yield _sse_event("phase_start", {
+            "phase": "vram_clear", "label": "Clearing Ollama VRAM...",
+            "phase_index": 2, "total_phases": 6,
         })
         await _unload_all_models()
         await asyncio.sleep(2)
         yield _sse_event("phase_result", {
-            "phase": "vram_clear", "status": "pass", "message": "VRAM cleared",
+            "phase": "vram_clear", "status": "pass", "message": "Ollama VRAM cleared",
         })
 
-        # Phase 2: Vision model
+        # Phase 3: Vision model
         yield _sse_event("phase_start", {
             "phase": "vision_model", "label": f"Testing vision model ({vision_model})...",
-            "phase_index": 2, "total_phases": 5,
+            "phase_index": 3, "total_phases": 6,
         })
         vision_result = await _test_vision_model(vision_model)
         yield _sse_event("phase_result", {"phase": "vision_model", **vision_result})
 
-        # Phase 3: Unload vision
+        # Phase 4: Unload vision
         yield _sse_event("phase_start", {
             "phase": "vision_unload", "label": f"Unloading {vision_model}...",
-            "phase_index": 3, "total_phases": 5,
+            "phase_index": 4, "total_phases": 6,
         })
         await _unload_all_models()
         await asyncio.sleep(2)
@@ -477,10 +554,10 @@ async def test_pipeline(request: Request):
             "message": "Vision model unloaded, VRAM freed",
         })
 
-        # Phase 4: Text model
+        # Phase 5: Text model
         yield _sse_event("phase_start", {
             "phase": "text_model", "label": f"Testing text model ({text_model})...",
-            "phase_index": 4, "total_phases": 5,
+            "phase_index": 5, "total_phases": 6,
         })
         text_result = await _test_text_model(text_model)
         yield _sse_event("phase_result", {"phase": "text_model", **text_result})

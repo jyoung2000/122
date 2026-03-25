@@ -23,7 +23,7 @@ function Spinner() {
 }
 
 // ── VRAM Gauge ──────────────────────────────────────────────────────────
-function VramGauge({ gpu, loadedModels, ollamaAvailable, onUnload, onRestart }) {
+function VramGauge({ gpu, loadedModels, ollamaAvailable, torchGpu, onUnload, onReleaseGpu, onRestart }) {
   // Ollama offline
   if (ollamaAvailable === false) {
     return (
@@ -73,12 +73,19 @@ function VramGauge({ gpu, loadedModels, ollamaAvailable, onUnload, onRestart }) 
   const barColor = usedPct > 85 ? '#ef4444' : usedPct > 60 ? '#f59e0b' : '#22c55e';
   const isPoisoned = gpu.gpu_poisoned;
 
-  // Build model segments
+  // Build model segments for VRAM bar
   const segments = loadedModels.map((m) => {
     const pct = totalBytes > 0 ? Math.min(100, (m.vram_bytes / totalBytes) * 100) : 0;
     const isVision = /moondream|llava|vision/i.test(m.name);
     return { name: m.name, pct, color: isVision ? MODEL_COLORS.vision : MODEL_COLORS.text, vram: m.vram_bytes };
   });
+
+  // Torch reserved memory segment (orange — the hidden VRAM hog)
+  const torchReserved = torchGpu?.reserved_bytes || 0;
+  if (torchReserved > 50 * 1024 * 1024) { // Only show if > 50MB
+    const torchPct = totalBytes > 0 ? Math.min(100, (torchReserved / totalBytes) * 100) : 0;
+    segments.push({ name: 'Torch/Whisper', pct: torchPct, color: '#f59e0b', vram: torchReserved });
+  }
 
   return (
     <div style={cardStyle}>
@@ -192,11 +199,33 @@ function VramGauge({ gpu, loadedModels, ollamaAvailable, onUnload, onRestart }) 
           })}
         </div>
       )}
-      {loadedModels.length === 0 && (
+      {/* Torch reserved memory warning */}
+      {torchReserved > 100 * 1024 * 1024 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          fontSize: 11, padding: '3px 0',
+          borderTop: loadedModels.length > 0 ? 'none' : '1px solid var(--border)',
+          paddingTop: loadedModels.length > 0 ? 0 : 8,
+        }}>
+          <span style={{ width: 8, height: 8, borderRadius: 2, flexShrink: 0, background: '#f59e0b' }} />
+          <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-primary)' }}>Torch/Whisper</span>
+          <span style={{ fontFamily: 'var(--font-mono)', color: '#f59e0b', fontSize: 10 }}>
+            {formatBytes(torchReserved)} reserved
+          </span>
+        </div>
+      )}
+      {loadedModels.length === 0 && torchReserved <= 100 * 1024 * 1024 && (
         <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>No models loaded</div>
       )}
 
-      <button onClick={onUnload} style={smallBtnStyle}>Unload All Models</button>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button onClick={onUnload} style={smallBtnStyle}>Unload Ollama Models</button>
+        {torchReserved > 100 * 1024 * 1024 && (
+          <button onClick={onReleaseGpu} style={{ ...smallBtnStyle, color: '#f59e0b', borderColor: '#f59e0b' }}>
+            Release Torch VRAM
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -249,6 +278,7 @@ function PhaseRow({ phase }) {
 export default function PipelineDiagnostics() {
   const [gpuStatus, setGpuStatus] = useState(null);
   const [loadedModels, setLoadedModels] = useState([]);
+  const [torchGpu, setTorchGpu] = useState(null);
   const [ollamaAvailable, setOllamaAvailable] = useState(null);
   const [testRunning, setTestRunning] = useState(false);
   const [testPhases, setTestPhases] = useState([]);
@@ -269,6 +299,7 @@ export default function PipelineDiagnostics() {
         if (!active) return;
         setGpuStatus(data.gpu);
         setLoadedModels(data.loaded_models || []);
+        setTorchGpu(data.torch_gpu || null);
         setOllamaAvailable(data.ollama_available);
       } catch {
         if (active) setOllamaAvailable(false);
@@ -281,6 +312,10 @@ export default function PipelineDiagnostics() {
 
   const handleUnload = useCallback(async () => {
     try { await fetch('/api/diagnostics/unload-models', { method: 'POST' }); } catch { /* */ }
+  }, []);
+
+  const handleReleaseGpu = useCallback(async () => {
+    try { await fetch('/api/diagnostics/release-gpu', { method: 'POST' }); } catch { /* */ }
   }, []);
 
   const handleRestart = useCallback(async () => {
@@ -344,8 +379,10 @@ export default function PipelineDiagnostics() {
       <VramGauge
         gpu={gpuStatus}
         loadedModels={loadedModels}
+        torchGpu={torchGpu}
         ollamaAvailable={ollamaAvailable}
         onUnload={handleUnload}
+        onReleaseGpu={handleReleaseGpu}
         onRestart={handleRestart}
       />
 
