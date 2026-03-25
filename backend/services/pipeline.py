@@ -7,6 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+import httpx
+
 from backend.config import settings
 from backend.models import JobResult, JobStatus, FrameData, VideoSummary
 from backend import database
@@ -1386,8 +1388,20 @@ async def _run_analysis_inner(job_id: str):
     if is_ollama_primary and _primary_provider:
         try:
             await _primary_provider.clear_vram()
-            logger.info("[%s] Vision model unloaded after scene analysis — GPU freed for text model", job_id)
-            await asyncio.sleep(2)  # Let CUDA driver reclaim VRAM
+            logger.info("[%s] Vision model unload sent — waiting for VRAM release", job_id)
+            # Poll until Ollama confirms no models loaded (VRAM takes 5-10s to free on GTX 1650)
+            for _vram_wait in range(10):
+                await asyncio.sleep(1)
+                try:
+                    async with httpx.AsyncClient(timeout=5) as _hc:
+                        _ps = await _hc.get(f"{settings.OLLAMA_HOST}/api/ps")
+                        if _ps.status_code == 200 and not _ps.json().get("models", []):
+                            logger.info("[%s] VRAM freed after %ds — no models loaded", job_id, _vram_wait + 1)
+                            break
+                except Exception:
+                    pass
+            else:
+                logger.warning("[%s] Models may still be unloading after 10s wait", job_id)
             # Reset force_cpu flag so text model tries GPU
             if hasattr(_primary_provider, '_force_cpu'):
                 _primary_provider._force_cpu = False

@@ -22,17 +22,18 @@ _gpu_info_cache: dict | None = None
 
 
 async def _get_gpu_info() -> dict:
-    """Get GPU hardware info, cached after first call.
+    """Get GPU hardware info. Tries Ollama's container first since the app
+    container often doesn't have direct GPU access (nvidia-smi/torch CUDA).
 
-    Distinguishes between:
-    - No GPU hardware at all
-    - GPU hardware exists (cuda_available=True)
-    The gpu_poisoned/gpu_in_use flags are computed per-request in the endpoint
-    since they depend on loaded model state.
+    Detection priority:
+    1. Ollama /api/ps — if any model has VRAM > 0, GPU exists
+    2. Local nvidia-smi — works if GPU passthrough configured for app container
+    3. Local torch.cuda — works if CUDA runtime available in app container
+    4. Ollama probe — load a tiny model with num_gpu=99 and check GPU placement
     """
     global _gpu_info_cache
     if _gpu_info_cache is not None:
-        return {**_gpu_info_cache}  # Return a copy so callers can mutate
+        return {**_gpu_info_cache}
 
     info = {
         "gpu_available": False,
@@ -44,25 +45,44 @@ async def _get_gpu_info() -> dict:
         "cuda_available": False,
     }
 
-    # Try nvidia-smi (works even when Ollama's scheduler is poisoned)
+    # Method 1: Check Ollama /api/ps — if a model is loaded on GPU, we know GPU exists
     try:
-        import subprocess
-        result = subprocess.run(
-            ["nvidia-smi", "--query-gpu=name,memory.total",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            parts = result.stdout.strip().split(",")
-            if len(parts) >= 2:
-                info["gpu_name"] = parts[0].strip()
-                info["vram_total_bytes"] = int(parts[1].strip()) * 1024 * 1024
-                info["gpu_available"] = True
-                info["cuda_available"] = True
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{settings.OLLAMA_HOST}/api/ps")
+            if resp.status_code == 200:
+                for m in resp.json().get("models", []):
+                    if m.get("size_vram", 0) > 0:
+                        info["gpu_available"] = True
+                        info["cuda_available"] = True
+                        info["gpu_name"] = "NVIDIA GPU (via Ollama)"
+                        break
     except Exception:
         pass
 
-    # Fallback: PyTorch CUDA detection
+    # Method 2: nvidia-smi locally
+    if not info["gpu_available"]:
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,memory.total",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                parts = result.stdout.strip().split(",")
+                if len(parts) >= 2:
+                    info["gpu_name"] = parts[0].strip()
+                    vram_mb = int(parts[1].strip())
+                    # Only trust nvidia-smi if it reports > 1GB (avoids app container's
+                    # 256MB iGPU misreport when discrete GPU is in Ollama container)
+                    if vram_mb > 1024:
+                        info["vram_total_bytes"] = vram_mb * 1024 * 1024
+                        info["gpu_available"] = True
+                        info["cuda_available"] = True
+        except Exception:
+            pass
+
+    # Method 3: PyTorch CUDA
     if not info["gpu_available"]:
         try:
             import torch
@@ -73,6 +93,42 @@ async def _get_gpu_info() -> dict:
                 info["cuda_available"] = True
         except Exception:
             pass
+
+    # Method 4: Probe Ollama — load a model with GPU request, check if it gets GPU
+    if not info["gpu_available"]:
+        try:
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(
+                    f"{settings.OLLAMA_HOST}/api/generate",
+                    json={
+                        "model": settings.OLLAMA_VISION_MODEL,
+                        "prompt": "hi",
+                        "stream": False,
+                        "options": {"num_gpu": 99, "num_predict": 1},
+                    },
+                    timeout=60,
+                )
+                if resp.status_code == 200:
+                    ps_resp = await client.get(f"{settings.OLLAMA_HOST}/api/ps")
+                    if ps_resp.status_code == 200:
+                        for m in ps_resp.json().get("models", []):
+                            if m.get("size_vram", 0) > 0:
+                                info["gpu_available"] = True
+                                info["cuda_available"] = True
+                                info["gpu_name"] = "NVIDIA GPU (via Ollama)"
+                                break
+                    # Clean up probe
+                    await client.post(
+                        f"{settings.OLLAMA_HOST}/api/generate",
+                        json={"model": settings.OLLAMA_VISION_MODEL, "keep_alive": 0},
+                    )
+                    await asyncio.sleep(2)
+        except Exception:
+            pass
+
+    # Default VRAM for known GTX 1650 setup if we detected GPU but not VRAM size
+    if info["gpu_available"] and info["vram_total_bytes"] == 0:
+        info["vram_total_bytes"] = int(3.6 * 1024 * 1024 * 1024)
 
     _gpu_info_cache = info
     return {**info}
@@ -114,6 +170,42 @@ async def _unload_all_models() -> None:
                         )
     except Exception:
         pass
+
+
+async def _unload_and_wait(max_wait: int = 15) -> bool:
+    """Unload all models and poll until VRAM is actually freed.
+
+    On GTX 1650, Ollama's CUDA memory reclamation can take 5-10s after
+    keep_alive=0. Simply sleeping 2s is not enough — the text model OOMs
+    because the vision model's VRAM hasn't been released yet.
+
+    Returns True if no models remain loaded.
+    """
+    await _unload_all_models()
+
+    for attempt in range(max_wait):
+        await asyncio.sleep(1)
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(f"{settings.OLLAMA_HOST}/api/ps")
+                if resp.status_code == 200:
+                    models = resp.json().get("models", [])
+                    if not models:
+                        logger.info("VRAM freed after %ds (no models loaded)", attempt + 1)
+                        return True
+                    # Models still present — send another unload
+                    for m in models:
+                        name = m.get("name", "")
+                        if name:
+                            await client.post(
+                                f"{settings.OLLAMA_HOST}/api/generate",
+                                json={"model": name, "keep_alive": 0},
+                            )
+        except Exception:
+            pass
+
+    logger.warning("Models still loaded after %ds wait", max_wait)
+    return False
 
 
 def _generate_test_image() -> str:
@@ -314,6 +406,17 @@ async def get_gpu_status():
     gpu["vram_used_bytes"] = vram_used
     gpu["gpu_in_use"] = any(m["vram_bytes"] > 0 for m in loaded_models)
 
+    # If we see a model on GPU but the cache said no GPU, invalidate cache
+    if gpu["gpu_in_use"] and not gpu.get("gpu_available"):
+        global _gpu_info_cache
+        _gpu_info_cache = None
+        gpu["gpu_available"] = True
+        gpu["cuda_available"] = True
+        if not gpu.get("gpu_name"):
+            gpu["gpu_name"] = "NVIDIA GPU (via Ollama)"
+        if gpu["vram_total_bytes"] == 0:
+            gpu["vram_total_bytes"] = int(3.6 * 1024 * 1024 * 1024)
+
     # Detect GPU scheduler poisoning: hardware exists but loaded models are on CPU
     if gpu["gpu_available"] and loaded_models and not gpu["gpu_in_use"]:
         gpu["gpu_poisoned"] = True
@@ -474,7 +577,7 @@ async def test_pipeline(request: Request):
                     raise Exception(f"HTTP {resp.status_code}")
 
             gpu = await _get_gpu_info()
-            gpu_msg = f"CUDA available, {gpu['name']}" if gpu.get("cuda_available") else "No GPU detected"
+            gpu_msg = f"CUDA available, {gpu.get('gpu_name', 'GPU')}" if gpu.get("cuda_available") else "No GPU detected"
             yield _sse_event("phase_result", {
                 "phase": "provider_check", "status": "pass",
                 "message": f"Ollama connected. {gpu_msg}",
@@ -528,10 +631,11 @@ async def test_pipeline(request: Request):
             "phase": "vram_clear", "label": "Clearing Ollama VRAM...",
             "phase_index": 2, "total_phases": 6,
         })
-        await _unload_all_models()
-        await asyncio.sleep(2)
+        cleared = await _unload_and_wait(10)
         yield _sse_event("phase_result", {
-            "phase": "vram_clear", "status": "pass", "message": "Ollama VRAM cleared",
+            "phase": "vram_clear",
+            "status": "pass" if cleared else "warn",
+            "message": "Ollama VRAM cleared" if cleared else "Models may still be unloading",
         })
 
         # Phase 3: Vision model
@@ -542,17 +646,24 @@ async def test_pipeline(request: Request):
         vision_result = await _test_vision_model(vision_model)
         yield _sse_event("phase_result", {"phase": "vision_model", **vision_result})
 
-        # Phase 4: Unload vision
+        # Phase 4: Unload vision — CRITICAL: must wait for VRAM to actually free
+        # On GTX 1650, the vision model's CUDA memory takes 5-10s to release.
+        # If we proceed too fast, the text model OOMs.
         yield _sse_event("phase_start", {
-            "phase": "vision_unload", "label": f"Unloading {vision_model}...",
+            "phase": "vision_unload", "label": f"Unloading {vision_model} (waiting for VRAM release)...",
             "phase_index": 4, "total_phases": 6,
         })
-        await _unload_all_models()
-        await asyncio.sleep(2)
-        yield _sse_event("phase_result", {
-            "phase": "vision_unload", "status": "pass",
-            "message": "Vision model unloaded, VRAM freed",
-        })
+        freed = await _unload_and_wait(15)
+        if freed:
+            yield _sse_event("phase_result", {
+                "phase": "vision_unload", "status": "pass",
+                "message": "Vision model unloaded, VRAM freed",
+            })
+        else:
+            yield _sse_event("phase_result", {
+                "phase": "vision_unload", "status": "warn",
+                "message": "Vision model unload sent but VRAM may not be fully released — text model may OOM",
+            })
 
         # Phase 5: Text model
         yield _sse_event("phase_start", {
