@@ -855,8 +855,8 @@ def _transcribe_sync(
         "vad_filter": settings.WHISPER_VAD_FILTER,
         "condition_on_previous_text": True,
         "word_timestamps": True,
-        "no_speech_threshold": 0.6,
-        "log_prob_threshold": -1.0,
+        "no_speech_threshold": 0.8,
+        "log_prob_threshold": -1.5,
         "compression_ratio_threshold": 2.4,
         "repetition_penalty": 1.1,
         "no_repeat_ngram_size": 3,           # Was 0 — prevents phrase-level repetition
@@ -870,8 +870,8 @@ def _transcribe_sync(
     if settings.WHISPER_VAD_FILTER:
         transcribe_kwargs["vad_parameters"] = {
             "min_silence_duration_ms": 300,   # Was 500 — shorter threshold preserves natural pauses
-            "speech_pad_ms": 400,              # Was 200 — wider padding prevents clipping plosives
-            "onset": 0.35,                     # Lower than default 0.5 — captures softer speech
+            "speech_pad_ms": 600,              # Wide padding captures trailing quiet words
+            "onset": 0.2,                      # Low threshold captures whispers and soft speech
             "min_speech_duration_ms": 100,     # Don't discard very short utterances
         }
     # CJK languages have higher natural compression ratios — relax threshold
@@ -913,7 +913,7 @@ def _transcribe_sync(
         # Pass 1: Measure loudness statistics
         measure_cmd = [
             "ffmpeg", "-y", "-i", audio_path,
-            "-af", "highpass=f=50,loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json",
+            "-af", "highpass=f=50,acompressor=threshold=-30dB:ratio=4:attack=5:release=100:makeup=6dB,agate=threshold=-45dB:attack=5:release=50,loudnorm=I=-20:TP=-1.5:LRA=7:print_format=json",
             "-f", "null", "-",
         ]
         measure_result = subprocess.run(measure_cmd, capture_output=True, text=True, timeout=120)
@@ -940,7 +940,11 @@ def _transcribe_sync(
 
             normalize_filter = (
                 f"highpass=f=50,"
-                f"loudnorm=I=-16:TP=-1.5:LRA=11:linear=true"
+                # Dynamic range compression: boost quiet speech, tame peaks
+                f"acompressor=threshold=-30dB:ratio=4:attack=5:release=100:makeup=6dB,"
+                # Noise gate: suppress background hiss amplified by compression
+                f"agate=threshold=-45dB:attack=5:release=50,"
+                f"loudnorm=I=-20:TP=-1.5:LRA=7:linear=true"
                 f":measured_I={measured_i}:measured_TP={measured_tp}"
                 f":measured_LRA={measured_lra}:measured_thresh={measured_thresh}"
                 f":offset={target_offset}"
@@ -956,18 +960,18 @@ def _transcribe_sync(
                 logger.warning("Two-pass loudnorm failed, falling back to single-pass")
                 cmd_fallback = [
                     "ffmpeg", "-y", "-i", audio_path,
-                    "-af", "highpass=f=50,loudnorm=I=-16:TP=-1.5:LRA=11",
+                    "-af", "highpass=f=50,acompressor=threshold=-30dB:ratio=4:attack=5:release=100:makeup=6dB,agate=threshold=-45dB:attack=5:release=50,loudnorm=I=-20:TP=-1.5:LRA=7",
                     "-ar", "16000", "-ac", "1",
                     preprocessed_path,
                 ]
                 subprocess.run(cmd_fallback, capture_output=True, timeout=120)
             else:
-                logger.info("Audio preprocessed: two-pass loudnorm to -16 LUFS, 16kHz mono")
+                logger.info("Audio preprocessed: two-pass loudnorm to -20 LUFS, 16kHz mono")
         else:
             # Fallback: single-pass if measurement failed
             cmd = [
                 "ffmpeg", "-y", "-i", audio_path,
-                "-af", "highpass=f=50,loudnorm=I=-16:TP=-1.5:LRA=11",
+                "-af", "highpass=f=50,acompressor=threshold=-30dB:ratio=4:attack=5:release=100:makeup=6dB,agate=threshold=-45dB:attack=5:release=50,loudnorm=I=-20:TP=-1.5:LRA=7",
                 "-ar", "16000", "-ac", "1",
                 preprocessed_path,
             ]
@@ -1095,8 +1099,8 @@ def _transcribe_sync(
                     avg_lp = getattr(segment, 'avg_logprob', -1.0)
                     no_speech = getattr(segment, 'no_speech_prob', 0.0)
                     confidence = max(0.0, min(1.0, 1.0 + avg_lp))
-                    if no_speech > 0.3:
-                        confidence *= (1.0 - no_speech)
+                    if no_speech > 0.5:
+                        confidence *= (1.0 - (no_speech - 0.5) * 2)
 
                     chunk_raw.append({
                         "start": seg_start,
@@ -1255,8 +1259,8 @@ def _transcribe_sync(
                 avg_lp = getattr(segment, 'avg_logprob', -1.0)
                 no_speech = getattr(segment, 'no_speech_prob', 0.0)
                 confidence = max(0.0, min(1.0, 1.0 + avg_lp))
-                if no_speech > 0.3:
-                    confidence *= (1.0 - no_speech)
+                if no_speech > 0.5:
+                    confidence *= (1.0 - (no_speech - 0.5) * 2)
 
                 seg_dict = {
                     "start": segment.start,
@@ -1348,8 +1352,8 @@ def _extract_word_timestamps_sync(audio_path: str, language: str = "") -> list[W
     if settings.WHISPER_VAD_FILTER:
         kwargs["vad_parameters"] = {
             "min_silence_duration_ms": 300,
-            "speech_pad_ms": 400,
-            "onset": 0.35,
+            "speech_pad_ms": 600,
+            "onset": 0.2,
             "min_speech_duration_ms": 100,
         }
     if language:
@@ -1559,7 +1563,7 @@ def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
         # Check 0a: Non-speech segment (silence/music hallucination)
         no_speech = seg.get("no_speech_prob", 0.0)
         confidence = seg.get("confidence", 1.0)
-        if no_speech and no_speech > 0.85 and confidence is not None and confidence < 0.15:
+        if no_speech and no_speech > 0.9 and confidence is not None and confidence < 0.1:
             logger.warning(
                 "Hallucination filter: removed non-speech segment at %.1fs (no_speech=%.2f, conf=%.2f): %s...",
                 seg["start"], no_speech, confidence, text[:60],
