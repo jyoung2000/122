@@ -37,6 +37,8 @@ export function buildOverlayPayload({ timelineItems, mediaLibrary, clipStart, tr
     text: it.textContent || '',
     x: it.position?.x ?? 50,
     y: it.position?.y ?? 50,
+    width: it.size?.w ?? 80,
+    height: it.size?.h ?? 20,
     font_size: Math.round(it.textStyle?.fontSize || 48),
     font_color: it.textStyle?.color || '#FFFFFF',
     font_family: it.textStyle?.fontFamily || 'sans-serif',

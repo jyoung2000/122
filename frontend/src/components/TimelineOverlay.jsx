@@ -65,7 +65,8 @@ export default function TimelineOverlay({ currentTime = 0, clipStart = 0 }) {
 
 
 function TextOverlayItem({ item, elapsed, duration }) {
-  const pos = item.position || { x: 50, y: 50 };
+  const rawPos = item.position || { x: 50, y: 50 };
+  const pos = (rawPos.x === 0 && rawPos.y === 0) ? { x: 50, y: 50 } : rawPos;
   const size = item.size || { w: 80, h: 20 };
   const style = item.textStyle || {};
   const text = item.textContent || '';
@@ -190,7 +191,8 @@ function TextOverlayItem({ item, elapsed, duration }) {
 
 
 function ShapeOverlayItem({ item, elapsed = 0, duration = 1 }) {
-  const pos = item.position || { x: 10, y: 10 };
+  const rawPos = item.position || { x: 10, y: 10 };
+  const pos = (rawPos.x === 0 && rawPos.y === 0) ? { x: 10, y: 10 } : rawPos;
   const size = item.size || { w: 20, h: 20 };
   const style = item.shapeStyle || {};
   const shapeType = item.shapeType || 'rectangle';
@@ -290,7 +292,8 @@ function ShapeOverlayItem({ item, elapsed = 0, duration = 1 }) {
 
 
 function ImageOverlayItem({ item, elapsed = 0, duration = 1 }) {
-  const pos = item.position || { x: 50, y: 50 };
+  const rawPos = item.position || { x: 50, y: 50 };
+  const pos = (rawPos.x === 0 && rawPos.y === 0) ? { x: 50, y: 50 } : rawPos;
   const size = item.size || { w: 30, h: 30 };
   const rotation = item.transform?.rotation || 0;
   const mediaLibrary = useTimelineStore((s) => s.mediaLibrary);

@@ -1695,32 +1695,33 @@ export default function VideoEditor({
   }, []);
 
   // ── NLE keyboard shortcuts (only active in multi-track mode) ──
+  const handleShuttleSpeed = useCallback((dir) => {
+    if (dir === 'stop') {
+      setShuttleSpeed(0);
+      if (videoRef.current) { videoRef.current.pause(); setPlaying(false); }
+    } else if (dir === 'reverse') {
+      setShuttleSpeed(prev => {
+        if (prev > 0) return 0;
+        const steps = [0, -1, -2, -4];
+        const idx = steps.indexOf(prev);
+        return steps[Math.min(idx + 1, steps.length - 1)] ?? -1;
+      });
+    } else if (dir === 'forward') {
+      setShuttleSpeed(prev => {
+        if (prev < 0) return 0;
+        const steps = [0, 1, 2, 4];
+        const idx = steps.indexOf(prev);
+        return steps[Math.min(idx + 1, steps.length - 1)] ?? 1;
+      });
+    }
+  }, []);
   useKeyboardShortcuts({
     enabled: showMultiTrack,
     onTogglePlay: togglePlay,
     onSeek: seekTo,
     onSkipTime: skipTime,
     onToggleMute: toggleMute,
-    onShuttleSpeed: (dir) => {
-      if (dir === 'stop') {
-        setShuttleSpeed(0);
-        if (videoRef.current) { videoRef.current.pause(); setPlaying(false); }
-      } else if (dir === 'reverse') {
-        setShuttleSpeed(prev => {
-          if (prev > 0) return 0;
-          const steps = [0, -1, -2, -4];
-          const idx = steps.indexOf(prev);
-          return steps[Math.min(idx + 1, steps.length - 1)] ?? -1;
-        });
-      } else if (dir === 'forward') {
-        setShuttleSpeed(prev => {
-          if (prev < 0) return 0;
-          const steps = [0, 1, 2, 4];
-          const idx = steps.indexOf(prev);
-          return steps[Math.min(idx + 1, steps.length - 1)] ?? 1;
-        });
-      }
-    },
+    onShuttleSpeed: handleShuttleSpeed,
   });
 
   // ── Apply trim ────────────────────────────────────
@@ -2022,6 +2023,22 @@ export default function VideoEditor({
   const selectedSegmentRef = useRef(selectedSegment);
   selectedSegmentRef.current = selectedSegment;
 
+  // Stable refs for keyboard handler — prevents effect re-registration from killing arrow hold intervals
+  const togglePlayRef = useRef(togglePlay);
+  togglePlayRef.current = togglePlay;
+  const seekToRef_kb = useRef(seekTo);
+  seekToRef_kb.current = seekTo;
+  const toggleMuteRef = useRef(toggleMute);
+  toggleMuteRef.current = toggleMute;
+  const trimmedStartRef = useRef(trimmedStart);
+  trimmedStartRef.current = trimmedStart;
+  const trimmedEndRef = useRef(trimmedEnd);
+  trimmedEndRef.current = trimmedEnd;
+  const onSegmentsChangeRef = useRef(onSegmentsChange);
+  onSegmentsChangeRef.current = onSegmentsChange;
+  const showMultiTrackRef = useRef(showMultiTrack);
+  showMultiTrackRef.current = showMultiTrack;
+
   // ── Keyboard shortcuts (J-K-L shuttle control) ─────
   useEffect(() => {
     const onKeyDown = (e) => {
@@ -2033,7 +2050,7 @@ export default function VideoEditor({
 
       // When multi-track is active, useKeyboardShortcuts handles transport controls
       // (Space, Arrows, J/K/L, Home/End, M). Skip them here to avoid double-firing.
-      if (showMultiTrack) {
+      if (showMultiTrackRef.current) {
         const mtKeys = ['Space', 'ArrowLeft', 'ArrowRight', 'KeyJ', 'KeyK', 'KeyL', 'Home', 'End', 'KeyM'];
         if (mtKeys.includes(e.code)) {
           e.preventDefault();
@@ -2045,7 +2062,7 @@ export default function VideoEditor({
         case 'Space':
           e.preventDefault();
           setShuttleSpeed(0);
-          togglePlay();
+          togglePlayRef.current();
           break;
         case 'ArrowLeft':
         case 'ArrowRight': {
@@ -2098,19 +2115,19 @@ export default function VideoEditor({
           break;
         case 'Home':
           e.preventDefault();
-          seekTo(trimmedStart);
+          seekToRef_kb.current(trimmedStartRef.current);
           break;
         case 'End':
           e.preventDefault();
-          seekTo(trimmedEnd);
+          seekToRef_kb.current(trimmedEndRef.current);
           break;
         case 'KeyM':
           e.preventDefault();
-          toggleMute();
+          toggleMuteRef.current();
           break;
         // ── Segment shortcuts (only in simple mode, not multi-track) ──
         case 'KeyS': {
-          if (showMultiTrack) break;
+          if (showMultiTrackRef.current) break;
           e.preventDefault();
           const splitTime = videoRef.current?.currentTime ?? currentTimeRef.current;
           // Split existing segment at playhead, or create a new one
@@ -2130,15 +2147,15 @@ export default function VideoEditor({
             next.push(seg2);
             next.sort((a, b) => a.start - b.start);
             setSegments(next);
-            onSegmentsChange?.(next);
+            onSegmentsChangeRef.current?.(next);
             setSelectedSegmentId(newId);
           } else {
             const halfDur = 2;
             const segs = segmentsRef.current;
             const newSeg = {
               id: `seg_${segmentIdRef.current++}`,
-              start: Math.max(trimmedStart, splitTime - halfDur),
-              end: Math.min(trimmedEnd, splitTime + halfDur),
+              start: Math.max(trimmedStartRef.current, splitTime - halfDur),
+              end: Math.min(trimmedEndRef.current, splitTime + halfDur),
               volume: 100,
               muted: false,
               subtitlesEnabled: true,
@@ -2148,33 +2165,33 @@ export default function VideoEditor({
             };
             const next = [...segs, newSeg].sort((a, b) => a.start - b.start);
             setSegments(next);
-            onSegmentsChange?.(next);
+            onSegmentsChangeRef.current?.(next);
             setSelectedSegmentId(newSeg.id);
           }
           break;
         }
         case 'Delete':
         case 'Backspace': {
-          if (showMultiTrack) break;
+          if (showMultiTrackRef.current) break;
           const delSegId = selectedSegmentIdRef.current;
           if (delSegId) {
             e.preventDefault();
             const next = segmentsRef.current.filter(s => s.id !== delSegId);
             setSegments(next);
-            onSegmentsChange?.(next);
+            onSegmentsChangeRef.current?.(next);
             setSelectedSegmentId(null);
           }
           break;
         }
         case 'Escape':
-          if (showMultiTrack) break;
+          if (showMultiTrackRef.current) break;
           if (selectedSegmentIdRef.current) {
             e.preventDefault();
             setSelectedSegmentId(null);
           }
           break;
         case 'Tab': {
-          if (showMultiTrack) break;
+          if (showMultiTrackRef.current) break;
           const segsTab = segmentsRef.current;
           if (segsTab.length > 0) {
             e.preventDefault();
@@ -2190,17 +2207,17 @@ export default function VideoEditor({
           break;
         }
         case 'BracketLeft':
-          if (showMultiTrack) break;
+          if (showMultiTrackRef.current) break;
           if (selectedSegmentRef.current) {
             e.preventDefault();
-            seekTo(selectedSegmentRef.current.start);
+            seekToRef_kb.current(selectedSegmentRef.current.start);
           }
           break;
         case 'BracketRight':
-          if (showMultiTrack) break;
+          if (showMultiTrackRef.current) break;
           if (selectedSegmentRef.current) {
             e.preventDefault();
-            seekTo(selectedSegmentRef.current.end);
+            seekToRef_kb.current(selectedSegmentRef.current.end);
           }
           break;
       }
@@ -2228,7 +2245,7 @@ export default function VideoEditor({
         hold.key = null;
       }
     };
-  }, [showMultiTrack, togglePlay, seekTo, toggleMute, trimmedStart, trimmedEnd, onSegmentsChange]);
+  }, []); // Stable: all dependencies accessed via refs
 
   // ── J-K-L shuttle speed effect ──────────────────────
   useEffect(() => {
@@ -2381,7 +2398,7 @@ export default function VideoEditor({
           playsInline
           preload="auto"
           style={(() => {
-            const hasCustomTransform = showMultiTrack && (
+            const hasCustomTransform = (
               videoItemPosition.x !== 50 || videoItemPosition.y !== 50 ||
               videoItemSize.w !== 100 || videoItemSize.h !== 100 ||
               videoItemRotation !== 0
