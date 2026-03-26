@@ -935,42 +935,61 @@ async def _run_analysis_inner(job_id: str):
 
         # ── CRASH RECOVERY: If Whisper returned 0 segments on a video with
         # real audio, it likely OOM'd or crashed. Retry with a smaller model.
+        # Use subprocess mode to preserve VRAM isolation (in-process retry
+        # would re-create CTranslate2's CUDA context in the main process).
         if not result and audio_duration > 10:
             logger.error(
-                "[%s] Whisper returned 0 segments for %.0fs audio — "
-                "likely OOM/crash. Retrying with 'small' model on CPU.",
-                job_id, audio_duration,
+                "[%s] Whisper returned 0 segments for %.0fs audio (model=%s) — "
+                "likely CTranslate2 silent OOM. Retrying with 'small' on GPU...",
+                job_id, audio_duration, settings.WHISPER_MODEL,
             )
             await _update_branch_progress("transcription", 10, JobStatus.TRANSCRIBING,
-                "Transcription failed — retrying with smaller model...")
+                "Transcription failed — retrying with smaller model on GPU...")
 
-            from backend.services.transcription import reload_model
             original_model = settings.WHISPER_MODEL
-            original_gpu = settings.GPU_ACCELERATION_ENABLED
+            original_beam = settings.WHISPER_BEAM_SIZE
             try:
                 settings.WHISPER_MODEL = "small"
-                settings.GPU_ACCELERATION_ENABLED = False
-                # Reduce beam size for CPU — beam=5 on CPU is 5x slower per chunk,
-                # making the retry timeout before completing all chunks.
-                original_beam = settings.WHISPER_BEAM_SIZE
-                settings.WHISPER_BEAM_SIZE = 1  # Greedy decode — fastest on CPU
-                reload_model()
-
-                result = await transcribe_audio(
+                settings.WHISPER_BEAM_SIZE = 1  # Greedy decode — lowest VRAM usage
+                result = await transcribe_audio_subprocess(
                     audio_path, language=job.language, task=whisper_task,
-                    initial_prompt=initial_prompt, cancel_check=cancel_check,
-                    progress_callback=_transcribe_progress, audio_duration=audio_duration,
+                    initial_prompt=initial_prompt, audio_duration=audio_duration,
                 )
                 logger.info(
-                    "[%s] Fallback transcription produced %d segments",
+                    "[%s] Retry transcription (small/GPU) produced %d segments",
                     job_id, len(result),
                 )
             finally:
-                # Restore original settings for future jobs
                 settings.WHISPER_MODEL = original_model
-                settings.GPU_ACCELERATION_ENABLED = original_gpu
                 settings.WHISPER_BEAM_SIZE = original_beam
-                reload_model()
+
+            # If GPU retry with small also failed, try CPU as last resort
+            if not result and audio_duration > 10:
+                logger.error(
+                    "[%s] GPU retry with 'small' also returned 0 segments. "
+                    "Trying CPU as last resort (may take %.0f minutes)...",
+                    job_id, audio_duration / 60,
+                )
+                await _update_branch_progress("transcription", 10, JobStatus.TRANSCRIBING,
+                    "GPU transcription failed — retrying on CPU (slower)...")
+
+                original_gpu = settings.GPU_ACCELERATION_ENABLED
+                try:
+                    settings.WHISPER_MODEL = "small"
+                    settings.WHISPER_BEAM_SIZE = 1
+                    settings.GPU_ACCELERATION_ENABLED = False
+                    result = await transcribe_audio_subprocess(
+                        audio_path, language=job.language, task=whisper_task,
+                        initial_prompt=initial_prompt, audio_duration=audio_duration,
+                    )
+                    logger.info(
+                        "[%s] CPU fallback transcription produced %d segments",
+                        job_id, len(result),
+                    )
+                finally:
+                    settings.WHISPER_MODEL = original_model
+                    settings.WHISPER_BEAM_SIZE = original_beam
+                    settings.GPU_ACCELERATION_ENABLED = original_gpu
 
         await database.update_job_status(job_id, transcript=list(result))
 

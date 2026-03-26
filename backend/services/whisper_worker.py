@@ -114,6 +114,16 @@ def main():
             "status": "ok",
         }
 
+        # CTranslate2 silently returns 0 segments when cudaMalloc fails
+        if len(result_segments) == 0 and info.duration > 10:
+            logger.error(
+                "WHISPER WORKER: 0 segments for %.1fs audio (language=%s, model=%s). "
+                "CTranslate2 likely hit a silent CUDA OOM. "
+                "Parent process should retry with a smaller model.",
+                info.duration, info.language, args.model,
+            )
+            result["warning"] = "zero_segments_possible_oom"
+
         with open(args.output, "w") as f:
             json.dump(result, f)
 

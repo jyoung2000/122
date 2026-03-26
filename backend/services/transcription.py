@@ -39,6 +39,22 @@ _MODEL_LOAD_TIMEOUT = 600  # 10 minutes
 _SEGMENT_STALL_TIMEOUT = 120  # 2 minutes
 
 
+def _get_gpu_vram_mb() -> int:
+    """Get total GPU VRAM in MB. Returns 0 if unavailable."""
+    gpus = _enumerate_gpus_nvidia_smi()
+    if gpus:
+        return gpus[0].get("vram_mb", 0)
+    # CTranslate2 can see the GPU even when torch can't, but doesn't expose VRAM.
+    # Use a conservative default for GTX 1650 class cards.
+    try:
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() > 0:
+            return 4096
+    except Exception:
+        pass
+    return 0
+
+
 async def transcribe_audio_subprocess(
     audio_path: str,
     language: str = "",
@@ -81,6 +97,57 @@ async def transcribe_audio_subprocess(
                 idx = int(gpu_idx)
                 if idx < cuda_count:
                     device_index = idx
+
+    # ── VRAM safety checks (mirrors _get_whisper_model logic) ──
+    # The in-process path auto-downgrades models that won't fit in VRAM.
+    # Without these checks, CTranslate2 silently OOMs → 0 segments returned.
+    if device == "cuda":
+        vram_mb = _get_gpu_vram_mb()
+        _VRAM_REQUIREMENTS = {
+            "large-v3": 6000, "large-v3-turbo": 5000,
+            "medium": 3000, "medium.en": 3000,
+        }
+        if model_name in _VRAM_REQUIREMENTS:
+            min_vram = _VRAM_REQUIREMENTS[model_name]
+            if 0 < vram_mb < min_vram:
+                logger.warning(
+                    "SUBPROCESS VRAM SAFETY: '%s' needs ~%dMB but GPU has %dMB. "
+                    "Downgrading to 'small' to prevent CTranslate2 silent OOM.",
+                    model_name, min_vram, vram_mb,
+                )
+                model_name = "small"
+
+        # Auto-upgrade from 'small' on large GPUs (only if user didn't explicitly set)
+        if model_name == "small" and not getattr(settings, 'WHISPER_MODEL_USER_SET', False):
+            if vram_mb >= 8000:
+                model_name = "large-v3"
+            elif vram_mb >= 6000:
+                model_name = "large-v3-turbo"
+
+        # Beam size safety: reduce if model+beam won't fit
+        _MODEL_VRAM_MB = {
+            "tiny": 400, "base": 500, "small": 1000,
+            "medium": 1500, "large-v3-turbo": 3000, "large-v3": 3500,
+        }
+        _model_mb = _MODEL_VRAM_MB.get(model_name, 1000)
+        _beam_overhead = beam_size * 50
+        _cuda_overhead = 400
+        _estimated_peak = _model_mb + _beam_overhead + _cuda_overhead
+        if vram_mb > 0 and _estimated_peak > vram_mb * 0.85:
+            safe_beam = max(1, int((vram_mb * 0.85 - _model_mb - _cuda_overhead) / 50))
+            if safe_beam < beam_size:
+                logger.warning(
+                    "SUBPROCESS: Reducing beam %d→%d for '%s' on %dMB GPU "
+                    "(est. peak %dMB)",
+                    beam_size, safe_beam, model_name, vram_mb, _estimated_peak,
+                )
+                beam_size = safe_beam
+
+    logger.info(
+        "Subprocess Whisper config: model=%s, device=%s, beam=%d "
+        "(settings had: model=%s, beam=%d)",
+        model_name, device, beam_size, settings.WHISPER_MODEL, settings.WHISPER_BEAM_SIZE,
+    )
 
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, dir="/tmp") as tmp:
         output_path = tmp.name
@@ -127,6 +194,16 @@ async def transcribe_audio_subprocess(
 
         with open(output_path, "r") as f:
             raw = json.load(f)
+
+        # Log result summary for debugging
+        _info = raw.get("info", {})
+        _seg_count = len(raw.get("segments", []))
+        logger.info(
+            "Whisper subprocess result: %d segments, duration=%.1fs, language=%s, "
+            "warning=%s, model=%s, device=%s",
+            _seg_count, _info.get("duration", 0), _info.get("language", "?"),
+            raw.get("warning", "none"), model_name, device,
+        )
 
         if raw.get("status") == "error":
             raise RuntimeError(f"Whisper worker error: {raw.get('error')}")
