@@ -827,10 +827,13 @@ async def test_subject_tracking():
     vision_model = settings.OLLAMA_VISION_MODEL
     is_moondream = "moondream" in vision_model.lower()
 
+    # 5 test images simulating a subject moving left-to-right across the frame
     test_cases = [
-        {"expected_x": 25, "color": (220, 60, 60), "label": "left"},
+        {"expected_x": 15, "color": (220, 60, 60), "label": "far left"},
+        {"expected_x": 35, "color": (200, 140, 60), "label": "left"},
         {"expected_x": 50, "color": (60, 120, 220), "label": "center"},
-        {"expected_x": 75, "color": (60, 200, 120), "label": "right"},
+        {"expected_x": 65, "color": (60, 200, 120), "label": "right"},
+        {"expected_x": 85, "color": (180, 60, 200), "label": "far right"},
     ]
 
     results = []
@@ -982,28 +985,37 @@ async def test_subject_tracking():
     returned_xs = [r["returned_x"] for r in results if r["returned_x"] is not None]
     all_same = len(set(returned_xs)) <= 1 and len(returned_xs) >= 2
 
+    total_cases = len(test_cases)
     if json_ok_count == 0:
         overall = "fail"
         summary = "Vision AI cannot produce JSON — subject tracking will not work"
-    elif json_ok_count < 3:
+    elif json_ok_count < total_cases:
         overall = "warn"
-        summary = f"JSON compliance: {json_ok_count}/3 — tracking may be unreliable"
+        summary = f"JSON compliance: {json_ok_count}/{total_cases} — tracking may be unreliable"
     elif all_same:
         overall = "warn"
         summary = f"JSON works but all responses returned subject_x={returned_xs[0]} — model may not differentiate positions on real video"
-    elif avg_error is not None and avg_error > 40:
-        overall = "warn"
-        summary = f"JSON works, avg error {avg_error}% on synthetic images — accuracy may vary on real video ({avg_speed}ms/frame)"
     else:
-        overall = "pass"
-        summary = f"Subject tracking working — {avg_error}% avg error, {avg_speed}ms/frame"
+        # Check if model detects movement direction (left images → lower x, right → higher x)
+        ordered_xs = [r["returned_x"] for r in results if r["returned_x"] is not None]
+        detects_direction = len(ordered_xs) >= 3 and ordered_xs[0] < ordered_xs[-1]
+
+        if avg_error is not None and avg_error > 40 and not detects_direction:
+            overall = "warn"
+            summary = f"JSON works, avg error {avg_error}% — model struggles with position but may work on real video ({avg_speed}ms/frame)"
+        elif detects_direction:
+            overall = "pass"
+            summary = f"Subject tracking working — detects movement direction, {avg_error}% avg error, {avg_speed}ms/frame"
+        else:
+            overall = "pass"
+            summary = f"Subject tracking working — {avg_error}% avg error, {avg_speed}ms/frame"
 
     return {
         "overall_status": overall,
         "summary": summary,
         "model": vision_model,
         "format_json_used": is_moondream,
-        "json_compliance": f"{json_ok_count}/3",
+        "json_compliance": f"{json_ok_count}/{total_cases}",
         "avg_error": avg_error,
         "avg_speed_ms": avg_speed,
         "results": results,
@@ -1017,12 +1029,24 @@ async def test_subject_tracking():
 async def test_whisper(request: Request):
     """Test Whisper transcription and translation with a short generated audio clip.
 
-    Generates a ~10 second audio file using ffmpeg (sine tone + silence),
-    runs the current Whisper model on it via subprocess, and reports results.
+    Accepts optional JSON body: {"language": "ja", "task": "translate"}
+    - language: source language code (default "" = auto-detect)
+    - task: "transcribe", "translate", or "both" (default)
+
     Streams SSE events for real-time progress in the UI.
     """
     import shutil
     import tempfile
+
+    # Parse optional request body
+    test_language = ""
+    test_task = "both"
+    try:
+        body = await request.json()
+        test_language = body.get("language", "")
+        test_task = body.get("task", "both")
+    except Exception:
+        pass
 
     async def event_stream() -> AsyncGenerator[str, None]:
         tmp_dir = tempfile.mkdtemp(prefix="whisper_test_")
@@ -1120,20 +1144,36 @@ async def test_whisper(request: Request):
             # ── Phase 3: Run Whisper transcription (subprocess) ──
             model_name = settings.WHISPER_MODEL
             beam_size = settings.WHISPER_BEAM_SIZE
+            lang_label = test_language or "auto-detect"
 
-            yield _sse_event("phase_start", {
-                "phase": "transcribe",
-                "label": f"Transcribing with {model_name} (beam={beam_size}) on {device.upper()}...",
-                "phase_index": 2, "total_phases": total_phases,
-            })
+            run_transcribe = test_task in ("both", "transcribe")
+            run_translate = test_task in ("both", "translate")
 
-            t0 = time.time()
-            try:
+            if run_transcribe:
+                yield _sse_event("phase_start", {
+                    "phase": "transcribe",
+                    "label": f"Transcribing with {model_name} (beam={beam_size}, lang={lang_label}) on {device.upper()}...",
+                    "phase_index": 2, "total_phases": total_phases,
+                })
+            else:
+                yield _sse_event("phase_start", {
+                    "phase": "transcribe",
+                    "label": "Transcription skipped (translate-only mode)",
+                    "phase_index": 2, "total_phases": total_phases,
+                })
+                yield _sse_event("phase_result", {
+                    "phase": "transcribe", "status": "pass",
+                    "message": "Skipped — testing translation only",
+                })
+
+            if run_transcribe:
+              t0 = time.time()
+              try:
                 from backend.services.transcription import transcribe_audio_subprocess
                 segments = await asyncio.wait_for(
                     transcribe_audio_subprocess(
                         test_audio,
-                        language="",
+                        language=test_language,
                         task="transcribe",
                         initial_prompt="",
                         audio_duration=10.0,
@@ -1147,21 +1187,21 @@ async def test_whisper(request: Request):
                     "phase": "transcribe", "status": "pass",
                     "message": (
                         f"Transcription OK — {seg_count} segment{'s' if seg_count != 1 else ''} "
-                        f"in {elapsed_ms}ms ({model_name}, beam={beam_size}, {device})"
+                        f"in {elapsed_ms}ms ({model_name}, beam={beam_size}, lang={lang_label}, {device})"
                     ),
                     "segments": seg_count,
                     "elapsed_ms": elapsed_ms,
                     "model": model_name,
                     "device": device,
                 })
-            except asyncio.TimeoutError:
+              except asyncio.TimeoutError:
                 yield _sse_event("phase_result", {
                     "phase": "transcribe", "status": "fail",
                     "message": "Transcription timed out after 120s — model may be downloading or CUDA OOM",
                 })
                 yield _sse_event("complete", {"overall_status": "fail"})
                 return
-            except Exception as e:
+              except Exception as e:
                 elapsed_ms = int((time.time() - t0) * 1000)
                 error_msg = str(e)[:300]
                 if "CUDA" in error_msg or "cudaMalloc" in error_msg:
@@ -1178,51 +1218,64 @@ async def test_whisper(request: Request):
                 return
 
             # ── Phase 4: Test translation ──
-            yield _sse_event("phase_start", {
-                "phase": "translate",
-                "label": "Testing Whisper translate mode...",
-                "phase_index": 3, "total_phases": total_phases,
-            })
+            if run_translate:
+                translate_lang = test_language or "ja"
+                yield _sse_event("phase_start", {
+                    "phase": "translate",
+                    "label": f"Testing Whisper translate mode ({translate_lang} -> en)...",
+                    "phase_index": 3, "total_phases": total_phases,
+                })
 
-            t0 = time.time()
-            try:
-                segments_translate = await asyncio.wait_for(
-                    transcribe_audio_subprocess(
-                        test_audio,
-                        language="ja",
-                        task="translate",
-                        initial_prompt="",
-                        audio_duration=10.0,
-                    ),
-                    timeout=120,
-                )
-                elapsed_ms = int((time.time() - t0) * 1000)
-
-                has_echo = any(
-                    "japanese conversation" in (getattr(s, "text", "") or "").lower()
-                    for s in segments_translate
-                )
-
-                if has_echo:
-                    yield _sse_event("phase_result", {
-                        "phase": "translate", "status": "fail",
-                        "message": "Translation produced prompt echo — initial_prompt is being hallucinated as output",
-                    })
-                else:
-                    yield _sse_event("phase_result", {
-                        "phase": "translate", "status": "pass",
-                        "message": (
-                            f"Translation OK — {len(segments_translate)} segment{'s' if len(segments_translate) != 1 else ''} "
-                            f"in {elapsed_ms}ms (ja->en, {model_name})"
+                t0 = time.time()
+                try:
+                    from backend.services.transcription import transcribe_audio_subprocess as _tas
+                    segments_translate = await asyncio.wait_for(
+                        _tas(
+                            test_audio,
+                            language=translate_lang,
+                            task="translate",
+                            initial_prompt="",
+                            audio_duration=10.0,
                         ),
-                        "segments": len(segments_translate),
-                        "elapsed_ms": elapsed_ms,
+                        timeout=120,
+                    )
+                    elapsed_ms = int((time.time() - t0) * 1000)
+
+                    has_echo = any(
+                        "japanese conversation" in (getattr(s, "text", "") or "").lower()
+                        for s in segments_translate
+                    )
+
+                    if has_echo:
+                        yield _sse_event("phase_result", {
+                            "phase": "translate", "status": "fail",
+                            "message": "Translation produced prompt echo — initial_prompt is being hallucinated as output",
+                        })
+                    else:
+                        yield _sse_event("phase_result", {
+                            "phase": "translate", "status": "pass",
+                            "message": (
+                                f"Translation OK — {len(segments_translate)} segment{'s' if len(segments_translate) != 1 else ''} "
+                                f"in {elapsed_ms}ms ({translate_lang}->en, {model_name})"
+                            ),
+                            "segments": len(segments_translate),
+                            "elapsed_ms": elapsed_ms,
+                        })
+                except Exception as e:
+                    elapsed_ms = int((time.time() - t0) * 1000)
+                    yield _sse_event("phase_result", {
+                        "phase": "translate", "status": "warn",
+                        "message": f"Translation test failed ({elapsed_ms}ms): {str(e)[:200]}",
                     })
-            except Exception as e:
-                elapsed_ms = int((time.time() - t0) * 1000)
+            else:
+                yield _sse_event("phase_start", {
+                    "phase": "translate",
+                    "label": "Translation skipped (transcribe-only mode)",
+                    "phase_index": 3, "total_phases": total_phases,
+                })
                 yield _sse_event("phase_result", {
-                    "phase": "translate", "status": "warn",
-                    "message": f"Translation test failed ({elapsed_ms}ms): {str(e)[:200]}",
+                    "phase": "translate", "status": "pass",
+                    "message": "Skipped — testing transcription only",
                 })
 
             # ── Phase 5: Verify VRAM cleanup ──

@@ -73,6 +73,8 @@ export default function Settings() {
   const [whisperTestRunning, setWhisperTestRunning] = useState(false);
   const [whisperTestPhases, setWhisperTestPhases] = useState([]);
   const [whisperTestResult, setWhisperTestResult] = useState(null);
+  const [whisperTestLang, setWhisperTestLang] = useState('');
+  const [whisperTestTask, setWhisperTestTask] = useState('both');
 
   // FFmpeg encoding settings
   const [ffmpegThreads, setFfmpegThreads] = useState(4);
@@ -639,7 +641,11 @@ export default function Settings() {
     setWhisperTestPhases([]);
     setWhisperTestResult(null);
     try {
-      const response = await fetch('/api/diagnostics/test-whisper', { method: 'POST' });
+      const response = await fetch('/api/diagnostics/test-whisper', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ language: whisperTestLang, task: whisperTestTask }),
+      });
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -1355,105 +1361,6 @@ export default function Settings() {
                   >
                     {transSaving ? 'Saving...' : 'Save Transcription Settings'}
                   </button>
-                )}
-              </div>
-
-              {/* ── Test Whisper ── */}
-              <div style={{
-                background: 'var(--bg-panel)', border: '1px solid var(--border)',
-                borderRadius: 'var(--radius-md)', padding: '14px 16px', marginBottom: 20,
-              }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                  <div>
-                    <h4 style={{ fontSize: 13, margin: 0, color: 'var(--text-primary)' }}>
-                      Test Whisper
-                    </h4>
-                    <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '4px 0 0', lineHeight: 1.4 }}>
-                      Verify your Whisper model loads correctly and can transcribe + translate before running a full pipeline.
-                      Tests CUDA/GPU access, model loading, and inference using a short generated audio clip.
-                    </p>
-                  </div>
-                  <button
-                    onClick={handleTestWhisper}
-                    disabled={whisperTestRunning}
-                    style={{
-                      padding: '6px 16px', flexShrink: 0,
-                      background: whisperTestRunning ? 'var(--bg-elevated)' : 'var(--accent-cyan)',
-                      color: whisperTestRunning ? 'var(--text-muted)' : 'var(--bg-base)',
-                      border: 'none', borderRadius: 'var(--radius-sm)',
-                      fontSize: 12, fontWeight: 600, cursor: whisperTestRunning ? 'not-allowed' : 'pointer',
-                    }}
-                  >
-                    {whisperTestRunning ? 'Testing...' : 'Run Test'}
-                  </button>
-                </div>
-
-                {whisperTestPhases.length > 0 && (
-                  <div style={{ marginTop: 10, display: 'grid', gap: 6 }}>
-                    {whisperTestPhases.map((phase) => (
-                      <div key={phase.phase} style={{
-                        display: 'flex', alignItems: 'flex-start', gap: 8,
-                        padding: '6px 10px', borderRadius: 'var(--radius-sm)',
-                        background: phase.status === 'fail' ? 'rgba(239,68,68,0.08)' :
-                                    phase.status === 'warn' ? 'rgba(245,158,11,0.08)' :
-                                    phase.status === 'pass' ? 'rgba(34,197,94,0.08)' :
-                                    'rgba(59,130,246,0.08)',
-                        border: `1px solid ${
-                          phase.status === 'fail' ? 'rgba(239,68,68,0.2)' :
-                          phase.status === 'warn' ? 'rgba(245,158,11,0.2)' :
-                          phase.status === 'pass' ? 'rgba(34,197,94,0.2)' :
-                          'rgba(59,130,246,0.2)'
-                        }`,
-                      }}>
-                        <span style={{ fontSize: 12, flexShrink: 0, marginTop: 1 }}>
-                          {phase.status === 'running' ? '\u23f3' :
-                           phase.status === 'pass' ? '\u2705' :
-                           phase.status === 'warn' ? '\u26a0\ufe0f' : '\u274c'}
-                        </span>
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 500 }}>
-                            {phase.label}
-                          </div>
-                          {phase.message && (
-                            <div style={{
-                              fontSize: 11, color: 'var(--text-muted)', marginTop: 2,
-                              fontFamily: 'var(--font-mono)', wordBreak: 'break-word',
-                            }}>
-                              {phase.message}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {whisperTestResult && (
-                  <div style={{
-                    marginTop: 10, padding: '8px 12px', borderRadius: 'var(--radius-sm)',
-                    background: whisperTestResult.overall_status === 'pass'
-                      ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
-                    border: `1px solid ${whisperTestResult.overall_status === 'pass'
-                      ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'}`,
-                  }}>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
-                      {whisperTestResult.overall_status === 'pass'
-                        ? '\u2705 Whisper is ready for pipeline use'
-                        : '\u274c Whisper test failed \u2014 check settings above'}
-                    </div>
-                    {whisperTestResult.summary && (
-                      <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, fontFamily: 'var(--font-mono)' }}>
-                        Model: {whisperTestResult.summary.model} | Device: {whisperTestResult.summary.device.toUpperCase()}
-                        {whisperTestResult.summary.gpu_name !== 'CPU' && ` (${whisperTestResult.summary.gpu_name})`}
-                        {' | '}Beam: {whisperTestResult.summary.beam_size} | Compute: {whisperTestResult.summary.compute_type}
-                      </div>
-                    )}
-                    {whisperTestResult.error && (
-                      <div style={{ fontSize: 11, color: '#ef4444', marginTop: 4 }}>
-                        {whisperTestResult.error}
-                      </div>
-                    )}
-                  </div>
                 )}
               </div>
 
@@ -2300,6 +2207,161 @@ export default function Settings() {
             {/* ── Pipeline Diagnostics ── */}
             <PipelineDiagnostics />
 
+            {/* ── Test Whisper ── */}
+            <div style={{
+              background: 'var(--bg-panel)', border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)', padding: '14px 16px', marginBottom: 32,
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div>
+                  <h4 style={{ fontSize: 13, margin: 0, color: 'var(--text-primary)' }}>
+                    Test Whisper
+                  </h4>
+                  <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '4px 0 0', lineHeight: 1.4 }}>
+                    Verify transcription and translation work before running a full pipeline.
+                    Tests CUDA/GPU access, model loading, and inference.
+                  </p>
+                </div>
+                <button
+                  onClick={handleTestWhisper}
+                  disabled={whisperTestRunning}
+                  style={{
+                    padding: '6px 16px', flexShrink: 0,
+                    background: whisperTestRunning ? 'var(--bg-elevated)' : 'var(--accent-cyan)',
+                    color: whisperTestRunning ? 'var(--text-muted)' : 'var(--bg-base)',
+                    border: 'none', borderRadius: 'var(--radius-sm)',
+                    fontSize: 12, fontWeight: 600, cursor: whisperTestRunning ? 'not-allowed' : 'pointer',
+                  }}
+                >
+                  {whisperTestRunning ? 'Testing...' : 'Run Test'}
+                </button>
+              </div>
+
+              {/* Language & task selectors */}
+              <div style={{ display: 'flex', gap: 12, marginBottom: 10, flexWrap: 'wrap' }}>
+                <div style={{ flex: 1, minWidth: 140 }}>
+                  <label style={{ fontSize: 10, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>Language</label>
+                  <select
+                    value={whisperTestLang}
+                    onChange={e => setWhisperTestLang(e.target.value)}
+                    disabled={whisperTestRunning}
+                    style={{
+                      width: '100%', padding: '5px 8px', fontSize: 11,
+                      background: 'var(--bg-elevated)', color: 'var(--text-primary)',
+                      border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                    }}
+                  >
+                    <option value="">Auto-detect</option>
+                    <option value="en">English</option>
+                    <option value="ja">Japanese</option>
+                    <option value="zh">Chinese</option>
+                    <option value="ko">Korean</option>
+                    <option value="es">Spanish</option>
+                    <option value="fr">French</option>
+                    <option value="de">German</option>
+                    <option value="pt">Portuguese</option>
+                    <option value="ru">Russian</option>
+                    <option value="ar">Arabic</option>
+                    <option value="hi">Hindi</option>
+                    <option value="it">Italian</option>
+                    <option value="nl">Dutch</option>
+                    <option value="pl">Polish</option>
+                    <option value="tr">Turkish</option>
+                    <option value="vi">Vietnamese</option>
+                    <option value="th">Thai</option>
+                    <option value="id">Indonesian</option>
+                    <option value="sv">Swedish</option>
+                    <option value="uk">Ukrainian</option>
+                  </select>
+                </div>
+                <div style={{ flex: 1, minWidth: 140 }}>
+                  <label style={{ fontSize: 10, color: 'var(--text-muted)', display: 'block', marginBottom: 3 }}>Task</label>
+                  <select
+                    value={whisperTestTask}
+                    onChange={e => setWhisperTestTask(e.target.value)}
+                    disabled={whisperTestRunning}
+                    style={{
+                      width: '100%', padding: '5px 8px', fontSize: 11,
+                      background: 'var(--bg-elevated)', color: 'var(--text-primary)',
+                      border: '1px solid var(--border)', borderRadius: 'var(--radius-sm)',
+                    }}
+                  >
+                    <option value="both">Transcribe + Translate</option>
+                    <option value="transcribe">Transcribe only</option>
+                    <option value="translate">Translate only</option>
+                  </select>
+                </div>
+              </div>
+
+              {whisperTestPhases.length > 0 && (
+                <div style={{ marginTop: 10, display: 'grid', gap: 6 }}>
+                  {whisperTestPhases.map((phase) => (
+                    <div key={phase.phase} style={{
+                      display: 'flex', alignItems: 'flex-start', gap: 8,
+                      padding: '6px 10px', borderRadius: 'var(--radius-sm)',
+                      background: phase.status === 'fail' ? 'rgba(239,68,68,0.08)' :
+                                  phase.status === 'warn' ? 'rgba(245,158,11,0.08)' :
+                                  phase.status === 'pass' ? 'rgba(34,197,94,0.08)' :
+                                  'rgba(59,130,246,0.08)',
+                      border: `1px solid ${
+                        phase.status === 'fail' ? 'rgba(239,68,68,0.2)' :
+                        phase.status === 'warn' ? 'rgba(245,158,11,0.2)' :
+                        phase.status === 'pass' ? 'rgba(34,197,94,0.2)' :
+                        'rgba(59,130,246,0.2)'
+                      }`,
+                    }}>
+                      <span style={{ fontSize: 12, flexShrink: 0, marginTop: 1 }}>
+                        {phase.status === 'running' ? '\u23f3' :
+                         phase.status === 'pass' ? '\u2705' :
+                         phase.status === 'warn' ? '\u26a0\ufe0f' : '\u274c'}
+                      </span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12, color: 'var(--text-primary)', fontWeight: 500 }}>
+                          {phase.label}
+                        </div>
+                        {phase.message && (
+                          <div style={{
+                            fontSize: 11, color: 'var(--text-muted)', marginTop: 2,
+                            fontFamily: 'var(--font-mono)', wordBreak: 'break-word',
+                          }}>
+                            {phase.message}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {whisperTestResult && (
+                <div style={{
+                  marginTop: 10, padding: '8px 12px', borderRadius: 'var(--radius-sm)',
+                  background: whisperTestResult.overall_status === 'pass'
+                    ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+                  border: `1px solid ${whisperTestResult.overall_status === 'pass'
+                    ? 'rgba(34,197,94,0.3)' : 'rgba(239,68,68,0.3)'}`,
+                }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)' }}>
+                    {whisperTestResult.overall_status === 'pass'
+                      ? '\u2705 Whisper is ready for pipeline use'
+                      : '\u274c Whisper test failed \u2014 check settings above'}
+                  </div>
+                  {whisperTestResult.summary && (
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 4, fontFamily: 'var(--font-mono)' }}>
+                      Model: {whisperTestResult.summary.model} | Device: {whisperTestResult.summary.device.toUpperCase()}
+                      {whisperTestResult.summary.gpu_name !== 'CPU' && ` (${whisperTestResult.summary.gpu_name})`}
+                      {' | '}Beam: {whisperTestResult.summary.beam_size} | Compute: {whisperTestResult.summary.compute_type}
+                    </div>
+                  )}
+                  {whisperTestResult.error && (
+                    <div style={{ fontSize: 11, color: '#ef4444', marginTop: 4 }}>
+                      {whisperTestResult.error}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
             {/* ── Subject Tracking Validation ── */}
             {subjectTrackingEnabled && (
               <div style={{
@@ -2312,7 +2374,7 @@ export default function Settings() {
                       Subject Tracking Validation
                     </h4>
                     <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '4px 0 0', lineHeight: 1.5 }}>
-                      Tests whether your vision AI can detect subject positions accurately using synthetic ground-truth images.
+                      Tests whether your vision AI can detect a moving subject across 5 positions (far left to far right) using synthetic images.
                     </p>
                   </div>
                   <button
@@ -2340,7 +2402,7 @@ export default function Settings() {
                       borderRadius: '50%', animation: 'spin 0.8s linear infinite',
                     }} />
                     <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                      Sending 3 test images to vision model... (may take 10-30s)
+                      Sending 5 test images to vision model... (may take 20-60s)
                     </span>
                   </div>
                 )}
