@@ -977,6 +977,7 @@ async def _run_analysis_inner(job_id: str):
                     transcribe_audio_subprocess(
                         audio_path, language=job.language, task=whisper_task,
                         initial_prompt=initial_prompt, audio_duration=audio_duration,
+                        progress_callback=_transcribe_progress,
                     ),
                     timeout=_whisper_timeout,
                 )
@@ -1015,6 +1016,7 @@ async def _run_analysis_inner(job_id: str):
                 result = await transcribe_audio_subprocess(
                     audio_path, language=job.language, task=whisper_task,
                     initial_prompt=initial_prompt, audio_duration=audio_duration,
+                    progress_callback=_transcribe_progress,
                 )
                 logger.info(
                     "[%s] Retry transcription (small/GPU) produced %d segments",
@@ -1042,6 +1044,7 @@ async def _run_analysis_inner(job_id: str):
                     result = await transcribe_audio_subprocess(
                         audio_path, language=job.language, task=whisper_task,
                         initial_prompt=initial_prompt, audio_duration=audio_duration,
+                        progress_callback=_transcribe_progress,
                     )
                     logger.info(
                         "[%s] CPU fallback transcription produced %d segments",

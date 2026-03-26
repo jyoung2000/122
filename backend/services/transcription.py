@@ -151,6 +151,7 @@ async def transcribe_audio_subprocess(
     task: str = "transcribe",
     initial_prompt: str = "",
     audio_duration: float = 0,
+    progress_callback=None,
 ) -> list[TranscriptSegment]:
     """Run Whisper in a subprocess to fully release CTranslate2's CUDA memory.
 
@@ -290,6 +291,8 @@ async def transcribe_audio_subprocess(
             cmd.extend(["--language", language])
         if initial_prompt:
             cmd.extend(["--initial-prompt", initial_prompt])
+        if audio_duration > 0:
+            cmd.extend(["--audio-duration", str(audio_duration)])
 
         logger.info("Starting Whisper subprocess: model=%s device=%s", model_name, device)
 
@@ -300,7 +303,8 @@ async def transcribe_audio_subprocess(
             env={**os.environ},
         )
 
-        # Stream stderr in real-time so model loading and progress are visible
+        # Stream stderr line by line for real-time progress updates.
+        # The worker emits "PROGRESS:{json}" lines during transcription.
         stderr_lines = []
         async def _stream_stderr():
             while True:
@@ -308,7 +312,16 @@ async def transcribe_audio_subprocess(
                 if not line:
                     break
                 decoded = line.decode(errors="replace").rstrip()
-                if decoded:
+                if not decoded:
+                    continue
+                if decoded.startswith("PROGRESS:"):
+                    try:
+                        progress_data = json.loads(decoded[9:])
+                        if progress_callback:
+                            await progress_callback(progress_data)
+                    except Exception:
+                        pass
+                else:
                     stderr_lines.append(decoded)
                     logger.info("[whisper-worker] %s", decoded)
 

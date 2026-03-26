@@ -139,6 +139,8 @@ def main():
     parser.add_argument("--vad-speech-pad-ms", type=int, default=600)
     parser.add_argument("--vad-onset", type=float, default=0.2)
     parser.add_argument("--vad-min-speech-ms", type=int, default=100)
+    parser.add_argument("--audio-duration", type=float, default=0,
+                        help="Total audio duration in seconds (for progress reporting)")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -232,10 +234,13 @@ def main():
 
         segments_gen, info = model.transcribe(args.audio, **transcribe_kwargs)
 
-        # Materialize segments (generator) with progress heartbeats
+        # Materialize segments with real-time progress reporting to stderr.
+        # The parent process reads PROGRESS:{json} lines to update the UI.
         result_segments = []
-        _last_heartbeat = _time.monotonic()
-        _heartbeat_interval = 10  # Log progress every 10 seconds
+        _last_progress_pos = 0.0
+        _audio_dur = args.audio_duration or 0
+        _detected_lang = info.language or ""
+
         for seg in segments_gen:
             seg_data = {
                 "id": seg.id,
@@ -252,14 +257,17 @@ def main():
                 ]
             result_segments.append(seg_data)
 
-            # Periodic progress heartbeat so parent knows we're alive
-            _now = _time.monotonic()
-            if _now - _last_heartbeat >= _heartbeat_interval:
-                _last_heartbeat = _now
-                logger.info(
-                    "Progress: %d segments, position=%.1fs",
-                    len(result_segments), seg.end,
-                )
+            # Emit progress every ~5 seconds of audio processed
+            if seg.end - _last_progress_pos >= 5.0 or len(result_segments) == 1:
+                _last_progress_pos = seg.end
+                pct = min(99, int(seg.end / _audio_dur * 100)) if _audio_dur > 0 else 0
+                progress_line = json.dumps({
+                    "segments": len(result_segments),
+                    "position_sec": round(seg.end, 1),
+                    "pct": pct,
+                    "lang": _detected_lang,
+                })
+                print(f"PROGRESS:{progress_line}", file=sys.stderr, flush=True)
 
         # Filter hallucinations (ghosts, loops, backward jumps, duplicates)
         result_segments = _filter_segments(result_segments, initial_prompt=args.initial_prompt or "")
