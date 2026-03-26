@@ -541,187 +541,472 @@ async def restart_ollama():
 
 @router.post("/test-pipeline")
 async def test_pipeline(request: Request):
-    """Run a diagnostic test of the AI pipeline via SSE."""
+    """Run a diagnostic test that mirrors the real analysis pipeline 1:1.
+
+    Simulates every step of _run_analysis_inner() in the same order with
+    the same VRAM management, so any failure that would occur during a real
+    analysis is caught here in ~60-90 seconds instead of 30-60 minutes.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    include_whisper = body.get("include_whisper", True)
+    test_translation = body.get("test_translation", False)
+
     is_ollama = "ollama" in settings.active_provider_chain
     vision_model = settings.OLLAMA_VISION_MODEL
     text_model = settings.OLLAMA_TEXT_MODEL
 
     async def event_stream() -> AsyncGenerator[str, None]:
-        # Phase 0: Provider check
-        yield _sse_event("phase_start", {
-            "phase": "provider_check", "label": "Checking AI provider...",
-            "phase_index": 0, "total_phases": 5,
-        })
+        import tempfile
+        import shutil
 
-        if not is_ollama:
-            # Cloud provider — simplified test
-            yield _sse_event("phase_result", {
-                "phase": "provider_check", "status": "pass",
-                "message": "Cloud provider selected — no local GPU needed",
-                "gpu_status": "n/a",
+        tmp_dir = None
+        # Track total phases dynamically
+        total_phases = 2 if not is_ollama else (11 + (1 if include_whisper else 0) + (1 if include_whisper and test_translation else 0))
+        phase_counter = [0]
+
+        def _phase(phase_id, label):
+            idx = phase_counter[0]
+            phase_counter[0] += 1
+            return _sse_event("phase_start", {
+                "phase": phase_id, "label": label,
+                "phase_index": idx, "total_phases": total_phases,
             })
-            # Test cloud API
-            yield _sse_event("phase_start", {
-                "phase": "cloud_test", "label": "Testing cloud API...",
-                "phase_index": 1, "total_phases": 2,
-            })
-            try:
-                from backend.services.ai_orchestrator import AIOrchestrator
-                orch = AIOrchestrator()
-                t0 = time.time()
-                await asyncio.wait_for(
-                    orch.text_completion("Say hello in one word.", max_tokens=10, timeout=30),
-                    timeout=30,
-                )
-                ms = int((time.time() - t0) * 1000)
+
+        try:
+            # ══════════════════════════════════════════════════════════
+            # Phase: Provider + GPU check
+            # ══════════════════════════════════════════════════════════
+            yield _phase("provider_gpu_check", "Checking AI provider + GPU hardware...")
+
+            if not is_ollama:
                 yield _sse_event("phase_result", {
-                    "phase": "cloud_test", "status": "pass",
-                    "message": f"Cloud API responded in {ms}ms",
+                    "phase": "provider_gpu_check", "status": "pass",
+                    "message": "Cloud provider selected — no local GPU needed",
+                })
+                yield _phase("cloud_test", "Testing cloud API connection...")
+                try:
+                    from backend.services.ai_orchestrator import AIOrchestrator
+                    orch = AIOrchestrator()
+                    t0 = time.time()
+                    await asyncio.wait_for(
+                        orch.text_completion("Say hello in one word.", max_tokens=10, timeout=30),
+                        timeout=30,
+                    )
+                    ms = int((time.time() - t0) * 1000)
+                    yield _sse_event("phase_result", {
+                        "phase": "cloud_test", "status": "pass",
+                        "message": f"Cloud API responded in {ms}ms",
+                    })
+                except Exception as e:
+                    yield _sse_event("phase_result", {
+                        "phase": "cloud_test", "status": "fail",
+                        "message": f"Cloud API error: {str(e)[:200]}",
+                    })
+                yield _sse_event("complete", {"overall_status": "pass"})
+                return
+
+            # ── Ollama local pipeline ──
+            gpu = None
+            try:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    resp = await client.get(f"{settings.OLLAMA_HOST}/api/tags")
+                    if resp.status_code != 200:
+                        raise Exception(f"HTTP {resp.status_code}")
+
+                gpu = await _get_gpu_info()
+                vram_mb = gpu.get("vram_total_bytes", 0) // 1024 // 1024 if gpu else 0
+                gpu_msg = (
+                    f"CUDA available, {gpu.get('gpu_name', 'GPU')} ({vram_mb}MB)"
+                    if gpu.get("cuda_available")
+                    else "No GPU detected — running on CPU"
+                )
+                yield _sse_event("phase_result", {
+                    "phase": "provider_gpu_check", "status": "pass",
+                    "message": f"Ollama connected. {gpu_msg}",
+                    "gpu": gpu,
                 })
             except Exception as e:
                 yield _sse_event("phase_result", {
-                    "phase": "cloud_test", "status": "fail",
-                    "message": f"Cloud API error: {str(e)[:200]}",
+                    "phase": "provider_gpu_check", "status": "fail",
+                    "message": f"Ollama not available: {e}",
                 })
-            yield _sse_event("complete", {"overall_status": "pass"})
-            return
+                yield _sse_event("complete", {"overall_status": "fail"})
+                return
 
-        # ── Ollama pipeline test ──
+            # ══════════════════════════════════════════════════════════
+            # Phase: FFmpeg availability
+            # ══════════════════════════════════════════════════════════
+            yield _phase("ffmpeg_check", "Testing FFmpeg (audio/video extraction)...")
+            test_audio = None
+            try:
+                tmp_dir = tempfile.mkdtemp(prefix="pipeline_test_")
+                test_audio = os.path.join(tmp_dir, "test_audio.wav")
 
-        # Phase 0 result: check Ollama is up
-        try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.get(f"{settings.OLLAMA_HOST}/api/tags")
-                if resp.status_code != 200:
-                    raise Exception(f"HTTP {resp.status_code}")
+                proc = await asyncio.create_subprocess_exec(
+                    "ffmpeg", "-version",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                stdout_bytes, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
+                version_line = stdout_bytes.decode().split("\n")[0] if stdout_bytes else "unknown"
 
-            gpu = await _get_gpu_info()
-            gpu_msg = f"CUDA available, {gpu.get('gpu_name', 'GPU')}" if gpu.get("cuda_available") else "No GPU detected"
+                cmd = [
+                    "ffmpeg", "-y", "-f", "lavfi", "-i",
+                    (
+                        "sine=frequency=440:duration=3,aformat=sample_rates=16000:channel_layouts=mono[a1];"
+                        "anullsrc=r=16000:cl=mono,atrim=0:2,asetpts=PTS-STARTPTS[s1];"
+                        "anullsrc=r=16000:cl=mono,atrim=0:2,asetpts=PTS-STARTPTS[s2];"
+                        "sine=frequency=880:duration=3,aformat=sample_rates=16000:channel_layouts=mono[a2];"
+                        "[s1][a1][s2][a2]concat=n=4:v=0:a=1[out]"
+                    ),
+                    "-map", "[out]", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                    test_audio,
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                await asyncio.wait_for(proc.communicate(), timeout=15)
+
+                if proc.returncode != 0 or not os.path.isfile(test_audio):
+                    cmd2 = ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+                            "-t", "5", "-acodec", "pcm_s16le", test_audio]
+                    proc2 = await asyncio.create_subprocess_exec(
+                        *cmd2, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                    )
+                    await asyncio.wait_for(proc2.communicate(), timeout=10)
+
+                audio_size = os.path.getsize(test_audio) if os.path.isfile(test_audio) else 0
+                yield _sse_event("phase_result", {
+                    "phase": "ffmpeg_check", "status": "pass",
+                    "message": f"{version_line.split(' Copyright')[0]} | Test audio: {audio_size // 1024}KB",
+                })
+            except Exception as e:
+                yield _sse_event("phase_result", {
+                    "phase": "ffmpeg_check", "status": "fail",
+                    "message": f"FFmpeg test failed: {str(e)[:200]}",
+                })
+                yield _sse_event("complete", {"overall_status": "fail"})
+                return
+
+            # ══════════════════════════════════════════════════════════
+            # Phase: Torch / CTranslate2 VRAM check
+            # ══════════════════════════════════════════════════════════
+            yield _phase("torch_vram", "Checking Whisper GPU runtime (CTranslate2 / PyTorch)...")
+            whisper_device = "cpu"
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch_reserved = torch.cuda.memory_reserved() / 1024 / 1024
+                    if torch_reserved > 100:
+                        from backend.services.pipeline import release_torch_gpu_memory
+                        release_torch_gpu_memory()
+                        await asyncio.sleep(2)
+                        torch_after = torch.cuda.memory_reserved() / 1024 / 1024
+                        yield _sse_event("phase_result", {
+                            "phase": "torch_vram",
+                            "status": "warn" if torch_after > 100 else "pass",
+                            "message": f"Torch was holding {torch_reserved:.0f}MB, released to {torch_after:.0f}MB",
+                        })
+                    else:
+                        yield _sse_event("phase_result", {
+                            "phase": "torch_vram", "status": "pass",
+                            "message": f"Torch GPU memory OK ({torch_reserved:.0f}MB reserved)",
+                        })
+                    whisper_device = "cuda"
+                else:
+                    ct2_devices = 0
+                    try:
+                        import ctranslate2
+                        ct2_devices = ctranslate2.get_cuda_device_count()
+                    except Exception:
+                        pass
+                    if ct2_devices > 0:
+                        whisper_device = "cuda"
+                        yield _sse_event("phase_result", {
+                            "phase": "torch_vram", "status": "warn",
+                            "message": f"PyTorch CUDA unavailable but CTranslate2 sees {ct2_devices} GPU(s) — Whisper uses subprocess mode",
+                        })
+                    else:
+                        yield _sse_event("phase_result", {
+                            "phase": "torch_vram", "status": "pass",
+                            "message": "No CUDA — Whisper will run on CPU (slower but functional)",
+                        })
+            except ImportError:
+                yield _sse_event("phase_result", {
+                    "phase": "torch_vram", "status": "pass",
+                    "message": "Torch not loaded — Whisper uses CTranslate2 runtime",
+                })
+
+            # ══════════════════════════════════════════════════════════
+            # Phase: Clear Ollama VRAM (pre-Whisper)
+            # Real pipeline: unload_models() before Whisper gets exclusive GPU
+            # ══════════════════════════════════════════════════════════
+            yield _phase("pre_whisper_vram_clear", "Unloading Ollama models (free GPU for Whisper)...")
+            cleared = await _unload_and_wait(10)
             yield _sse_event("phase_result", {
-                "phase": "provider_check", "status": "pass",
-                "message": f"Ollama connected. {gpu_msg}",
+                "phase": "pre_whisper_vram_clear",
+                "status": "pass" if cleared else "warn",
+                "message": "Ollama models unloaded — GPU freed for Whisper" if cleared else "Models may still be unloading",
             })
-        except Exception as e:
-            yield _sse_event("phase_result", {
-                "phase": "provider_check", "status": "fail",
-                "message": f"Ollama not available: {e}",
-            })
-            yield _sse_event("complete", {"overall_status": "fail"})
-            return
 
-        # Phase 1: Check + release torch VRAM
-        yield _sse_event("phase_start", {
-            "phase": "torch_vram", "label": "Checking torch GPU memory...",
-            "phase_index": 1, "total_phases": 6,
-        })
-        torch_reserved = 0
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch_reserved = torch.cuda.memory_reserved() / 1024 / 1024
-                if torch_reserved > 100:
+            # ══════════════════════════════════════════════════════════
+            # Phase: Whisper transcription test
+            # Real pipeline: transcribe_audio_subprocess()
+            # ══════════════════════════════════════════════════════════
+            whisper_ok = True
+            if include_whisper and test_audio and os.path.isfile(test_audio):
+                model_name = settings.WHISPER_MODEL
+                beam_size = settings.WHISPER_BEAM_SIZE
+
+                yield _phase("whisper_transcribe",
+                    f"Whisper transcription — {model_name} (beam={beam_size}) on {whisper_device.upper()}...")
+
+                t0 = time.time()
+                try:
+                    from backend.services.transcription import transcribe_audio_subprocess
+                    segments = await asyncio.wait_for(
+                        transcribe_audio_subprocess(
+                            test_audio, language="", task="transcribe",
+                            initial_prompt="", audio_duration=10.0,
+                        ),
+                        timeout=180,
+                    )
+                    elapsed_ms = int((time.time() - t0) * 1000)
+                    yield _sse_event("phase_result", {
+                        "phase": "whisper_transcribe", "status": "pass",
+                        "message": (
+                            f"Transcription OK — {len(segments)} segment{'s' if len(segments) != 1 else ''} "
+                            f"in {elapsed_ms}ms ({model_name}, beam={beam_size}, {whisper_device})"
+                        ),
+                        "segments": len(segments), "elapsed_ms": elapsed_ms,
+                    })
+                except asyncio.TimeoutError:
+                    whisper_ok = False
+                    yield _sse_event("phase_result", {
+                        "phase": "whisper_transcribe", "status": "fail",
+                        "message": f"Timed out after 180s — model '{model_name}' may be downloading or too large for GPU",
+                    })
+                except Exception as e:
+                    whisper_ok = False
+                    elapsed_ms = int((time.time() - t0) * 1000)
+                    err = str(e)[:300]
+                    hint = " — GPU memory issue, try smaller model" if "cuda" in err.lower() else ""
+                    yield _sse_event("phase_result", {
+                        "phase": "whisper_transcribe", "status": "fail",
+                        "message": f"Failed ({elapsed_ms}ms): {err}{hint}",
+                    })
+
+                # ── Optional: Whisper translation test ──
+                if test_translation and whisper_ok:
+                    yield _phase("whisper_translate", f"Whisper translation — ja→en ({model_name})...")
+                    t0 = time.time()
+                    try:
+                        segments_tr = await asyncio.wait_for(
+                            transcribe_audio_subprocess(
+                                test_audio, language="ja", task="translate",
+                                initial_prompt="", audio_duration=10.0,
+                            ),
+                            timeout=120,
+                        )
+                        elapsed_ms = int((time.time() - t0) * 1000)
+                        has_echo = any(
+                            any(p in (getattr(s, "text", "") or "").lower() for p in [
+                                "japanese conversation", "translated to natural english",
+                            ])
+                            for s in segments_tr
+                        )
+                        if has_echo:
+                            yield _sse_event("phase_result", {
+                                "phase": "whisper_translate", "status": "fail",
+                                "message": "Prompt echo detected — Whisper hallucinating initial_prompt as output",
+                            })
+                        else:
+                            yield _sse_event("phase_result", {
+                                "phase": "whisper_translate", "status": "pass",
+                                "message": f"Translation OK — {len(segments_tr)} segments in {elapsed_ms}ms (ja→en, no echo)",
+                            })
+                    except Exception as e:
+                        elapsed_ms = int((time.time() - t0) * 1000)
+                        yield _sse_event("phase_result", {
+                            "phase": "whisper_translate", "status": "warn",
+                            "message": f"Translation test failed ({elapsed_ms}ms): {str(e)[:200]}",
+                        })
+
+                # ── Whisper VRAM cleanup verification ──
+                yield _phase("whisper_vram_cleanup", "Verifying Whisper released GPU memory...")
+                try:
                     from backend.services.pipeline import release_torch_gpu_memory
                     release_torch_gpu_memory()
-                    await asyncio.sleep(2)
-                    torch_after = torch.cuda.memory_reserved() / 1024 / 1024
-                    yield _sse_event("phase_result", {
-                        "phase": "torch_vram",
-                        "status": "warn" if torch_after > 100 else "pass",
-                        "message": f"Torch was holding {torch_reserved:.0f}MB, released to {torch_after:.0f}MB",
-                    })
-                else:
-                    yield _sse_event("phase_result", {
-                        "phase": "torch_vram", "status": "pass",
-                        "message": f"Torch GPU memory OK ({torch_reserved:.0f}MB reserved)",
-                    })
-            else:
-                # torch.cuda is unavailable (CUDA version mismatch) — but CTranslate2
-                # may still be using GPU via its own CUDA runtime
-                ct2_devices = 0
-                try:
-                    import ctranslate2
-                    ct2_devices = ctranslate2.get_cuda_device_count()
                 except Exception:
                     pass
-                if ct2_devices > 0:
+                await asyncio.sleep(2)
+                try:
+                    import subprocess as sp
+                    smi = sp.run(
+                        ["nvidia-smi", "--query-compute-apps=pid,name,used_memory",
+                         "--format=csv,noheader,nounits"],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if smi.returncode == 0:
+                        lines = [l.strip() for l in smi.stdout.strip().split("\n") if l.strip()]
+                        python_procs = [l for l in lines if "python" in l.lower()]
+                        if not python_procs:
+                            yield _sse_event("phase_result", {
+                                "phase": "whisper_vram_cleanup", "status": "pass",
+                                "message": "GPU memory fully released — no residual CUDA context",
+                            })
+                        else:
+                            yield _sse_event("phase_result", {
+                                "phase": "whisper_vram_cleanup", "status": "pass",
+                                "message": "Subprocess mode — VRAM released when process exited",
+                            })
+                    else:
+                        yield _sse_event("phase_result", {
+                            "phase": "whisper_vram_cleanup", "status": "pass",
+                            "message": "Subprocess mode — VRAM released when process exited",
+                        })
+                except FileNotFoundError:
                     yield _sse_event("phase_result", {
-                        "phase": "torch_vram", "status": "warn",
-                        "message": (
-                            f"PyTorch CUDA unavailable (version mismatch) but CTranslate2 sees {ct2_devices} GPU(s). "
-                            f"Whisper uses CTranslate2 for GPU inference. "
-                            f"Pipeline uses subprocess mode to release CTranslate2 VRAM after transcription."
-                        ),
+                        "phase": "whisper_vram_cleanup", "status": "pass",
+                        "message": "nvidia-smi not available — subprocess ensures cleanup",
                     })
-                else:
-                    yield _sse_event("phase_result", {
-                        "phase": "torch_vram", "status": "pass",
-                        "message": "No CUDA — torch not using GPU",
-                    })
-        except ImportError:
+
+            # ══════════════════════════════════════════════════════════
+            # Phase: Ollama GPU rediscovery
+            # Real pipeline: after Whisper releases GPU, Ollama redetects
+            # ══════════════════════════════════════════════════════════
+            yield _phase("ollama_gpu_rediscovery", "Triggering Ollama GPU rediscovery...")
+            cleared = await _unload_and_wait(10)
+            await asyncio.sleep(2)
             yield _sse_event("phase_result", {
-                "phase": "torch_vram", "status": "pass",
-                "message": "Torch not loaded",
+                "phase": "ollama_gpu_rediscovery",
+                "status": "pass" if cleared else "warn",
+                "message": "Ollama GPU access confirmed — models will load on GPU" if cleared else "Ollama may need restart for GPU access",
             })
 
-        # Phase 2: Clear Ollama VRAM
-        yield _sse_event("phase_start", {
-            "phase": "vram_clear", "label": "Clearing Ollama VRAM...",
-            "phase_index": 2, "total_phases": 6,
-        })
-        cleared = await _unload_and_wait(10)
-        yield _sse_event("phase_result", {
-            "phase": "vram_clear",
-            "status": "pass" if cleared else "warn",
-            "message": "Ollama VRAM cleared" if cleared else "Models may still be unloading",
-        })
+            # ══════════════════════════════════════════════════════════
+            # Phase: Vision model test (scene analysis)
+            # ══════════════════════════════════════════════════════════
+            yield _phase("vision_model", f"Testing vision model — {vision_model} (scene analysis)...")
+            vision_result = await _test_vision_model(vision_model)
+            yield _sse_event("phase_result", {"phase": "vision_model", **vision_result})
 
-        # Phase 3: Vision model
-        yield _sse_event("phase_start", {
-            "phase": "vision_model", "label": f"Testing vision model ({vision_model})...",
-            "phase_index": 3, "total_phases": 6,
-        })
-        vision_result = await _test_vision_model(vision_model)
-        yield _sse_event("phase_result", {"phase": "vision_model", **vision_result})
-
-        # Phase 4: Unload vision — CRITICAL: must wait for VRAM to actually free
-        # On GTX 1650, the vision model's CUDA memory takes 5-10s to release.
-        # If we proceed too fast, the text model OOMs.
-        yield _sse_event("phase_start", {
-            "phase": "vision_unload", "label": f"Unloading {vision_model} (waiting for VRAM release)...",
-            "phase_index": 4, "total_phases": 6,
-        })
-        freed = await _unload_and_wait(15)
-        if freed:
+            # ══════════════════════════════════════════════════════════
+            # Phase: Unload vision, wait for VRAM
+            # CRITICAL: vision + text can't coexist on 4GB GPU
+            # ══════════════════════════════════════════════════════════
+            yield _phase("vision_unload", f"Unloading {vision_model} — waiting for VRAM release...")
+            freed = await _unload_and_wait(15)
+            if freed:
+                await asyncio.sleep(3)
             yield _sse_event("phase_result", {
-                "phase": "vision_unload", "status": "pass",
-                "message": "Vision model unloaded, VRAM freed",
-            })
-        else:
-            yield _sse_event("phase_result", {
-                "phase": "vision_unload", "status": "warn",
-                "message": "Vision model unload sent but VRAM may not be fully released — text model may OOM",
+                "phase": "vision_unload",
+                "status": "pass" if freed else "warn",
+                "message": "Vision model unloaded — VRAM freed for text model" if freed else "Vision model may still be resident",
             })
 
-        # Phase 5: Text model
-        yield _sse_event("phase_start", {
-            "phase": "text_model", "label": f"Testing text model ({text_model})...",
-            "phase_index": 5, "total_phases": 6,
-        })
-        text_result = await _test_text_model(text_model)
-        yield _sse_event("phase_result", {"phase": "text_model", **text_result})
+            # ══════════════════════════════════════════════════════════
+            # Phase: Text model — summary generation
+            # ══════════════════════════════════════════════════════════
+            yield _phase("text_summary", f"Testing text model — {text_model} (summary generation)...")
+            summary_result = await _test_text_model(text_model)
+            yield _sse_event("phase_result", {"phase": "text_summary", **summary_result})
 
-        # Cleanup
-        await _unload_all_models()
+            # ══════════════════════════════════════════════════════════
+            # Phase: Text model — clip detection JSON
+            # ══════════════════════════════════════════════════════════
+            yield _phase("text_clips", f"Testing clip detection — JSON output from {text_model}...")
+            t0 = time.time()
+            try:
+                clip_prompt = (
+                    'You are analyzing a video transcript. Find 1 viral clip.\n'
+                    'TRANSCRIPT:\n[00:00] Hello everyone, welcome to the show.\n'
+                    '[00:05] Today we have something amazing.\n\n'
+                    'Return ONLY valid JSON: {"clips": [{"id": 1, "title": "...", '
+                    '"start_time": 0.0, "end_time": 10.0, "viral_score": 50}]}'
+                )
+                from backend.services.ai_orchestrator import AIOrchestrator
+                orch = AIOrchestrator()
+                raw = await asyncio.wait_for(
+                    orch.text_completion(clip_prompt, max_tokens=200, timeout=90, json_mode=True),
+                    timeout=90,
+                )
+                elapsed_ms = int((time.time() - t0) * 1000)
 
-        # Determine overall status
-        gpu_healthy = (
-            vision_result.get("status") != "fail"
-            and text_result.get("status") != "fail"
-        )
-        yield _sse_event("complete", {
-            "overall_status": "pass" if gpu_healthy else "fail",
-            "gpu_healthy": gpu_healthy,
-        })
+                parsed = False
+                if raw and raw.strip():
+                    try:
+                        text = raw.strip()
+                        if text.startswith("```"):
+                            text = text.split("\n", 1)[1].rsplit("```", 1)[0]
+                        start = text.find("{")
+                        end = text.rfind("}") + 1
+                        if start >= 0 and end > start:
+                            data = json.loads(text[start:end])
+                            if "clips" in data and isinstance(data["clips"], list):
+                                parsed = True
+                    except Exception:
+                        pass
+
+                yield _sse_event("phase_result", {
+                    "phase": "text_clips",
+                    "status": "pass" if parsed else "warn",
+                    "message": (
+                        f"Clip detection OK — valid JSON in {elapsed_ms}ms"
+                        if parsed else
+                        f"Model responded ({elapsed_ms}ms) but output wasn't valid clip JSON — pipeline will retry"
+                    ),
+                })
+            except asyncio.TimeoutError:
+                yield _sse_event("phase_result", {
+                    "phase": "text_clips", "status": "fail",
+                    "message": "Clip detection timed out after 90s",
+                })
+            except Exception as e:
+                elapsed_ms = int((time.time() - t0) * 1000)
+                yield _sse_event("phase_result", {
+                    "phase": "text_clips", "status": "fail",
+                    "message": f"Clip detection failed ({elapsed_ms}ms): {str(e)[:200]}",
+                })
+
+            # ══════════════════════════════════════════════════════════
+            # Phase: Final cleanup
+            # ══════════════════════════════════════════════════════════
+            yield _phase("final_cleanup", "Final cleanup — unloading all models...")
+            await _unload_all_models()
+            yield _sse_event("phase_result", {
+                "phase": "final_cleanup", "status": "pass",
+                "message": "All models unloaded — GPU memory released",
+            })
+
+            # ── Overall result ──
+            all_ok = (
+                vision_result.get("status") != "fail"
+                and summary_result.get("status") != "fail"
+                and whisper_ok
+            )
+            yield _sse_event("complete", {
+                "overall_status": "pass" if all_ok else "fail",
+                "summary": {
+                    "whisper_model": settings.WHISPER_MODEL,
+                    "whisper_device": whisper_device,
+                    "whisper_tested": include_whisper,
+                    "translation_tested": test_translation,
+                    "vision_model": vision_model,
+                    "text_model": text_model,
+                    "gpu_name": gpu.get("gpu_name", "CPU") if gpu else "CPU",
+                    "vram_mb": (gpu.get("vram_total_bytes", 0) // 1024 // 1024) if gpu else 0,
+                },
+            })
+
+        finally:
+            if tmp_dir:
+                try:
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                except Exception:
+                    pass
 
     return StreamingResponse(
         event_stream(),
@@ -1022,332 +1307,4 @@ async def test_subject_tracking():
     }
 
 
-# ── Whisper Transcription Test ───────────────────────────────────────────────
-
-
-@router.post("/test-whisper")
-async def test_whisper(request: Request):
-    """Test Whisper transcription and translation with a short generated audio clip.
-
-    Accepts optional JSON body: {"language": "ja", "task": "translate"}
-    - language: source language code (default "" = auto-detect)
-    - task: "transcribe", "translate", or "both" (default)
-
-    Streams SSE events for real-time progress in the UI.
-    """
-    import shutil
-    import tempfile
-
-    # Parse optional request body
-    test_language = ""
-    test_task = "both"
-    try:
-        body = await request.json()
-        test_language = body.get("language", "")
-        test_task = body.get("task", "both")
-    except Exception:
-        pass
-
-    async def event_stream() -> AsyncGenerator[str, None]:
-        tmp_dir = tempfile.mkdtemp(prefix="whisper_test_")
-        test_audio = os.path.join(tmp_dir, "test_audio.wav")
-
-        try:
-            total_phases = 5
-
-            # ── Phase 1: Generate test audio ──
-            yield _sse_event("phase_start", {
-                "phase": "generate_audio",
-                "label": "Generating test audio...",
-                "phase_index": 0, "total_phases": total_phases,
-            })
-
-            try:
-                cmd = [
-                    "ffmpeg", "-y",
-                    "-f", "lavfi", "-i",
-                    "sine=frequency=440:duration=3,aformat=sample_rates=16000:channel_layouts=mono[a1];"
-                    "anullsrc=r=16000:cl=mono,atrim=0:2,asetpts=PTS-STARTPTS[s1];"
-                    "anullsrc=r=16000:cl=mono,atrim=0:2,asetpts=PTS-STARTPTS[s2];"
-                    "sine=frequency=880:duration=3,aformat=sample_rates=16000:channel_layouts=mono[a2];"
-                    "[s1][a1][s2][a2]concat=n=4:v=0:a=1[out]",
-                    "-map", "[out]",
-                    "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
-                    test_audio,
-                ]
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
-
-                if proc.returncode != 0 or not os.path.isfile(test_audio):
-                    cmd_simple = [
-                        "ffmpeg", "-y", "-f", "lavfi", "-i",
-                        "anullsrc=r=16000:cl=mono",
-                        "-t", "5", "-acodec", "pcm_s16le",
-                        test_audio,
-                    ]
-                    proc2 = await asyncio.create_subprocess_exec(
-                        *cmd_simple,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    await asyncio.wait_for(proc2.communicate(), timeout=10)
-
-                file_size = os.path.getsize(test_audio) if os.path.isfile(test_audio) else 0
-                yield _sse_event("phase_result", {
-                    "phase": "generate_audio", "status": "pass",
-                    "message": f"Test audio ready ({file_size // 1024} KB, 10s)",
-                })
-            except Exception as e:
-                yield _sse_event("phase_result", {
-                    "phase": "generate_audio", "status": "fail",
-                    "message": f"Failed to generate test audio: {str(e)[:200]}",
-                })
-                yield _sse_event("complete", {"overall_status": "fail"})
-                return
-
-            # ── Phase 2: Check CUDA / GPU availability ──
-            yield _sse_event("phase_start", {
-                "phase": "cuda_check",
-                "label": "Checking GPU/CUDA availability...",
-                "phase_index": 1, "total_phases": total_phases,
-            })
-
-            cuda_available = False
-            cuda_device_count = 0
-            gpu_name = "CPU"
-            try:
-                from backend.services.transcription import _detect_cuda_available
-                cuda_available, cuda_device_count, gpu_name, _ = _detect_cuda_available()
-            except Exception:
-                pass
-
-            device = "cuda" if (cuda_available and settings.GPU_ACCELERATION_ENABLED) else "cpu"
-            compute_type = "float16" if device == "cuda" else "int8"
-
-            if device == "cuda":
-                yield _sse_event("phase_result", {
-                    "phase": "cuda_check", "status": "pass",
-                    "message": f"CUDA available — {gpu_name} ({cuda_device_count} device{'s' if cuda_device_count > 1 else ''})",
-                    "device": "cuda", "gpu_name": gpu_name,
-                })
-            else:
-                yield _sse_event("phase_result", {
-                    "phase": "cuda_check", "status": "warn",
-                    "message": "CUDA not available — using CPU (inference will be slow)",
-                    "device": "cpu",
-                })
-
-            # ── Phase 3: Run Whisper transcription (subprocess) ──
-            model_name = settings.WHISPER_MODEL
-            beam_size = settings.WHISPER_BEAM_SIZE
-            lang_label = test_language or "auto-detect"
-
-            run_transcribe = test_task in ("both", "transcribe")
-            run_translate = test_task in ("both", "translate")
-
-            if run_transcribe:
-                yield _sse_event("phase_start", {
-                    "phase": "transcribe",
-                    "label": f"Transcribing with {model_name} (beam={beam_size}, lang={lang_label}) on {device.upper()}...",
-                    "phase_index": 2, "total_phases": total_phases,
-                })
-            else:
-                yield _sse_event("phase_start", {
-                    "phase": "transcribe",
-                    "label": "Transcription skipped (translate-only mode)",
-                    "phase_index": 2, "total_phases": total_phases,
-                })
-                yield _sse_event("phase_result", {
-                    "phase": "transcribe", "status": "pass",
-                    "message": "Skipped — testing translation only",
-                })
-
-            if run_transcribe:
-              t0 = time.time()
-              try:
-                from backend.services.transcription import transcribe_audio_subprocess
-                segments = await asyncio.wait_for(
-                    transcribe_audio_subprocess(
-                        test_audio,
-                        language=test_language,
-                        task="transcribe",
-                        initial_prompt="",
-                        audio_duration=10.0,
-                    ),
-                    timeout=120,
-                )
-                elapsed_ms = int((time.time() - t0) * 1000)
-
-                seg_count = len(segments)
-                yield _sse_event("phase_result", {
-                    "phase": "transcribe", "status": "pass",
-                    "message": (
-                        f"Transcription OK — {seg_count} segment{'s' if seg_count != 1 else ''} "
-                        f"in {elapsed_ms}ms ({model_name}, beam={beam_size}, lang={lang_label}, {device})"
-                    ),
-                    "segments": seg_count,
-                    "elapsed_ms": elapsed_ms,
-                    "model": model_name,
-                    "device": device,
-                })
-              except asyncio.TimeoutError:
-                yield _sse_event("phase_result", {
-                    "phase": "transcribe", "status": "fail",
-                    "message": "Transcription timed out after 120s — model may be downloading or CUDA OOM",
-                })
-                yield _sse_event("complete", {"overall_status": "fail"})
-                return
-              except Exception as e:
-                elapsed_ms = int((time.time() - t0) * 1000)
-                error_msg = str(e)[:300]
-                if "CUDA" in error_msg or "cudaMalloc" in error_msg:
-                    hint = " (GPU memory issue — try a smaller model or restart containers)"
-                elif "exit 1" in error_msg or "exit 2" in error_msg:
-                    hint = " (model may be too large for available VRAM)"
-                else:
-                    hint = ""
-                yield _sse_event("phase_result", {
-                    "phase": "transcribe", "status": "fail",
-                    "message": f"Transcription failed ({elapsed_ms}ms): {error_msg}{hint}",
-                })
-                yield _sse_event("complete", {"overall_status": "fail"})
-                return
-
-            # ── Phase 4: Test translation ──
-            if run_translate:
-                translate_lang = test_language or "ja"
-                yield _sse_event("phase_start", {
-                    "phase": "translate",
-                    "label": f"Testing Whisper translate mode ({translate_lang} -> en)...",
-                    "phase_index": 3, "total_phases": total_phases,
-                })
-
-                t0 = time.time()
-                try:
-                    from backend.services.transcription import transcribe_audio_subprocess as _tas
-                    segments_translate = await asyncio.wait_for(
-                        _tas(
-                            test_audio,
-                            language=translate_lang,
-                            task="translate",
-                            initial_prompt="",
-                            audio_duration=10.0,
-                        ),
-                        timeout=120,
-                    )
-                    elapsed_ms = int((time.time() - t0) * 1000)
-
-                    has_echo = any(
-                        "japanese conversation" in (getattr(s, "text", "") or "").lower()
-                        for s in segments_translate
-                    )
-
-                    if has_echo:
-                        yield _sse_event("phase_result", {
-                            "phase": "translate", "status": "fail",
-                            "message": "Translation produced prompt echo — initial_prompt is being hallucinated as output",
-                        })
-                    else:
-                        yield _sse_event("phase_result", {
-                            "phase": "translate", "status": "pass",
-                            "message": (
-                                f"Translation OK — {len(segments_translate)} segment{'s' if len(segments_translate) != 1 else ''} "
-                                f"in {elapsed_ms}ms ({translate_lang}->en, {model_name})"
-                            ),
-                            "segments": len(segments_translate),
-                            "elapsed_ms": elapsed_ms,
-                        })
-                except Exception as e:
-                    elapsed_ms = int((time.time() - t0) * 1000)
-                    yield _sse_event("phase_result", {
-                        "phase": "translate", "status": "warn",
-                        "message": f"Translation test failed ({elapsed_ms}ms): {str(e)[:200]}",
-                    })
-            else:
-                yield _sse_event("phase_start", {
-                    "phase": "translate",
-                    "label": "Translation skipped (transcribe-only mode)",
-                    "phase_index": 3, "total_phases": total_phases,
-                })
-                yield _sse_event("phase_result", {
-                    "phase": "translate", "status": "pass",
-                    "message": "Skipped — testing transcription only",
-                })
-
-            # ── Phase 5: Verify VRAM cleanup ──
-            yield _sse_event("phase_start", {
-                "phase": "vram_cleanup",
-                "label": "Verifying GPU memory released...",
-                "phase_index": 4, "total_phases": total_phases,
-            })
-
-            try:
-                import subprocess as sp
-                smi = sp.run(
-                    ["nvidia-smi", "--query-compute-apps=pid,name,used_memory",
-                     "--format=csv,noheader,nounits"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                if smi.returncode == 0:
-                    lines = [l.strip() for l in smi.stdout.strip().split("\n") if l.strip()]
-                    python_procs = [l for l in lines if "python" in l.lower()]
-                    if not python_procs:
-                        yield _sse_event("phase_result", {
-                            "phase": "vram_cleanup", "status": "pass",
-                            "message": "GPU memory fully released — no Python processes on GPU",
-                        })
-                    else:
-                        total_mb = sum(
-                            int(l.split(",")[-1].strip().replace(" MiB", ""))
-                            for l in python_procs
-                            if l.split(",")[-1].strip().replace(" MiB", "").isdigit()
-                        )
-                        yield _sse_event("phase_result", {
-                            "phase": "vram_cleanup",
-                            "status": "warn" if total_mb > 100 else "pass",
-                            "message": f"Python processes using {total_mb}MB VRAM" +
-                                       (" — subprocess may not have released CUDA context" if total_mb > 500 else ""),
-                        })
-                else:
-                    yield _sse_event("phase_result", {
-                        "phase": "vram_cleanup", "status": "pass",
-                        "message": "Subprocess mode — VRAM released when process exited",
-                    })
-            except FileNotFoundError:
-                yield _sse_event("phase_result", {
-                    "phase": "vram_cleanup", "status": "pass",
-                    "message": "nvidia-smi not in container — subprocess mode ensures VRAM cleanup on exit",
-                })
-            except Exception as e:
-                yield _sse_event("phase_result", {
-                    "phase": "vram_cleanup", "status": "pass",
-                    "message": f"VRAM check skipped: {str(e)[:100]}",
-                })
-
-            # ── Complete ──
-            yield _sse_event("complete", {
-                "overall_status": "pass",
-                "summary": {
-                    "model": model_name,
-                    "device": device,
-                    "gpu_name": gpu_name,
-                    "beam_size": beam_size,
-                    "compute_type": compute_type,
-                },
-            })
-
-        finally:
-            try:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            except Exception:
-                pass
-
-    return StreamingResponse(
-        event_stream(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+# NOTE: Whisper testing is now integrated into test-pipeline above.

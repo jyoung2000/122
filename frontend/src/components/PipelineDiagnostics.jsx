@@ -284,6 +284,8 @@ export default function PipelineDiagnostics() {
   const [testPhases, setTestPhases] = useState([]);
   const [testOverall, setTestOverall] = useState(null);
   const [restartMsg, setRestartMsg] = useState(null);
+  const [testIncludeWhisper, setTestIncludeWhisper] = useState(true);
+  const [testTranslation, setTestTranslation] = useState(false);
 
   // Poll GPU status every 2s
   useEffect(() => {
@@ -338,7 +340,14 @@ export default function PipelineDiagnostics() {
     setTestPhases([]);
     setTestOverall(null);
     try {
-      const resp = await fetch('/api/diagnostics/test-pipeline', { method: 'POST' });
+      const resp = await fetch('/api/diagnostics/test-pipeline', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          include_whisper: testIncludeWhisper,
+          test_translation: testTranslation,
+        }),
+      });
       const reader = resp.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -367,7 +376,7 @@ export default function PipelineDiagnostics() {
     } finally {
       setTestRunning(false);
     }
-  }, []);
+  }, [testIncludeWhisper, testTranslation]);
 
   return (
     <div style={{ marginBottom: 32 }}>
@@ -400,8 +409,32 @@ export default function PipelineDiagnostics() {
       {/* Pipeline Test Runner */}
       <div style={{ ...cardStyle, marginTop: 12 }}>
         <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 10 }}>
-          Tests vision + text model loading on GPU before uploading a video.
-          Catches VRAM contention, OOM errors, and CPU fallback in under 60 seconds.
+          Simulates the full video analysis pipeline — same order, same VRAM management.
+          Catches OOM errors, model load failures, and GPU handoff issues before processing a real video.
+        </div>
+
+        {/* Test options */}
+        <div style={{ display: 'flex', gap: 16, marginBottom: 12, flexWrap: 'wrap' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--text-secondary)', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={testIncludeWhisper}
+              onChange={(e) => setTestIncludeWhisper(e.target.checked)}
+              disabled={testRunning}
+              style={{ accentColor: 'var(--accent-cyan)' }}
+            />
+            Test Whisper transcription
+          </label>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: testIncludeWhisper ? 'var(--text-secondary)' : 'var(--text-muted)', cursor: testIncludeWhisper ? 'pointer' : 'default' }}>
+            <input
+              type="checkbox"
+              checked={testTranslation}
+              onChange={(e) => setTestTranslation(e.target.checked)}
+              disabled={testRunning || !testIncludeWhisper}
+              style={{ accentColor: 'var(--accent-cyan)' }}
+            />
+            Test translation (ja→en)
+          </label>
         </div>
 
         <button
@@ -431,7 +464,7 @@ export default function PipelineDiagnostics() {
                 textAlign: 'center',
               }}>
                 {testOverall.overall_status === 'pass'
-                  ? '\u2705 Pipeline ready for video analysis'
+                  ? `\u2705 Pipeline ready \u2014 ${testOverall.summary?.whisper_tested ? 'Whisper + ' : ''}vision + text verified`
                   : '\u274c Pipeline has issues \u2014 check results above'}
               </div>
             )}
