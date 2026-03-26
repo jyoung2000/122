@@ -83,6 +83,8 @@ export default function Settings() {
   // Subject tracking toggle
   const [subjectTrackingEnabled, setSubjectTrackingEnabled] = useState(true);
   const [subjectTrackingSaving, setSubjectTrackingSaving] = useState(false);
+  const [trackingTest, setTrackingTest] = useState(null);
+  const [trackingTestRunning, setTrackingTestRunning] = useState(false);
 
   // Font management state
   const [customFonts, setCustomFonts] = useState([]);
@@ -607,6 +609,24 @@ export default function Settings() {
       }
     } catch { showToast('Failed to update subject tracking', 'error'); }
     finally { setSubjectTrackingSaving(false); }
+  };
+
+  const handleTestSubjectTracking = async () => {
+    setTrackingTestRunning(true);
+    setTrackingTest(null);
+    try {
+      const res = await fetch('/api/diagnostics/test-subject-tracking', { method: 'POST' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setTrackingTest(data);
+    } catch (e) {
+      setTrackingTest({
+        overall_status: 'fail',
+        summary: `Test failed: ${e.message}`,
+        results: [],
+      });
+    }
+    setTrackingTestRunning(false);
   };
 
   const handleToggleGpu = async (enabled) => {
@@ -1390,6 +1410,129 @@ export default function Settings() {
               {subjectTrackingEnabled ? 'Enabled — subjects will be tracked and centered during crop' : 'Disabled — crops will use center of frame'}
             </div>
           </div>
+
+          {/* Subject Tracking Validation */}
+          {subjectTrackingEnabled && (
+            <div style={{
+              background: 'var(--bg-panel)', border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-md)', padding: '14px 18px', marginBottom: 24,
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <div>
+                  <h4 style={{ fontSize: 13, margin: 0, color: 'var(--text-primary)' }}>
+                    Subject Tracking Validation
+                  </h4>
+                  <p style={{ fontSize: 11, color: 'var(--text-muted)', margin: '4px 0 0', lineHeight: 1.5 }}>
+                    Tests whether your vision AI can detect subject positions accurately using synthetic ground-truth images.
+                  </p>
+                </div>
+                <button
+                  onClick={handleTestSubjectTracking}
+                  disabled={trackingTestRunning}
+                  style={{
+                    padding: '6px 14px', fontSize: 11, fontWeight: 500,
+                    background: trackingTestRunning ? 'var(--bg-elevated)' : 'var(--accent-cyan)',
+                    color: trackingTestRunning ? 'var(--text-muted)' : '#fff',
+                    border: 'none', borderRadius: 'var(--radius-sm)',
+                    cursor: trackingTestRunning ? 'default' : 'pointer',
+                    opacity: trackingTestRunning ? 0.6 : 1,
+                    flexShrink: 0, marginLeft: 16,
+                  }}
+                >
+                  {trackingTestRunning ? 'Testing...' : 'Run Test'}
+                </button>
+              </div>
+
+              {/* Spinner while running */}
+              {trackingTestRunning && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 0' }}>
+                  <div style={{
+                    width: 16, height: 16,
+                    border: '2px solid var(--border)', borderTopColor: 'var(--accent-cyan)',
+                    borderRadius: '50%', animation: 'spin 0.8s linear infinite',
+                  }} />
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    Sending 3 test images to vision model... (may take 10-30s)
+                  </span>
+                </div>
+              )}
+
+              {/* Results */}
+              {trackingTest && !trackingTestRunning && (
+                <div>
+                  {/* Overall status badge */}
+                  <div style={{
+                    display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
+                    background: trackingTest.overall_status === 'pass' ? 'rgba(16,185,129,0.08)'
+                      : trackingTest.overall_status === 'warn' ? 'rgba(245,158,11,0.08)'
+                      : 'rgba(239,68,68,0.08)',
+                    borderRadius: 'var(--radius-sm)', marginBottom: 10,
+                  }}>
+                    <span style={{ fontSize: 14 }}>
+                      {trackingTest.overall_status === 'pass' ? '\u2705'
+                        : trackingTest.overall_status === 'warn' ? '\u26a0\ufe0f' : '\u274c'}
+                    </span>
+                    <span style={{
+                      fontSize: 12, fontWeight: 500,
+                      color: trackingTest.overall_status === 'pass' ? 'var(--success)'
+                        : trackingTest.overall_status === 'warn' ? '#f59e0b' : '#ef4444',
+                    }}>
+                      {trackingTest.summary}
+                    </span>
+                  </div>
+
+                  {/* Stats row */}
+                  <div style={{ display: 'flex', gap: 16, marginBottom: 10, flexWrap: 'wrap' }}>
+                    <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                      Model: <span style={{ color: 'var(--text-secondary)' }}>{trackingTest.model || '?'}</span>
+                    </div>
+                    <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                      JSON: <span style={{ color: 'var(--text-secondary)' }}>{trackingTest.json_compliance || '?'}</span>
+                    </div>
+                    <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                      Avg error: <span style={{ color: 'var(--text-secondary)' }}>
+                        {trackingTest.avg_error != null ? `${trackingTest.avg_error}%` : 'N/A'}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)' }}>
+                      Speed: <span style={{ color: 'var(--text-secondary)' }}>
+                        {trackingTest.avg_speed_ms ? `${(trackingTest.avg_speed_ms / 1000).toFixed(1)}s/frame` : 'N/A'}
+                      </span>
+                    </div>
+                    {trackingTest.format_json_used && (
+                      <div style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--accent-cyan)' }}>
+                        format:json active
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Per-image results */}
+                  {trackingTest.results?.map((r, i) => (
+                    <div key={i} style={{
+                      display: 'flex', alignItems: 'center', gap: 8,
+                      padding: '5px 0', borderTop: i > 0 ? '1px solid rgba(128,128,128,0.1)' : 'none',
+                    }}>
+                      <span style={{ fontSize: 12, width: 18, textAlign: 'center', flexShrink: 0 }}>
+                        {r.status === 'pass' ? '\u2705' : r.status === 'warn' ? '\u26a0\ufe0f' : '\u274c'}
+                      </span>
+                      <span style={{
+                        fontSize: 11, fontWeight: 500, width: 50, flexShrink: 0,
+                        color: 'var(--text-primary)', textTransform: 'capitalize',
+                      }}>
+                        {r.label}
+                      </span>
+                      <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', flex: 1 }}>
+                        {r.message}
+                      </span>
+                      <span style={{ fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)', flexShrink: 0 }}>
+                        {r.duration_ms}ms
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
 
           {!promptsLoaded ? (
             <div style={{ padding: 16, color: 'var(--text-muted)', fontSize: 12 }}>Loading prompts...</div>

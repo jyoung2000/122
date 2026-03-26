@@ -727,3 +727,230 @@ async def test_pipeline(request: Request):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── Subject Tracking Validation ──────────────────────────────────────────────
+
+
+def _generate_tracking_test_image(subject_x_pct: int, color: tuple[int, int, int]) -> str:
+    """Generate a 256x256 test image with a synthetic subject at known position.
+
+    Returns base64-encoded PNG.
+    """
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (256, 256), (40, 40, 45))
+    draw = ImageDraw.Draw(img)
+
+    cx = int(256 * subject_x_pct / 100)
+    cy = 128
+
+    # Draw a "body" rectangle to give context
+    body_w, body_h = 40, 80
+    draw.rectangle(
+        [cx - body_w // 2, cy - 10, cx + body_w // 2, cy + body_h],
+        fill=(color[0] // 2, color[1] // 2, color[2] // 2),
+    )
+
+    # Draw the "head" circle (bright, prominent)
+    head_r = 22
+    draw.ellipse(
+        [cx - head_r, cy - head_r - 15, cx + head_r, cy + head_r - 15],
+        fill=color,
+    )
+
+    # Environmental context lines
+    for y_line in [20, 230]:
+        draw.line([(0, y_line), (256, y_line)], fill=(70, 70, 75), width=1)
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+
+@router.post("/test-subject-tracking")
+async def test_subject_tracking():
+    """Validate that the vision AI produces usable subject_x values.
+
+    Generates 3 synthetic test images with subjects at known positions
+    (25%, 50%, 75%), sends each to the vision model, and compares
+    the returned subject_x against ground truth.
+    """
+    vision_model = settings.OLLAMA_VISION_MODEL
+    is_moondream = "moondream" in vision_model.lower()
+
+    test_cases = [
+        {"expected_x": 25, "color": (220, 60, 60), "label": "left"},
+        {"expected_x": 50, "color": (60, 120, 220), "label": "center"},
+        {"expected_x": 75, "color": (60, 200, 120), "label": "right"},
+    ]
+
+    results = []
+    total_time = 0
+
+    for tc in test_cases:
+        test_b64 = _generate_tracking_test_image(tc["expected_x"], tc["color"])
+
+        if is_moondream:
+            prompt = (
+                "Describe what you see in this image. "
+                "Focus on where the main subject is positioned."
+                '\n\nRespond with ONLY this JSON, nothing else:\n'
+                '{"description": "<what you see>", "subject_x": <number 0 to 100>}\n'
+                'subject_x: where is the main subject horizontally? '
+                '0 = left edge, 50 = center, 100 = right edge.'
+            )
+        else:
+            prompt = (
+                "Describe what you see in this image."
+                '\n\nReturn ONLY valid JSON:\n'
+                '{"timestamp": 0, "description": "<text>", '
+                '"importance_score": 5, "subject_x": <0-100>}\n'
+                'subject_x = horizontal center of the main subject as % of frame width '
+                '(0=far left, 50=exact center, 100=far right).'
+            )
+
+        t0 = time.time()
+        try:
+            payload = {
+                "model": vision_model,
+                "messages": [{
+                    "role": "user",
+                    "content": prompt,
+                    "images": [test_b64],
+                }],
+                "stream": False,
+                "options": {"num_gpu": 99, "num_predict": 100, "num_ctx": 2048},
+            }
+            if is_moondream:
+                payload["format"] = "json"
+
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(
+                    f"{settings.OLLAMA_HOST}/api/chat",
+                    json=payload,
+                    timeout=120,
+                )
+
+            duration_ms = int((time.time() - t0) * 1000)
+            total_time += duration_ms
+
+            if resp.status_code != 200:
+                results.append({
+                    "label": tc["label"],
+                    "expected_x": tc["expected_x"],
+                    "returned_x": None,
+                    "error": None,
+                    "json_ok": False,
+                    "duration_ms": duration_ms,
+                    "raw_response": resp.text[:200],
+                    "status": "fail",
+                    "message": f"HTTP {resp.status_code}",
+                })
+                continue
+
+            raw_text = resp.json().get("message", {}).get("content", "")
+
+            json_ok = False
+            returned_x = None
+            try:
+                text = raw_text.strip()
+                if text.startswith("```"):
+                    text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+                json_start = text.find("{")
+                json_end = text.rfind("}") + 1
+                if json_start >= 0 and json_end > json_start:
+                    parsed = json.loads(text[json_start:json_end])
+                    if isinstance(parsed, list) and parsed:
+                        parsed = parsed[0]
+                    raw_sx = parsed.get("subject_x")
+                    if raw_sx is not None:
+                        returned_x = max(0, min(100, int(raw_sx)))
+                        json_ok = True
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                pass
+
+            error = abs(returned_x - tc["expected_x"]) if returned_x is not None else None
+
+            if not json_ok:
+                status = "fail"
+                message = "JSON parse failed or missing subject_x"
+            elif error <= 20:
+                status = "pass"
+                message = f"subject_x={returned_x} (expected {tc['expected_x']}, error={error})"
+            elif error <= 35:
+                status = "warn"
+                message = f"subject_x={returned_x} — low accuracy (expected {tc['expected_x']}, error={error})"
+            else:
+                status = "fail"
+                message = f"subject_x={returned_x} — inaccurate (expected {tc['expected_x']}, error={error})"
+
+            results.append({
+                "label": tc["label"],
+                "expected_x": tc["expected_x"],
+                "returned_x": returned_x,
+                "error": error,
+                "json_ok": json_ok,
+                "duration_ms": duration_ms,
+                "raw_response": raw_text[:200],
+                "status": status,
+                "message": message,
+            })
+
+        except asyncio.TimeoutError:
+            results.append({
+                "label": tc["label"],
+                "expected_x": tc["expected_x"],
+                "returned_x": None,
+                "error": None,
+                "json_ok": False,
+                "duration_ms": 120000,
+                "raw_response": "",
+                "status": "fail",
+                "message": "Timeout (>120s)",
+            })
+        except Exception as e:
+            results.append({
+                "label": tc["label"],
+                "expected_x": tc["expected_x"],
+                "returned_x": None,
+                "error": None,
+                "json_ok": False,
+                "duration_ms": int((time.time() - t0) * 1000),
+                "raw_response": str(e)[:200],
+                "status": "fail",
+                "message": f"Error: {str(e)[:100]}",
+            })
+
+    # Compute summary
+    json_ok_count = sum(1 for r in results if r["json_ok"])
+    errors = [r["error"] for r in results if r["error"] is not None]
+    avg_error = round(sum(errors) / len(errors), 1) if errors else None
+    avg_speed = round(total_time / len(results)) if results else 0
+
+    if json_ok_count == 0:
+        overall = "fail"
+        summary = "Vision AI cannot produce JSON — subject tracking will not work"
+    elif json_ok_count < 3:
+        overall = "warn"
+        summary = f"JSON compliance: {json_ok_count}/3 — tracking may be unreliable"
+    elif avg_error is not None and avg_error > 35:
+        overall = "fail"
+        summary = f"Poor accuracy (avg error {avg_error}%) — model cannot locate subjects"
+    elif avg_error is not None and avg_error > 20:
+        overall = "warn"
+        summary = f"Limited accuracy (avg error {avg_error}%) — tracking may be imprecise"
+    else:
+        overall = "pass"
+        summary = f"Subject tracking working — {avg_error}% avg error, {avg_speed}ms/frame"
+
+    return {
+        "overall_status": overall,
+        "summary": summary,
+        "model": vision_model,
+        "format_json_used": is_moondream,
+        "json_compliance": f"{json_ok_count}/3",
+        "avg_error": avg_error,
+        "avg_speed_ms": avg_speed,
+        "results": results,
+    }
