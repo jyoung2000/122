@@ -460,6 +460,12 @@ export default function Analysis() {
   const [inlineActivePreset, setInlineActivePreset] = useState('');
   const fullVideoExporting = encoding.tasks[`${jobId}_0`]?.status === 'encoding';
 
+  // Staged aspect ratio: gate preview on tracking readiness
+  const [trackingLoading, setTrackingLoading] = useState(false);
+  const [activeAspectRatio, setActiveAspectRatio] = useState(
+    () => clipSettings?.aspectRatio || null
+  );
+
   // Speaker detection (post-processing diarization)
   const [diarizeNumSpeakers, setDiarizeNumSpeakers] = useState(0);
   const [diarizeLoading, setDiarizeLoading] = useState(false);
@@ -1111,10 +1117,16 @@ export default function Analysis() {
     setGenSettings((prev) => ({ ...prev, [key]: value }));
   };
 
-  // Auto-apply flash indicator: deep compare to avoid spam from reference changes
+  // Auto-apply flash indicator: deep compare, excluding transient keys that
+  // get initialized asynchronously (speakerColors, speakerNames)
   const prevClipSettingsJsonRef = useRef('');
+  const settingsToCompareJson = useCallback((s) => {
+    if (!s) return '';
+    const { speakerColors, speakerNames, ...rest } = s;
+    return JSON.stringify(rest);
+  }, []);
   useEffect(() => {
-    const json = JSON.stringify(clipSettings);
+    const json = settingsToCompareJson(clipSettings);
     if (!clipPreview) { prevClipSettingsJsonRef.current = json; return; }
     if (prevClipSettingsJsonRef.current && prevClipSettingsJsonRef.current !== json) {
       setSettingsAppliedFlash(true);
@@ -1122,7 +1134,7 @@ export default function Analysis() {
       settingsAppliedTimerRef.current = setTimeout(() => setSettingsAppliedFlash(false), 1800);
     }
     prevClipSettingsJsonRef.current = json;
-  }, [clipSettings, clipPreview]);
+  }, [clipSettings, clipPreview, settingsToCompareJson]);
   useEffect(() => () => { if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current); }, []);
 
   // Determine if playhead is inside a segment — used for segment-aware subs toggle.
@@ -1182,11 +1194,30 @@ export default function Analysis() {
   }, [speakers]);
 
   // --- Auto-trigger subject tracking when clip or aspect ratio changes ---
-  // Mirrors ViralClips.jsx auto-trigger behavior. When a clip is opened with
-  // a crop aspect ratio, check if AI scene data exists. If not, trigger
-  // background analysis so subject tracking can center the crop on the subject.
+  // --- Per-clip subject tracking: staged AR pattern ---
+  // Uses pendingAR (clipSettings.aspectRatio) vs activeAspectRatio.
+  // The preview only switches AR once tracking data is ready.
   const prevAnalysisTrackingRef = useRef({ clipId: null, ar: null });
   const subjectTrackingPollRef = useRef(null);
+
+  // Sync activeAR when clip changes or closes
+  useEffect(() => {
+    if (!clipPreview) {
+      setActiveAspectRatio(null);
+      setTrackingLoading(false);
+      return;
+    }
+    if (!job) return;
+    const scenes = job.scenes || [];
+    const hasAiData = scenes.some((s) => {
+      const sx = typeof s === 'object' ? (s.subject_x ?? 50) : 50;
+      return sx !== 50;
+    });
+    if (hasAiData) {
+      setActiveAspectRatio(clipSettings?.aspectRatio || null);
+    }
+  }, [clipPreview?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     // Clean up any previous polling interval
     if (subjectTrackingPollRef.current) {
@@ -1197,16 +1228,19 @@ export default function Analysis() {
     // Guard: job not loaded yet — skip tracking logic
     if (!job) return;
 
-    const ar = clipSettings?.aspectRatio;
+    const requestedAr = clipSettings?.aspectRatio;
     const prev = prevAnalysisTrackingRef.current;
     const clipId = clipPreview?.id ?? null;
 
     const clipChanged = clipId !== prev.clipId;
-    const arChanged = ar !== prev.ar;
-    prevAnalysisTrackingRef.current = { clipId, ar };
+    const arChanged = requestedAr !== prev.ar;
+    prevAnalysisTrackingRef.current = { clipId, ar: requestedAr };
 
-    // Only act when a clip is open with a crop aspect ratio, and something changed
-    if (!clipPreview || !ar) return;
+    if (!clipPreview || !requestedAr) {
+      setActiveAspectRatio(requestedAr || null);
+      setTrackingLoading(false);
+      return;
+    }
     if (!clipChanged && !arChanged) return;
 
     // Check if this job already has AI-detected per-scene subject positions
@@ -1217,9 +1251,13 @@ export default function Analysis() {
     });
 
     let cancelled = false;
-    if (!hasAiData && jobId) {
-      // No AI subject data — trigger background scene analysis
-      console.log('[Analysis] Auto-triggering subject tracking for clip', clipId, 'aspect', ar);
+    if (hasAiData) {
+      // CASE A: Data exists — apply immediately
+      setActiveAspectRatio(requestedAr);
+      setTrackingLoading(false);
+    } else if (jobId) {
+      // CASE B: No AI data — keep preview at OLD AR while backend analyzes.
+      setTrackingLoading(true);
       fetch(`/api/jobs/${jobId}/recenter-subject`, { method: 'POST' })
         .then((res) => {
           if (cancelled || !res.ok) throw new Error('recenter failed');
@@ -1228,8 +1266,7 @@ export default function Analysis() {
         .then((data) => {
           if (cancelled) return;
           if (data.status === 'reanalyzing') {
-            showToast('Analyzing subject position...', 'info');
-            // Poll for completion
+            showToast(`Analyzing subject position for ${requestedAr} crop...`, 'info');
             const poll = setInterval(async () => {
               if (cancelled) { clearInterval(poll); return; }
               try {
@@ -1240,22 +1277,37 @@ export default function Analysis() {
                 if (sxVals.some((v) => v !== 50)) {
                   clearInterval(poll);
                   subjectTrackingPollRef.current = null;
-                  // Refresh job data so scenes are updated
                   await fetchJob();
-                  showToast('Subject tracking applied', 'success');
+                  // NOW apply the new AR — data is ready
+                  setActiveAspectRatio(requestedAr);
+                  setTrackingLoading(false);
+                  showToast('Subject tracking ready — preview updated', 'success');
                 }
               } catch { /* ignore polling errors */ }
             }, 3000);
             subjectTrackingPollRef.current = poll;
-            // Timeout after 2 minutes
-            setTimeout(() => { clearInterval(poll); subjectTrackingPollRef.current = null; }, 120000);
+            // Timeout: apply AR anyway after 2 minutes
+            setTimeout(() => {
+              clearInterval(poll);
+              subjectTrackingPollRef.current = null;
+              setActiveAspectRatio(requestedAr);
+              setTrackingLoading(false);
+            }, 120000);
           } else {
-            // Data already exists — refresh job
+            // Data already exists — refresh and apply
             fetchJob();
+            setActiveAspectRatio(requestedAr);
+            setTrackingLoading(false);
+            showToast('Subject tracking ready — preview updated', 'success');
           }
         })
         .catch((err) => {
-          if (!cancelled) console.warn('[Analysis] Subject tracking auto-trigger failed:', err);
+          if (!cancelled) {
+            console.warn('[Analysis] Subject tracking auto-trigger failed:', err);
+            // Network error — apply AR anyway as fallback
+            setActiveAspectRatio(requestedAr);
+            setTrackingLoading(false);
+          }
         });
     }
 
@@ -1885,6 +1937,41 @@ export default function Analysis() {
 
   return (
     <div>
+      {/* Loading overlay while subject tracking computes for new AR */}
+      {trackingLoading && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 10002,
+          display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(0,0,0,0.6)',
+          backdropFilter: 'blur(4px)',
+          pointerEvents: 'all',
+        }}>
+          <div style={{
+            background: 'var(--bg-panel)',
+            borderRadius: 'var(--radius-lg)',
+            padding: '24px 36px',
+            textAlign: 'center',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+            maxWidth: 340,
+          }}>
+            <div style={{
+              width: 32, height: 32, margin: '0 auto 12px',
+              border: '3px solid var(--border)',
+              borderTopColor: 'var(--accent-cyan)',
+              borderRadius: '50%',
+              animation: 'spin 0.8s linear infinite',
+            }} />
+            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>
+              Applying subject tracking
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+              Analyzing subject position for {clipSettings.aspectRatio} crop...
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Video Player (sticky) — hidden on Transcript tab where we show side-by-side layout */}
       <div ref={stickyPlayerRef} style={{ position: 'sticky', top: 0, zIndex: 10, background: 'var(--bg-base)', display: (tab === 2 && !showExportPreview) ? 'none' : 'block' }}>
         {showExportPreview ? (
@@ -1896,7 +1983,7 @@ export default function Analysis() {
               clipStart={clipPreview.start_time}
               clipEnd={clipPreview.end_time}
               title={String(clipPreview.title || `Clip ${clipPreview.id}`)}
-              aspectRatio={clipSettings.aspectRatio || null}
+              aspectRatio={activeAspectRatio || null}
               sourceWidth={sourceDims.w}
               sourceHeight={sourceDims.h}
               subjectX={clipSubjectX}
@@ -1956,7 +2043,7 @@ export default function Analysis() {
                   clipStart={clipPreview.start_time}
                   clipEnd={clipPreview.end_time}
                   settings={clipSettings}
-                  aspectRatio={clipSettings.aspectRatio || null}
+                  aspectRatio={activeAspectRatio || null}
                   sourceWidth={sourceDims.w}
                   sourceHeight={sourceDims.h}
                   segments={editorSegments}
@@ -1999,7 +2086,7 @@ export default function Analysis() {
               clipStart={fullVideoRange ? fullVideoRange.start : 0}
               clipEnd={fullVideoRange ? fullVideoRange.end : (job.duration || 0)}
               title={String(job.filename || 'Full Video')}
-              aspectRatio={clipSettings.aspectRatio || null}
+              aspectRatio={activeAspectRatio || null}
               sourceWidth={sourceDims.w}
               sourceHeight={sourceDims.h}
               subjectX={50}
@@ -2036,7 +2123,7 @@ export default function Analysis() {
                   clipStart={fullVideoRange ? fullVideoRange.start : 0}
                   clipEnd={fullVideoRange ? fullVideoRange.end : (job.duration || 0)}
                   settings={clipSettings}
-                  aspectRatio={clipSettings.aspectRatio || null}
+                  aspectRatio={activeAspectRatio || null}
                   sourceWidth={sourceDims.w}
                   sourceHeight={sourceDims.h}
                   segments={editorSegments}

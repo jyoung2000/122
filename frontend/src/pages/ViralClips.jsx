@@ -511,6 +511,10 @@ export default function ViralClips() {
   const [previewKey, setPreviewKey] = useState(0); // Incremented to force ClipPreview remount
   const [centerSubjectState, setCenterSubjectState] = useState('idle'); // idle | centering | done
   const [trackingApplied, setTrackingApplied] = useState(false); // flash when tracking updates
+  // Staged aspect ratio: pendingAR is what user selected, activeAR is what
+  // ClipPreview is currently rendering. They differ only while waiting for
+  // subject tracking data from the backend.
+  const [trackingLoading, setTrackingLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [settingsAppliedFlash, setSettingsAppliedFlash] = useState(false);
   const settingsAppliedTimerRef = useRef(null);
@@ -673,27 +677,51 @@ export default function ViralClips() {
   }, [previewClip, jobs]);
 
   // --- Per-clip subject tracking: auto-apply when clip or aspect ratio changes ---
-  // Each clip has its own time range and therefore its own subject positions.
-  // Whenever the user opens a clip or changes the aspect ratio, we ensure
-  // the crop is positioned using AI-detected subject data for that specific
-  // clip range, and show a visual indicator that tracking has been applied.
+  // Uses a staged AR pattern: pendingAR (previewClipSettings.aspectRatio) vs
+  // activeAspectRatio. The preview only switches AR once tracking data is ready.
   const prevTrackingRef = useRef({ clipId: null, jobId: null, ar: null });
+  // The AR that ClipPreview is actually rendering — lags behind
+  // previewClipSettings.aspectRatio while tracking data loads.
+  const [activeAspectRatio, setActiveAspectRatio] = useState(
+    () => previewClipSettings?.aspectRatio || null
+  );
+
+  // Sync activeAR when clip changes (new clip should start at its settings' AR)
   useEffect(() => {
-    const ar = previewClipSettings.aspectRatio;
+    if (!previewClip) {
+      setActiveAspectRatio(null);
+      setTrackingLoading(false);
+      return;
+    }
+    // When a new clip opens, check if it has AI data immediately
+    const job = jobs.find((j) => j.job_id === previewClip.jobId);
+    const scenes = job?.scenes || [];
+    const hasAiData = scenes.some((s) => {
+      const sx = typeof s === 'object' ? (s.subject_x ?? 50) : 50;
+      return sx !== 50;
+    });
+    if (hasAiData) {
+      setActiveAspectRatio(previewClipSettings.aspectRatio || null);
+    }
+  }, [previewClip?.id, previewClip?.jobId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const requestedAr = previewClipSettings.aspectRatio;
     const prev = prevTrackingRef.current;
     const clipId = previewClip?.id ?? null;
     const jobId = previewClip?.jobId ?? null;
 
-    // Determine if something relevant changed
     const clipChanged = clipId !== prev.clipId || jobId !== prev.jobId;
-    const arChanged = ar !== prev.ar;
-    prevTrackingRef.current = { clipId, jobId, ar };
+    const arChanged = requestedAr !== prev.ar;
+    prevTrackingRef.current = { clipId, jobId, ar: requestedAr };
 
-    // Only act when a clip is open with a crop aspect ratio, and something changed
-    if (!previewClip || !ar) return;
+    if (!previewClip || !requestedAr) {
+      setActiveAspectRatio(requestedAr || null);
+      setTrackingLoading(false);
+      return;
+    }
     if (!clipChanged && !arChanged) return;
 
-    // Check if this job already has AI-detected per-scene subject positions
     const job = jobs.find((j) => j.job_id === previewClip.jobId);
     const scenes = job?.scenes || [];
     const hasAiData = scenes.some((s) => {
@@ -702,18 +730,20 @@ export default function ViralClips() {
     });
 
     if (hasAiData) {
-      // AI data already exists — ClipPreview handles ratio changes reactively
-      // via its useMemo deps. Only remount if the CLIP changed, not just the ratio.
+      // CASE A: Data exists — processKeyframes() runs synchronously inside
+      // ClipPreview's useMemo. Apply the new AR immediately.
+      setActiveAspectRatio(requestedAr);
+      setTrackingLoading(false);
       if (clipChanged) {
         setPreviewKey((k) => k + 1);
-        setTrackingApplied(true);
-        setTimeout(() => setTrackingApplied(false), 2000);
       }
-      // AR-only change: ClipPreview handles reactively, no badge needed.
+      setTrackingApplied(true);
+      setTimeout(() => setTrackingApplied(false), 2000);
     } else {
-      // No AI data yet — trigger background analysis for this job's scenes.
-      // Once complete, all clips from this job benefit from the per-scene data.
+      // CASE B: No AI data — keep preview at OLD AR while backend analyzes.
+      setTrackingLoading(true);
       setCenterSubjectState('centering');
+
       fetch(`/api/jobs/${previewClip.jobId}/recenter-subject`, { method: 'POST' })
         .then((res) => {
           if (!res.ok) throw new Error('recenter failed');
@@ -721,7 +751,7 @@ export default function ViralClips() {
         })
         .then((data) => {
           if (data.status === 'reanalyzing') {
-            showToast(`Analyzing subject position for clip ${previewClip.id}...`, 'info');
+            showToast(`Analyzing subject position for ${requestedAr} crop...`, 'info');
             const poll = setInterval(async () => {
               try {
                 const jr = await fetch(`/api/jobs/${previewClip.jobId}`, { cache: 'no-store' });
@@ -730,32 +760,56 @@ export default function ViralClips() {
                 const sx = (jd.scenes || []).map((s) => s.subject_x);
                 if (sx.some((v) => v !== 50)) {
                   clearInterval(poll);
-                  setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? sanitizeJob(jd) : j));
+                  setJobs((prev) => prev.map((j) =>
+                    j.job_id === previewClip.jobId ? sanitizeJob(jd) : j
+                  ));
+                  // NOW apply the new AR — data is ready
+                  setActiveAspectRatio(requestedAr);
                   setPreviewKey((k) => k + 1);
+                  setTrackingLoading(false);
                   setCenterSubjectState('done');
                   setTrackingApplied(true);
-                  showToast('Subject tracking applied to clip', 'success');
-                  setTimeout(() => { setCenterSubjectState('idle'); setTrackingApplied(false); }, 2200);
+                  showToast('Subject tracking ready — preview updated', 'success');
+                  setTimeout(() => {
+                    setCenterSubjectState('idle');
+                    setTrackingApplied(false);
+                  }, 2200);
                 }
-              } catch { /* ignore */ }
+              } catch { /* ignore polling errors */ }
             }, 3000);
-            setTimeout(() => { clearInterval(poll); setCenterSubjectState((s) => s === 'centering' ? 'idle' : s); }, 120000);
+            // Timeout: if tracking doesn't complete in 2 minutes, apply AR anyway
+            setTimeout(() => {
+              clearInterval(poll);
+              setActiveAspectRatio(requestedAr);
+              setTrackingLoading(false);
+              setCenterSubjectState((s) => s === 'centering' ? 'idle' : s);
+            }, 120000);
           } else {
             // Backend says data already exists — refresh and apply
             fetch(`/api/jobs/${previewClip.jobId}`, { cache: 'no-store' })
               .then((jr) => jr.ok ? jr.json() : null)
               .then((jd) => {
-                if (jd) setJobs((prev) => prev.map((j) => j.job_id === previewClip.jobId ? sanitizeJob(jd) : j));
+                if (jd) setJobs((prev) => prev.map((j) =>
+                  j.job_id === previewClip.jobId ? sanitizeJob(jd) : j
+                ));
               })
               .catch(() => {});
+            setActiveAspectRatio(requestedAr);
             setPreviewKey((k) => k + 1);
+            setTrackingLoading(false);
             setCenterSubjectState('done');
             setTrackingApplied(true);
-            showToast('Subject tracking applied to clip', 'success');
-            setTimeout(() => { setCenterSubjectState('idle'); setTrackingApplied(false); }, 2200);
+            showToast('Subject tracking ready — preview updated', 'success');
+            setTimeout(() => {
+              setCenterSubjectState('idle');
+              setTrackingApplied(false);
+            }, 2200);
           }
         })
         .catch(() => {
+          // Network error — apply AR anyway as fallback
+          setActiveAspectRatio(requestedAr);
+          setTrackingLoading(false);
           setCenterSubjectState('idle');
         });
     }
@@ -809,10 +863,16 @@ export default function ViralClips() {
     }
   }, [settings.activeWordEnabled, clipOverrides, jobs]);
 
-  // Auto-apply flash indicator: deep compare to avoid spam from reference changes
+  // Auto-apply flash indicator: deep compare, excluding transient keys that
+  // get initialized asynchronously (speakerColors, speakerNames)
   const prevSettingsJsonRef = useRef('');
+  const settingsToCompareJson = useCallback((s) => {
+    if (!s) return '';
+    const { speakerColors, speakerNames, ...rest } = s;
+    return JSON.stringify(rest);
+  }, []);
   useEffect(() => {
-    const json = JSON.stringify(previewClipSettings);
+    const json = settingsToCompareJson(previewClipSettings);
     if (!previewClip) { prevSettingsJsonRef.current = json; return; }
     if (prevSettingsJsonRef.current && prevSettingsJsonRef.current !== json) {
       setSettingsAppliedFlash(true);
@@ -820,7 +880,7 @@ export default function ViralClips() {
       settingsAppliedTimerRef.current = setTimeout(() => setSettingsAppliedFlash(false), 1800);
     }
     prevSettingsJsonRef.current = json;
-  }, [previewClipSettings, previewClip]);
+  }, [previewClipSettings, previewClip, settingsToCompareJson]);
   useEffect(() => () => { if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current); }, []);
 
   const handleApplySettings = useCallback((applied) => {
@@ -1826,6 +1886,41 @@ export default function ViralClips() {
         </div>
       )}
 
+      {/* Loading overlay while subject tracking computes for new AR */}
+      {trackingLoading && (
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 10002,
+          display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(0,0,0,0.6)',
+          backdropFilter: 'blur(4px)',
+          pointerEvents: 'all',
+        }}>
+          <div style={{
+            background: 'var(--bg-panel)',
+            borderRadius: 'var(--radius-lg)',
+            padding: '24px 36px',
+            textAlign: 'center',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
+            maxWidth: 340,
+          }}>
+            <div style={{
+              width: 32, height: 32, margin: '0 auto 12px',
+              border: '3px solid var(--border)',
+              borderTopColor: 'var(--accent-cyan)',
+              borderRadius: '50%',
+              animation: 'spin 0.8s linear infinite',
+            }} />
+            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 4 }}>
+              Applying subject tracking
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
+              Analyzing subject position for {previewClipSettings.aspectRatio} crop...
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Clip preview lightbox */}
       {previewClip && (
         <>
@@ -1835,7 +1930,7 @@ export default function ViralClips() {
             clipStart={previewClip.start_time}
             clipEnd={previewClip.end_time}
             title={previewClip.title || `Clip ${previewClip.id}`}
-            aspectRatio={previewClipSettings.aspectRatio || null}
+            aspectRatio={activeAspectRatio || null}
             sourceWidth={previewSourceDims.w}
             sourceHeight={previewSourceDims.h}
             subjectX={previewSubjectX}
