@@ -4307,6 +4307,9 @@ def _build_unified_overlay_chain(
         item_id = entry.get("id")
 
         if item_type == "text":
+            if not _HAS_DRAWTEXT:
+                logger.info("Unified chain: skipping text '%s' (drawtext unavailable, rendered via ASS)", str(item_id)[:20])
+                continue
             if item_id not in text_by_id:
                 logger.warning("Unified chain: text '%s' NOT in text_by_id — SKIPPED", item_id)
                 warnings.append(f"text '{item_id}' not found")
@@ -5796,9 +5799,16 @@ async def export_clip(
 
             if proc.returncode != 0:
                 _stderr_text = stderr.decode(errors="replace")
-                # Take the TAIL of stderr — the actual error is at the end,
-                # not the FFmpeg version/config preamble at the start.
-                raise RuntimeError(f"Clip export failed: {_stderr_text[-3000:]}")
+                # Extract actual error lines (skip the FFmpeg version banner)
+                _error_lines = [
+                    line.strip() for line in _stderr_text.split("\n")
+                    if line.strip() and any(kw in line.lower() for kw in [
+                        "error", "no such filter", "filter not found", "failed",
+                        "invalid", "no space", "permission denied", "cannot",
+                    ])
+                ]
+                _error_msg = "\n".join(_error_lines[-5:]) if _error_lines else _stderr_text[-1500:]
+                raise RuntimeError(f"Clip export failed:\n{_error_msg}")
         else:
             # No filters — use stream copy for speed
             await _notify(f"Exporting clip {clip_id} (stream copy — fast mode)")
