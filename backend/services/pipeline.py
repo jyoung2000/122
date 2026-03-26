@@ -666,23 +666,29 @@ async def _run_analysis_inner(job_id: str):
         # Warm up models to detect capabilities and VRAM constraints,
         # then immediately unload so Whisper gets exclusive GPU access.
         # Models reload automatically when scene analysis starts.
+        # Timeout: skip warmup if it takes too long — models will load lazily.
         try:
             await _update_progress(job_id, JobStatus.EXTRACTING_FRAMES, 3, "Warming up local AI models...")
-            await _primary_provider.warmup()
+            await asyncio.wait_for(_primary_provider.warmup(), timeout=60)
             # Log GPU status after warmup for diagnostics
             if hasattr(_primary_provider, 'log_gpu_status'):
                 await _primary_provider.log_gpu_status()
-        except Exception:
-            pass
+        except asyncio.TimeoutError:
+            logger.warning("[%s] Ollama warmup timed out after 60s — skipping (models will load lazily)", job_id)
+        except Exception as e:
+            logger.warning("[%s] Ollama warmup failed (non-fatal): %s", job_id, e)
 
         # ── Critical: free GPU for Whisper ──
         # warmup() loaded Ollama models (qwen2.5:3b = 2.3GB) onto the GPU.
         # On a 4GB GPU, this leaves only ~1.5GB for Whisper → silent OOM.
         # Unload now — models reload when pipeline reaches scene analysis.
         try:
-            await _primary_provider.unload_models()
+            await _update_progress(job_id, JobStatus.EXTRACTING_FRAMES, 4, "Freeing GPU for transcription...")
+            await asyncio.wait_for(_primary_provider.unload_models(), timeout=15)
             logger.info("[%s] Ollama models unloaded after warmup — GPU freed for Whisper", job_id)
             await asyncio.sleep(2)  # Let CUDA driver reclaim across containers
+        except asyncio.TimeoutError:
+            logger.warning("[%s] Ollama model unload timed out after 15s — proceeding anyway", job_id)
         except Exception as e:
             logger.warning("[%s] Failed to unload Ollama after warmup: %s", job_id, e)
 
@@ -927,10 +933,23 @@ async def _run_analysis_inner(job_id: str):
         _subprocess_whisper_used[0] = _use_subprocess_whisper
         if _use_subprocess_whisper:
             logger.info("[%s] Using subprocess Whisper (GPU mode) to release CUDA memory after", job_id)
-            result = await transcribe_audio_subprocess(
-                audio_path, language=job.language, task=whisper_task,
-                initial_prompt=initial_prompt, audio_duration=audio_duration,
-            )
+            # Timeout: audio_duration * 3 or 30 minutes minimum — prevents infinite hang
+            _whisper_timeout = max(1800, int(audio_duration * 3)) if audio_duration > 0 else 3600
+            logger.info("[%s] Whisper subprocess timeout: %ds for %.0fs audio", job_id, _whisper_timeout, audio_duration)
+            try:
+                result = await asyncio.wait_for(
+                    transcribe_audio_subprocess(
+                        audio_path, language=job.language, task=whisper_task,
+                        initial_prompt=initial_prompt, audio_duration=audio_duration,
+                    ),
+                    timeout=_whisper_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "[%s] Whisper subprocess timed out after %ds — killing process",
+                    job_id, _whisper_timeout,
+                )
+                raise RuntimeError(f"Whisper transcription timed out after {_whisper_timeout // 60} minutes")
             logger.info("[%s] Whisper subprocess exited — CTranslate2 CUDA memory fully reclaimed", job_id)
         else:
             result = await transcribe_audio(
@@ -1215,9 +1234,12 @@ async def _run_analysis_inner(job_id: str):
         # On a 4GB GPU, qwen2.5:3b (2.3GB) + Whisper small (1GB) = OOM.
         if is_ollama_primary and _primary_provider:
             try:
-                await _primary_provider.unload_models()
+                logger.info("[%s] Pre-transcription: ensuring Ollama models are unloaded...", job_id)
+                await asyncio.wait_for(_primary_provider.unload_models(), timeout=15)
                 logger.info("[%s] Pre-transcription: Ollama models unloaded from GPU", job_id)
                 await asyncio.sleep(1)
+            except asyncio.TimeoutError:
+                logger.warning("[%s] Pre-transcription: Ollama unload timed out after 15s — proceeding", job_id)
             except Exception:
                 pass
 
