@@ -1834,6 +1834,23 @@ def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
                 )
                 continue
 
+        # Check 0d: Text-to-duration ratio — catches ghosts that have low no_speech_prob
+        seg_duration = seg["end"] - seg["start"]
+        if seg_duration > 0:
+            chars_per_sec = len(text) / seg_duration
+            if seg_duration > 15 and chars_per_sec < 1.0:
+                logger.warning(
+                    "Hallucination filter: ghost (ratio) at %.1fs (%.0fs, %.2f c/s): %s...",
+                    seg["start"], seg_duration, chars_per_sec, text[:60],
+                )
+                continue
+            if seg_duration > 120 and len(text) < 200:
+                logger.warning(
+                    "Hallucination filter: mega-ghost at %.1fs (%.0fs, %d chars): %s...",
+                    seg["start"], seg_duration, len(text), text[:60],
+                )
+                continue
+
         # Check 0c: Temporal ordering — segment start must not jump backward
         if filtered and seg["start"] < filtered[-1]["start"]:
             logger.warning(
@@ -1907,6 +1924,16 @@ def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
                 logger.warning(
                     "Hallucination filter: removed duplicate segment at %.1fs (%.0f%% similar): %s...",
                     seg["start"], ratio * 100, text[:60],
+                )
+                continue
+
+        # Check 3b: Exact duplicate of any segment in the last 10
+        if len(filtered) >= 2:
+            recent_texts = {s["text"].strip().lower() for s in filtered[-10:]}
+            if text.lower() in recent_texts:
+                logger.warning(
+                    "Hallucination filter: near-dup (window) at %.1fs: %s...",
+                    seg["start"], text[:60],
                 )
                 continue
 

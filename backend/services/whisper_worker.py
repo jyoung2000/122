@@ -41,13 +41,32 @@ def _filter_segments(result_segments: list[dict]) -> list[dict]:
         duration = seg["end"] - seg["start"]
         no_speech = seg.get("no_speech_prob", 0.0)
         if duration > 30 and len(text) < 30 and no_speech > 0.5:
-            logger.warning("Filter: ghost at %.1fs (%.0fs, no_speech=%.2f): %s", seg["start"], duration, no_speech, text[:60])
+            logger.warning("Filter: ghost (no_speech) at %.1fs (%.0fs, ns=%.2f): %s", seg["start"], duration, no_speech, text[:60])
+            continue
+
+        # Ghost check: text-to-duration ratio
+        # Normal speech: ~12-15 chars/sec. 1 char/sec is extremely generous threshold.
+        chars_per_sec = len(text) / max(duration, 0.1)
+        if duration > 15 and chars_per_sec < 1.0:
+            logger.warning("Filter: ghost (ratio) at %.1fs (%.0fs, %.2f c/s): %s", seg["start"], duration, chars_per_sec, text[:60])
+            continue
+
+        # Mega-segments (>120s) need proportional text
+        if duration > 120 and len(text) < 200:
+            logger.warning("Filter: mega-ghost at %.1fs (%.0fs, %d chars): %s", seg["start"], duration, len(text), text[:60])
             continue
 
         # Skip exact duplicate of previous segment
         if prev_text and text == prev_text and duration < 5.0:
             logger.warning("Filter: exact duplicate at %.1fs: %s", seg["start"], text[:60])
             continue
+
+        # Near-duplicate of any recent segment (sliding window)
+        if len(cleaned) >= 2:
+            recent_texts = [c.get("text", "").strip().lower() for c in cleaned[-5:]]
+            if text.lower() in recent_texts:
+                logger.warning("Filter: near-dup (window) at %.1fs: %s", seg["start"], text[:60])
+                continue
 
         # Repeated n-gram detection
         words = text.lower().split()
@@ -145,16 +164,32 @@ def main():
         }
 
         if args.vad_filter:
-            transcribe_kwargs["vad_parameters"] = {
+            vad_params = {
                 "min_silence_duration_ms": args.vad_min_silence_ms,
                 "speech_pad_ms": args.vad_speech_pad_ms,
                 "onset": args.vad_onset,
                 "min_speech_duration_ms": args.vad_min_speech_ms,
             }
+            # For translation tasks, widen padding to catch quiet speech
+            if args.task == "translate":
+                vad_params["speech_pad_ms"] = max(vad_params["speech_pad_ms"], 800)
+                vad_params["onset"] = min(vad_params["onset"], 0.15)
+            transcribe_kwargs["vad_parameters"] = vad_params
 
         if args.language:
             transcribe_kwargs["language"] = args.language
-        if args.initial_prompt:
+
+        # Enhance initial_prompt for Japanese translation
+        if args.task == "translate" and (args.language or "") in ("ja", ""):
+            ja_prefix = (
+                "This is a Japanese conversation translated to natural English. "
+                "Use complete sentences. Translate names as-is (Shota, Misaki). "
+            )
+            if args.initial_prompt:
+                transcribe_kwargs["initial_prompt"] = ja_prefix + args.initial_prompt
+            else:
+                transcribe_kwargs["initial_prompt"] = ja_prefix
+        elif args.initial_prompt:
             transcribe_kwargs["initial_prompt"] = args.initial_prompt
 
         logger.info(

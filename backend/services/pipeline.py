@@ -355,7 +355,13 @@ async def _background_post_processing(job_id: str, transcript: list, orchestrato
             _total_batches = -(-len(transcript) // _batch_size)
             _remaining_waves = -(- max(0, _total_batches - 1) // 3)
             _per_batch = 150 if _polish_info.get("is_thinking") else 90
-            _correction_timeout = max(120, min(600, _per_batch + (_remaining_waves * _per_batch) + 30))
+            # Scale timeout with segment count — 955 segments at ~7s/batch of 8 = ~835s
+            _estimated_time = (_total_batches * _per_batch) * 1.5
+            _correction_timeout = max(180, min(1800, int(_estimated_time) + 60))
+            logger.info(
+                "[%s] Polishing timeout: %ds (segments=%d, batches=%d, per_batch=%ds)",
+                job_id, _correction_timeout, len(transcript), _total_batches, _per_batch,
+            )
 
             # Get Whisper's detected language for the correction prompt
             from backend.services.transcription import _last_detected_language
