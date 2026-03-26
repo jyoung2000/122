@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import os
+import shutil
 from typing import Callable, Optional
 
 from PIL import Image
@@ -13,6 +14,55 @@ from backend.models import FrameData
 logger = logging.getLogger(__name__)
 
 MAX_DIMENSION = 1568
+
+
+def _extract_ffmpeg_error(stderr_bytes: bytes) -> str:
+    """Extract the useful error message from ffmpeg stderr.
+
+    ffmpeg prints a ~400 char version banner to stderr on EVERY run (even
+    successful ones). The actual error is at the END. Previous code used
+    stderr[:500] which captured only the banner and missed the real error.
+    """
+    text = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
+
+    # Find specific error lines
+    error_lines = [
+        line.strip() for line in text.split("\n")
+        if line.strip() and any(kw in line.lower() for kw in [
+            "error", "no space", "permission denied", "no such file",
+            "invalid", "corrupt", "failed", "cannot", "not found",
+            "out of memory", "killed", "broken pipe", "disk full",
+        ])
+    ]
+    if error_lines:
+        return "\n".join(error_lines[-5:])
+
+    # Fallback: return the tail (skips the version banner)
+    return text[-1500:].strip() if len(text) > 1500 else text.strip()
+
+
+def _check_disk_space(output_path: str, required_mb: int = 500) -> None:
+    """Check that enough disk space is available before extraction."""
+    output_dir = os.path.dirname(output_path) or "."
+    try:
+        disk = shutil.disk_usage(output_dir)
+        free_mb = disk.free / (1024 * 1024)
+        if free_mb < required_mb:
+            raise RuntimeError(
+                f"Insufficient disk space: {free_mb:.0f}MB free, need {required_mb}MB. "
+                f"Disk is {disk.used / disk.total * 100:.0f}% full. "
+                f"Clear old job files from /data/uploads/ or increase disk size."
+            )
+        elif free_mb < required_mb * 2:
+            logger.warning(
+                "Low disk space: %.0fMB free (%.0f%% full). "
+                "Extraction may fail for long videos.",
+                free_mb, disk.used / disk.total * 100,
+            )
+    except RuntimeError:
+        raise
+    except OSError as e:
+        logger.warning("Could not check disk space: %s", e)
 
 # After this many seconds with 0 frames produced, kill FFmpeg and retry
 # with a fallback strategy (no GPU / no scene detection).
@@ -477,7 +527,7 @@ async def extract_frames(
         elif returncode != 0:
             logger.warning(
                 "Frame extraction failed (%s, rc=%d): %s — trying next strategy",
-                label, returncode, stderr.decode()[:300],
+                label, returncode, _extract_ffmpeg_error(stderr),
             )
         else:
             logger.warning(
@@ -486,8 +536,9 @@ async def extract_frames(
             )
 
     if returncode != 0 and returncode != -1:
-        logger.error(f"FFmpeg frame extraction failed (all strategies): {stderr.decode()}")
-        raise RuntimeError(f"FFmpeg failed: {stderr.decode()[:500]}")
+        error_msg = _extract_ffmpeg_error(stderr)
+        logger.error("FFmpeg frame extraction failed (all strategies): %s", error_msg)
+        raise RuntimeError(f"FFmpeg frame extraction failed:\n{error_msg}")
 
     # Collect extracted frames with actual timestamps from PTS
     frames = []
@@ -598,6 +649,8 @@ async def extract_audio(
     cancel_check: Optional[Callable] = None,
 ) -> str:
     """Extract audio track from video as WAV for Whisper."""
+    _check_disk_space(output_path, required_mb=500)
+
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
@@ -608,6 +661,17 @@ async def extract_audio(
     logger.info("FFmpeg audio extraction command: %s", " ".join(cmd))
     returncode, stderr = await _run_subprocess_cancellable(cmd, cancel_check)
     if returncode != 0:
-        raise RuntimeError(f"Audio extraction failed: {stderr.decode()[:500]}")
+        error_msg = _extract_ffmpeg_error(stderr)
+        input_mb = os.path.getsize(video_path) / (1024 * 1024) if os.path.exists(video_path) else 0
+        try:
+            free_mb = shutil.disk_usage(os.path.dirname(output_path)).free / (1024 * 1024)
+        except OSError:
+            free_mb = -1
+        logger.error(
+            "ffmpeg audio extraction failed (exit %d)\n"
+            "Input: %s (%.1fMB)\nOutput: %s\nDisk free: %.0fMB\nError: %s",
+            returncode, video_path, input_mb, output_path, free_mb, error_msg,
+        )
+        raise RuntimeError(f"Audio extraction failed:\n{error_msg}")
     logger.info("Audio extraction complete: %s", output_path)
     return output_path

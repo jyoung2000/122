@@ -3866,8 +3866,8 @@ async def _render_shape_to_png(shape: dict, video_width: int, video_height: int,
             return None
 
         if proc.returncode != 0:
-            logger.warning("Shape %d (%s) render failed: %s", idx, shape_type,
-                           stderr.decode()[:500] if stderr else "unknown error")
+            stderr_text = stderr.decode(errors="replace")[-1000:] if stderr else "unknown error"
+            logger.warning("Shape %d (%s) render failed: %s", idx, shape_type, stderr_text)
             return None
 
         if os.path.isfile(png_path):
@@ -5793,7 +5793,8 @@ async def export_clip(
                 )
                 _, stderr = await proc.communicate()
                 if proc.returncode != 0:
-                    raise RuntimeError(f"Clip export failed: {stderr.decode()[:2000]}")
+                    stderr_tail = stderr.decode(errors="replace")[-2000:] if stderr else "unknown error"
+                    raise RuntimeError(f"Clip export failed:\n{stderr_tail}")
 
         # QA validation: verify the exported file is valid
         await _notify(f"Validating export for clip {clip_id}...")
