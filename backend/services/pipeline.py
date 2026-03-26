@@ -1168,6 +1168,26 @@ async def _run_analysis_inner(job_id: str):
                 "total_scenes": len(scenes_result),
                 "message": f"Subject tracking: {len(tracked)}/{len(scenes_result)} scenes tracked for dynamic crop positioning",
             })
+
+            # Detect poor tracking quality from local AI and notify user
+            if tracked and sx_values:
+                at_center = sum(1 for sx in sx_values if sx == 50)
+                center_pct = at_center / len(sx_values) * 100 if sx_values else 0
+                if center_pct > 80 and len(sx_values) > 5:
+                    logger.warning(
+                        "[SubjectTracking] Poor quality for job %s: %d/%d frames (%.0f%%) at center. Provider: %s",
+                        job_id, at_center, len(sx_values), center_pct, provider,
+                    )
+                    await broadcast_ws(job_id, {
+                        "type": "subject_tracking_quality",
+                        "quality": "low",
+                        "center_pct": round(center_pct),
+                        "total_frames": len(sx_values),
+                        "message": (
+                            f"Subject tracking quality is limited — {round(center_pct)}% of frames defaulted to center. "
+                            f"Using {provider}. Cloud AI providers typically produce more accurate tracking."
+                        ),
+                    })
         else:
             logger.info(
                 "[SubjectTracking] DISABLED for job %s — all crops will use center of frame",

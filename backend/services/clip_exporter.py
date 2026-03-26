@@ -5086,14 +5086,28 @@ async def export_clip(
                         subject_x = converged_sx
                         keyframes = None
                     else:
-                        logger.info(
-                            "[SubjectTracking] clip %s: DYNAMIC tracking — %d processed keyframes, "
-                            "sx range [%d, %d], keyframes=%s",
-                            clip_id, len(keyframes),
-                            min(kf[1] for kf in keyframes),
-                            max(kf[1] for kf in keyframes),
-                            [(f"t={t:.2f}s,sx={sx}") for t, sx in keyframes],
-                        )
+                        # Check for near-convergence: if the range is < 5, the motion
+                        # is imperceptible and will look like jitter, not tracking.
+                        # Collapse to static using the median value.
+                        kf_min = min(kf[1] for kf in keyframes)
+                        kf_max = max(kf[1] for kf in keyframes)
+                        if kf_max - kf_min < 5:
+                            median_sx = sorted(kf[1] for kf in keyframes)[len(keyframes) // 2]
+                            logger.info(
+                                "[SubjectTracking] clip %s: keyframe range too small (%d-%d, Δ=%d) — "
+                                "collapsing to static sx=%d to avoid jitter",
+                                clip_id, kf_min, kf_max, kf_max - kf_min, median_sx,
+                            )
+                            subject_x = median_sx
+                            keyframes = None
+                        else:
+                            logger.info(
+                                "[SubjectTracking] clip %s: DYNAMIC tracking — %d processed keyframes, "
+                                "sx range [%d, %d], keyframes=%s",
+                                clip_id, len(keyframes),
+                                kf_min, kf_max,
+                                [(f"t={t:.2f}s,sx={sx}") for t, sx in keyframes],
+                            )
                 elif len(raw_kf) == 1:
                     # Single keyframe — use its tracked value directly as the
                     # static subject_x so the crop centers on the actual subject

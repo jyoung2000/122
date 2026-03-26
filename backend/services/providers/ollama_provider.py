@@ -26,6 +26,16 @@ _VISION_JSON_SUFFIX = (
     'IMPORTANT: Carefully estimate the actual position — do NOT default to 50 for every frame.'
 )
 
+# Simplified JSON schema for small models (moondream) that can't handle complex prompts.
+# Fewer fields = higher compliance rate. timestamp is set by caller, not model.
+_VISION_JSON_SUFFIX_SIMPLE = (
+    '\n\nRespond with ONLY this JSON, nothing else:\n'
+    '{"description": "<what you see>", "subject_x": <number 0 to 100>}\n'
+    'subject_x: where is the main person\'s face horizontally? '
+    '0 = left edge, 50 = center, 100 = right edge.\n'
+    'Look carefully at the face position. Do NOT always say 50.'
+)
+
 # Minimal prompt for two-stage vision fast scan
 _QUICK_SCAN_PROMPT = (
     "Rate this frame's visual interest from 1-10. "
@@ -762,6 +772,11 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
 
         num_gpu = self._get_num_gpu(self._vision_model)
 
+        # Determine if model supports format: "json" reliably.
+        # moondream supports it well. Larger llava models may not.
+        vision_lower = self._vision_model.lower()
+        use_json_format = "moondream" in vision_lower
+
         for attempt in range(2):  # At most 2 attempts: GPU then CPU
             try:
                 options = {
@@ -774,20 +789,25 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                     options["num_gpu"] = 0
                     logger.info("Retrying vision call with num_gpu=0 (CPU-only) after OOM")
 
+                payload = {
+                    "model": self._vision_model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt,
+                            "images": [image_base64],
+                        }
+                    ],
+                    "stream": False,
+                    "options": options,
+                }
+                # Force JSON output for models that support it
+                if use_json_format:
+                    payload["format"] = "json"
+
                 response = await self._client.post(
                     f"{self._host}/api/chat",
-                    json={
-                        "model": self._vision_model,
-                        "messages": [
-                            {
-                                "role": "user",
-                                "content": prompt,
-                                "images": [image_base64],
-                            }
-                        ],
-                        "stream": False,
-                        "options": options,
-                    },
+                    json=payload,
                     timeout=vision_timeout,
                 )
 
@@ -1048,11 +1068,16 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             try:
                 # Use the ACTUAL prompt for speed testing (not a simplified version)
                 # The real prompt is 3-4x longer and triggers different tokenization
+                _test_suffix = (
+                    _VISION_JSON_SUFFIX_SIMPLE
+                    if "moondream" in self._vision_model.lower()
+                    else _VISION_JSON_SUFFIX
+                )
                 test_prompt = (
                     "Describe what you see in this video frame in 1-2 sentences. "
                     "Focus on: who/what is visible, the setting, any text on screen. "
                     "Be specific and factual — only describe what is ACTUALLY VISIBLE."
-                    + _VISION_JSON_SUFFIX
+                    + _test_suffix
                 )
                 test_result = await asyncio.wait_for(
                     self._call_vision(test_prompt, frames[0].base64),
@@ -1360,7 +1385,14 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                     f"{temporal_context}"
                 )
 
-                prompt = ollama_vision_prompt + _VISION_JSON_SUFFIX
+                # Select JSON suffix based on model capability
+                vision_lower = self._vision_model.lower()
+                if "moondream" in vision_lower:
+                    json_suffix = _VISION_JSON_SUFFIX_SIMPLE
+                else:
+                    json_suffix = _VISION_JSON_SUFFIX
+
+                prompt = ollama_vision_prompt + json_suffix
                 try:
                     raw = await self._call_vision(prompt, frame.base64)
                     # Try JSON parsing first (preferred — extracts subject_x)
@@ -1388,7 +1420,10 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                         else:
                             raise json.JSONDecodeError("No JSON object found", text, 0)
                     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-                        # Fall back to word-scanning for importance score
+                        # JSON parse failed — extract what we can from free text
+                        raw_lower = raw.lower()
+
+                        # Extract importance score (existing logic)
                         for word in raw.split():
                             try:
                                 val = int(word.strip(".,/()"))
@@ -1397,6 +1432,28 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                                     break
                             except ValueError:
                                 continue
+
+                        # Extract subject_x from positional language
+                        if any(kw in raw_lower for kw in ["far left", "left edge", "leftmost"]):
+                            subject_x = 20
+                        elif any(kw in raw_lower for kw in ["left side", "to the left", "on the left", "left of center", "left half"]):
+                            subject_x = 35
+                        elif any(kw in raw_lower for kw in ["slightly left", "just left"]):
+                            subject_x = 42
+                        elif any(kw in raw_lower for kw in ["far right", "right edge", "rightmost"]):
+                            subject_x = 80
+                        elif any(kw in raw_lower for kw in ["right side", "to the right", "on the right", "right of center", "right half"]):
+                            subject_x = 65
+                        elif any(kw in raw_lower for kw in ["slightly right", "just right"]):
+                            subject_x = 58
+                        elif any(kw in raw_lower for kw in ["center", "middle", "centered", "directly facing"]):
+                            subject_x = 50
+
+                        if subject_x != 50:
+                            logger.info(
+                                "Ollama frame %d: extracted subject_x=%d from free text (no JSON)",
+                                fi, subject_x,
+                            )
                     # ── Quality validation ──
                     if description:
                         # Strip JSON fragments
@@ -1474,6 +1531,37 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         # Run with concurrency limiter (sequential when VISION_CONCURRENCY=1)
         await asyncio.gather(*[_analyze_one(i, f) for i, f in enumerate(frames)])
 
+        # ── Post-analysis subject_x quality check ──
+        analyzed_scenes = [s for s in scenes if s is not None]
+        if analyzed_scenes:
+            sx_values = [s.subject_x for s in analyzed_scenes]
+            at_center = sum(1 for sx in sx_values if sx == 50)
+            center_pct = at_center / len(sx_values) * 100
+            unique_sx = len(set(sx_values))
+
+            if center_pct > 80 and len(sx_values) > 5:
+                logger.warning(
+                    "[SubjectTracking] Moondream quality issue: %d/%d frames (%.0f%%) have subject_x=50. "
+                    "Subject tracking will be limited. Model: %s",
+                    at_center, len(sx_values), center_pct, self._vision_model,
+                )
+            elif unique_sx <= 2 and len(sx_values) > 5:
+                logger.warning(
+                    "[SubjectTracking] Low subject_x diversity: only %d unique values across %d frames. "
+                    "Model: %s",
+                    unique_sx, len(sx_values), self._vision_model,
+                )
+            else:
+                non_center = [sx for sx in sx_values if sx != 50]
+                if non_center:
+                    logger.info(
+                        "[SubjectTracking] Moondream tracking quality OK: %d/%d frames tracked "
+                        "(range %d-%d, %d unique), model=%s",
+                        len(non_center), len(sx_values),
+                        min(non_center), max(non_center), unique_sx,
+                        self._vision_model,
+                    )
+
         # Fill in cold-zone frames with interpolated descriptions from nearest analyzed frames
         for fi, frame in enumerate(frames):
             if scenes[fi] is None and fi not in interesting_indices:
@@ -1504,10 +1592,35 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 next_imp = next((scenes[j].importance_score for j in range(fi + 1, total) if scenes[j]), 5)
                 interp_importance = max(2, (prev_imp + next_imp) // 2 - 1)
 
-                # Interpolate subject_x from neighbors
-                prev_sx = next((scenes[j].subject_x for j in range(fi - 1, -1, -1) if scenes[j]), 50)
-                next_sx = next((scenes[j].subject_x for j in range(fi + 1, total) if scenes[j]), 50)
-                interp_sx = (prev_sx + next_sx) // 2
+                # Interpolate subject_x from neighbors — weighted by temporal distance
+                prev_sx = None
+                prev_ts = None
+                for j in range(fi - 1, -1, -1):
+                    if scenes[j] is not None:
+                        prev_sx = scenes[j].subject_x
+                        prev_ts = scenes[j].timestamp
+                        break
+                next_sx = None
+                next_ts = None
+                for j in range(fi + 1, total):
+                    if scenes[j] is not None:
+                        next_sx = scenes[j].subject_x
+                        next_ts = scenes[j].timestamp
+                        break
+
+                if prev_sx is not None and next_sx is not None and prev_ts is not None and next_ts is not None:
+                    dt = next_ts - prev_ts
+                    if dt > 0:
+                        frac = (frame.timestamp - prev_ts) / dt
+                        interp_sx = round(prev_sx + (next_sx - prev_sx) * frac)
+                    else:
+                        interp_sx = prev_sx
+                elif prev_sx is not None:
+                    interp_sx = prev_sx
+                elif next_sx is not None:
+                    interp_sx = next_sx
+                else:
+                    interp_sx = 50
 
                 scenes[fi] = SceneDescription(
                     timestamp=frame.timestamp,

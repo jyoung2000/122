@@ -432,18 +432,31 @@ export function processKeyframes(scenes, clipStart, clipEnd, srcRatio = null, ta
   // Final bounds enforcement — ensure every keyframe x is clamped to [0, 100]
   // and within the safe range for the aspect ratio. This prevents any pipeline
   // stage from producing values that would push the crop off-screen.
+  let result;
   if (srcRatio && targetRatio) {
     const range = computeSafeRange(srcRatio, targetRatio);
-    return afterHolds.map(kf => ({
+    result = afterHolds.map(kf => ({
       t: kf.t,
       x: Math.max(range.min, Math.min(range.max, Math.round(kf.x))),
     }));
+  } else {
+    result = afterHolds.map(kf => ({
+      t: kf.t,
+      x: Math.max(0, Math.min(100, Math.round(kf.x))),
+    }));
   }
 
-  return afterHolds.map(kf => ({
-    t: kf.t,
-    x: Math.max(0, Math.min(100, Math.round(kf.x))),
-  }));
+  // Check for near-convergence: if range < 5, collapse to static to avoid jitter
+  if (result.length > 1) {
+    const finalXs = result.map(kf => kf.x);
+    const minX = Math.min(...finalXs);
+    const maxX = Math.max(...finalXs);
+    if (maxX - minX < 5) {
+      const medianX = finalXs.slice().sort((a, b) => a - b)[Math.floor(finalXs.length / 2)];
+      return [{ t: 0, x: medianX }];
+    }
+  }
+  return result;
 }
 
 /**
