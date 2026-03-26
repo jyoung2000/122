@@ -12,6 +12,14 @@ import re
 _IS_WINDOWS = platform.system() == "Windows"
 _IS_MACOS = platform.system() == "Darwin"
 
+# Check if ffmpeg has drawtext filter (requires libfreetype at compile time)
+_HAS_DRAWTEXT = False
+try:
+    _dt_check = subprocess.run(["ffmpeg", "-filters"], capture_output=True, text=True, timeout=5)
+    _HAS_DRAWTEXT = "drawtext" in _dt_check.stdout
+except Exception:
+    pass
+
 from backend.config import settings as app_settings
 from backend.models import TranscriptSegment
 from backend.services.ass_generator import (
@@ -29,6 +37,12 @@ from backend.services.ass_generator import (
 )
 
 logger = logging.getLogger(__name__)
+
+if not _HAS_DRAWTEXT:
+    logger.warning(
+        "FFmpeg 'drawtext' filter not available — "
+        "text overlays will be rendered via ASS subtitles instead"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4876,6 +4890,25 @@ async def export_clip(
                     f.write(ass_content)
                 logger.info("ASS file written: %s (%d bytes)", ass_path, len(ass_content))
 
+                # ── Text overlays via ASS when drawtext unavailable ──
+                if has_text_overlays and not _HAS_DRAWTEXT:
+                    logger.info(
+                        "drawtext unavailable — rendering %d text overlay(s) via ASS for clip %s",
+                        len(text_overlays), clip_id,
+                    )
+                    from backend.services.ass_generator import append_text_overlays_to_ass
+                    with open(ass_path, "r", encoding="utf-8") as f:
+                        _ass = f.read()
+                    _ass = append_text_overlays_to_ass(
+                        _ass, text_overlays,
+                        clip_start=start,
+                        video_out_w=video_width,
+                        video_out_h=video_height,
+                    )
+                    with open(ass_path, "w", encoding="utf-8") as f:
+                        f.write(_ass)
+                    has_text_overlays = False  # Prevent drawtext from being added to filter chain
+
                 # ── Diagnostic: verify two-layer architecture ──
                 # Log whether the ASS uses the two-layer approach for active
                 # word mode so we can confirm the black-bar fix is active.
@@ -4945,6 +4978,38 @@ async def export_clip(
                     "segments overlap clip range %.1f-%.1f (%d total segments)",
                     clip_id, start, end, len(transcript),
                 )
+
+        # If subtitles are off but text overlays need ASS (drawtext unavailable),
+        # create a minimal ASS file just for text overlays.
+        if has_text_overlays and not _HAS_DRAWTEXT and not ass_path:
+            logger.info(
+                "Creating ASS file for %d text overlay(s) (subs disabled, drawtext unavailable) clip %s",
+                len(text_overlays), clip_id,
+            )
+            from backend.services.ass_generator import append_text_overlays_to_ass
+            _minimal_ass = (
+                "[Script Info]\nScriptType: v4.00+\n"
+                f"PlayResX: {video_width}\nPlayResY: {video_height}\n"
+                "ScaledBorderAndShadow: yes\n\n"
+                "[V4+ Styles]\n"
+                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+                "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+                "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+                "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+                "Style: Default,Arial,48,&H00FFFFFF&,&H000000FF&,&H00000000&,"
+                "&H00000000&,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1\n\n"
+                "[Events]\n"
+                "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+            )
+            _minimal_ass = append_text_overlays_to_ass(
+                _minimal_ass, text_overlays,
+                clip_start=start, video_out_w=video_width, video_out_h=video_height,
+            )
+            ass_path = os.path.join(output_dir, f"clip_{clip_id}_textoverlay.ass")
+            with open(ass_path, "w", encoding="utf-8") as f:
+                f.write(_minimal_ass)
+            subtitles_enabled = True  # Enable subtitle filter to render text overlays
+            has_text_overlays = False  # Don't add drawtext to filter chain
 
         _check_cancel()
 
@@ -5092,7 +5157,7 @@ async def export_clip(
             _overlay_warnings: list[str] = list(_shape_warnings)
             _text_vf_for_post_concat = ""
             _use_unified_compositing = bool(overlay_compositing_order) and (has_text_overlays or has_image_overlays)
-            if has_text_overlays and text_overlays and not _use_unified_compositing:
+            if has_text_overlays and _HAS_DRAWTEXT and text_overlays and not _use_unified_compositing:
                 text_vf, _tw = _build_text_overlay_filters(text_overlays, clip_start=start, video_out_w=video_width, video_out_h=video_height)
                 _overlay_warnings.extend(_tw)
                 if text_vf:
