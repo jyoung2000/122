@@ -248,7 +248,7 @@ async def _test_vision_model(model: str) -> dict:
     start = time.time()
     try:
         test_image_b64 = _generate_test_image()
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=180) as client:
             resp = await client.post(
                 f"{settings.OLLAMA_HOST}/api/chat",
                 json={
@@ -265,7 +265,7 @@ async def _test_vision_model(model: str) -> dict:
                         "num_batch": 128,  # Reduce batch to lower compute buffer
                     },
                 },
-                timeout=120,
+                timeout=180,
             )
 
             duration_ms = int((time.time() - start) * 1000)
@@ -305,8 +305,11 @@ async def _test_vision_model(model: str) -> dict:
     except asyncio.TimeoutError:
         return {
             "status": "fail",
-            "message": "Vision model timed out (>120s) — likely stuck on CPU",
-            "duration_ms": 120000, "gpu_status": "timeout",
+            "message": (
+                "Vision model timed out (>180s). If Whisper just ran, the GPU may need "
+                "rediscovery — try restarting the Ollama container."
+            ),
+            "duration_ms": 180000, "gpu_status": "timeout",
         }
     except Exception as e:
         return {
@@ -875,16 +878,56 @@ async def test_pipeline(request: Request):
 
             # ══════════════════════════════════════════════════════════
             # Phase: Ollama GPU rediscovery
-            # Real pipeline: after Whisper releases GPU, Ollama redetects
+            # Real pipeline: _trigger_ollama_gpu_rediscovery()
+            # After Whisper releases CUDA, Ollama's cached GPU state is stale.
+            # Must load a model with num_gpu=99 to trigger fresh GPU scan.
             # ══════════════════════════════════════════════════════════
             yield _phase("ollama_gpu_rediscovery", "Triggering Ollama GPU rediscovery...")
-            cleared = await _unload_and_wait(10)
-            await asyncio.sleep(2)
-            yield _sse_event("phase_result", {
-                "phase": "ollama_gpu_rediscovery",
-                "status": "pass" if cleared else "warn",
-                "message": "Ollama GPU access confirmed — models will load on GPU" if cleared else "Ollama may need restart for GPU access",
-            })
+
+            # Step 1: Ensure all models unloaded first
+            await _unload_and_wait(10)
+            await asyncio.sleep(2)  # CUDA driver settle
+
+            # Step 2: Load vision model with num_gpu=99 to trigger GPU re-scan
+            # This is exactly what _trigger_ollama_gpu_rediscovery() does
+            gpu_rediscovered = False
+            try:
+                async with httpx.AsyncClient(timeout=120) as _rc:
+                    _probe = await _rc.post(
+                        f"{settings.OLLAMA_HOST}/api/generate",
+                        json={
+                            "model": vision_model,
+                            "prompt": "test",
+                            "stream": False,
+                            "options": {"num_gpu": 99, "num_predict": 1},
+                        },
+                        timeout=120,
+                    )
+                    if _probe.status_code == 200:
+                        # Check if it actually loaded on GPU
+                        _ps = await _rc.get(f"{settings.OLLAMA_HOST}/api/ps", timeout=10)
+                        if _ps.status_code == 200:
+                            for m in _ps.json().get("models", []):
+                                if m.get("size_vram", 0) > 0:
+                                    gpu_rediscovered = True
+                                    vram_mb = m.get("size_vram", 0) // 1024 // 1024
+                                    break
+                        # Unload the probe model
+                        await _rc.post(f"{settings.OLLAMA_HOST}/api/generate",
+                            json={"model": vision_model, "keep_alive": 0}, timeout=10)
+            except Exception as e:
+                logger.warning("GPU rediscovery probe failed: %s", e)
+
+            if gpu_rediscovered:
+                yield _sse_event("phase_result", {
+                    "phase": "ollama_gpu_rediscovery", "status": "pass",
+                    "message": f"GPU rediscovered — {vision_model} loaded on GPU ({vram_mb}MB VRAM)",
+                })
+            else:
+                yield _sse_event("phase_result", {
+                    "phase": "ollama_gpu_rediscovery", "status": "warn",
+                    "message": "GPU rediscovery: model loaded on CPU — GPU may be poisoned. Try restarting Ollama container.",
+                })
 
             # ══════════════════════════════════════════════════════════
             # Phase: Vision model test (scene analysis)
@@ -930,7 +973,7 @@ async def test_pipeline(request: Request):
                 from backend.services.ai_orchestrator import AIOrchestrator
                 orch = AIOrchestrator()
                 raw = await asyncio.wait_for(
-                    orch.text_completion(clip_prompt, max_tokens=200, timeout=90, json_mode=True),
+                    orch.text_completion(clip_prompt, max_tokens=200, timeout=90),
                     timeout=90,
                 )
                 elapsed_ms = int((time.time() - t0) * 1000)
