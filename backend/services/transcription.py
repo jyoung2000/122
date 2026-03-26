@@ -98,24 +98,33 @@ async def transcribe_audio_subprocess(
                 if idx < cuda_count:
                     device_index = idx
 
-    # ── VRAM safety checks (mirrors _get_whisper_model logic) ──
-    # The in-process path auto-downgrades models that won't fit in VRAM.
-    # Without these checks, CTranslate2 silently OOMs → 0 segments returned.
+    # ── VRAM safety checks for subprocess (exclusive GPU access) ──
+    # Since main process no longer preloads Whisper, the subprocess gets the
+    # full GPU. Thresholds are LOWER than the in-process path because there's
+    # no competing CUDA context.
     if device == "cuda":
         vram_mb = _get_gpu_vram_mb()
+        # Subprocess-exclusive VRAM requirements (model + beam + CUDA context)
         _VRAM_REQUIREMENTS = {
-            "large-v3": 6000, "large-v3-turbo": 5000,
-            "medium": 3000, "medium.en": 3000,
+            "large-v3": 4500,       # 3.5GB model + 0.5GB beam + 0.4GB context
+            "large-v3-turbo": 3800, # 3.0GB model + 0.5GB beam + 0.3GB context
+            "medium": 2400,         # 1.5GB model + 0.3GB beam + 0.2GB context + margin
+            "medium.en": 2400,
         }
         if model_name in _VRAM_REQUIREMENTS:
             min_vram = _VRAM_REQUIREMENTS[model_name]
             if 0 < vram_mb < min_vram:
                 logger.warning(
-                    "SUBPROCESS VRAM SAFETY: '%s' needs ~%dMB but GPU has %dMB. "
-                    "Downgrading to 'small' to prevent CTranslate2 silent OOM.",
+                    "SUBPROCESS VRAM: '%s' needs ~%dMB but GPU has %dMB total. "
+                    "Downgrading to 'small'.",
                     model_name, min_vram, vram_mb,
                 )
                 model_name = "small"
+            else:
+                logger.info(
+                    "SUBPROCESS VRAM OK: '%s' needs ~%dMB, GPU has %dMB (exclusive)",
+                    model_name, min_vram, vram_mb,
+                )
 
         # Auto-upgrade from 'small' on large GPUs (only if user didn't explicitly set)
         if model_name == "small" and not getattr(settings, 'WHISPER_MODEL_USER_SET', False):
@@ -131,7 +140,7 @@ async def transcribe_audio_subprocess(
         }
         _model_mb = _MODEL_VRAM_MB.get(model_name, 1000)
         _beam_overhead = beam_size * 50
-        _cuda_overhead = 400
+        _cuda_overhead = 400  # CUDA driver/context baseline
         _estimated_peak = _model_mb + _beam_overhead + _cuda_overhead
         if vram_mb > 0 and _estimated_peak > vram_mb * 0.85:
             safe_beam = max(1, int((vram_mb * 0.85 - _model_mb - _cuda_overhead) / 50))
@@ -252,7 +261,18 @@ def _detect_cuda_available() -> tuple[bool, int, str, int]:
     """
     best_name, best_idx = _get_best_gpu()
 
-    # Method 1: ctranslate2 (used by faster-whisper)
+    # Method 0 (fast, no CUDA context): Check /dev/nvidia* device nodes
+    # Avoids initializing CTranslate2's CUDA context (~200MB) just for detection.
+    try:
+        import glob as _glob
+        nvidia_devs = _glob.glob("/dev/nvidia[0-9]*")
+        if nvidia_devs:
+            gpu_name = best_name or f"NVIDIA GPU ({len(nvidia_devs)} device{'s' if len(nvidia_devs) > 1 else ''})"
+            return True, len(nvidia_devs), gpu_name, best_idx
+    except Exception:
+        pass
+
+    # Method 1: ctranslate2 (fallback — creates a CUDA context)
     try:
         import ctranslate2
         cuda_count = ctranslate2.get_cuda_device_count()
