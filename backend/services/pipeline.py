@@ -873,6 +873,42 @@ async def _run_analysis_inner(job_id: str):
     async def _branch_transcription():
         cancel_check()
         lang_label = job.language if job.language else "auto-detect"
+
+        # ── Pre-flight: verify Whisper model loads and CUDA works ──
+        # This catches model download hangs, CUDA OOM, and corrupted models
+        # BEFORE committing to a potentially hour-long transcription.
+        from backend.services.transcription import preflight_whisper_check
+        await _update_branch_progress("transcription", 2, JobStatus.TRANSCRIBING,
+            f"Verifying Whisper model ({settings.WHISPER_MODEL})...")
+        _preflight = await preflight_whisper_check(timeout=90)
+        if _preflight["ok"]:
+            logger.info(
+                "[%s] Whisper preflight passed: model=%s device=%s load_time=%dms",
+                job_id, _preflight["model"], _preflight["device"],
+                _preflight.get("load_time_ms", 0),
+            )
+        else:
+            logger.error(
+                "[%s] Whisper preflight FAILED: %s (model=%s device=%s)",
+                job_id, _preflight.get("error", "unknown"), _preflight["model"], _preflight["device"],
+            )
+            # Try to provide actionable error message
+            err = _preflight.get("error", "Unknown error")
+            if "timed out" in err.lower():
+                raise RuntimeError(
+                    f"Whisper model '{_preflight['model']}' failed to load within 90 seconds. "
+                    f"The model may be downloading for the first time, or GPU memory is exhausted. "
+                    f"Try a smaller model (e.g., 'small') in Settings > AI Provider."
+                )
+            elif "cuda" in err.lower() or "gpu" in err.lower():
+                raise RuntimeError(
+                    f"Whisper failed on GPU: {err}. "
+                    f"Try disabling GPU acceleration in Settings > Advanced, "
+                    f"or use a smaller model."
+                )
+            else:
+                raise RuntimeError(f"Whisper model check failed: {err}")
+
         # Include GPU/device info in the initial transcription message
         from backend.services.transcription import whisper_device_info
         _wdev = whisper_device_info

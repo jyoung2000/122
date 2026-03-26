@@ -110,8 +110,10 @@ def _filter_segments(result_segments: list[dict], initial_prompt: str = "") -> l
 
 def main():
     parser = argparse.ArgumentParser(description="Whisper transcription worker")
-    parser.add_argument("--audio", required=True)
+    parser.add_argument("--audio", required=False, default=None)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--preflight", action="store_true", default=False,
+                        help="Only load model and verify CUDA, then exit (no transcription)")
     parser.add_argument("--model", default="small")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--device-index", type=int, default=0)
@@ -145,6 +147,7 @@ def main():
     )
 
     try:
+        import time as _time
         from faster_whisper import WhisperModel
 
         model_kwargs = {
@@ -159,7 +162,25 @@ def main():
             args.model, args.device, args.device_index, args.compute_type,
         )
 
+        _load_t0 = _time.monotonic()
         model = WhisperModel(args.model, **model_kwargs)
+        _load_ms = int((_time.monotonic() - _load_t0) * 1000)
+        logger.info("Whisper model loaded in %dms", _load_ms)
+
+        # ── Preflight mode: verify model loads then exit ──
+        if args.preflight:
+            logger.info("Preflight check passed: model=%s device=%s load_time=%dms", args.model, args.device, _load_ms)
+            with open(args.output, "w") as f:
+                json.dump({"status": "ok", "load_time_ms": _load_ms}, f)
+            del model
+            gc.collect()
+            sys.exit(0)
+
+        if not args.audio:
+            logger.error("No audio file specified (--audio required for transcription)")
+            with open(args.output, "w") as f:
+                json.dump({"status": "error", "error": "No audio file specified"}, f)
+            sys.exit(1)
 
         logger.info("Transcribing: %s", args.audio)
 
@@ -211,8 +232,10 @@ def main():
 
         segments_gen, info = model.transcribe(args.audio, **transcribe_kwargs)
 
-        # Materialize segments (generator)
+        # Materialize segments (generator) with progress heartbeats
         result_segments = []
+        _last_heartbeat = _time.monotonic()
+        _heartbeat_interval = 10  # Log progress every 10 seconds
         for seg in segments_gen:
             seg_data = {
                 "id": seg.id,
@@ -228,6 +251,15 @@ def main():
                     for w in seg.words
                 ]
             result_segments.append(seg_data)
+
+            # Periodic progress heartbeat so parent knows we're alive
+            _now = _time.monotonic()
+            if _now - _last_heartbeat >= _heartbeat_interval:
+                _last_heartbeat = _now
+                logger.info(
+                    "Progress: %d segments, position=%.1fs",
+                    len(result_segments), seg.end,
+                )
 
         # Filter hallucinations (ghosts, loops, backward jumps, duplicates)
         result_segments = _filter_segments(result_segments, initial_prompt=args.initial_prompt or "")

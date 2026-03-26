@@ -55,6 +55,96 @@ def _get_gpu_vram_mb() -> int:
     return 0
 
 
+async def preflight_whisper_check(timeout: float = 90) -> dict:
+    """Quick pre-flight check that the Whisper model loads and CUDA works.
+
+    Spawns a subprocess that loads the model and immediately exits.
+    Returns {"ok": True, "model": ..., "device": ..., "load_time_ms": ...}
+    on success, or {"ok": False, "error": ...} on failure.
+    """
+    import asyncio
+    import json
+    import sys
+    import tempfile
+
+    model_name = settings.WHISPER_MODEL
+    device = "cpu"
+    compute_type = "int8"
+    device_index = 0
+    if settings.GPU_ACCELERATION_ENABLED:
+        cuda_available, cuda_count, _, best_idx = _detect_cuda_available()
+        if cuda_available and cuda_count > 0:
+            device = "cuda"
+            compute_type = "float16"
+            device_index = best_idx
+
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, dir="/tmp") as tmp:
+        output_path = tmp.name
+
+    try:
+        cmd = [
+            sys.executable, "-m", "backend.services.whisper_worker",
+            "--preflight",
+            "--output", output_path,
+            "--model", model_name,
+            "--device", device,
+            "--device-index", str(device_index),
+            "--compute-type", compute_type,
+        ]
+        logger.info("Whisper preflight check: model=%s device=%s timeout=%ds", model_name, device, int(timeout))
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env={**os.environ},
+        )
+
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return {
+                "ok": False,
+                "error": f"Model load timed out after {int(timeout)}s — model may be downloading or GPU unavailable",
+                "model": model_name,
+                "device": device,
+            }
+
+        if stderr:
+            for line in stderr.decode(errors="replace").strip().split("\n"):
+                if line.strip():
+                    logger.info("[whisper-preflight] %s", line)
+
+        if proc.returncode != 0:
+            error_msg = stderr.decode(errors="replace")[-300:] if stderr else "Unknown error"
+            return {
+                "ok": False,
+                "error": f"Model load failed (exit {proc.returncode}): {error_msg}",
+                "model": model_name,
+                "device": device,
+            }
+
+        try:
+            with open(output_path, "r") as f:
+                result = json.load(f)
+            return {
+                "ok": result.get("status") == "ok",
+                "error": result.get("error"),
+                "model": model_name,
+                "device": device,
+                "load_time_ms": result.get("load_time_ms", 0),
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"Failed to read preflight result: {e}", "model": model_name, "device": device}
+    finally:
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+
+
 async def transcribe_audio_subprocess(
     audio_path: str,
     language: str = "",
@@ -210,15 +300,26 @@ async def transcribe_audio_subprocess(
             env={**os.environ},
         )
 
-        stdout, stderr = await proc.communicate()
+        # Stream stderr in real-time so model loading and progress are visible
+        stderr_lines = []
+        async def _stream_stderr():
+            while True:
+                line = await proc.stderr.readline()
+                if not line:
+                    break
+                decoded = line.decode(errors="replace").rstrip()
+                if decoded:
+                    stderr_lines.append(decoded)
+                    logger.info("[whisper-worker] %s", decoded)
 
-        if stderr:
-            for line in stderr.decode(errors="replace").strip().split("\n"):
-                if line.strip():
-                    logger.info("[whisper-worker] %s", line)
+        import asyncio as _aio
+        stderr_task = _aio.create_task(_stream_stderr())
+        stdout = await proc.stdout.read()
+        await stderr_task
+        await proc.wait()
 
         if proc.returncode != 0:
-            error_msg = stderr.decode(errors="replace")[-500:] if stderr else "Unknown error"
+            error_msg = "\n".join(stderr_lines[-10:]) if stderr_lines else "Unknown error"
             raise RuntimeError(f"Whisper subprocess failed (exit {proc.returncode}): {error_msg}")
 
         with open(output_path, "r") as f:
