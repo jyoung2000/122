@@ -17,6 +17,7 @@ import useEncodingManager from '../hooks/useEncodingManager';
 import { computeClipSubjectX } from '../utils/subjectTracking';
 import useTimelineStore from '../stores/timelineStore';
 import { buildOverlayPayload, buildVideoEffectsPayload, mapSubtitleSettings } from '../utils/buildExportPayload';
+import { DEFAULT_CLIP_SETTINGS } from '../utils/defaultSettings';
 
 // Speaker color palette (must match SubtitleOverlay / ClipSettingsPanel / VideoEditor)
 const DEFAULT_SPEAKER_PALETTE = [
@@ -285,36 +286,7 @@ export default function Analysis() {
   // Subtitle/clip settings — server is the source of truth.
   // On mount we start with defaults; once the job loads, server-stored
   // settings replace them (see the effect below).
-  const CLIP_SETTINGS_DEFAULTS = React.useMemo(() => ({
-    aspectRatio: null,
-    subtitlesEnabled: false,
-    subtitleFont: 'DM Sans',
-    subtitleSize: 30,
-    subtitleFontWeight: 700,
-    subtitleFontColor: '#FFFFFF',
-    subtitlePosition: 'bottom',
-    speakerColors: {},
-    subtitleBgEnabled: false,
-    subtitleBgColor: '#000000',
-    subtitleBgOpacity: 75,
-    subtitleBgRadius: 0,
-    subtitleOutlineColor: '#000000',
-    subtitleOutlineOpacity: 100,
-    subtitleOutlineWidth: 2,
-    showSpeakerLabels: false,
-    subtitleMaxWidth: 90,
-    subtitleOffsetV: 4,
-    subtitleMaxWords: 0,
-    activeWordEnabled: false,
-    activeWordColor: '#FFD700',
-    activeWordOutlineColor: '#000000',
-    activeWordBgColor: '#000000',
-    activeWordBgOpacity: 0,
-    activeWordBgRadius: 4,
-    useSpeakerColors: true,
-    playbackVolume: 100,
-    playbackSpeed: 1.0,
-  }), []);
+  const CLIP_SETTINGS_DEFAULTS = React.useMemo(() => ({ ...DEFAULT_CLIP_SETTINGS }), []);
   const [clipSettings, setClipSettings] = useState(CLIP_SETTINGS_DEFAULTS);
   const clipSettingsLoadedFromServer = useRef(false);
   const skipNextServerSave = useRef(false);
@@ -829,8 +801,26 @@ export default function Analysis() {
     const savedSegments = clipSegmentsMapRef.current[clip.id] || loadSegmentsFromStorage(clip.id);
     clipSegmentsMapRef.current[clip.id] = savedSegments;
     setEditorSegments(savedSegments);
+
+    // ── Eagerly populate timeline store with clip-filtered subtitles ──
+    // The timeline store is a global singleton. Before React re-renders,
+    // it still has subtitle items from the previous editor (full-video or
+    // another clip). SubtitleOverlay reads from this store during render.
+    // By calling initFromClip synchronously here, the store has the correct
+    // clip-contextual items before the first render of the new VideoEditor.
+    const fullTranscript = job.translated_transcript?.length
+      ? job.translated_transcript
+      : (job.transcript || []);
+    useTimelineStore.getState().initFromClip({
+      src: `/api/files/${jobId}/video.${job.file_path?.split('.').pop() || 'mp4'}`,
+      clipStart: clip.start_time,
+      clipEnd: clip.end_time,
+      subtitleSegments: fullTranscript,
+    });
+
     setClipPreview(clip);
-    handleSeek(clip.start_time);
+    // NOTE: handleSeek removed — VideoEditor auto-seeks to clipStart on remount
+    // via key={`clip-${clipPreview.id}`} triggering fresh mount with auto-seek effect.
     setTab(3);
   };
 
@@ -901,6 +891,27 @@ export default function Analysis() {
     }
     if (overlays.warnings.length > 0) {
       for (const w of overlays.warnings) console.warn(`[Export] ${w}`);
+    }
+
+    // Include user-edited subtitle timing/text from the timeline store so the
+    // export uses actual item durations/text (may have been resized or edited).
+    // Mirrors ExportDialog.jsx logic.
+    const subtitleItemsForExport = timelineItems
+      .filter(it => it.type === 'subtitle')
+      .sort((a, b) => a.start - b.start)
+      .map(it => ({
+        start: (it.start || 0) + clip.start_time,
+        end: (it.end || 0) + clip.start_time,
+        text: it.subtitleText || '',
+        speaker: it.speaker || '',
+        words: it.words ? it.words.map(w => ({
+          start: (w.start || 0) + clip.start_time,
+          end: (w.end || 0) + clip.start_time,
+          word: w.text || w.word || '',
+        })) : null,
+      }));
+    if (subtitleItemsForExport.length > 0) {
+      exportBody.edited_subtitle_segments = subtitleItemsForExport;
     }
 
     // Diagnostic logging: full export payload for debugging overlay/settings issues
@@ -979,6 +990,25 @@ export default function Analysis() {
     }
     if (fvOverlays.warnings.length > 0) {
       for (const w of fvOverlays.warnings) console.warn(`[Export] ${w}`);
+    }
+
+    // Include edited subtitle segments for full video export
+    const fvSubtitleItems = timelineItems
+      .filter(it => it.type === 'subtitle')
+      .sort((a, b) => a.start - b.start)
+      .map(it => ({
+        start: (it.start || 0) + (fullVideoRange ? fullVideoRange.start : 0),
+        end: (it.end || 0) + (fullVideoRange ? fullVideoRange.start : 0),
+        text: it.subtitleText || '',
+        speaker: it.speaker || '',
+        words: it.words ? it.words.map(w => ({
+          start: (w.start || 0) + (fullVideoRange ? fullVideoRange.start : 0),
+          end: (w.end || 0) + (fullVideoRange ? fullVideoRange.start : 0),
+          word: w.text || w.word || '',
+        })) : null,
+      }));
+    if (fvSubtitleItems.length > 0) {
+      body.edited_subtitle_segments = fvSubtitleItems;
     }
 
     encoding.startExport(jobId, 0, job.filename || 'Full Video', body, {
@@ -1081,15 +1111,17 @@ export default function Analysis() {
     setGenSettings((prev) => ({ ...prev, [key]: value }));
   };
 
-  // Auto-apply flash indicator: show when settings change while clip preview is open
+  // Auto-apply flash indicator: deep compare to avoid spam from reference changes
+  const prevClipSettingsJsonRef = useRef('');
   useEffect(() => {
-    if (!clipPreview) { prevClipSettingsRef.current = clipSettings; return; }
-    if (prevClipSettingsRef.current !== clipSettings) {
-      prevClipSettingsRef.current = clipSettings;
+    const json = JSON.stringify(clipSettings);
+    if (!clipPreview) { prevClipSettingsJsonRef.current = json; return; }
+    if (prevClipSettingsJsonRef.current && prevClipSettingsJsonRef.current !== json) {
       setSettingsAppliedFlash(true);
       if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current);
       settingsAppliedTimerRef.current = setTimeout(() => setSettingsAppliedFlash(false), 1800);
     }
+    prevClipSettingsJsonRef.current = json;
   }, [clipSettings, clipPreview]);
   useEffect(() => () => { if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current); }, []);
 
@@ -1859,6 +1891,7 @@ export default function Analysis() {
           <div style={{ position: 'relative', width: isMobile ? '100%' : '85vw', maxWidth: '1600px', margin: '0 auto' }}>
             <VideoEditorBoundary>
             <VideoEditor
+              key={`clip-${clipPreview.id}`}
               src={videoSrc}
               clipStart={clipPreview.start_time}
               clipEnd={clipPreview.end_time}
@@ -1902,6 +1935,18 @@ export default function Analysis() {
                   clipSegmentsMapRef.current[clipPreview.id] = editorSegments;
                   saveSegmentsToStorage(clipPreview.id, editorSegments);
                 }
+                // Eagerly populate store with full-video subtitles before re-rendering
+                const fvTranscript = job.translated_transcript?.length
+                  ? job.translated_transcript
+                  : (job.transcript || []);
+                const fvStart = fullVideoRange ? fullVideoRange.start : 0;
+                const fvEnd = fullVideoRange ? fullVideoRange.end : (job.duration || 0);
+                useTimelineStore.getState().initFromClip({
+                  src: `/api/files/${jobId}/video.${job.file_path?.split('.').pop() || 'mp4'}`,
+                  clipStart: fvStart,
+                  clipEnd: fvEnd,
+                  subtitleSegments: fvTranscript,
+                });
                 setClipPreview(null);
               }}
               subtitleOverlay={

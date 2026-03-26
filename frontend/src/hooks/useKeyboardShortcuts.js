@@ -18,10 +18,19 @@ export default function useKeyboardShortcuts({
   const removeItems = useTimelineStore((s) => s.removeItems);
   const splitItem = useTimelineStore((s) => s.splitItem);
 
-  // Arrow key hold-to-repeat state
+  // Stable refs for all callback props — prevents effect re-registration
+  // from killing arrow hold intervals when parent re-renders
   const arrowHoldRef = useRef({ key: null, interval: null });
   const onSkipTimeRef = useRef(onSkipTime);
   onSkipTimeRef.current = onSkipTime;
+  const onTogglePlayRef = useRef(onTogglePlay);
+  onTogglePlayRef.current = onTogglePlay;
+  const onSeekRef = useRef(onSeek);
+  onSeekRef.current = onSeek;
+  const onToggleMuteRef = useRef(onToggleMute);
+  onToggleMuteRef.current = onToggleMute;
+  const onShuttleSpeedRef = useRef(onShuttleSpeed);
+  onShuttleSpeedRef.current = onShuttleSpeed;
 
   const handleKeyDown = useCallback((e) => {
     if (!enabled) return;
@@ -87,7 +96,7 @@ export default function useKeyboardShortcuts({
       // Transport
       case 'Space':
         e.preventDefault();
-        onTogglePlay?.();
+        onTogglePlayRef.current?.();
         break;
       case 'ArrowLeft':
       case 'ArrowRight': {
@@ -116,31 +125,31 @@ export default function useKeyboardShortcuts({
       // J/K/L shuttle
       case 'KeyJ':
         e.preventDefault();
-        onShuttleSpeed?.('reverse');
+        onShuttleSpeedRef.current?.('reverse');
         break;
       case 'KeyK':
         e.preventDefault();
-        onShuttleSpeed?.('stop');
+        onShuttleSpeedRef.current?.('stop');
         break;
       case 'KeyL':
         e.preventDefault();
-        onShuttleSpeed?.('forward');
+        onShuttleSpeedRef.current?.('forward');
         break;
 
       // Home/End
       case 'Home':
         e.preventDefault();
-        onSeek?.(0);
+        onSeekRef.current?.(0);
         break;
       case 'End':
         e.preventDefault();
-        onSeek?.(useTimelineStore.getState().duration);
+        onSeekRef.current?.(useTimelineStore.getState().duration);
         break;
 
       // Mute
       case 'KeyM':
         e.preventDefault();
-        onToggleMute?.();
+        onToggleMuteRef.current?.();
         break;
 
       // Tool selection
@@ -209,8 +218,7 @@ export default function useKeyboardShortcuts({
         }
         break;
     }
-  }, [enabled, onTogglePlay, onSeek, onToggleMute, onShuttleSpeed,
-      setActiveTool, removeItem, removeItems, splitItem]);
+  }, [enabled, setActiveTool, removeItem, removeItems, splitItem]);
 
   const handleKeyUp = useCallback((e) => {
     if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {

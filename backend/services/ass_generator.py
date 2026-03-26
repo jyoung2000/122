@@ -1293,3 +1293,98 @@ def generate_ass(
     )
 
     return "\n".join(lines) + "\n"
+
+
+def append_text_overlays_to_ass(
+    ass_content: str,
+    text_overlays: list[dict],
+    clip_start: float = 0,
+    video_out_w: int = 1920,
+    video_out_h: int = 1080,
+) -> str:
+    """Append text overlay items as ASS dialogue events.
+
+    Used when FFmpeg's drawtext filter is unavailable. Converts each
+    text overlay to an ASS Dialogue line with positioning, font,
+    color, and timing that matches the preview.
+    """
+    if not text_overlays:
+        return ass_content
+
+    _PREVIEW_REF = 960
+    res_scale = max(video_out_w, video_out_h) / _PREVIEW_REF
+
+    new_styles = []
+    new_events = []
+
+    for i, overlay in enumerate(text_overlays):
+        text = overlay.get("text", "").strip()
+        if not text:
+            continue
+
+        start_t = max(0, overlay.get("start_time", 0) - clip_start)
+        end_t = max(0, overlay.get("end_time", 0) - clip_start)
+        if end_t <= start_t:
+            continue
+
+        pos_x = int((overlay.get("x", 50) / 100.0) * video_out_w)
+        pos_y = int((overlay.get("y", 50) / 100.0) * video_out_h)
+
+        font_size = max(8, int(round(overlay.get("font_size", 48) * res_scale)))
+        font_family = overlay.get("font_family", "Arial")
+        font_color = overlay.get("font_color", "#FFFFFF")
+        font_weight = overlay.get("font_weight", 400)
+        if isinstance(font_weight, str):
+            font_weight = 700 if font_weight.lower() == "bold" else 400
+        is_bold = 1 if int(font_weight) >= 600 else 0
+
+        primary_color = _hex_to_ass_color(font_color)
+        outline_width = max(0, int(round(overlay.get("outline_width", 0) * res_scale / 2)))
+        outline_color = _hex_to_ass_color(overlay.get("outline_color", "#000000"))
+
+        shadow_x = int(round(overlay.get("shadow_offset_x", 0) * res_scale))
+        shadow_y = int(round(overlay.get("shadow_offset_y", 0) * res_scale))
+        shadow_depth = max(abs(shadow_x), abs(shadow_y))
+
+        opacity = overlay.get("opacity", 1.0)
+        alpha = max(0, min(255, int((1 - opacity) * 255)))
+        alpha_tag = f"\\1a&H{alpha:02X}&" if alpha > 0 else ""
+
+        style_name = f"TextOverlay{i + 1}"
+        align = 5  # Middle-center, positioned with \pos
+
+        style_line = (
+            f"Style: {style_name},{font_family},{font_size},"
+            f"{primary_color},&H000000FF&,{outline_color},&H00000000&,"
+            f"{is_bold},0,0,0,100,100,0,0,1,{outline_width},{shadow_depth},"
+            f"{align},10,10,10,1"
+        )
+        new_styles.append(style_line)
+
+        start_ts = _format_ass_time(start_t)
+        end_ts = _format_ass_time(end_t)
+        text_escaped = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+        text_escaped = text_escaped.replace("\n", "\\N")
+        override = f"{{\\pos({pos_x},{pos_y}){alpha_tag}}}"
+
+        event_line = f"Dialogue: 10,{start_ts},{end_ts},{style_name},,0,0,0,,{override}{text_escaped}"
+        new_events.append(event_line)
+
+    if not new_events:
+        return ass_content
+
+    lines = ass_content.split("\n")
+
+    # Insert new styles after the last existing Style: line
+    last_style_idx = -1
+    for idx, line in enumerate(lines):
+        if line.startswith("Style:"):
+            last_style_idx = idx
+    if last_style_idx >= 0:
+        for j, style in enumerate(new_styles):
+            lines.insert(last_style_idx + 1 + j, style)
+
+    # Append dialogue events at the end
+    lines.extend(new_events)
+
+    return "\n".join(lines)

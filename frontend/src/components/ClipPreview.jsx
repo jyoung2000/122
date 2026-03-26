@@ -510,6 +510,9 @@ export default function ClipPreview({
 
   // --- Dynamic subject tracking: update objectPosition via rAF for smooth ~60fps updates ---
   const srcRatio = sourceWidth / sourceHeight;
+  const lastAppliedPctRef = useRef(null);
+  const transitionStartRef = useRef(null);
+  const TRANSITION_DURATION = 0.3; // 300ms for aspect ratio transitions
   useEffect(() => {
     if (!hasDynamicSubject) return;
     const video = fgVideoRef.current;
@@ -521,11 +524,37 @@ export default function ClipPreview({
       `[SubjectTracking] DYNAMIC mode active (rAF): R=${R.toFixed(3)} (src=${srcRatio.toFixed(3)}, target=${targetRatio.toFixed(3)}), ` +
       `${subjectKeyframes.length} keyframes`
     );
+    // If we have a previous position, start a smooth transition
+    if (lastAppliedPctRef.current !== null) {
+      transitionStartRef.current = performance.now();
+    }
+    // Apply initial position synchronously to eliminate 1-2 frame gap
+    // between effect cleanup and first rAF tick
+    {
+      const initRel = video.currentTime - clipStart;
+      const initSx = interpolateSubjectX(subjectKeyframes, initRel);
+      const initPct = subjectXToCenterPct(Math.max(0, Math.min(100, initSx)), srcRatio, targetRatio);
+      video.style.objectPosition = `${initPct}% 50%`;
+      if (lastAppliedPctRef.current === null) {
+        lastAppliedPctRef.current = initPct;
+      }
+    }
     let animId;
     const tick = () => {
       const relTime = video.currentTime - clipStart;
       const sx = interpolateSubjectX(subjectKeyframes, relTime);
-      const centerPct = subjectXToCenterPct(Math.max(0, Math.min(100, sx)), srcRatio, targetRatio);
+      let centerPct = subjectXToCenterPct(Math.max(0, Math.min(100, sx)), srcRatio, targetRatio);
+      // Smooth transition when aspect ratio just changed
+      if (transitionStartRef.current !== null && lastAppliedPctRef.current !== null) {
+        const elapsed = (performance.now() - transitionStartRef.current) / 1000;
+        if (elapsed < TRANSITION_DURATION) {
+          const t = elapsed / TRANSITION_DURATION;
+          const eased = t * t * (3 - 2 * t); // smoothstep
+          centerPct = lastAppliedPctRef.current + (centerPct - lastAppliedPctRef.current) * eased;
+        } else {
+          transitionStartRef.current = null;
+        }
+      }
       // Only update DOM if value actually changed (avoid layout thrashing)
       // Use higher precision — 4 decimal places eliminates visible stepping
       // while still preventing unnecessary DOM updates
@@ -533,6 +562,7 @@ export default function ClipPreview({
       if (rounded !== lastPct) {
         video.style.objectPosition = `${centerPct}% 50%`;
         lastPct = rounded;
+        lastAppliedPctRef.current = centerPct;
         // Log first 5 updates and then every 30th for debugging
         if (logCount < 5 || logCount % 30 === 0) {
           console.log(
@@ -560,7 +590,7 @@ export default function ClipPreview({
     if (hasDynamicSubject || !isCrop) return;
     const video = fgVideoRef.current;
     if (!video) return;
-    const sx = safeSubjectX(subjectX);
+    const sx = safeSubjectX(subjectX, srcRatio, targetRatio);
     const centerPct = subjectXToCenterPct(
       Math.max(0, Math.min(100, sx)), srcRatio, targetRatio,
     );
@@ -841,7 +871,11 @@ export default function ClipPreview({
   };
 
   // --- Video area ---
+  // Single wrapper div (no key="crop"/"original") to preserve the <video> element
+  // across crop/non-crop transitions. Different keys would destroy and recreate
+  // the video element, causing flash and loss of playback position.
   const renderVideoArea = () => {
+    const srcRatioLocal = sourceWidth / sourceHeight;
     const videoStyle = {
       width: '100%',
       height: '100%',
@@ -849,43 +883,25 @@ export default function ClipPreview({
     };
 
     if (isCrop) {
-      // Crop-to-fill: use objectFit cover with subject-centered positioning
-      const initialSx = hasDynamicSubject ? subjectKeyframes[0].x : safeSubjectX(subjectX);
-      const srcRatio = sourceWidth / sourceHeight;
-      const centerPct = subjectXToCenterPct(Math.max(0, Math.min(100, initialSx)), srcRatio, targetRatio);
-      const R = srcRatio / targetRatio;
-      console.log(
-        `[SubjectTracking] INITIAL: mode=${hasDynamicSubject ? 'DYNAMIC' : 'STATIC'}, ` +
-        `sx=${initialSx}, R=${R.toFixed(3)}, objectPosition=${centerPct.toFixed(2)}% 50%, ` +
-        `src=${sourceWidth}x${sourceHeight}, aspect=${aspectRatio}`
-      );
-      return (
-        <div key="crop" style={{ position: 'relative', width: '100%', height: '100%' }}>
-          <video
-            ref={fgVideoRef}
-            src={src}
-            playsInline
-            style={{
-              ...videoStyle,
-              objectFit: 'cover',
-              objectPosition: `${centerPct}% 50%`,
-            }}
-            onClick={togglePlay}
-          />
-        </div>
-      );
+      const initialSx = hasDynamicSubject ? subjectKeyframes[0].x : safeSubjectX(subjectX, srcRatioLocal, targetRatio);
+      const centerPct = subjectXToCenterPct(Math.max(0, Math.min(100, initialSx)), srcRatioLocal, targetRatio);
+      Object.assign(videoStyle, {
+        objectFit: 'cover',
+        objectPosition: `${centerPct}% 50%`,
+      });
+    } else {
+      Object.assign(videoStyle, {
+        objectFit: 'contain',
+      });
     }
 
     return (
-      <div key="original" style={{ position: 'relative', width: '100%', height: '100%' }}>
+      <div style={{ position: 'relative', width: '100%', height: '100%' }}>
         <video
           ref={fgVideoRef}
           src={src}
           playsInline
-          style={{
-            ...videoStyle,
-            objectFit: 'contain',
-          }}
+          style={videoStyle}
           onClick={togglePlay}
         />
       </div>

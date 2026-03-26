@@ -79,7 +79,7 @@ function findSnapTarget(candidateTime, items, excludeItemId, playhead, duration,
   return null;
 }
 
-export default function Timeline({ compact = false, onSeek, onItemSelect }) {
+export default function Timeline({ compact = false, onSeek, onItemSelect, onSubtitleVisibilityChange }) {
   const canvasRef = useRef(null);
   const containerRef = useRef(null);
 
@@ -1173,12 +1173,29 @@ export default function Timeline({ compact = false, onSeek, onItemSelect }) {
                       {track.name}
                     </span>
                   )}
+                  {track.type === 'subtitle' && isHidden && (
+                    <span style={{
+                      fontSize: 9,
+                      color: 'var(--ve-text-muted, #999)',
+                      marginLeft: 4,
+                      opacity: 0.6,
+                    }}>
+                      (hidden)
+                    </span>
+                  )}
                 </span>
                 {/* Controls row */}
                 <div style={{ display: 'flex', gap: 1 }}>
                   {/* Visibility toggle (eye icon) — preview only */}
                   <button
-                    onClick={(e) => { e.stopPropagation(); toggleTrackVisibility(track.id); }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleTrackVisibility(track.id);
+                      // Sync subtitle track visibility to settings
+                      if (track.type === 'subtitle' && onSubtitleVisibilityChange) {
+                        onSubtitleVisibilityChange(!(track.visible !== false));
+                      }
+                    }}
                     title={isHidden ? `Show ${track.name} in preview` : `Hide ${track.name} from preview (still in export)`}
                     className="ve-multi-timeline__track-ctrl"
                     style={{

@@ -12,6 +12,14 @@ import re
 _IS_WINDOWS = platform.system() == "Windows"
 _IS_MACOS = platform.system() == "Darwin"
 
+# Check if ffmpeg has drawtext filter (requires libfreetype at compile time)
+_HAS_DRAWTEXT = False
+try:
+    _dt_check = subprocess.run(["ffmpeg", "-filters"], capture_output=True, text=True, timeout=5)
+    _HAS_DRAWTEXT = "drawtext" in _dt_check.stdout
+except Exception:
+    pass
+
 from backend.config import settings as app_settings
 from backend.models import TranscriptSegment
 from backend.services.ass_generator import (
@@ -29,6 +37,12 @@ from backend.services.ass_generator import (
 )
 
 logger = logging.getLogger(__name__)
+
+if not _HAS_DRAWTEXT:
+    logger.warning(
+        "FFmpeg 'drawtext' filter not available — "
+        "text overlays will be rendered via ASS subtitles instead"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2338,8 +2352,22 @@ def _apply_dead_zone(
     snapped_count = 0
     for i in range(1, len(keyframes)):
         t, sx = keyframes[i]
+        prev_t, prev_sx = keyframes[i - 1]
+        dt = t - prev_t
+        # Velocity-aware dead zone: reduce threshold when subject moves consistently
+        actual_threshold = effective_threshold
+        if dt > 0:
+            velocity = (sx - prev_sx) / dt
+            same_direction = False
+            if i >= 2:
+                prev_prev_t, prev_prev_sx = keyframes[i - 2]
+                prev_dt = prev_t - prev_prev_t
+                if prev_dt > 0:
+                    prev_velocity = (prev_sx - prev_prev_sx) / prev_dt
+                    same_direction = (velocity > 0 and prev_velocity > 0) or (velocity < 0 and prev_velocity < 0)
+            actual_threshold = effective_threshold * (0.6 if same_direction else 1.0)
         drift_from_anchor = abs(sx - anchor)
-        if drift_from_anchor >= effective_threshold:
+        if drift_from_anchor >= actual_threshold:
             # Subject has drifted far enough from anchor — move to new position
             result.append((t, sx))
             anchor = sx  # Reset anchor to new committed position
@@ -2359,7 +2387,7 @@ def _apply_dead_zone(
 
 def _smooth_keyframes_bidirectional(
     keyframes: list[tuple[float, int]],
-    max_speed: float = 15.0,
+    max_speed: float = 22.0,
 ) -> list[tuple[float, int]]:
     """Damped-lerp with hold-then-move for human-like camera motion.
 
@@ -2371,8 +2399,8 @@ def _smooth_keyframes_bidirectional(
     if len(keyframes) <= 1:
         return list(keyframes)
 
-    MIN_HOLD_TIME = 0.5    # Seconds to hold before panning
-    EASE_FACTOR = 0.12     # Per-step lerp factor
+    MIN_HOLD_TIME = 0.3    # Seconds to hold before panning
+    EASE_FACTOR = 0.18     # Per-step lerp factor
     dt_step = 0.016        # 16ms simulation step
 
     result = [keyframes[0]]
@@ -2464,7 +2492,7 @@ def _merge_holds(
 
 def _compress_range(
     keyframes: list[tuple[float, int]],
-    max_range: int = 20,
+    max_range: int = 30,
 ) -> list[tuple[float, int]]:
     """Compress the range of subject_x values to prevent erratic swinging.
 
@@ -3852,8 +3880,8 @@ async def _render_shape_to_png(shape: dict, video_width: int, video_height: int,
             return None
 
         if proc.returncode != 0:
-            logger.warning("Shape %d (%s) render failed: %s", idx, shape_type,
-                           stderr.decode()[:500] if stderr else "unknown error")
+            stderr_text = stderr.decode(errors="replace")[-1000:] if stderr else "unknown error"
+            logger.warning("Shape %d (%s) render failed: %s", idx, shape_type, stderr_text)
             return None
 
         if os.path.isfile(png_path):
@@ -4279,6 +4307,9 @@ def _build_unified_overlay_chain(
         item_id = entry.get("id")
 
         if item_type == "text":
+            if not _HAS_DRAWTEXT:
+                logger.info("Unified chain: skipping text '%s' (drawtext unavailable, rendered via ASS)", str(item_id)[:20])
+                continue
             if item_id not in text_by_id:
                 logger.warning("Unified chain: text '%s' NOT in text_by_id — SKIPPED", item_id)
                 warnings.append(f"text '{item_id}' not found")
@@ -4862,6 +4893,25 @@ async def export_clip(
                     f.write(ass_content)
                 logger.info("ASS file written: %s (%d bytes)", ass_path, len(ass_content))
 
+                # ── Text overlays via ASS when drawtext unavailable ──
+                if has_text_overlays and not _HAS_DRAWTEXT:
+                    logger.info(
+                        "drawtext unavailable — rendering %d text overlay(s) via ASS for clip %s",
+                        len(text_overlays), clip_id,
+                    )
+                    from backend.services.ass_generator import append_text_overlays_to_ass
+                    with open(ass_path, "r", encoding="utf-8") as f:
+                        _ass = f.read()
+                    _ass = append_text_overlays_to_ass(
+                        _ass, text_overlays,
+                        clip_start=start,
+                        video_out_w=video_width,
+                        video_out_h=video_height,
+                    )
+                    with open(ass_path, "w", encoding="utf-8") as f:
+                        f.write(_ass)
+                    has_text_overlays = False  # Prevent drawtext from being added to filter chain
+
                 # ── Diagnostic: verify two-layer architecture ──
                 # Log whether the ASS uses the two-layer approach for active
                 # word mode so we can confirm the black-bar fix is active.
@@ -4931,6 +4981,38 @@ async def export_clip(
                     "segments overlap clip range %.1f-%.1f (%d total segments)",
                     clip_id, start, end, len(transcript),
                 )
+
+        # If subtitles are off but text overlays need ASS (drawtext unavailable),
+        # create a minimal ASS file just for text overlays.
+        if has_text_overlays and not _HAS_DRAWTEXT and not ass_path:
+            logger.info(
+                "Creating ASS file for %d text overlay(s) (subs disabled, drawtext unavailable) clip %s",
+                len(text_overlays), clip_id,
+            )
+            from backend.services.ass_generator import append_text_overlays_to_ass
+            _minimal_ass = (
+                "[Script Info]\nScriptType: v4.00+\n"
+                f"PlayResX: {video_width}\nPlayResY: {video_height}\n"
+                "ScaledBorderAndShadow: yes\n\n"
+                "[V4+ Styles]\n"
+                "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+                "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+                "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+                "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+                "Style: Default,Arial,48,&H00FFFFFF&,&H000000FF&,&H00000000&,"
+                "&H00000000&,0,0,0,0,100,100,0,0,1,2,0,2,10,10,10,1\n\n"
+                "[Events]\n"
+                "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+            )
+            _minimal_ass = append_text_overlays_to_ass(
+                _minimal_ass, text_overlays,
+                clip_start=start, video_out_w=video_width, video_out_h=video_height,
+            )
+            ass_path = os.path.join(output_dir, f"clip_{clip_id}_textoverlay.ass")
+            with open(ass_path, "w", encoding="utf-8") as f:
+                f.write(_minimal_ass)
+            subtitles_enabled = True  # Enable subtitle filter to render text overlays
+            has_text_overlays = False  # Don't add drawtext to filter chain
 
         _check_cancel()
 
@@ -5078,7 +5160,7 @@ async def export_clip(
             _overlay_warnings: list[str] = list(_shape_warnings)
             _text_vf_for_post_concat = ""
             _use_unified_compositing = bool(overlay_compositing_order) and (has_text_overlays or has_image_overlays)
-            if has_text_overlays and text_overlays and not _use_unified_compositing:
+            if has_text_overlays and _HAS_DRAWTEXT and text_overlays and not _use_unified_compositing:
                 text_vf, _tw = _build_text_overlay_filters(text_overlays, clip_start=start, video_out_w=video_width, video_out_h=video_height)
                 _overlay_warnings.extend(_tw)
                 if text_vf:
@@ -5717,9 +5799,16 @@ async def export_clip(
 
             if proc.returncode != 0:
                 _stderr_text = stderr.decode(errors="replace")
-                # Take the TAIL of stderr — the actual error is at the end,
-                # not the FFmpeg version/config preamble at the start.
-                raise RuntimeError(f"Clip export failed: {_stderr_text[-3000:]}")
+                # Extract actual error lines (skip the FFmpeg version banner)
+                _error_lines = [
+                    line.strip() for line in _stderr_text.split("\n")
+                    if line.strip() and any(kw in line.lower() for kw in [
+                        "error", "no such filter", "filter not found", "failed",
+                        "invalid", "no space", "permission denied", "cannot",
+                    ])
+                ]
+                _error_msg = "\n".join(_error_lines[-5:]) if _error_lines else _stderr_text[-1500:]
+                raise RuntimeError(f"Clip export failed:\n{_error_msg}")
         else:
             # No filters — use stream copy for speed
             await _notify(f"Exporting clip {clip_id} (stream copy — fast mode)")
@@ -5779,7 +5868,8 @@ async def export_clip(
                 )
                 _, stderr = await proc.communicate()
                 if proc.returncode != 0:
-                    raise RuntimeError(f"Clip export failed: {stderr.decode()[:2000]}")
+                    stderr_tail = stderr.decode(errors="replace")[-2000:] if stderr else "unknown error"
+                    raise RuntimeError(f"Clip export failed:\n{stderr_tail}")
 
         # QA validation: verify the exported file is valid
         await _notify(f"Validating export for clip {clip_id}...")

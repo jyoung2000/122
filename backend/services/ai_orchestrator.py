@@ -94,12 +94,18 @@ class AIOrchestrator:
     Circuit breaker: marks provider degraded for 15 min after 3 failures in 10 min.
     """
 
+    # Model downgrade fallback for consecutive Ollama failures
+    _SMALLER_MODELS = ["qwen2.5:1.5b-instruct", "qwen2.5:0.5b-instruct", "tinyllama"]
+    _FAILURE_THRESHOLD_FOR_DOWNGRADE = 3
+
     def __init__(self, ws_broadcast=None, custom_prompts=None, cancel_check=None):
         self._circuit_breaker = _CircuitBreaker()
         self._ws_broadcast = ws_broadcast
         self._custom_prompts = custom_prompts  # PromptSet or None
         self._cancel_check = cancel_check  # callable that raises on cancel
         self._providers: dict[str, AIProvider] = {}
+        self._consecutive_ollama_failures: int = 0
+        self._current_model_override: str | None = None
         for name in settings.active_provider_chain:
             p = _build_provider(name)
             if p:
@@ -546,6 +552,38 @@ class AIOrchestrator:
             return _partial_clips, "partial"
         raise AllProvidersFailedError("All providers failed for viral clip detection")
 
+    async def _maybe_downgrade_ollama_model(self, provider) -> None:
+        """After consecutive Ollama failures, clear VRAM and try a smaller model."""
+        self._consecutive_ollama_failures += 1
+        if self._consecutive_ollama_failures < self._FAILURE_THRESHOLD_FOR_DOWNGRADE:
+            return
+
+        logger.warning(
+            "Ollama model failed %d times consecutively. Attempting VRAM clear and model downgrade.",
+            self._consecutive_ollama_failures,
+        )
+
+        # Clear VRAM
+        if hasattr(provider, 'clear_vram'):
+            await provider.clear_vram()
+
+        # Try smaller models
+        import httpx as _httpx
+        for smaller_model in self._SMALLER_MODELS:
+            try:
+                async with _httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.post(
+                        f"{provider._host}/api/show",
+                        json={"model": smaller_model},
+                    )
+                    if resp.status_code == 200:
+                        logger.info("Downgrading to smaller model: %s", smaller_model)
+                        self._current_model_override = smaller_model
+                        self._consecutive_ollama_failures = 0
+                        return
+            except Exception:
+                continue
+
     async def text_completion(self, prompt: str, max_tokens: int = 4096, timeout: float = 60, job_id: str = "", skip_circuit_breaker: bool = False) -> str:
         """Generic text completion using the configured provider chain.
 
@@ -562,7 +600,18 @@ class AIOrchestrator:
         for provider in self._get_active_chain():
             pname = provider.provider_name
             model_name = provider.text_model_name
+            # Apply model override for Ollama if we've downgraded after failures
+            if pname == "ollama" and self._current_model_override:
+                model_name = self._current_model_override
+                # Temporarily override the provider's text model
+                original_model = provider._text_model
+                provider._text_model = self._current_model_override
+            else:
+                original_model = None
             try:
+                # Clear VRAM before first Ollama call in a job
+                if pname == "ollama" and hasattr(provider, 'clear_vram') and self._consecutive_ollama_failures == 0 and not self._current_model_override:
+                    await provider.clear_vram()
                 logger.info("text_completion attempting via %s model=%s (%d chars prompt)", pname, model_name, len(prompt))
                 t0 = time.monotonic()
                 result = await asyncio.wait_for(
@@ -573,19 +622,30 @@ class AIOrchestrator:
                 logger.info("text_completion via %s model=%s completed in %.1fs", pname, model_name, elapsed)
                 if not skip_circuit_breaker:
                     self._circuit_breaker.record_success(pname)
+                # Reset consecutive failure counter on success
+                if pname == "ollama":
+                    self._consecutive_ollama_failures = 0
                 return result
             except asyncio.TimeoutError:
                 if not skip_circuit_breaker:
                     self._circuit_breaker.record_failure(pname)
                 logger.warning("text_completion via %s model=%s timed out after %.0fs — trying next provider", pname, model_name, timeout)
+                if pname == "ollama":
+                    await self._maybe_downgrade_ollama_model(provider)
                 await self._notify_fallback(job_id, pname, f"Text completion timed out after {timeout:.0f}s (model={model_name})")
                 continue
             except Exception as e:
                 if not skip_circuit_breaker:
                     self._circuit_breaker.record_failure(pname)
                 logger.warning("text_completion via %s model=%s failed: %s — trying next provider", pname, model_name, e)
+                if pname == "ollama" and ("stalled" in str(e).lower() or "overloaded" in str(e).lower()):
+                    await self._maybe_downgrade_ollama_model(provider)
                 await self._notify_fallback(job_id, pname, str(e))
                 continue
+            finally:
+                # Restore original model if we overrode it
+                if original_model is not None:
+                    provider._text_model = original_model
         raise AllProvidersFailedError("All providers failed for text completion")
 
     async def generate_seo(

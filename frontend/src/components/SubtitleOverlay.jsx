@@ -239,24 +239,29 @@ export default function SubtitleOverlay({
   const updateItem = useTimelineStore((s) => s.updateItem);
 
   // Check if subtitle track is hidden via the eye icon toggle
+  // This IS the single source of truth — settings.subtitlesEnabled syncs TO this
+  // via the useEffect in VideoEditor (FIX 2)
   const subtitleTrackVisible = useMemo(() => {
     const subTrack = tracks.find((t) => t.type === 'subtitle');
     return subTrack ? subTrack.visible !== false : true;
   }, [tracks]);
 
-  const subtitlesEnabledGlobal = settings.subtitlesEnabled || false;
-
   // Per-segment subtitle override: segment's subtitlesEnabled takes precedence
-  const subtitlesEnabled = useMemo(() => {
-    if (!segments || segments.length === 0) return subtitlesEnabledGlobal;
+  const perSegmentEnabled = useMemo(() => {
+    if (!segments || segments.length === 0) return true; // no segments = always on
     const absTime = currentTime;
     for (const seg of segments) {
       if (absTime >= seg.start && absTime < seg.end) {
         return seg.subtitlesEnabled !== false;
       }
     }
-    return subtitlesEnabledGlobal;
-  }, [segments, currentTime, subtitlesEnabledGlobal]);
+    return true; // not in any segment = default on
+  }, [segments, currentTime]);
+
+  // SINGLE GATE: track visible AND per-segment enabled
+  // settings.subtitlesEnabled is NOT checked here because it's already
+  // synced to track.visible via the useEffect in VideoEditor (FIX 2)
+  const subtitlesEnabled = subtitleTrackVisible && perSegmentEnabled;
 
   // Track container size for font scaling
   useEffect(() => {

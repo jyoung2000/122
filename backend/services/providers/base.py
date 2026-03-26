@@ -527,9 +527,16 @@ class ChunkedClipDetectionMixin:
 
     @staticmethod
     def _deduplicate_clips(clips: list[ClipCandidate], max_overlap: float = 0.5) -> list[ClipCandidate]:
-        """Remove clips that overlap by more than max_overlap fraction of the shorter clip."""
+        """Remove clips that overlap or are adjacent covering the same region."""
         if len(clips) <= 1:
             return clips
+
+        # Normalize any inverted timestamps before dedup
+        for clip in clips:
+            if clip.end_time < clip.start_time:
+                clip.start_time, clip.end_time = clip.end_time, clip.start_time
+                if clip.duration <= 0:
+                    clip.duration = round(clip.end_time - clip.start_time, 1)
 
         sorted_clips = sorted(clips, key=lambda c: c.viral_score, reverse=True)
         kept: list[ClipCandidate] = []
@@ -548,6 +555,22 @@ class ChunkedClipDetectionMixin:
                         "De-dup: dropping '%s' (%.0f-%.0fs, score=%d) — overlaps %.0f%% with '%s'",
                         clip.title, clip.start_time, clip.end_time, clip.viral_score,
                         (overlap_duration / shorter_duration) * 100, existing.title,
+                    )
+                    break
+
+                # Proximity check: adjacent clips covering the same region
+                gap = min(
+                    abs(clip.start_time - existing.end_time),
+                    abs(existing.start_time - clip.end_time),
+                )
+                combined_span = max(clip.end_time, existing.end_time) - min(clip.start_time, existing.start_time)
+                combined_dur = clip.duration + existing.duration
+                if gap < 10 and combined_dur > 0 and combined_span / combined_dur < 1.3:
+                    is_duplicate = True
+                    _mixin_logger.info(
+                        "De-dup (proximity): dropping '%s' (%.0f-%.0fs) — adjacent to '%s' (%.0f-%.0fs), gap=%.0fs",
+                        clip.title, clip.start_time, clip.end_time,
+                        existing.title, existing.start_time, existing.end_time, gap,
                     )
                     break
 
@@ -774,11 +797,14 @@ class ChunkedClipDetectionMixin:
         kept = []
 
         for clip in sorted_clips:
-            clip_words = _word_set(clip.title + " " + (clip.hook_text or ""))
+            # Use TITLE ONLY for thematic similarity (hook_text dilutes Jaccard
+            # and lets clips with identical titles but different hooks survive)
+            clip_title_words = _word_set(clip.title)
             similar_count = 0
             for existing in kept:
-                existing_words = _word_set(existing.title + " " + (existing.hook_text or ""))
-                if _jaccard(clip_words, existing_words) > 0.5:
+                existing_title_words = _word_set(existing.title)
+                title_sim = _jaccard(clip_title_words, existing_title_words)
+                if title_sim > 0.6:
                     similar_count += 1
             if similar_count < max_similar:
                 kept.append(clip)
@@ -967,7 +993,10 @@ class ChunkedClipDetectionMixin:
                     len(collected_clips),
                 )
 
-        return self._deduplicate_clips(collected_clips)
+        # Don't dedup here — _multi_pass_clip_detection will dedup all clips
+        # (windowed + pass 2) together. Deduping here kills clips that would
+        # survive when considered alongside pass 2 results.
+        return collected_clips
 
     async def _multi_pass_clip_detection(
         self,
@@ -1032,7 +1061,8 @@ class ChunkedClipDetectionMixin:
             _partial_results=_partial_results,
             sequential=sequential,
             custom_prompt=custom_prompt, cancel_check=cancel_check,
-            clip_count=5,  # Cap per-window to reduce token output (5 × N windows → dedup)
+            # Scale per-window: longer videos need more candidates to survive dedup
+            clip_count=min(8, max(3, num_clips // 3)),
             min_duration=min_duration, max_duration=max_duration,
             video_summary=video_summary, existing_clips=existing_clips,
             progress_callback=progress_callback,
@@ -1135,14 +1165,18 @@ class ChunkedClipDetectionMixin:
         if progress_callback:
             await progress_callback("pass3_merge", {"raw": len(all_clips)})
         raw_count = len(all_clips)
-        all_clips = self._deduplicate_clips(all_clips, max_overlap=0.4)
+        all_clips = self._deduplicate_clips(all_clips, max_overlap=0.6)
+        after_overlap = len(all_clips)
         all_clips = self._deduplicate_thematic(all_clips, max_similar=2)
+        after_thematic = len(all_clips)
         all_clips.sort(key=lambda c: c.viral_score, reverse=True)
 
         if len(all_clips) > num_clips:
             all_clips = all_clips[:num_clips]
 
         _mixin_logger.info(
-            "Multi-pass complete: %d final clips (from %d raw)", len(all_clips), raw_count,
+            "Multi-pass complete: %d raw → %d overlap-dedup → %d thematic-dedup "
+            "→ %d final (target: %d)",
+            raw_count, after_overlap, after_thematic, len(all_clips), num_clips,
         )
         return all_clips

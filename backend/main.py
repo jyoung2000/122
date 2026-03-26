@@ -15,6 +15,7 @@ from backend.routers import upload, jobs, clips, fonts, presets, settings as set
 from backend.routers import agent as agent_router
 from backend.routers import media as media_router
 from backend.routers import chunked_upload
+from backend.routers import diagnostics as diagnostics_router
 from backend.routers.api_v1 import router as api_v1_router
 
 LOG_FILE = "/data/logs/app.log"
@@ -259,11 +260,41 @@ async def _startup_preload():
             " | ".join(diag_parts),
         )
 
-    from backend.services.transcription import preload_model
-    threading.Thread(target=preload_model, daemon=True).start()
+    # Only preload Whisper in-process if we won't use subprocess transcription.
+    # When Ollama is the AI provider, the pipeline runs Whisper in a subprocess
+    # to release CTranslate2's CUDA context (~1.6GB) after transcription.
+    # Preloading here would permanently hold that VRAM, defeating subprocess
+    # isolation and leaving insufficient memory for medium/large models.
+    from backend.config import settings as cfg
+    _use_subprocess_whisper = (
+        cfg.GPU_ACCELERATION_ENABLED
+        and "ollama" in getattr(cfg, "active_provider_chain", [])
+    )
+    if _use_subprocess_whisper:
+        logger.info(
+            "Skipping Whisper preload — subprocess mode active (Ollama primary). "
+            "GPU VRAM stays free for subprocess to load %s model.",
+            cfg.WHISPER_MODEL,
+        )
+        # Populate whisper_device_info for status display without loading the model
+        from backend.services.transcription import _detect_cuda_available, whisper_device_info
+        try:
+            cuda_ok, cuda_count, gpu_name, best_idx = _detect_cuda_available()
+            if cuda_ok:
+                whisper_device_info.update({
+                    "device": "cuda",
+                    "compute_type": "float16",
+                    "gpu_name": gpu_name,
+                    "device_index": best_idx,
+                })
+                logger.info("Whisper will use GPU in subprocess: %s (float16)", gpu_name)
+        except Exception:
+            pass
+    else:
+        from backend.services.transcription import preload_model
+        threading.Thread(target=preload_model, daemon=True).start()
 
     # Pull Ollama models in the background only if Ollama is in the fallback chain.
-    from backend.config import settings as cfg
     if "ollama" in cfg.active_provider_chain:
         def _pull_ollama_models():
             import httpx
@@ -344,6 +375,7 @@ app.include_router(settings_router.router)
 app.include_router(ws.router)
 app.include_router(agent_router.router)
 app.include_router(media_router.router)
+app.include_router(diagnostics_router.router)
 app.include_router(api_v1_router)
 
 # Mount MCP server at /mcp (if mcp package is available)

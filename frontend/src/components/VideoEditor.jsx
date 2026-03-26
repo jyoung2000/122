@@ -262,8 +262,11 @@ export default function VideoEditor({
   // Runs when tracks/items/selection change (NOT on every playhead frame update)
   useEffect(() => {
     if (!timelineTracks.length || !timelineStoreItems.length) return;
+    const storeSegments = useTimelineStore.getState().segments;
     const qa = runEditorQA(timelineTracks, timelineStoreItems, {
       selectedItemId: storeSelectedItemId,
+      settings,
+      segments: storeSegments,
     });
     if (qa.errors.length > 0) {
       // Auto-fix track compatibility violations
@@ -280,7 +283,7 @@ export default function VideoEditor({
     if (process.env.NODE_ENV === 'development' && qa.violations.length > 0) {
       console.warn('[EditorQA]', qa.summary, qa.violations);
     }
-  }, [timelineTracks, timelineStoreItems, updateTimelineItem, storeSelectedItemId]);
+  }, [timelineTracks, timelineStoreItems, updateTimelineItem, storeSelectedItemId, settings]);
 
   // Initialize timeline store when clip data changes
   const addItem = useTimelineStore((s) => s.addItem);
@@ -295,9 +298,17 @@ export default function VideoEditor({
 
     // Re-init if clipEnd becomes available for the first time, or changes significantly
     const needsInit = !multiTrackInitialized.current || (lastInitClipEnd.current === 0 && effectiveEnd > 0);
-    if (!needsInit) return;
 
-    if (!recovered || timelineStoreItems.length === 0 || lastInitClipEnd.current === 0) {
+    // Also re-init if the store's video item doesn't match our clip range
+    // (can happen when useTimelinePersistence recovers stale state)
+    const videoItem = timelineStoreItems.find(it => it.type === 'video');
+    const storeClipMismatch = videoItem &&
+        (Math.abs((videoItem.trimStart || 0) - clipStart) > 0.5 ||
+         Math.abs((videoItem.trimEnd || 0) - effectiveEnd) > 0.5);
+
+    if (!needsInit && !storeClipMismatch) return;
+
+    if (!recovered || timelineStoreItems.length === 0 || lastInitClipEnd.current === 0 || storeClipMismatch) {
       // Fresh init — populate with transcript subtitles
       initFromClip({ src, clipStart, clipEnd: effectiveEnd, subtitleSegments: transcript || [] });
     } else if (recovered && transcript && transcript.length > 0) {
@@ -335,6 +346,27 @@ export default function VideoEditor({
     multiTrackInitialized.current = true;
     lastInitClipEnd.current = effectiveEnd;
   }, [src, clipStart, clipEnd, initFromClip, recovered, timelineStoreItems.length, transcript, addItem]);
+
+  // ── Sync: settings.subtitlesEnabled → timeline track visibility ──
+  // The settings toggle is the PRIMARY control for subtitle visibility.
+  // The timeline track eye icon follows it. This ensures the user always
+  // sees consistent behavior regardless of which control they use.
+  const toggleTrackVisibility = useTimelineStore((s) => s.toggleTrackVisibility);
+  useEffect(() => {
+    const subTrack = timelineTracks.find(t => t.type === 'subtitle');
+    if (!subTrack) return;
+
+    const trackVisible = subTrack.visible !== false;
+    const settingsEnabled = settings?.subtitlesEnabled ?? true;
+
+    // Sync: if settings says ON but track is hidden, show the track
+    // If settings says OFF but track is visible, hide the track
+    if (settingsEnabled && !trackVisible) {
+      toggleTrackVisibility(subTrack.id);
+    } else if (!settingsEnabled && trackVisible) {
+      toggleTrackVisibility(subTrack.id);
+    }
+  }, [settings?.subtitlesEnabled, timelineTracks, toggleTrackVisibility]);
 
   // ── Subtitle sync refs (shared by forward and reverse sync effects) ──
   const subtitleSyncTimerRef = useRef(null);
@@ -1339,10 +1371,25 @@ export default function VideoEditor({
   }, [trimmedEnd, syncTime, segments, volume, isMuted, speed]);
 
   // ── Dynamic subject tracking via rAF ───────────────
+  const lastAppliedPctRef = useRef(null);
+  const transitionStartRef = useRef(null);
+  const TRANSITION_DURATION = 0.3; // 300ms for aspect ratio transitions
   useEffect(() => {
     if (!hasDynamicSubject) return;
     const video = videoRef.current;
     if (!video) return;
+    // If we have a previous position, start a smooth transition
+    if (lastAppliedPctRef.current !== null) {
+      transitionStartRef.current = performance.now();
+    }
+    // Apply initial position synchronously to eliminate 1-2 frame gap
+    {
+      const initRel = video.currentTime - (clipStart || 0);
+      const initSx = interpolateSubjectX(subjectKeyframes, initRel);
+      const initPct = subjectXToCenterPct(initSx, srcRatio, targetRatio);
+      video.style.objectPosition = `${initPct}% 50%`;
+      if (lastAppliedPctRef.current === null) lastAppliedPctRef.current = initPct;
+    }
     let animId;
     let lastPct = null;
     const tick = () => {
@@ -1354,11 +1401,23 @@ export default function VideoEditor({
       const sx = trackingOn
         ? interpolateSubjectX(subjectKeyframes, relTime)
         : (safeSubjectX ? safeSubjectX(subjectX) : subjectX);
-      const centerPct = subjectXToCenterPct(sx, srcRatio, targetRatio);
+      let centerPct = subjectXToCenterPct(sx, srcRatio, targetRatio);
+      // Smooth transition when aspect ratio just changed
+      if (transitionStartRef.current !== null && lastAppliedPctRef.current !== null) {
+        const elapsed = (performance.now() - transitionStartRef.current) / 1000;
+        if (elapsed < TRANSITION_DURATION) {
+          const t = elapsed / TRANSITION_DURATION;
+          const eased = t * t * (3 - 2 * t); // smoothstep
+          centerPct = lastAppliedPctRef.current + (centerPct - lastAppliedPctRef.current) * eased;
+        } else {
+          transitionStartRef.current = null;
+        }
+      }
       const rounded = Math.round(centerPct * 10000) / 10000;
       if (rounded !== lastPct) {
         video.style.objectPosition = `${centerPct}% 50%`;
         lastPct = rounded;
+        lastAppliedPctRef.current = centerPct;
       }
       animId = requestAnimationFrame(tick);
     };
@@ -1612,6 +1671,31 @@ export default function VideoEditor({
     useTimelineStore.getState().setPlayhead(clamped - clipStart);
   }, [clipStart, effectiveClipEnd]);
 
+  // Expose seekTo globally so Analysis.handleSeek works when VideoEditor is active.
+  // Mirrors VideoPlayer.jsx's window.__clipai_seekTo registration.
+  useEffect(() => {
+    const mySeekTo = seekTo;
+    window.__clipai_seekTo = seekTo;
+    window.__clipai_pausePlayer = () => {
+      const video = videoRef.current;
+      if (video && !video.paused) {
+        video.pause();
+        setPlaying(false);
+      }
+    };
+    window.__clipai_getPlayerTime = () => {
+      return videoRef.current?.currentTime ?? 0;
+    };
+    return () => {
+      // Only clean up if this instance still owns the globals
+      if (window.__clipai_seekTo === mySeekTo) {
+        delete window.__clipai_seekTo;
+        delete window.__clipai_pausePlayer;
+        delete window.__clipai_getPlayerTime;
+      }
+    };
+  }, [seekTo]);
+
   const skipTime = useCallback((delta) => {
     const video = videoRef.current;
     if (!video) return;
@@ -1646,32 +1730,33 @@ export default function VideoEditor({
   }, []);
 
   // ── NLE keyboard shortcuts (only active in multi-track mode) ──
+  const handleShuttleSpeed = useCallback((dir) => {
+    if (dir === 'stop') {
+      setShuttleSpeed(0);
+      if (videoRef.current) { videoRef.current.pause(); setPlaying(false); }
+    } else if (dir === 'reverse') {
+      setShuttleSpeed(prev => {
+        if (prev > 0) return 0;
+        const steps = [0, -1, -2, -4];
+        const idx = steps.indexOf(prev);
+        return steps[Math.min(idx + 1, steps.length - 1)] ?? -1;
+      });
+    } else if (dir === 'forward') {
+      setShuttleSpeed(prev => {
+        if (prev < 0) return 0;
+        const steps = [0, 1, 2, 4];
+        const idx = steps.indexOf(prev);
+        return steps[Math.min(idx + 1, steps.length - 1)] ?? 1;
+      });
+    }
+  }, []);
   useKeyboardShortcuts({
     enabled: showMultiTrack,
     onTogglePlay: togglePlay,
     onSeek: seekTo,
     onSkipTime: skipTime,
     onToggleMute: toggleMute,
-    onShuttleSpeed: (dir) => {
-      if (dir === 'stop') {
-        setShuttleSpeed(0);
-        if (videoRef.current) { videoRef.current.pause(); setPlaying(false); }
-      } else if (dir === 'reverse') {
-        setShuttleSpeed(prev => {
-          if (prev > 0) return 0;
-          const steps = [0, -1, -2, -4];
-          const idx = steps.indexOf(prev);
-          return steps[Math.min(idx + 1, steps.length - 1)] ?? -1;
-        });
-      } else if (dir === 'forward') {
-        setShuttleSpeed(prev => {
-          if (prev < 0) return 0;
-          const steps = [0, 1, 2, 4];
-          const idx = steps.indexOf(prev);
-          return steps[Math.min(idx + 1, steps.length - 1)] ?? 1;
-        });
-      }
-    },
+    onShuttleSpeed: handleShuttleSpeed,
   });
 
   // ── Apply trim ────────────────────────────────────
@@ -1973,6 +2058,22 @@ export default function VideoEditor({
   const selectedSegmentRef = useRef(selectedSegment);
   selectedSegmentRef.current = selectedSegment;
 
+  // Stable refs for keyboard handler — prevents effect re-registration from killing arrow hold intervals
+  const togglePlayRef = useRef(togglePlay);
+  togglePlayRef.current = togglePlay;
+  const seekToRef_kb = useRef(seekTo);
+  seekToRef_kb.current = seekTo;
+  const toggleMuteRef = useRef(toggleMute);
+  toggleMuteRef.current = toggleMute;
+  const trimmedStartRef = useRef(trimmedStart);
+  trimmedStartRef.current = trimmedStart;
+  const trimmedEndRef = useRef(trimmedEnd);
+  trimmedEndRef.current = trimmedEnd;
+  const onSegmentsChangeRef = useRef(onSegmentsChange);
+  onSegmentsChangeRef.current = onSegmentsChange;
+  const showMultiTrackRef = useRef(showMultiTrack);
+  showMultiTrackRef.current = showMultiTrack;
+
   // ── Keyboard shortcuts (J-K-L shuttle control) ─────
   useEffect(() => {
     const onKeyDown = (e) => {
@@ -1984,7 +2085,7 @@ export default function VideoEditor({
 
       // When multi-track is active, useKeyboardShortcuts handles transport controls
       // (Space, Arrows, J/K/L, Home/End, M). Skip them here to avoid double-firing.
-      if (showMultiTrack) {
+      if (showMultiTrackRef.current) {
         const mtKeys = ['Space', 'ArrowLeft', 'ArrowRight', 'KeyJ', 'KeyK', 'KeyL', 'Home', 'End', 'KeyM'];
         if (mtKeys.includes(e.code)) {
           e.preventDefault();
@@ -1996,7 +2097,7 @@ export default function VideoEditor({
         case 'Space':
           e.preventDefault();
           setShuttleSpeed(0);
-          togglePlay();
+          togglePlayRef.current();
           break;
         case 'ArrowLeft':
         case 'ArrowRight': {
@@ -2049,19 +2150,19 @@ export default function VideoEditor({
           break;
         case 'Home':
           e.preventDefault();
-          seekTo(trimmedStart);
+          seekToRef_kb.current(trimmedStartRef.current);
           break;
         case 'End':
           e.preventDefault();
-          seekTo(trimmedEnd);
+          seekToRef_kb.current(trimmedEndRef.current);
           break;
         case 'KeyM':
           e.preventDefault();
-          toggleMute();
+          toggleMuteRef.current();
           break;
         // ── Segment shortcuts (only in simple mode, not multi-track) ──
         case 'KeyS': {
-          if (showMultiTrack) break;
+          if (showMultiTrackRef.current) break;
           e.preventDefault();
           const splitTime = videoRef.current?.currentTime ?? currentTimeRef.current;
           // Split existing segment at playhead, or create a new one
@@ -2081,15 +2182,15 @@ export default function VideoEditor({
             next.push(seg2);
             next.sort((a, b) => a.start - b.start);
             setSegments(next);
-            onSegmentsChange?.(next);
+            onSegmentsChangeRef.current?.(next);
             setSelectedSegmentId(newId);
           } else {
             const halfDur = 2;
             const segs = segmentsRef.current;
             const newSeg = {
               id: `seg_${segmentIdRef.current++}`,
-              start: Math.max(trimmedStart, splitTime - halfDur),
-              end: Math.min(trimmedEnd, splitTime + halfDur),
+              start: Math.max(trimmedStartRef.current, splitTime - halfDur),
+              end: Math.min(trimmedEndRef.current, splitTime + halfDur),
               volume: 100,
               muted: false,
               subtitlesEnabled: true,
@@ -2099,33 +2200,33 @@ export default function VideoEditor({
             };
             const next = [...segs, newSeg].sort((a, b) => a.start - b.start);
             setSegments(next);
-            onSegmentsChange?.(next);
+            onSegmentsChangeRef.current?.(next);
             setSelectedSegmentId(newSeg.id);
           }
           break;
         }
         case 'Delete':
         case 'Backspace': {
-          if (showMultiTrack) break;
+          if (showMultiTrackRef.current) break;
           const delSegId = selectedSegmentIdRef.current;
           if (delSegId) {
             e.preventDefault();
             const next = segmentsRef.current.filter(s => s.id !== delSegId);
             setSegments(next);
-            onSegmentsChange?.(next);
+            onSegmentsChangeRef.current?.(next);
             setSelectedSegmentId(null);
           }
           break;
         }
         case 'Escape':
-          if (showMultiTrack) break;
+          if (showMultiTrackRef.current) break;
           if (selectedSegmentIdRef.current) {
             e.preventDefault();
             setSelectedSegmentId(null);
           }
           break;
         case 'Tab': {
-          if (showMultiTrack) break;
+          if (showMultiTrackRef.current) break;
           const segsTab = segmentsRef.current;
           if (segsTab.length > 0) {
             e.preventDefault();
@@ -2141,17 +2242,17 @@ export default function VideoEditor({
           break;
         }
         case 'BracketLeft':
-          if (showMultiTrack) break;
+          if (showMultiTrackRef.current) break;
           if (selectedSegmentRef.current) {
             e.preventDefault();
-            seekTo(selectedSegmentRef.current.start);
+            seekToRef_kb.current(selectedSegmentRef.current.start);
           }
           break;
         case 'BracketRight':
-          if (showMultiTrack) break;
+          if (showMultiTrackRef.current) break;
           if (selectedSegmentRef.current) {
             e.preventDefault();
-            seekTo(selectedSegmentRef.current.end);
+            seekToRef_kb.current(selectedSegmentRef.current.end);
           }
           break;
       }
@@ -2179,7 +2280,7 @@ export default function VideoEditor({
         hold.key = null;
       }
     };
-  }, [showMultiTrack, togglePlay, seekTo, toggleMute, trimmedStart, trimmedEnd, onSegmentsChange]);
+  }, []); // Stable: all dependencies accessed via refs
 
   // ── J-K-L shuttle speed effect ──────────────────────
   useEffect(() => {
@@ -2332,7 +2433,7 @@ export default function VideoEditor({
           playsInline
           preload="auto"
           style={(() => {
-            const hasCustomTransform = showMultiTrack && (
+            const hasCustomTransform = (
               videoItemPosition.x !== 50 || videoItemPosition.y !== 50 ||
               videoItemSize.w !== 100 || videoItemSize.h !== 100 ||
               videoItemRotation !== 0
@@ -3389,6 +3490,11 @@ export default function VideoEditor({
                     }
                   }}
                   onItemSelect={() => setShowProperties(true)}
+                  onSubtitleVisibilityChange={(visible) => {
+                    if (onSettingsChange) {
+                      onSettingsChange({ ...settings, subtitlesEnabled: visible });
+                    }
+                  }}
                 />
               </div>
             </div>

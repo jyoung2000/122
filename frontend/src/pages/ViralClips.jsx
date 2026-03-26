@@ -9,6 +9,7 @@ import { computeClipSubjectX } from '../utils/subjectTracking';
 import sanitizeJob, { sanitizeSubtitleSettings } from '../utils/sanitizeJob';
 import useTimelineStore from '../stores/timelineStore';
 import { buildOverlayPayload, buildVideoEffectsPayload, mapSubtitleSettings } from '../utils/buildExportPayload';
+import { DEFAULT_CLIP_SETTINGS } from '../utils/defaultSettings';
 
 function formatDuration(seconds) {
   if (!seconds) return '-';
@@ -80,37 +81,7 @@ const FONT_WEIGHTS = [
   { value: 700, label: 'Bold' },
 ];
 
-const DEFAULT_SETTINGS = {
-  aspectRatio: null,
-  subtitlesEnabled: false,
-  subtitleFont: 'DM Sans',
-  subtitleSize: 30,
-  subtitleFontWeight: 700,
-  subtitleFontColor: '#FFFFFF',
-  subtitlePosition: 'bottom',
-  useSpeakerColors: true,
-  speakerColors: {},
-  subtitleBgEnabled: false,
-  subtitleBgColor: '#000000',
-  subtitleBgOpacity: 75,
-  subtitleBgRadius: 0,
-  subtitleOutlineColor: '#000000',
-  subtitleOutlineOpacity: 100,
-  subtitleOutlineWidth: 2,
-  showSpeakerLabels: false,
-  subtitleMaxWidth: 90,
-  subtitleOffsetV: 4,
-  subtitleMaxWords: 0,
-  activeWordEnabled: false,
-  activeWordColor: '#FFD700',
-  activeWordOutlineColor: '#000000',
-  activeWordBgColor: '#000000',
-  activeWordBgOpacity: 0,
-  activeWordBgRadius: 4,
-  exportQuality: '1080p',
-  playbackVolume: 100,
-  playbackSpeed: 1.0,
-};
+const DEFAULT_SETTINGS = DEFAULT_CLIP_SETTINGS;
 
 function loadExportSettings() {
   try {
@@ -731,12 +702,14 @@ export default function ViralClips() {
     });
 
     if (hasAiData) {
-      // AI data already exists — remount preview to apply per-clip tracking
-      // at the current aspect ratio. ClipPreview's buildSubjectKeyframes()
-      // filters scenes to this clip's [start_time, end_time] range.
-      setPreviewKey((k) => k + 1);
-      setTrackingApplied(true);
-      setTimeout(() => setTrackingApplied(false), 2000);
+      // AI data already exists — ClipPreview handles ratio changes reactively
+      // via its useMemo deps. Only remount if the CLIP changed, not just the ratio.
+      if (clipChanged) {
+        setPreviewKey((k) => k + 1);
+        setTrackingApplied(true);
+        setTimeout(() => setTrackingApplied(false), 2000);
+      }
+      // AR-only change: ClipPreview handles reactively, no badge needed.
     } else {
       // No AI data yet — trigger background analysis for this job's scenes.
       // Once complete, all clips from this job benefit from the per-scene data.
@@ -836,16 +809,17 @@ export default function ViralClips() {
     }
   }, [settings.activeWordEnabled, clipOverrides, jobs]);
 
-  // Auto-apply flash indicator: show when settings change while preview is open
-  const prevSettingsRef = useRef(previewClipSettings);
+  // Auto-apply flash indicator: deep compare to avoid spam from reference changes
+  const prevSettingsJsonRef = useRef('');
   useEffect(() => {
-    if (!previewClip) { prevSettingsRef.current = previewClipSettings; return; }
-    if (prevSettingsRef.current !== previewClipSettings) {
-      prevSettingsRef.current = previewClipSettings;
+    const json = JSON.stringify(previewClipSettings);
+    if (!previewClip) { prevSettingsJsonRef.current = json; return; }
+    if (prevSettingsJsonRef.current && prevSettingsJsonRef.current !== json) {
       setSettingsAppliedFlash(true);
       if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current);
       settingsAppliedTimerRef.current = setTimeout(() => setSettingsAppliedFlash(false), 1800);
     }
+    prevSettingsJsonRef.current = json;
   }, [previewClipSettings, previewClip]);
   useEffect(() => () => { if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current); }, []);
 
@@ -869,9 +843,11 @@ export default function ViralClips() {
     };
     if (cs.aspectRatio) body.aspect_ratio = cs.aspectRatio;
     const globalSubsOn = cs.subtitlesEnabled || false;
-    body.subtitles_enabled = globalSubsOn;
+    const anySegmentSubsOn = useTimelineStore.getState().segments?.some(s => s.subtitlesEnabled !== false) || false;
+    const needsSubs = globalSubsOn || anySegmentSubsOn;
+    body.subtitles_enabled = needsSubs;
     body.global_subtitles_enabled = globalSubsOn;
-    if (globalSubsOn) {
+    if (needsSubs) {
       body.subtitle_settings = mapSubtitleSettings(cs);
     }
     // Include playback volume/speed if non-default
