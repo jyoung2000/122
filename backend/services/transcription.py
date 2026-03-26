@@ -158,6 +158,10 @@ async def transcribe_audio_subprocess(
         model_name, device, beam_size, settings.WHISPER_MODEL, settings.WHISPER_BEAM_SIZE,
     )
 
+    # Detect CJK for compression ratio relaxation
+    _is_cjk = language.lower() in ("ja", "ko", "zh", "zh-cn", "zh-tw") if language else False
+    effective_best_of = 1 if beam_size <= 1 else 3
+
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False, dir="/tmp") as tmp:
         output_path = tmp.name
 
@@ -171,11 +175,27 @@ async def transcribe_audio_subprocess(
             "--device-index", str(device_index),
             "--compute-type", compute_type,
             "--beam-size", str(beam_size),
+            "--best-of", str(effective_best_of),
             "--task", task,
+            # Quality parameters (match in-process path exactly)
+            "--no-speech-threshold", "0.8",
+            "--log-prob-threshold", "-1.5",
+            "--compression-ratio-threshold", "2.4",
+            "--repetition-penalty", "1.1",
+            "--no-repeat-ngram-size", "3",
+            "--prompt-reset-on-temperature", "0.5",
+            # VAD fine-tuning
+            "--vad-min-silence-ms", "300",
+            "--vad-speech-pad-ms", "600",
+            "--vad-onset", "0.2",
+            "--vad-min-speech-ms", "100",
         ]
         if vad_filter:
             cmd.append("--vad-filter")
         cmd.append("--word-timestamps")
+        cmd.append("--condition-on-previous")
+        if _is_cjk:
+            cmd.append("--cjk")
         if language:
             cmd.extend(["--language", language])
         if initial_prompt:
@@ -217,9 +237,15 @@ async def transcribe_audio_subprocess(
         if raw.get("status") == "error":
             raise RuntimeError(f"Whisper worker error: {raw.get('error')}")
 
+        # Apply the full hallucination filter as a second pass.
+        # The worker does basic filtering internally, but _filter_hallucinations
+        # has more sophisticated checks (CJK n-grams, SequenceMatcher dedup).
+        raw_segments = raw.get("segments", [])
+        raw_segments = _filter_hallucinations(raw_segments)
+
         # Convert raw JSON to TranscriptSegment objects
         segments = []
-        for seg in raw.get("segments", []):
+        for seg in raw_segments:
             words = None
             if seg.get("words"):
                 words = [WordTimestamp(start=w["start"], end=w["end"], word=w["word"]) for w in seg["words"]]
