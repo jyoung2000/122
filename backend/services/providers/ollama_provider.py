@@ -1847,7 +1847,15 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 for c in data.get("clips", []):
                     st = float(c.get("start_time", 0))
                     et = float(c.get("end_time", 0))
-                    duration = et - st if et > st else float(c.get("duration", 0))
+                    # Fix inverted timestamps (LLM sometimes swaps start/end)
+                    if et < st:
+                        logger.warning("Clip '%s': inverted timestamps %.1f→%.1f, swapping", c.get("title", "?"), st, et)
+                        st, et = et, st
+                    if et <= st:
+                        dur_hint = float(c.get("duration", 0))
+                        if dur_hint > 0:
+                            et = st + dur_hint
+                    duration = et - st
                     if duration < 15 or duration > 600:
                         continue
                     clips.append(ClipCandidate(
@@ -1877,7 +1885,14 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                         try:
                             st = float(c.get("start_time", 0))
                             et = float(c.get("end_time", 0))
-                            duration = et - st if et > st else float(c.get("duration", 0))
+                            if et < st:
+                                logger.warning("Salvage clip '%s': inverted %.1f→%.1f, swapping", c.get("title", "?"), st, et)
+                                st, et = et, st
+                            if et <= st:
+                                dur_hint = float(c.get("duration", 0))
+                                if dur_hint > 0:
+                                    et = st + dur_hint
+                            duration = et - st
                             if 15 <= duration <= 600:
                                 salvaged.append(ClipCandidate(
                                     id=c.get("id", len(salvaged) + 1),
