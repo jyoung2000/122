@@ -18,13 +18,32 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-def _filter_segments(result_segments: list[dict]) -> list[dict]:
+def _filter_segments(result_segments: list[dict], initial_prompt: str = "") -> list[dict]:
     """Remove hallucinated segments: ghosts, loops, backward jumps, duplicates."""
+    # Build set of prompt fragments to detect echoing
+    _prompt_fragments = set()
+    if initial_prompt:
+        for phrase in initial_prompt.replace(". ", ".\n").split("\n"):
+            cleaned_phrase = phrase.strip().lower().rstrip(".")
+            if len(cleaned_phrase) > 15:
+                _prompt_fragments.add(cleaned_phrase)
+
     cleaned = []
     prev_text = ""
     for seg in result_segments:
         text = seg.get("text", "").strip()
         if not text:
+            continue
+
+        # Check for initial_prompt echo (Whisper hallucinates the prompt during silence)
+        text_lower = text.lower().rstrip(".")
+        is_prompt_echo = False
+        for frag in _prompt_fragments:
+            if frag in text_lower or text_lower in frag:
+                is_prompt_echo = True
+                break
+        if is_prompt_echo:
+            logger.warning("Filter: prompt echo at %.1fs: %s", seg["start"], text[:80])
             continue
 
         # Skip backward-jumping timestamps
@@ -179,17 +198,7 @@ def main():
         if args.language:
             transcribe_kwargs["language"] = args.language
 
-        # Enhance initial_prompt for Japanese translation
-        if args.task == "translate" and (args.language or "") in ("ja", ""):
-            ja_prefix = (
-                "This is a Japanese conversation translated to natural English. "
-                "Use complete sentences. Translate names as-is (Shota, Misaki). "
-            )
-            if args.initial_prompt:
-                transcribe_kwargs["initial_prompt"] = ja_prefix + args.initial_prompt
-            else:
-                transcribe_kwargs["initial_prompt"] = ja_prefix
-        elif args.initial_prompt:
+        if args.initial_prompt:
             transcribe_kwargs["initial_prompt"] = args.initial_prompt
 
         logger.info(
@@ -221,7 +230,7 @@ def main():
             result_segments.append(seg_data)
 
         # Filter hallucinations (ghosts, loops, backward jumps, duplicates)
-        result_segments = _filter_segments(result_segments)
+        result_segments = _filter_segments(result_segments, initial_prompt=args.initial_prompt or "")
 
         result = {
             "segments": result_segments,

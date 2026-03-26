@@ -1834,6 +1834,23 @@ def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
                 )
                 continue
 
+        # Check 0e: Prompt echo detection — catches initial_prompt being
+        # hallucinated as transcription during quiet audio sections.
+        _PROMPT_ECHO_PATTERNS = [
+            "this is a japanese conversation",
+            "this is a conversation translated",
+            "translated to natural english",
+            "translate names as-is",
+            "use complete sentences",
+        ]
+        text_lower_check = text.lower()
+        if any(pat in text_lower_check for pat in _PROMPT_ECHO_PATTERNS):
+            logger.warning(
+                "Hallucination filter: prompt echo at %.1fs: %s...",
+                seg["start"], text[:80],
+            )
+            continue
+
         # Check 0d: Text-to-duration ratio — catches ghosts that have low no_speech_prob
         seg_duration = seg["end"] - seg["start"]
         if seg_duration > 0:
