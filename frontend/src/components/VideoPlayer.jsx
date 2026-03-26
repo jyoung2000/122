@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect, useMemo } from 'react';
-import { processKeyframes, interpolateSubjectX, isDynamic } from '../utils/subjectTracking';
+import { processKeyframes, interpolateSubjectX, isDynamic, subjectXToCenterPct, safeSubjectX } from '../utils/subjectTracking';
 import useResponsive from '../hooks/useResponsive';
 
 const ASPECT_RATIO_VALUES = {
@@ -9,29 +9,7 @@ const ASPECT_RATIO_VALUES = {
   '4:5': 4 / 5,
 };
 
-/**
- * Convert subject_x (0-100) to a CSS objectPosition percentage that
- * centers the subject in the cropped frame.  Matches ClipPreview logic.
- *
- * R = srcRatio / targetRatio = rendered_width / container_width (for cover)
- * centerPct = (R * sx - 50) / (R - 1)
- */
-function subjectXToCenterPct(sx, srcRatio, targetRatio) {
-  const R = srcRatio / targetRatio;
-  if (R <= 1.01) return Math.max(0, Math.min(100, sx));
-  const pct = (R * sx - 50) / (R - 1);
-
-  // Soft clamp: if pct is outside [0, 100], ease toward the edge
-  // instead of hard-clamping. This prevents the "slam to edge" visual.
-  if (pct < 0) {
-    return Math.max(0, 5 * (1 - Math.min(1, Math.abs(pct) / 50)));
-  }
-  if (pct > 100) {
-    return Math.min(100, 100 - 5 * (1 - Math.min(1, (pct - 100) / 50)));
-  }
-
-  return pct;
-}
+// subjectXToCenterPct imported from subjectTracking.js (shared with ClipPreview + backend)
 
 function formatTime(seconds) {
   if (!seconds || isNaN(seconds)) return '0:00';
@@ -217,6 +195,14 @@ export default function VideoPlayer({ src, clipStart, clipEnd, onTimeUpdate, asp
     // If we have a previous position, start a smooth transition
     if (lastAppliedPctRef.current !== null) {
       transitionStartRef.current = performance.now();
+    }
+    // Apply initial position synchronously to eliminate 1-2 frame gap
+    {
+      const initRel = video.currentTime - (clipStart || 0);
+      const initSx = interpolateSubjectX(subjectKeyframes, initRel);
+      const initPct = subjectXToCenterPct(initSx, srcRatio, targetRatio);
+      video.style.objectPosition = `${initPct}% 50%`;
+      if (lastAppliedPctRef.current === null) lastAppliedPctRef.current = initPct;
     }
     let animId;
     let lastPct = null;

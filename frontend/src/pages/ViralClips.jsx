@@ -706,9 +706,10 @@ export default function ViralClips() {
       // via its useMemo deps. Only remount if the CLIP changed, not just the ratio.
       if (clipChanged) {
         setPreviewKey((k) => k + 1);
+        setTrackingApplied(true);
+        setTimeout(() => setTrackingApplied(false), 2000);
       }
-      setTrackingApplied(true);
-      setTimeout(() => setTrackingApplied(false), 2000);
+      // AR-only change: ClipPreview handles reactively, no badge needed.
     } else {
       // No AI data yet — trigger background analysis for this job's scenes.
       // Once complete, all clips from this job benefit from the per-scene data.
@@ -808,16 +809,17 @@ export default function ViralClips() {
     }
   }, [settings.activeWordEnabled, clipOverrides, jobs]);
 
-  // Auto-apply flash indicator: show when settings change while preview is open
-  const prevSettingsRef = useRef(previewClipSettings);
+  // Auto-apply flash indicator: deep compare to avoid spam from reference changes
+  const prevSettingsJsonRef = useRef('');
   useEffect(() => {
-    if (!previewClip) { prevSettingsRef.current = previewClipSettings; return; }
-    if (prevSettingsRef.current !== previewClipSettings) {
-      prevSettingsRef.current = previewClipSettings;
+    const json = JSON.stringify(previewClipSettings);
+    if (!previewClip) { prevSettingsJsonRef.current = json; return; }
+    if (prevSettingsJsonRef.current && prevSettingsJsonRef.current !== json) {
       setSettingsAppliedFlash(true);
       if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current);
       settingsAppliedTimerRef.current = setTimeout(() => setSettingsAppliedFlash(false), 1800);
     }
+    prevSettingsJsonRef.current = json;
   }, [previewClipSettings, previewClip]);
   useEffect(() => () => { if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current); }, []);
 

@@ -1111,15 +1111,17 @@ export default function Analysis() {
     setGenSettings((prev) => ({ ...prev, [key]: value }));
   };
 
-  // Auto-apply flash indicator: show when settings change while clip preview is open
+  // Auto-apply flash indicator: deep compare to avoid spam from reference changes
+  const prevClipSettingsJsonRef = useRef('');
   useEffect(() => {
-    if (!clipPreview) { prevClipSettingsRef.current = clipSettings; return; }
-    if (prevClipSettingsRef.current !== clipSettings) {
-      prevClipSettingsRef.current = clipSettings;
+    const json = JSON.stringify(clipSettings);
+    if (!clipPreview) { prevClipSettingsJsonRef.current = json; return; }
+    if (prevClipSettingsJsonRef.current && prevClipSettingsJsonRef.current !== json) {
       setSettingsAppliedFlash(true);
       if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current);
       settingsAppliedTimerRef.current = setTimeout(() => setSettingsAppliedFlash(false), 1800);
     }
+    prevClipSettingsJsonRef.current = json;
   }, [clipSettings, clipPreview]);
   useEffect(() => () => { if (settingsAppliedTimerRef.current) clearTimeout(settingsAppliedTimerRef.current); }, []);
 

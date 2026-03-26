@@ -1382,6 +1382,14 @@ export default function VideoEditor({
     if (lastAppliedPctRef.current !== null) {
       transitionStartRef.current = performance.now();
     }
+    // Apply initial position synchronously to eliminate 1-2 frame gap
+    {
+      const initRel = video.currentTime - (clipStart || 0);
+      const initSx = interpolateSubjectX(subjectKeyframes, initRel);
+      const initPct = subjectXToCenterPct(initSx, srcRatio, targetRatio);
+      video.style.objectPosition = `${initPct}% 50%`;
+      if (lastAppliedPctRef.current === null) lastAppliedPctRef.current = initPct;
+    }
     let animId;
     let lastPct = null;
     const tick = () => {
