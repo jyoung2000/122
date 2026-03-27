@@ -278,7 +278,7 @@ async def transcribe_audio_subprocess(
             # VAD fine-tuning
             "--vad-min-silence-ms", "300",
             "--vad-speech-pad-ms", "600",
-            "--vad-onset", "0.2",
+            "--vad-onset", "0.15",
             "--vad-min-speech-ms", "100",
         ]
         if vad_filter:
@@ -356,8 +356,7 @@ async def transcribe_audio_subprocess(
         # has more sophisticated checks (CJK n-grams, SequenceMatcher dedup).
         raw_segments = raw.get("segments", [])
         raw_segments = _filter_hallucinations(raw_segments)
-
-        # Convert raw JSON to TranscriptSegment objects
+        raw_segments = _consolidate_segments(raw_segments)
         segments = []
         for seg in raw_segments:
             words = None
@@ -1060,6 +1059,7 @@ async def transcribe_audio(
                     len(partial), str(e)[:200],
                 )
                 partial = _filter_hallucinations(partial)
+                partial = _consolidate_segments(partial)
                 if partial:
                     result_segs = []
                     for seg in partial:
@@ -1664,8 +1664,9 @@ def _transcribe_sync(
     if not raw_segments:
         return []
 
-    # Filter hallucinations before speaker assignment
+    # Filter hallucinations and consolidate fragments before speaker assignment
     raw_segments = _filter_hallucinations(raw_segments)
+    raw_segments = _consolidate_segments(raw_segments)
     if not raw_segments:
         return []
 
@@ -2068,6 +2069,29 @@ def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
                 )
                 continue
 
+        # Check 3c: Fuzzy near-duplicate within 30s (Jaccard word overlap)
+        # large-v3 sometimes re-transcribes the same content 10-30s later
+        _is_fuzzy_dup = False
+        if len(filtered) >= 2 and len(text.split()) > 3 and len(text) > 15:
+            text_words = set(text.lower().split())
+            for recent in filtered[-10:]:
+                recent_text = recent["text"].strip()
+                time_gap = abs(seg["start"] - recent["start"])
+                if time_gap > 30 or time_gap < 2:
+                    continue
+                recent_words = set(recent_text.lower().split())
+                if text_words and recent_words:
+                    jaccard = len(text_words & recent_words) / len(text_words | recent_words)
+                    if jaccard > 0.7:
+                        logger.warning(
+                            "Hallucination filter: fuzzy dup at %.1fs (%.0f%% similar to %.1fs): %s...",
+                            seg["start"], jaccard * 100, recent["start"], text[:60],
+                        )
+                        _is_fuzzy_dup = True
+                        break
+        if _is_fuzzy_dup:
+            continue
+
         filtered.append(seg)
         prev_text = text
 
@@ -2075,6 +2099,134 @@ def _filter_hallucinations(raw_segments: list[dict]) -> list[dict]:
     if removed > 0:
         logger.info("Hallucination filter: removed %d/%d segments", removed, len(raw_segments))
     return filtered
+
+
+def _consolidate_segments(segments: list[dict], max_gap: float = 2.0) -> list[dict]:
+    """Consolidate over-fragmented Whisper output into natural subtitle-length segments.
+
+    Merges micro-segments (<0.5s), consecutive short fragments (1-3 words),
+    and removes near-duplicate text within 30 seconds.
+    """
+    if len(segments) <= 1:
+        return segments
+
+    # ── Pass 1: Merge micro-segments (<0.5s) into neighbors ──
+    merged = []
+    i = 0
+    while i < len(segments):
+        seg = dict(segments[i])
+        duration = seg["end"] - seg["start"]
+        text = seg.get("text", "").strip()
+
+        # Merge very short segment forward into next
+        if duration < 0.5 and len(text.split()) <= 3 and i + 1 < len(segments):
+            next_seg = segments[i + 1]
+            gap = next_seg["start"] - seg["end"]
+            if gap < max_gap:
+                merged_seg = dict(next_seg)
+                merged_seg["start"] = seg["start"]
+                merged_seg["text"] = text + " " + next_seg.get("text", "").strip()
+                if seg.get("words") and next_seg.get("words"):
+                    merged_seg["words"] = list(seg["words"]) + list(next_seg["words"])
+                elif next_seg.get("words"):
+                    merged_seg["words"] = next_seg["words"]
+                merged.append(merged_seg)
+                i += 2
+                continue
+
+        # Merge very short segment backward into previous
+        if duration < 0.5 and len(text.split()) <= 3 and merged:
+            prev = merged[-1]
+            gap = seg["start"] - prev["end"]
+            if gap < max_gap:
+                prev["end"] = seg["end"]
+                prev["text"] = prev.get("text", "").strip() + " " + text
+                if prev.get("words") and seg.get("words"):
+                    prev["words"] = list(prev["words"]) + list(seg["words"])
+                i += 1
+                continue
+
+        merged.append(seg)
+        i += 1
+
+    # ── Pass 2: Merge consecutive short fragments into sentences ──
+    consolidated = []
+    i = 0
+    while i < len(merged):
+        seg = dict(merged[i])
+        text = seg.get("text", "").strip()
+        words = text.split()
+
+        if len(words) <= 3 and i + 1 < len(merged):
+            combined_text = text
+            combined_end = seg["end"]
+            combined_words = list(seg.get("words", []) or [])
+            j = i + 1
+
+            while j < len(merged):
+                next_seg = merged[j]
+                next_text = next_seg.get("text", "").strip()
+                gap = next_seg["start"] - combined_end
+
+                if gap > max_gap:
+                    break
+                if len(combined_text.split()) + len(next_text.split()) > 15:
+                    break
+                if len(combined_text) + len(next_text) > 80:
+                    break
+                if len(next_text.split()) > 3 and len(combined_text.split()) > 3:
+                    break
+
+                combined_text = combined_text + " " + next_text
+                combined_end = next_seg["end"]
+                if next_seg.get("words"):
+                    combined_words.extend(next_seg["words"])
+                j += 1
+
+            if j > i + 1:
+                seg["end"] = combined_end
+                seg["text"] = combined_text
+                if combined_words:
+                    seg["words"] = combined_words
+                i = j
+                consolidated.append(seg)
+                continue
+
+        consolidated.append(seg)
+        i += 1
+
+    # ── Pass 3: Remove near-duplicate text within 30 seconds ──
+    deduped = []
+    for seg in consolidated:
+        text = seg.get("text", "").strip().lower()
+        is_dup = False
+
+        for recent in deduped[-10:]:
+            recent_text = recent.get("text", "").strip().lower()
+            time_gap = abs(seg["start"] - recent["start"])
+            if time_gap > 30:
+                continue
+            if len(text) > 10 and len(recent_text) > 10:
+                if text in recent_text or recent_text in text:
+                    is_dup = True
+                    break
+                words_a = set(text.split())
+                words_b = set(recent_text.split())
+                if words_a and words_b:
+                    jaccard = len(words_a & words_b) / len(words_a | words_b)
+                    if jaccard > 0.7:
+                        is_dup = True
+                        break
+
+        if is_dup:
+            logger.info("Consolidation: removed near-dup at %.1fs: %s", seg["start"], seg.get("text", "")[:60])
+            continue
+        deduped.append(seg)
+
+    removed = len(segments) - len(deduped)
+    if removed > 0:
+        logger.info("Segment consolidation: %d → %d segments (removed %d)", len(segments), len(deduped), removed)
+    return deduped
 
 
 # ── Speaker Diarization (pyannote) ─────────────────────────────────────

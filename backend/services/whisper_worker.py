@@ -214,8 +214,9 @@ def main():
             }
             # For translation tasks, widen padding to catch quiet speech
             if args.task == "translate":
-                vad_params["speech_pad_ms"] = max(vad_params["speech_pad_ms"], 800)
-                vad_params["onset"] = min(vad_params["onset"], 0.15)
+                vad_params["speech_pad_ms"] = max(vad_params["speech_pad_ms"], 1000)
+                vad_params["onset"] = min(vad_params["onset"], 0.12)
+                vad_params["min_speech_duration_ms"] = min(vad_params["min_speech_duration_ms"], 50)
             transcribe_kwargs["vad_parameters"] = vad_params
 
         if args.language:
