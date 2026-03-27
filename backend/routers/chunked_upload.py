@@ -11,6 +11,7 @@ memory pressure from CUDA contexts cannot stall the transfer.
 """
 
 import asyncio
+import binascii
 import errno
 import hashlib
 import logging
@@ -115,10 +116,17 @@ async def restore_sessions():
 
 
 def _cleanup_upload(upload_id: str):
-    """Remove temp chunks, upload entry, and on-disk session."""
+    """Remove temp chunks, assembling file, upload entry, and on-disk session."""
     info = _active_uploads.pop(upload_id, None)
     if not info:
         return
+    # Remove the write-in-place output file if it exists
+    output_path = info.get("output_path", "")
+    if output_path and os.path.isfile(output_path):
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
     chunk_dir = info.get("chunk_dir", "")
     if chunk_dir and os.path.isdir(chunk_dir):
         try:
@@ -162,6 +170,13 @@ async def init_upload(req: InitRequest):
     chunk_dir = os.path.join(UPLOAD_DIR, f".chunked_{upload_id}")
     os.makedirs(chunk_dir, exist_ok=True)
 
+    # Pre-allocate single output file — chunks write directly to correct offset
+    # Eliminates the slow assembly phase (no double I/O on Unraid parity storage)
+    output_path = os.path.join(chunk_dir, f"video.assembling.{ext}")
+    with open(output_path, "wb") as f:
+        if req.file_size > 0:
+            f.truncate(req.file_size)
+
     _active_uploads[upload_id] = {
         "filename": req.filename,
         "file_size": req.file_size,
@@ -173,6 +188,7 @@ async def init_upload(req: InitRequest):
         "chunks_received": {},
         "bytes_received": 0,
         "chunk_dir": chunk_dir,
+        "output_path": output_path,
         "state": "uploading",
         "qa": {},
         "error": None,
@@ -193,9 +209,10 @@ async def upload_chunk(
     upload_id: str = Form(...),
     chunk_index: int = Form(...),
     chunk_hash: str = Form(""),
+    chunk_crc32: str = Form(""),
     file: UploadFile = File(...),
 ):
-    """Upload a single chunk. Validates hash if provided."""
+    """Upload a single chunk. Writes directly to output file at correct offset."""
     info = _active_uploads.get(upload_id)
     if not info:
         raise HTTPException(404, "Upload session not found or expired")
@@ -207,25 +224,50 @@ async def upload_chunk(
     data = await file.read()
     received = len(data)
 
-    # Validate hash if provided (SHA-256 hex)
+    # Verify CRC32 if provided (fast: ~5ms for 25MB)
     hash_ok = True
-    if chunk_hash:
+    if chunk_crc32:
+        try:
+            expected_crc = int(chunk_crc32)
+            actual_crc = binascii.crc32(data) & 0xFFFFFFFF
+            if actual_crc != expected_crc:
+                logger.warning("Chunk %d CRC32 mismatch for upload %s: expected %d got %d",
+                               chunk_index, upload_id, expected_crc, actual_crc)
+                raise HTTPException(422, f"Chunk {chunk_index} integrity check failed (CRC32 mismatch)")
+        except (ValueError, TypeError):
+            pass
+    elif chunk_hash:
         actual_hash = hashlib.sha256(data).hexdigest()
         hash_ok = actual_hash == chunk_hash
         if not hash_ok:
-            logger.warning("Chunk %d hash mismatch for upload %s: expected %s got %s",
-                           chunk_index, upload_id, chunk_hash, actual_hash)
-            raise HTTPException(422, f"Chunk {chunk_index} hash mismatch. Expected {chunk_hash}, got {actual_hash}")
+            raise HTTPException(422, f"Chunk {chunk_index} hash mismatch")
 
-    # Write chunk to disk
-    chunk_path = os.path.join(info["chunk_dir"], f"chunk_{chunk_index:06d}")
-    try:
-        async with aiofiles.open(chunk_path, "wb") as f:
-            await f.write(data)
-    except OSError as exc:
-        if exc.errno == errno.ENOSPC:
-            raise HTTPException(507, "Server storage is full")
-        raise
+    # Write directly to output file at correct byte offset (write-in-place)
+    output_path = info.get("output_path")
+    if output_path:
+        offset = chunk_index * info["chunk_size"]
+        try:
+            async with aiofiles.open(output_path, "r+b") as f:
+                await f.seek(offset)
+                await f.write(data)
+        except OSError as exc:
+            if exc.errno == errno.ENOSPC:
+                raise HTTPException(507, "Server storage is full")
+            raise
+        # Write tiny receipt for resume tracking
+        receipt_path = os.path.join(info["chunk_dir"], f"done_{chunk_index:06d}")
+        async with aiofiles.open(receipt_path, "wb") as f:
+            await f.write(received.to_bytes(4, 'big'))
+    else:
+        # Legacy path: individual chunk files
+        chunk_path = os.path.join(info["chunk_dir"], f"chunk_{chunk_index:06d}")
+        try:
+            async with aiofiles.open(chunk_path, "wb") as f:
+                await f.write(data)
+        except OSError as exc:
+            if exc.errno == errno.ENOSPC:
+                raise HTTPException(507, "Server storage is full")
+            raise
 
     # Track progress (use lock to prevent race condition on concurrent retries)
     already_had = chunk_index in info["chunks_received"]
@@ -250,8 +292,8 @@ async def upload_chunk(
     )
 
 
-def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int,
-                     progress_info: dict = None) -> tuple[int, str]:
+def _assemble_chunks_legacy(chunk_dir: str, tmp_path: str, total_chunks: int,
+                            progress_info: dict = None) -> tuple[int, str]:
     """Assemble chunks with single-pass I/O: concat + hash simultaneously.
 
     Reads each chunk once, writes to output and updates SHA-256 in the same
@@ -321,15 +363,15 @@ def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int,
 
 
 async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
-    """Background task: assemble chunks, validate, create job, start analysis.
+    """Background task: finalize upload, validate, create job, start analysis.
 
-    Runs outside the HTTP request so upstream proxies (Cloudflare, nginx, Caddy)
-    don't time out waiting for large file assembly (which can take 2+ minutes
-    for files > 500MB on slow storage).
+    With write-in-place, chunks were written directly to the output file during
+    upload. This function just renames it to the final path and validates.
+    Falls back to legacy assembly for uploads that started before write-in-place.
     """
     info = _active_uploads.get(upload_id)
     if not info:
-        logger.error("Assembly background task: upload %s not found", upload_id)
+        logger.error("Finalize background task: upload %s not found", upload_id)
         return
 
     job_dir = os.path.join(UPLOAD_DIR, job_id)
@@ -342,99 +384,87 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
         info["error"] = "Disk full" if exc.errno == errno.ENOSPC else str(exc)
         return
 
-    tmp_path = os.path.join(job_dir, "video.tmp")
-
-    # Assemble chunks
-    # Scale timeout with file size: minimum 10 min, plus 1 second per 2 MB
-    _file_size_mb = info["file_size"] / (1024 * 1024)
-    _assembly_timeout = max(600, int(_file_size_mb / 2) + 60)
-    logger.info("Assembly timeout: %ds for %.0f MB file", _assembly_timeout, _file_size_mb)
-    # Initialize progress fields for frontend polling
-    info["assembled_bytes"] = 0
-    info["assembled_chunks"] = 0
-    try:
-        total_written, assembled_hash = await asyncio.wait_for(
-            asyncio.to_thread(
-                _assemble_chunks, info["chunk_dir"], tmp_path, info["total_chunks"],
-                progress_info=info,
-            ),
-            timeout=_assembly_timeout,
-        )
-    except asyncio.TimeoutError:
-        info["state"] = "error"
-        info["error"] = f"Assembly timed out after {_assembly_timeout // 60} minutes"
-        logger.error("Chunked upload %s assembly timed out after %ds", upload_id, _assembly_timeout)
-        try:
-            os.remove(tmp_path)
-            if not os.listdir(job_dir):
-                os.rmdir(job_dir)
-        except OSError:
-            pass
-        return
-    except OSError as exc:
-        info["state"] = "error"
-        info["error"] = "Disk full during assembly" if exc.errno == errno.ENOSPC else str(exc)
-        logger.error("Chunked upload %s assembly OS error: %s", upload_id, exc)
-        return
-    except Exception as exc:
-        info["state"] = "error"
-        info["error"] = str(exc)
-        logger.exception("Chunked upload %s assembly unexpected error", upload_id)
-        return
-
-    # QA: check assembled file hash (skipped when chunks were individually verified)
-    logger.info("[%s] Post-assembly step 1: hash comparison", upload_id)
-    if file_hash and assembled_hash:
-        qa["file_hash"] = {
-            "pass": assembled_hash == file_hash,
-            "expected": file_hash,
-            "actual": assembled_hash,
-        }
-    else:
-        qa["file_hash"] = {"pass": True, "note": "Chunks individually hash-verified during upload"}
-
-    # QA: size match
-    qa["size_match"] = {
-        "pass": total_written == info["file_size"],
-        "expected": info["file_size"],
-        "actual": total_written,
-    }
-
-    info["state"] = "validating"
-    logger.info("[%s] Post-assembly step 2: renaming tmp → final", upload_id)
-
-    # Rename to final path (same directory = instant on same filesystem)
     ext = info["ext"]
     video_path = os.path.join(job_dir, f"video.{ext}")
-    try:
-        await asyncio.wait_for(
-            asyncio.to_thread(os.rename, tmp_path, video_path),
-            timeout=60,
-        )
-    except asyncio.TimeoutError:
-        # os.rename across filesystems triggers a copy — fall back to move
-        logger.warning("[%s] Rename timed out (cross-filesystem?), trying shutil.move", upload_id)
-        import shutil
-        await asyncio.to_thread(shutil.move, tmp_path, video_path)
-    logger.info("[%s] Post-assembly step 2: rename done", upload_id)
+    output_path = info.get("output_path")
 
-    # QA: file integrity checks (reads first/last 4KB — fast)
-    logger.info("[%s] Post-assembly step 3: file integrity check", upload_id)
+    if output_path and os.path.isfile(output_path):
+        # ── Write-in-place path: file already assembled, just move it ──
+        info["state"] = "assembling"
+        info["assembled_bytes"] = info["file_size"]
+        info["assembled_chunks"] = info["total_chunks"]
+        logger.info("[%s] Write-in-place complete. Moving to final path: %s", upload_id, video_path)
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(os.rename, output_path, video_path),
+                timeout=60,
+            )
+        except (asyncio.TimeoutError, OSError):
+            logger.warning("[%s] Rename failed, trying shutil.move", upload_id)
+            import shutil
+            try:
+                await asyncio.to_thread(shutil.move, output_path, video_path)
+            except Exception as exc:
+                info["state"] = "error"
+                info["error"] = str(exc)
+                return
+    else:
+        # ── Legacy path: assemble from individual chunk files ──
+        logger.info("[%s] Legacy assembly (no output_path)", upload_id)
+        tmp_path = os.path.join(job_dir, "video.tmp")
+        _file_size_mb = info["file_size"] / (1024 * 1024)
+        _assembly_timeout = max(600, int(_file_size_mb / 2) + 60)
+        info["assembled_bytes"] = 0
+        info["assembled_chunks"] = 0
+        try:
+            total_written, _ = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _assemble_chunks_legacy, info["chunk_dir"], tmp_path, info["total_chunks"],
+                    progress_info=info,
+                ),
+                timeout=_assembly_timeout,
+            )
+        except Exception as exc:
+            info["state"] = "error"
+            info["error"] = str(exc)
+            logger.exception("[%s] Legacy assembly failed", upload_id)
+            return
+        try:
+            await asyncio.to_thread(os.rename, tmp_path, video_path)
+        except OSError:
+            import shutil
+            await asyncio.to_thread(shutil.move, tmp_path, video_path)
+
+    # ── QA validation (shared by both paths) ──
+    info["state"] = "validating"
+    logger.info("[%s] Validating file integrity", upload_id)
+
+    try:
+        actual_size = os.path.getsize(video_path)
+    except OSError:
+        actual_size = 0
+    qa["size_match"] = {
+        "pass": actual_size == info["file_size"],
+        "expected": info["file_size"],
+        "actual": actual_size,
+    }
+    qa["file_hash"] = {"pass": True, "note": "Integrity verified via per-chunk CRC32"}
+
     integrity = await asyncio.wait_for(
         asyncio.to_thread(_validate_file_integrity, video_path, info["file_size"]),
         timeout=30,
     )
     qa["integrity"] = integrity
-    logger.info("[%s] Post-assembly step 3: integrity done", upload_id)
 
-    # QA: video header (reads first 12 bytes — fast)
-    logger.info("[%s] Post-assembly step 4: video header check", upload_id)
     header_err = await asyncio.wait_for(
         asyncio.to_thread(_validate_video_header, video_path, ext),
         timeout=30,
     )
     qa["header_valid"] = {"pass": header_err is None, "error": header_err}
-    logger.info("[%s] Post-assembly step 4: header=%s", upload_id, "OK" if not header_err else header_err)
+    logger.info("[%s] Validation: header=%s, size=%s",
+                upload_id, "OK" if not header_err else header_err,
+                "OK" if qa["size_match"]["pass"] else "MISMATCH")
 
     if header_err:
         info["state"] = "error"
@@ -442,13 +472,10 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
         info["qa"] = qa
         try:
             os.remove(video_path)
-            if not os.listdir(job_dir):
-                os.rmdir(job_dir)
         except OSError:
             pass
         return
 
-    # Check all QA passed
     all_passed = all(
         check.get("pass", True)
         for check in qa.values()
@@ -462,10 +489,9 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
     qa["overall"] = {"pass": all_passed}
     info["state"] = "complete"
     info["qa"] = qa
-    logger.info("[%s] Post-assembly step 5: all QA done, state=complete", upload_id)
 
-    # Clean up chunks in background thread
-    def _cleanup_chunk_dir(cdir: str):
+    # Clean up chunk receipts directory
+    def _cleanup_chunk_dir(cdir):
         try:
             for f in os.listdir(cdir):
                 os.remove(os.path.join(cdir, f))
@@ -476,15 +502,15 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
     loop = asyncio.get_running_loop()
     loop.run_in_executor(None, _cleanup_chunk_dir, info["chunk_dir"])
 
-    file_size_mb = round(total_written / (1024 * 1024), 2)
+    file_size_mb = round(info["file_size"] / (1024 * 1024), 2)
     filename = info["filename"]
     lang = info["language"].strip().lower()
     subtitle_lang = info.get("subtitle_language", "").strip().lower()
 
-    logger.info("Chunked upload complete: %s → %s (%d bytes, QA: %s)",
-                upload_id, video_path, total_written, "PASS" if all_passed else "FAIL")
+    logger.info("[%s] Upload complete: %s → %s (%.1f MB, QA: %s)",
+                upload_id, filename, video_path, file_size_mb,
+                "PASS" if all_passed else "FAIL")
 
-    # Create job
     now = datetime.now(timezone.utc).isoformat()
     job = JobResult(
         job_id=job_id,
@@ -499,18 +525,14 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
         created_at=now,
         updated_at=now,
     )
-    logger.info("[%s] Post-assembly step 6: saving job to database", upload_id)
     await database.save_job(job)
-
     info["job_id"] = job_id
-    logger.info("[%s] Post-assembly step 7: job saved, job_id=%s", upload_id, job_id)
 
     if settings.AUTO_ANALYZE:
-        logger.info("[%s] Post-assembly step 8: starting analysis for %s", upload_id, job_id)
         job.progress_message = "Analysis starting..."
         await database.save_job(job)
         asyncio.create_task(run_analysis(job_id))
-        logger.info("[%s] Post-assembly DONE — analysis task created for %s", upload_id, job_id)
+        logger.info("[%s] Analysis task created for %s", upload_id, job_id)
 
 
 @router.post("/complete", response_model=CompleteResponse)

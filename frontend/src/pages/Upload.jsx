@@ -53,17 +53,54 @@ function validateFileHeader(file) {
   });
 }
 
-// Compute SHA-256 hash of a chunk using Web Crypto API
-async function computeChunkHash(blob) {
-  try {
-    const buffer = await blob.arrayBuffer();
-    const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
-    return Array.from(new Uint8Array(hashBuffer))
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
-  } catch {
-    return '';
+// CRC32 lookup table — generated once at module load (~10ms per 25MB chunk)
+const CRC32_TABLE = new Uint32Array(256);
+(function buildCRC32Table() {
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) {
+      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    CRC32_TABLE[i] = c;
   }
+})();
+
+function crc32(buffer) {
+  const view = new Uint8Array(buffer);
+  let crc = 0xFFFFFFFF;
+  for (let i = 0; i < view.length; i++) {
+    crc = CRC32_TABLE[(crc ^ view[i]) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) >>> 0;
+}
+
+// Upload a chunk via XHR with real-time byte-level progress
+function uploadChunkXHR(formData, onProgress, timeoutMs = 120000) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let aborted = false;
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) onProgress(event.loaded, event.total);
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); }
+        catch { resolve({ ok: true }); }
+      } else {
+        let errMsg = `HTTP ${xhr.status}`;
+        try {
+          const body = JSON.parse(xhr.responseText);
+          if (body.detail) errMsg = typeof body.detail === 'string' ? body.detail : errMsg;
+        } catch {}
+        reject(new Error(errMsg));
+      }
+    };
+    xhr.onerror = () => { if (!aborted) reject(new Error('Network error during chunk upload')); };
+    xhr.ontimeout = () => reject(new Error('Chunk upload timed out'));
+    xhr.timeout = timeoutMs;
+    xhr.open('POST', '/api/upload/chunk');
+    xhr.send(formData);
+  });
 }
 
 // Compute SHA-256 hash of the full file using streaming reads
@@ -306,40 +343,29 @@ export default function Upload() {
     handleFile(file);
   }, [handleFile]);
 
-  const uploadChunkWithRetry = useCallback(async (uploadId, chunkIndex, blob) => {
+  const uploadChunkWithRetry = useCallback(async (uploadId, chunkIndex, blob, onChunkProgress) => {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        // Skip per-chunk SHA-256 hash — it blocks the main thread for each chunk
-        // and adds significant overhead (~1-2s per 25MB chunk). Server validates
-        // file integrity via size match after assembly instead.
+        // Compute CRC32 for fast integrity verification (~10ms per 25MB)
+        const buffer = await blob.arrayBuffer();
+        const checksum = crc32(buffer);
+
         const formData = new FormData();
         formData.append('upload_id', uploadId);
         formData.append('chunk_index', chunkIndex.toString());
-        formData.append('file', blob, `chunk_${chunkIndex}`);
+        formData.append('chunk_crc32', checksum.toString());
+        formData.append('file', new Blob([buffer]), `chunk_${chunkIndex}`);
 
         if (attempt > 0) {
           setChunkStates((prev) => ({ ...prev, [chunkIndex]: 'retrying' }));
           addLog(`Retrying chunk ${chunkIndex + 1} (attempt ${attempt + 1})`, 'warn');
         }
 
-        const resp = await fetch('/api/upload/chunk', {
-          method: 'POST',
-          body: formData,
-        });
-
-        if (!resp.ok) {
-          const errText = await resp.text();
-          let errMsg = `Chunk ${chunkIndex + 1} failed: HTTP ${resp.status}`;
-          try {
-            const errJson = JSON.parse(errText);
-            if (errJson.detail) errMsg = errJson.detail;
-          } catch {}
-          throw new Error(errMsg);
-        }
-
-        const result = await resp.json();
+        // Use XHR for real-time upload progress within each chunk
+        const result = await uploadChunkXHR(formData, onChunkProgress);
         return result;
       } catch (err) {
+        if (abortRef.current) throw err;
         if (attempt < MAX_RETRIES) {
           const delay = RETRY_DELAYS[attempt] || 16000;
           addLog(`Chunk ${chunkIndex + 1} error: ${err.message}. Retrying in ${delay / 1000}s...`, 'warn');
@@ -467,30 +493,39 @@ export default function Upload() {
         const blob = file.slice(start, end);
 
         setChunkStates((prev) => ({ ...prev, [i]: 'uploading' }));
+        const chunkBytes = end - start;
+        const chunkStartTime = Date.now();
+
+        // Intra-chunk progress: updates progress bar smoothly during each chunk
+        const onChunkProgress = (loaded, total) => {
+          const partialBytes = (loaded / total) * chunkBytes;
+          const totalSoFar = bytesUploaded + partialBytes;
+          setProgress(Math.min(90, Math.round((totalSoFar / file.size) * 90)));
+          const now = Date.now();
+          if (now - lastSpeedCalcTime >= 500) {
+            const elapsedSec = (now - chunkStartTime) / 1000;
+            if (elapsedSec > 0) {
+              const currentSpeed = partialBytes / elapsedSec;
+              setSpeed(currentSpeed);
+              setEta(currentSpeed > 0 ? (file.size - bytesUploaded - partialBytes) / currentSpeed : 0);
+              lastSpeedCalcTime = now;
+            }
+          }
+        };
 
         try {
-          await uploadChunkWithRetry(uploadId, i, blob);
+          await uploadChunkWithRetry(uploadId, i, blob, onChunkProgress);
           setChunkStates((prev) => ({ ...prev, [i]: 'done' }));
-          bytesUploaded += (end - start);
+          bytesUploaded += chunkBytes;
           completedCount++;
 
-          // Calculate speed and ETA
-          const now = Date.now();
-          const elapsed = (now - lastSpeedCalcTime) / 1000;
-          if (elapsed >= 0.5) {
-            const bytesSinceCalc = bytesUploaded - lastSpeedCalcBytes;
-            const currentSpeed = bytesSinceCalc / elapsed;
-            setSpeed(currentSpeed);
-            const remaining = file.size - bytesUploaded;
-            setEta(currentSpeed > 0 ? remaining / currentSpeed : 0);
-            lastSpeedCalcTime = now;
-            lastSpeedCalcBytes = bytesUploaded;
-            // Store throughput for adaptive chunk sizing on next upload
-            try { localStorage.setItem('clipai_chunk_speed', currentSpeed.toString()); } catch {}
+          // Store throughput for adaptive chunk sizing
+          const chunkDuration = (Date.now() - chunkStartTime) / 1000;
+          if (chunkDuration > 0) {
+            try { localStorage.setItem('clipai_chunk_speed', (chunkBytes / chunkDuration).toString()); } catch {}
           }
 
-          const chunkProgress = Math.round((completedCount / totalChunksActual) * 90);
-          setProgress(chunkProgress);
+          setProgress(Math.round((completedCount / totalChunksActual) * 90));
         } catch (err) {
           setChunkStates((prev) => ({ ...prev, [i]: 'error' }));
           uploadError = err;
@@ -525,7 +560,7 @@ export default function Upload() {
     // and can crash on large files. Server validates integrity via size match.
     setUploadPhase('assembling');
     setProgress(92);
-    addLog('All chunks uploaded. Assembling file on server...');
+    addLog('All chunks uploaded. Finalizing upload...');
 
     try {
       const completeForm = new FormData();
@@ -564,9 +599,9 @@ export default function Upload() {
       // If server returned poll=true, poll /status until assembly is done
       if (completeData.poll) {
         const fileSizeMB = file.size / (1024 * 1024);
-        // Estimate assembly time: ~10 MB/s for single-pass concat+hash
-        const estimatedSeconds = Math.max(10, Math.round(fileSizeMB / 10));
-        addLog(`Assembling ${fileSizeMB.toFixed(0)} MB on server (estimated ~${estimatedSeconds}s)...`);
+        // With write-in-place, finalization is just a rename + validation (~5-10s)
+        const estimatedSeconds = Math.max(5, Math.round(fileSizeMB / 50));
+        addLog('Finalizing upload — validating file integrity...');
         const pollStart = Date.now();
         // Scale poll timeout with file size: min 10 min, max 30 min
         const pollTimeout = Math.min(30, Math.max(10, Math.round(fileSizeMB / 100))) * 60 * 1000;
@@ -592,25 +627,14 @@ export default function Upload() {
 
             if (status.state === 'assembling' && lastLoggedState !== 'assembling-update') {
               if (elapsedSec > 0 && elapsedSec % 10 < 3) {
-                // Use real progress from server if available
-                const assembledMB = status.assembled_bytes ? Math.round(status.assembled_bytes / (1024 * 1024)) : null;
-                const assembledPct = status.assembled_bytes ? Math.round((status.assembled_bytes / file.size) * 100) : null;
-
-                let progressMsg;
-                if (assembledMB !== null && assembledPct !== null && assembledMB > 0) {
-                  progressMsg = `Assembling: ${assembledMB}/${fileSizeMB.toFixed(0)} MB (${assembledPct}%) — ${elapsedSec}s elapsed`;
-                  setProgress(Math.min(98, Math.round(92 + (assembledPct / 100) * 6)));
-                } else {
-                  const eta = remainingSec > 0 ? ` — ~${remainingSec}s remaining` : ' — finishing up...';
-                  progressMsg = `Assembling: ${elapsedSec}s elapsed${eta}`;
-                }
-                addLog(progressMsg);
+                addLog(`Finalizing: ${elapsedSec}s elapsed`);
+                setProgress(Math.min(96, 92 + Math.min(4, elapsedSec / 2)));
                 lastLoggedState = 'assembling-update';
                 setTimeout(() => { lastLoggedState = ''; }, 8000);
               }
             } else if (status.state === 'validating') {
               if (lastLoggedState !== 'validating') {
-                addLog('Assembly complete — writing to disk and validating...');
+                addLog('Validating file integrity...');
                 lastLoggedState = 'validating';
                 setProgress(97);
               } else if (elapsedSec > 0 && elapsedSec % 30 < 3 && lastLoggedState === 'validating') {
