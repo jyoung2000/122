@@ -766,6 +766,17 @@ async def test_pipeline(request: Request):
                 yield _phase("whisper_transcribe",
                     f"Whisper transcription — {model_name} (beam={beam_size}) on {whisper_device.upper()}...")
 
+                # Known CTranslate2 VRAM usage per model (weights + context + beam)
+                _WHISPER_VRAM_MB = {
+                    "tiny": 150, "tiny.en": 150,
+                    "base": 250, "base.en": 250,
+                    "small": 500, "small.en": 500,
+                    "medium": 1800, "medium.en": 1800,
+                    "large-v3": 3500, "large-v3-turbo": 3200,
+                    "large-v2": 3500, "large": 3500,
+                }
+                whisper_vram_mb = _WHISPER_VRAM_MB.get(model_name, 1000) if whisper_device == "cuda" else 0
+
                 t0 = time.time()
                 try:
                     from backend.services.transcription import transcribe_audio_subprocess
@@ -784,6 +795,9 @@ async def test_pipeline(request: Request):
                             f"in {elapsed_ms}ms ({model_name}, beam={beam_size}, {whisper_device})"
                         ),
                         "segments": len(segments), "elapsed_ms": elapsed_ms,
+                        "gpu_status": f"gpu (~{whisper_vram_mb}MB VRAM)" if whisper_device == "cuda" else "cpu",
+                        "vram_bytes": whisper_vram_mb * 1024 * 1024 if whisper_device == "cuda" else 0,
+                        "model": model_name,
                     })
                 except asyncio.TimeoutError:
                     whisper_ok = False
@@ -829,6 +843,7 @@ async def test_pipeline(request: Request):
                             yield _sse_event("phase_result", {
                                 "phase": "whisper_translate", "status": "pass",
                                 "message": f"Translation OK — {len(segments_tr)} segments in {elapsed_ms}ms (ja→en, no echo)",
+                                "gpu_status": f"gpu (~{whisper_vram_mb}MB VRAM)" if whisper_device == "cuda" else "cpu",
                             })
                     except Exception as e:
                         elapsed_ms = int((time.time() - t0) * 1000)
