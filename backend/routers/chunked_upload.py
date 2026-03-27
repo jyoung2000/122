@@ -170,12 +170,15 @@ async def init_upload(req: InitRequest):
     chunk_dir = os.path.join(UPLOAD_DIR, f".chunked_{upload_id}")
     os.makedirs(chunk_dir, exist_ok=True)
 
-    # Pre-allocate single output file — chunks write directly to correct offset
-    # Eliminates the slow assembly phase (no double I/O on Unraid parity storage)
+    # Pre-allocate single output file for write-in-place
     output_path = os.path.join(chunk_dir, f"video.assembling.{ext}")
-    with open(output_path, "wb") as f:
-        if req.file_size > 0:
-            f.truncate(req.file_size)
+    try:
+        # Just create the file — don't pre-allocate size (FUSE/Unraid may not support it)
+        with open(output_path, "wb") as f:
+            pass
+    except OSError as exc:
+        logger.warning("Failed to create output file %s: %s — falling back to legacy chunks", output_path, exc)
+        output_path = None
 
     _active_uploads[upload_id] = {
         "filename": req.filename,
