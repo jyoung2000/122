@@ -566,11 +566,12 @@ export default function Upload() {
       // If server returned poll=true, poll /status until assembly is done
       if (completeData.poll) {
         const fileSizeMB = file.size / (1024 * 1024);
-        // Estimate assembly time: ~5 MB/s for cat + sha256sum on typical storage
-        const estimatedSeconds = Math.max(10, Math.round(fileSizeMB / 5));
+        // Estimate assembly time: ~10 MB/s for single-pass concat+hash
+        const estimatedSeconds = Math.max(10, Math.round(fileSizeMB / 10));
         addLog(`Assembling ${fileSizeMB.toFixed(0)} MB on server (estimated ~${estimatedSeconds}s)...`);
         const pollStart = Date.now();
-        const pollTimeout = 10 * 60 * 1000; // 10 minute max poll time
+        // Scale poll timeout with file size: min 10 min, max 30 min
+        const pollTimeout = Math.min(30, Math.max(10, Math.round(fileSizeMB / 100))) * 60 * 1000;
         let lastLoggedState = '';
 
         while (Date.now() - pollStart < pollTimeout) {

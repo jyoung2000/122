@@ -249,14 +249,14 @@ async def upload_chunk(
 
 
 def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int) -> tuple[int, str]:
-    """Assemble chunks using OS-level concatenation for maximum speed.
+    """Assemble chunks into a single file with streaming SHA-256.
+
+    Combines concatenation and hashing into a SINGLE I/O pass — reads each
+    chunk once, writes to output and hashes simultaneously. This is 2x faster
+    than the old approach of cat + sha256sum (which read the entire file twice).
 
     Returns (total_bytes_written, sha256_hex_digest).
-    Uses ``cat`` for kernel-space concatenation and ``sha256sum`` for
-    hardware-accelerated hashing — typically 5-10x faster than Python I/O.
     """
-    import subprocess
-
     t0 = time.monotonic()
 
     # Build ordered list of chunk paths
@@ -269,43 +269,38 @@ def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int) -> tuple[
 
     logger.info("Assembly starting: %d chunks → %s", total_chunks, tmp_path)
 
-    # Use cat for concatenation (kernel-space, zero-copy on Linux)
+    # Single-pass: read each chunk, write to output + update hash
+    file_hash = hashlib.sha256()
+    total_written = 0
+    buf_size = 8 * 1024 * 1024  # 8MB buffer
+
     with open(tmp_path, 'wb') as out:
-        proc = subprocess.run(
-            ['cat'] + chunk_paths,
-            stdout=out,
-            stderr=subprocess.PIPE,
-            timeout=600,
-        )
-        if proc.returncode != 0:
-            raise OSError(f"cat failed: {proc.stderr.decode()}")
+        for i, chunk_path in enumerate(chunk_paths):
+            with open(chunk_path, 'rb') as chunk_file:
+                while True:
+                    block = chunk_file.read(buf_size)
+                    if not block:
+                        break
+                    out.write(block)
+                    file_hash.update(block)
+                    total_written += len(block)
 
-    total_written = os.path.getsize(tmp_path)
+            # Log progress every 20 chunks (~150MB)
+            if (i + 1) % 20 == 0 or i == len(chunk_paths) - 1:
+                elapsed = time.monotonic() - t0
+                speed = (total_written / (1024 * 1024)) / max(elapsed, 0.001)
+                logger.info(
+                    "Assembly progress: %d/%d chunks, %.0f MB written (%.0f MB/s)",
+                    i + 1, total_chunks, total_written / (1024 * 1024), speed,
+                )
 
-    # Compute SHA-256 hash using sha256sum (also kernel-optimized)
-    assembled_hash = ''
-    try:
-        proc = subprocess.run(
-            ['sha256sum', tmp_path],
-            capture_output=True, text=True, timeout=300,
-        )
-        if proc.returncode == 0:
-            assembled_hash = proc.stdout.split()[0]
-    except (subprocess.TimeoutExpired, OSError):
-        # Fall back to Python hashing if sha256sum unavailable
-        file_hash = hashlib.sha256()
-        with open(tmp_path, 'rb') as f:
-            while True:
-                block = f.read(4 * 1024 * 1024)
-                if not block:
-                    break
-                file_hash.update(block)
-        assembled_hash = file_hash.hexdigest()
+    assembled_hash = file_hash.hexdigest()
 
     elapsed = time.monotonic() - t0
-    logger.info("Assembly complete: %.1f MB in %.1fs (%.1f MB/s)",
+    logger.info("Assembly complete: %.1f MB in %.1fs (%.1f MB/s), hash=%s",
                 total_written / (1024 * 1024), elapsed,
-                (total_written / (1024 * 1024)) / max(elapsed, 0.001))
+                (total_written / (1024 * 1024)) / max(elapsed, 0.001),
+                assembled_hash[:16])
     return total_written, assembled_hash
 
 
@@ -334,17 +329,21 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
     tmp_path = os.path.join(job_dir, "video.tmp")
 
     # Assemble chunks
+    # Scale timeout with file size: minimum 10 min, plus 1 second per 2 MB
+    _file_size_mb = info["file_size"] / (1024 * 1024)
+    _assembly_timeout = max(600, int(_file_size_mb / 2) + 60)
+    logger.info("Assembly timeout: %ds for %.0f MB file", _assembly_timeout, _file_size_mb)
     try:
         total_written, assembled_hash = await asyncio.wait_for(
             asyncio.to_thread(
                 _assemble_chunks, info["chunk_dir"], tmp_path, info["total_chunks"]
             ),
-            timeout=600,  # 10 minute timeout for very large files
+            timeout=_assembly_timeout,
         )
     except asyncio.TimeoutError:
         info["state"] = "error"
-        info["error"] = "Assembly timed out after 10 minutes"
-        logger.error("Chunked upload %s assembly timed out", upload_id)
+        info["error"] = f"Assembly timed out after {_assembly_timeout // 60} minutes"
+        logger.error("Chunked upload %s assembly timed out after %ds", upload_id, _assembly_timeout)
         try:
             os.remove(tmp_path)
             if not os.listdir(job_dir):
