@@ -1380,20 +1380,24 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                         + "\n".join(ctx_lines) + "\n"
                     )
 
-                # Simplified prompt for small vision models
-                ollama_vision_prompt = (
-                    "Describe what you see in this video frame in 1-2 sentences. "
-                    "Focus on: who/what is visible, the setting, any text on screen, "
-                    "and the overall mood. Be specific and factual — only describe "
-                    "what is ACTUALLY VISIBLE, do not infer or imagine what might be happening."
-                    f"{temporal_context}"
-                )
-
-                # Select JSON suffix based on model capability
+                # Select prompt based on model size/capability
                 vision_lower = self._vision_model.lower()
                 if "moondream" in vision_lower:
+                    # Moondream 1.8B: very short prompt to fit in 2048 context
+                    # The image tokens consume most of the context window
+                    ollama_vision_prompt = (
+                        "Describe this video frame in 1 sentence. "
+                        "What is visible and where is the main person?"
+                    )
                     json_suffix = _VISION_JSON_SUFFIX_SIMPLE
                 else:
+                    ollama_vision_prompt = (
+                        "Describe what you see in this video frame in 1-2 sentences. "
+                        "Focus on: who/what is visible, the setting, any text on screen, "
+                        "and the overall mood. Be specific and factual — only describe "
+                        "what is ACTUALLY VISIBLE, do not infer or imagine what might be happening."
+                        f"{temporal_context}"
+                    )
                     json_suffix = _VISION_JSON_SUFFIX
 
                 prompt = ollama_vision_prompt + json_suffix
@@ -1411,6 +1415,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                     importance = 5
                     subject_x = 50
                     description = raw.strip()
+                    json_parsed_ok = False
                     try:
                         text = raw.strip()
                         # Strip markdown code fences
@@ -1423,12 +1428,13 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                             parsed = json.loads(text[json_start:json_end])
                             if isinstance(parsed, list) and parsed:
                                 parsed = parsed[0]
-                            description = parsed.get("description", description)
+                            description = parsed.get("description", "") or ""
                             importance = max(1, min(10, int(parsed.get("importance_score", 5))))
                             raw_sx = parsed.get("subject_x")
                             if raw_sx is None:
                                 logger.warning("Ollama frame %d: missing subject_x field", fi)
                             subject_x = max(0, min(100, int(raw_sx))) if raw_sx is not None else 50
+                            json_parsed_ok = True
                         else:
                             raise json.JSONDecodeError("No JSON object found", text, 0)
                     except (json.JSONDecodeError, KeyError, TypeError, ValueError):
@@ -1468,28 +1474,36 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                             )
                     # ── Quality validation ──
                     if description:
-                        # Strip JSON fragments
-                        if description.startswith('{') or description.startswith('['):
-                            description = re.sub(r'[{}\[\]":]', ' ', description)
-                            description = re.sub(r'\s+', ' ', description).strip()
+                        # Strip JSON fragments from non-JSON-parsed descriptions
+                        if not json_parsed_ok:
+                            if description.startswith('{') or description.startswith('['):
+                                description = re.sub(r'[{}\[\]":]', ' ', description)
+                                description = re.sub(r'\s+', ' ', description).strip()
 
                         # Strip markdown code fences
                         if description.startswith('```'):
                             description = description.split('\n', 1)[-1].rsplit('```', 1)[0].strip()
 
-                        # Reject obviously bad descriptions
-                        if len(description) < 5 or description.lower() in (
-                            "analysis failed", "error", "none", "n/a", "null",
-                            "analysis failed (local ai)",
-                        ):
-                            # Use subject position info if available for a better fallback
-                            if subject_x < 35:
-                                pos_hint = "subject positioned left of frame"
-                            elif subject_x > 65:
-                                pos_hint = "subject positioned right of frame"
-                            else:
-                                pos_hint = "subject near center of frame"
-                            description = f"Frame at {frame.timestamp:.0f}s — {pos_hint}"
+                    # Generate fallback description when empty/bad
+                    if not description or len(description) < 3 or description.lower() in (
+                        "analysis failed", "error", "none", "n/a", "null",
+                        "analysis failed (local ai)",
+                    ):
+                        # Construct a useful description from what we know
+                        mins = int(frame.timestamp // 60)
+                        secs = int(frame.timestamp % 60)
+                        if subject_x < 30:
+                            pos_hint = "person visible on the left side"
+                        elif subject_x > 70:
+                            pos_hint = "person visible on the right side"
+                        elif subject_x < 45:
+                            pos_hint = "person visible slightly left of center"
+                        elif subject_x > 55:
+                            pos_hint = "person visible slightly right of center"
+                        else:
+                            pos_hint = "person visible at center"
+                        description = f"Video frame at {mins}:{secs:02d} — {pos_hint}"
+                        if not json_parsed_ok:
                             importance = 5
 
                         # Truncate extremely long descriptions (hallucination indicator)
@@ -1747,6 +1761,8 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             real_scenes = [s for s in scenes
                            if s.description
                            and not s.description.startswith("Frame at ")
+                           and not s.description.startswith("Video frame at ")
+                           and not s.description.startswith("Continuation of video")
                            and not any(m in s.description.lower() for m in _synthetic_markers)]
             if not real_scenes:
                 logger.warning("Skipping Ollama summary — no transcript and no real scenes")
@@ -1932,8 +1948,10 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             and len(s.description) > 20
             and "analysis skipped" not in s.description.lower()
             and "analysis temporarily unavailable" not in s.description.lower()
-            and "visual content present but description unavailable" not in s.description.lower()
+            and "description unavailable" not in s.description.lower()
             and not s.description.startswith("Frame at ")
+            and not s.description.startswith("Video frame at ")
+            and not s.description.startswith("Continuation of video")
         ] if scenes else []
         if not real_scenes and scenes:
             # If ALL scenes are synthetic, keep the originals but note it
