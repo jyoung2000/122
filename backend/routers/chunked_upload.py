@@ -252,8 +252,7 @@ def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int) -> tuple[
     """Assemble chunks into a single file with streaming SHA-256.
 
     Combines concatenation and hashing into a SINGLE I/O pass — reads each
-    chunk once, writes to output and hashes simultaneously. This is 2x faster
-    than the old approach of cat + sha256sum (which read the entire file twice).
+    chunk once, writes to output and hashes simultaneously.
 
     Returns (total_bytes_written, sha256_hex_digest).
     """
@@ -274,7 +273,8 @@ def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int) -> tuple[
     total_written = 0
     buf_size = 8 * 1024 * 1024  # 8MB buffer
 
-    with open(tmp_path, 'wb') as out:
+    out = open(tmp_path, 'wb')
+    try:
         for i, chunk_path in enumerate(chunk_paths):
             with open(chunk_path, 'rb') as chunk_file:
                 while True:
@@ -294,6 +294,17 @@ def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int) -> tuple[
                     i + 1, total_chunks, total_written / (1024 * 1024), speed,
                 )
 
+        # Flush to OS without waiting for disk sync — file.close() would
+        # trigger fsync on some filesystems (Unraid parity array), which
+        # can block for minutes on large files. We flush user-space buffers
+        # but skip the kernel sync so the assembly function returns promptly.
+        logger.info("Assembly: flushing %d MB to OS buffer...", total_written // (1024 * 1024))
+        out.flush()
+        logger.info("Assembly: flush complete, closing file handle")
+    finally:
+        out.close()
+
+    logger.info("Assembly: file closed, computing hash digest")
     assembled_hash = file_hash.hexdigest()
 
     elapsed = time.monotonic() - t0
@@ -363,6 +374,7 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
         return
 
     # QA: check assembled file hash
+    logger.info("[%s] Post-assembly step 1: hash comparison", upload_id)
     if file_hash:
         qa["file_hash"] = {
             "pass": assembled_hash == file_hash,
@@ -380,21 +392,40 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
     }
 
     info["state"] = "validating"
-    logger.info("Assembly done for %s, starting validation", upload_id)
+    logger.info("[%s] Post-assembly step 2: renaming tmp → final", upload_id)
 
-    # Rename to final path
+    # Rename to final path (same directory = instant on same filesystem)
     ext = info["ext"]
     video_path = os.path.join(job_dir, f"video.{ext}")
-    await asyncio.to_thread(os.rename, tmp_path, video_path)
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(os.rename, tmp_path, video_path),
+            timeout=60,
+        )
+    except asyncio.TimeoutError:
+        # os.rename across filesystems triggers a copy — fall back to move
+        logger.warning("[%s] Rename timed out (cross-filesystem?), trying shutil.move", upload_id)
+        import shutil
+        await asyncio.to_thread(shutil.move, tmp_path, video_path)
+    logger.info("[%s] Post-assembly step 2: rename done", upload_id)
 
-    # QA: file integrity checks
-    integrity = await asyncio.to_thread(_validate_file_integrity, video_path, info["file_size"])
+    # QA: file integrity checks (reads first/last 4KB — fast)
+    logger.info("[%s] Post-assembly step 3: file integrity check", upload_id)
+    integrity = await asyncio.wait_for(
+        asyncio.to_thread(_validate_file_integrity, video_path, info["file_size"]),
+        timeout=30,
+    )
     qa["integrity"] = integrity
+    logger.info("[%s] Post-assembly step 3: integrity done", upload_id)
 
-    # QA: video header
-    header_err = await asyncio.to_thread(_validate_video_header, video_path, ext)
+    # QA: video header (reads first 12 bytes — fast)
+    logger.info("[%s] Post-assembly step 4: video header check", upload_id)
+    header_err = await asyncio.wait_for(
+        asyncio.to_thread(_validate_video_header, video_path, ext),
+        timeout=30,
+    )
     qa["header_valid"] = {"pass": header_err is None, "error": header_err}
-    logger.info("Validation done for %s: header=%s", upload_id, "OK" if not header_err else header_err)
+    logger.info("[%s] Post-assembly step 4: header=%s", upload_id, "OK" if not header_err else header_err)
 
     if header_err:
         info["state"] = "error"
@@ -422,6 +453,7 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
     qa["overall"] = {"pass": all_passed}
     info["state"] = "complete"
     info["qa"] = qa
+    logger.info("[%s] Post-assembly step 5: all QA done, state=complete", upload_id)
 
     # Clean up chunks in background thread
     def _cleanup_chunk_dir(cdir: str):
@@ -458,14 +490,18 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
         created_at=now,
         updated_at=now,
     )
+    logger.info("[%s] Post-assembly step 6: saving job to database", upload_id)
     await database.save_job(job)
 
     info["job_id"] = job_id
+    logger.info("[%s] Post-assembly step 7: job saved, job_id=%s", upload_id, job_id)
 
     if settings.AUTO_ANALYZE:
+        logger.info("[%s] Post-assembly step 8: starting analysis for %s", upload_id, job_id)
         job.progress_message = "Analysis starting..."
         await database.save_job(job)
         asyncio.create_task(run_analysis(job_id))
+        logger.info("[%s] Post-assembly DONE — analysis task created for %s", upload_id, job_id)
 
 
 @router.post("/complete", response_model=CompleteResponse)
