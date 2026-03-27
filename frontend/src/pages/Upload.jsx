@@ -590,12 +590,21 @@ export default function Upload() {
             const status = await statusResp.json();
 
             if (status.state === 'assembling' && lastLoggedState !== 'assembling-update') {
-              // Log periodic updates during assembly (every ~10s)
               if (elapsedSec > 0 && elapsedSec % 10 < 3) {
-                const eta = remainingSec > 0 ? ` — ~${remainingSec}s remaining` : ' — finishing up...';
-                addLog(`Assembling: ${elapsedSec}s elapsed${eta}`);
+                // Use real progress from server if available
+                const assembledMB = status.assembled_bytes ? Math.round(status.assembled_bytes / (1024 * 1024)) : null;
+                const assembledPct = status.assembled_bytes ? Math.round((status.assembled_bytes / file.size) * 100) : null;
+
+                let progressMsg;
+                if (assembledMB !== null && assembledPct !== null && assembledMB > 0) {
+                  progressMsg = `Assembling: ${assembledMB}/${fileSizeMB.toFixed(0)} MB (${assembledPct}%) — ${elapsedSec}s elapsed`;
+                  setProgress(Math.min(98, Math.round(92 + (assembledPct / 100) * 6)));
+                } else {
+                  const eta = remainingSec > 0 ? ` — ~${remainingSec}s remaining` : ' — finishing up...';
+                  progressMsg = `Assembling: ${elapsedSec}s elapsed${eta}`;
+                }
+                addLog(progressMsg);
                 lastLoggedState = 'assembling-update';
-                // Reset so we log again after next 10s window
                 setTimeout(() => { lastLoggedState = ''; }, 8000);
               }
             } else if (status.state === 'validating' && lastLoggedState !== 'validating') {

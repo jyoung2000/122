@@ -91,6 +91,8 @@ class StatusResponse(BaseModel):
     qa: dict
     error: Optional[str] = None
     job_id: Optional[str] = None  # Set when assembly+validation completes
+    assembled_bytes: int = 0      # Bytes written during assembly (for progress)
+    assembled_chunks: int = 0     # Chunks assembled so far
 
 
 # ── Shared validation ─────────────────────────────────────────────────────────
@@ -248,62 +250,57 @@ async def upload_chunk(
     )
 
 
-def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int) -> tuple[int, str]:
-    """Assemble chunks using OS-level cat for maximum speed.
+def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int,
+                     progress_info: dict = None) -> tuple[int, str]:
+    """Assemble chunks with single-pass I/O: concat + hash simultaneously.
 
-    Uses ``cat`` for kernel-space concatenation — zero-copy on Linux,
-    significantly faster than Python read/write loops. Skips whole-file
-    SHA-256 since each chunk was already hash-verified on upload.
+    Reads each chunk once, writes to output and updates SHA-256 in the same
+    pass — half the I/O of cat-then-sha256sum. Updates progress_info dict
+    so the frontend can show real assembly progress via polling.
 
-    Returns (total_bytes_written, sha256_hex_digest_or_empty).
+    Returns (total_bytes_written, sha256_hex_digest).
     """
-    import subprocess
-
     t0 = time.monotonic()
+    file_hash = hashlib.sha256()
+    total_written = 0
+    buf_size = 4 * 1024 * 1024  # 4 MB read buffer
 
-    # Build ordered list of chunk paths
-    chunk_paths = []
-    for i in range(total_chunks):
-        p = os.path.join(chunk_dir, f"chunk_{i:06d}")
-        if not os.path.exists(p):
-            raise FileNotFoundError(f"Missing chunk file: {p}")
-        chunk_paths.append(p)
+    logger.info("Assembly starting: %d chunks → %s (single-pass)", total_chunks, tmp_path)
 
-    logger.info("Assembly starting: %d chunks → %s", total_chunks, tmp_path)
-
-    # Use cat for concatenation (kernel-space, fastest possible)
-    # Split into batches if too many chunks (avoid ARG_MAX limit)
-    BATCH_SIZE = 50
     with open(tmp_path, 'wb') as out:
-        for batch_start in range(0, len(chunk_paths), BATCH_SIZE):
-            batch = chunk_paths[batch_start:batch_start + BATCH_SIZE]
-            proc = subprocess.run(
-                ['cat'] + batch,
-                stdout=out,
-                stderr=subprocess.PIPE,
-                timeout=300,
-            )
-            if proc.returncode != 0:
-                raise OSError(f"cat failed: {proc.stderr.decode()}")
+        for i in range(total_chunks):
+            chunk_path = os.path.join(chunk_dir, f"chunk_{i:06d}")
+            if not os.path.exists(chunk_path):
+                raise FileNotFoundError(f"Missing chunk file: {chunk_path}")
 
-            if batch_start + BATCH_SIZE < len(chunk_paths):
+            with open(chunk_path, 'rb') as chunk_f:
+                while True:
+                    block = chunk_f.read(buf_size)
+                    if not block:
+                        break
+                    out.write(block)
+                    file_hash.update(block)
+                    total_written += len(block)
+
+            # Update progress for frontend polling
+            if progress_info is not None:
+                progress_info["assembled_bytes"] = total_written
+                progress_info["assembled_chunks"] = i + 1
+
+            # Log every 20 chunks
+            if (i + 1) % 20 == 0 or i == total_chunks - 1:
                 elapsed = time.monotonic() - t0
+                speed = (total_written / (1024 * 1024)) / max(elapsed, 0.001)
                 logger.info(
-                    "Assembly progress: %d/%d chunks (%.1fs elapsed)",
-                    min(batch_start + BATCH_SIZE, total_chunks), total_chunks, elapsed,
+                    "Assembly progress: %d/%d chunks, %.0f MB (%.0f MB/s)",
+                    i + 1, total_chunks, total_written / (1024 * 1024), speed,
                 )
 
-    total_written = os.path.getsize(tmp_path)
-
-    # Skip whole-file SHA-256 — each chunk was already individually
-    # hash-verified during upload. Re-hashing 1.6GB adds 10-30s for
-    # zero additional integrity benefit.
-    assembled_hash = ""
-
+    assembled_hash = file_hash.hexdigest()
     elapsed = time.monotonic() - t0
-    logger.info("Assembly complete: %.1f MB in %.1fs (%.1f MB/s)",
-                total_written / (1024 * 1024), elapsed,
-                (total_written / (1024 * 1024)) / max(elapsed, 0.001))
+    speed = (total_written / (1024 * 1024)) / max(elapsed, 0.001)
+    logger.info("Assembly complete: %.1f MB in %.1fs (%.1f MB/s, single-pass), hash=%s",
+                total_written / (1024 * 1024), elapsed, speed, assembled_hash[:16])
     return total_written, assembled_hash
 
 
@@ -336,10 +333,14 @@ async def _assemble_and_finalize(upload_id: str, job_id: str, file_hash: str):
     _file_size_mb = info["file_size"] / (1024 * 1024)
     _assembly_timeout = max(600, int(_file_size_mb / 2) + 60)
     logger.info("Assembly timeout: %ds for %.0f MB file", _assembly_timeout, _file_size_mb)
+    # Initialize progress fields for frontend polling
+    info["assembled_bytes"] = 0
+    info["assembled_chunks"] = 0
     try:
         total_written, assembled_hash = await asyncio.wait_for(
             asyncio.to_thread(
-                _assemble_chunks, info["chunk_dir"], tmp_path, info["total_chunks"]
+                _assemble_chunks, info["chunk_dir"], tmp_path, info["total_chunks"],
+                progress_info=info,
             ),
             timeout=_assembly_timeout,
         )
@@ -565,6 +566,8 @@ async def upload_status(upload_id: str):
         qa=info.get("qa", {}),
         error=info.get("error"),
         job_id=info.get("job_id"),
+        assembled_bytes=info.get("assembled_bytes", 0),
+        assembled_chunks=info.get("assembled_chunks", 0),
     )
 
 
