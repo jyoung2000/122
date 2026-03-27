@@ -1363,7 +1363,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         # and set timeout to 3× rolling average (min 30s, max 360s).
         # First frame gets a generous timeout for model loading.
         _frame_times: list[float] = []
-        _INITIAL_TIMEOUT = 90.0    # First frame: model load + warmup
+        _INITIAL_TIMEOUT = 180.0   # First frame: CLIP encoder load + warmup (can be slow if on CPU)
         _MIN_TIMEOUT = 30.0
         _MAX_TIMEOUT = 360.0
 

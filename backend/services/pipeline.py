@@ -162,7 +162,8 @@ async def _trigger_ollama_gpu_rediscovery(job_id: str, provider):
 
     Ollama caches GPU state from startup. If discovery failed (timeout) or
     the GPU was full (torch hogging VRAM), all subsequent loads use CPU.
-    Loading a model with num_gpu=99 triggers a fresh GPU scan.
+    Loading a model with num_gpu=99 AND a vision request triggers a fresh
+    GPU scan for both the LLM and the CLIP vision encoder.
     """
     if not hasattr(provider, '_host'):
         return False
@@ -176,13 +177,22 @@ async def _trigger_ollama_gpu_rediscovery(job_id: str, provider):
             await provider.clear_vram()
         await asyncio.sleep(2)
 
-        # Load smallest model with GPU forced — triggers GPU re-scan
+        # Generate a tiny 1x1 test image for vision probe
+        import base64 as _b64
+        _tiny_img = _b64.b64encode(
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
+            b'\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00'
+            b'\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00'
+            b'\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82'
+        ).decode()
+
+        # Load vision model with GPU forced AND an image to trigger CLIP GPU allocation
         async with httpx.AsyncClient(timeout=120) as client:
             resp = await client.post(
-                f"{host}/api/generate",
+                f"{host}/api/chat",
                 json={
                     "model": vision_model,
-                    "prompt": "test",
+                    "messages": [{"role": "user", "content": "test", "images": [_tiny_img]}],
                     "stream": False,
                     "options": {"num_gpu": 99, "num_predict": 1},
                 },
@@ -197,13 +207,18 @@ async def _trigger_ollama_gpu_rediscovery(job_id: str, provider):
                                 "[%s] Ollama GPU re-discovery succeeded — %s on GPU (%.0fMB VRAM)",
                                 job_id, m.get("name", ""), m.get("size_vram", 0) / 1024 / 1024,
                             )
-                            # Clear the probe model
-                            if hasattr(provider, 'clear_vram'):
-                                await provider.clear_vram()
+                            # Don't clear — leave model loaded so scene analysis uses GPU
                             if hasattr(provider, '_force_cpu'):
                                 provider._force_cpu = False
                             return True
                 logger.warning("[%s] Ollama GPU re-discovery: model still on CPU", job_id)
+                # Unload CPU model so scene analysis can retry on GPU
+                if hasattr(provider, 'clear_vram'):
+                    await provider.clear_vram()
+                return False
+            elif resp.status_code == 500:
+                # OOM during GPU load — model won't fit. Let scene analysis handle CPU fallback
+                logger.warning("[%s] Ollama GPU re-discovery: vision model OOM on GPU (HTTP 500)", job_id)
                 if hasattr(provider, 'clear_vram'):
                     await provider.clear_vram()
                 return False
