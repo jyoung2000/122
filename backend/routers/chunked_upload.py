@@ -246,21 +246,20 @@ async def upload_chunk(
             raise HTTPException(422, f"Chunk {chunk_index} hash mismatch")
 
     # Write directly to output file at correct byte offset (write-in-place)
+    # Use asyncio.to_thread to avoid blocking the event loop during disk I/O
     output_path = info.get("output_path")
     if output_path:
         offset = chunk_index * info["chunk_size"]
+        def _write_chunk():
+            with open(output_path, "r+b") as f:
+                f.seek(offset)
+                f.write(data)
         try:
-            async with aiofiles.open(output_path, "r+b") as f:
-                await f.seek(offset)
-                await f.write(data)
+            await asyncio.to_thread(_write_chunk)
         except OSError as exc:
             if exc.errno == errno.ENOSPC:
                 raise HTTPException(507, "Server storage is full")
             raise
-        # Write tiny receipt for resume tracking
-        receipt_path = os.path.join(info["chunk_dir"], f"done_{chunk_index:06d}")
-        async with aiofiles.open(receipt_path, "wb") as f:
-            await f.write(received.to_bytes(4, 'big'))
     else:
         # Legacy path: individual chunk files
         chunk_path = os.path.join(info["chunk_dir"], f"chunk_{chunk_index:06d}")
@@ -280,8 +279,9 @@ async def upload_chunk(
     chunks_done = len(info["chunks_received"])
     percent = round(chunks_done / info["total_chunks"] * 100, 1)
 
-    # Persist updated state to disk (every 10 chunks to reduce I/O)
-    if chunks_done % 10 == 0 or chunks_done == info["total_chunks"]:
+    # Persist updated state to disk (every 25% or at completion to minimize I/O)
+    quarter = max(1, info["total_chunks"] // 4)
+    if chunks_done % quarter == 0 or chunks_done == info["total_chunks"]:
         await upload_state.save_session(upload_id, info)
 
     return ChunkResponse(
