@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import time as _time
 from typing import Optional
 
 import httpx
@@ -761,7 +762,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         except Exception as e:
             logger.warning("Ollama capability detection failed: %s", e)
 
-    async def _call_vision(self, prompt: str, image_base64: str) -> str:
+    async def _call_vision(self, prompt: str, image_base64: str, timeout: float = 0) -> str:
         """Send ONE frame to the vision model with VRAM-aware GPU offloading.
 
         On 4GB GPUs, the CLIP vision encoder (595 MiB for llava:7b) often
@@ -769,7 +770,13 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         (CPU-only) to avoid crashing the Ollama runner process.
         """
         await self._ensure_capabilities()
-        vision_timeout = 360.0  # 6 minutes — enough for CPU inference
+        # Adaptive timeout: caller can override. Default depends on GPU vs CPU.
+        if timeout > 0:
+            vision_timeout = timeout
+        elif self._force_cpu:
+            vision_timeout = 360.0  # CPU: moondream takes 60-120s/frame
+        else:
+            vision_timeout = 60.0   # GPU: moondream takes 4-5s/frame, 60s is generous
 
         num_gpu = self._get_num_gpu(self._vision_model)
 
@@ -1352,6 +1359,20 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
         stage2_consecutive_failures = 0
         stage2_aborted = False
 
+        # Adaptive vision timeout: track successful frame durations
+        # and set timeout to 3× rolling average (min 30s, max 360s).
+        # First frame gets a generous timeout for model loading.
+        _frame_times: list[float] = []
+        _INITIAL_TIMEOUT = 90.0    # First frame: model load + warmup
+        _MIN_TIMEOUT = 30.0
+        _MAX_TIMEOUT = 360.0
+
+        def _adaptive_timeout() -> float:
+            if not _frame_times:
+                return _INITIAL_TIMEOUT
+            avg = sum(_frame_times[-10:]) / len(_frame_times[-10:])
+            return max(_MIN_TIMEOUT, min(_MAX_TIMEOUT, avg * 3))
+
         # Track previous description for temporal context
         _prev_descriptions: list[str] = []  # last N descriptions for context
         _CONTEXT_WINDOW = 3  # number of previous descriptions to include
@@ -1402,7 +1423,9 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
 
                 prompt = ollama_vision_prompt + json_suffix
                 try:
-                    raw = await self._call_vision(prompt, frame.base64)
+                    _frame_t0 = _time.monotonic()
+                    _cur_timeout = _adaptive_timeout()
+                    raw = await self._call_vision(prompt, frame.base64, timeout=_cur_timeout)
                     # If response is empty or very short, retry with simpler prompt
                     if not raw or len(raw.strip()) < 3:
                         logger.warning("Ollama frame %d: empty response, retrying with simple prompt", fi)
@@ -1410,7 +1433,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                             "What do you see? Where is the main person horizontally?"
                             '\n\nJSON only: {"description": "<text>", "subject_x": <0-100>}'
                         )
-                        raw = await self._call_vision(simple_prompt, frame.base64)
+                        raw = await self._call_vision(simple_prompt, frame.base64, timeout=_cur_timeout)
                     # Try JSON parsing first (preferred — extracts subject_x)
                     importance = 5
                     subject_x = 50
@@ -1528,6 +1551,19 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                         subject_x=subject_x,
                     )
                     stage2_consecutive_failures = 0
+
+                    # Track frame time for adaptive timeout
+                    _frame_elapsed = _time.monotonic() - _frame_t0
+                    _frame_times.append(_frame_elapsed)
+                    if len(_frame_times) > 10:
+                        _frame_times[:] = _frame_times[-10:]
+                    # Log adaptive timeout after first few frames
+                    if len(_frame_times) == 3:
+                        logger.info(
+                            "Vision adaptive timeout: avg=%.1fs → timeout=%.1fs (initial was %.0fs)",
+                            sum(_frame_times) / len(_frame_times),
+                            _adaptive_timeout(), _INITIAL_TIMEOUT,
+                        )
                 except Exception as e:
                     logger.warning(f"Ollama frame analysis failed for {frame.timestamp}s: {e}")
                     stage2_consecutive_failures += 1
