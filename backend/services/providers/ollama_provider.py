@@ -1395,6 +1395,14 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 prompt = ollama_vision_prompt + json_suffix
                 try:
                     raw = await self._call_vision(prompt, frame.base64)
+                    # If response is empty or very short, retry with simpler prompt
+                    if not raw or len(raw.strip()) < 3:
+                        logger.warning("Ollama frame %d: empty response, retrying with simple prompt", fi)
+                        simple_prompt = (
+                            "What do you see? Where is the main person horizontally?"
+                            '\n\nJSON only: {"description": "<text>", "subject_x": <0-100>}'
+                        )
+                        raw = await self._call_vision(simple_prompt, frame.base64)
                     # Try JSON parsing first (preferred — extracts subject_x)
                     importance = 5
                     subject_x = 50
@@ -1470,7 +1478,14 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                             "analysis failed", "error", "none", "n/a", "null",
                             "analysis failed (local ai)",
                         ):
-                            description = f"Frame at {frame.timestamp:.0f}s — visual content present but description unavailable"
+                            # Use subject position info if available for a better fallback
+                            if subject_x < 35:
+                                pos_hint = "subject positioned left of frame"
+                            elif subject_x > 65:
+                                pos_hint = "subject positioned right of frame"
+                            else:
+                                pos_hint = "subject near center of frame"
+                            description = f"Frame at {frame.timestamp:.0f}s — {pos_hint}"
                             importance = 5
 
                         # Truncate extremely long descriptions (hallucination indicator)
@@ -1516,13 +1531,18 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                         )
                         stage2_aborted = True
                     else:
-                        # Use a placeholder that will be replaced by interpolation later
+                        # Use neighbor subject_x instead of hardcoded 50
+                        neighbor_sx = 50
+                        for j in range(fi - 1, -1, -1):
+                            if scenes[j] is not None and scenes[j].subject_x != 50:
+                                neighbor_sx = scenes[j].subject_x
+                                break
                         scenes[fi] = SceneDescription(
                             timestamp=frame.timestamp,
                             description=f"Frame at {frame.timestamp:.0f}s — analysis temporarily unavailable",
                             importance_score=5,
                             thumbnail_path=frame.path,
-                            subject_x=50,
+                            subject_x=neighbor_sx,
                         )
                 completed += 1
                 if progress_callback:
@@ -1585,7 +1605,7 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 elif next_desc:
                     interp_desc = f"Before: {next_desc[:150]}"
                 else:
-                    interp_desc = "No visual analysis available for this segment"
+                    interp_desc = f"Continuation of video at {frame.timestamp:.0f}s"
 
                 # Interpolate importance from neighbors
                 prev_imp = next((scenes[j].importance_score for j in range(fi - 1, -1, -1) if scenes[j]), 5)
