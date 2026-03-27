@@ -608,10 +608,15 @@ export default function Upload() {
                 lastLoggedState = 'assembling-update';
                 setTimeout(() => { lastLoggedState = ''; }, 8000);
               }
-            } else if (status.state === 'validating' && lastLoggedState !== 'validating') {
-              addLog('Assembly complete — validating file integrity...');
-              lastLoggedState = 'validating';
-              setProgress(97);
+            } else if (status.state === 'validating') {
+              if (lastLoggedState !== 'validating') {
+                addLog('Assembly complete — writing to disk and validating...');
+                lastLoggedState = 'validating';
+                setProgress(97);
+              } else if (elapsedSec > 0 && elapsedSec % 30 < 3 && lastLoggedState === 'validating') {
+                // Log periodic updates during slow disk sync
+                addLog(`Writing to disk: ${elapsedSec}s elapsed — this can take a few minutes on parity storage`);
+              }
             } else if (status.state === 'complete') {
               setUploadPhase('complete');
               setProgress(100);

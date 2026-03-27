@@ -255,8 +255,7 @@ def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int,
     """Assemble chunks with single-pass I/O: concat + hash simultaneously.
 
     Reads each chunk once, writes to output and updates SHA-256 in the same
-    pass — half the I/O of cat-then-sha256sum. Updates progress_info dict
-    so the frontend can show real assembly progress via polling.
+    pass. Updates progress_info dict for real-time frontend polling.
 
     Returns (total_bytes_written, sha256_hex_digest).
     """
@@ -267,7 +266,8 @@ def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int,
 
     logger.info("Assembly starting: %d chunks → %s (single-pass)", total_chunks, tmp_path)
 
-    with open(tmp_path, 'wb') as out:
+    out = open(tmp_path, 'wb')
+    try:
         for i in range(total_chunks):
             chunk_path = os.path.join(chunk_dir, f"chunk_{i:06d}")
             if not os.path.exists(chunk_path):
@@ -296,10 +296,26 @@ def _assemble_chunks(chunk_dir: str, tmp_path: str, total_chunks: int,
                     i + 1, total_chunks, total_written / (1024 * 1024), speed,
                 )
 
+        # All data written — flush user-space buffer
+        logger.info("Assembly: flushing %.0f MB...", total_written / (1024 * 1024))
+        out.flush()
+
+        # Signal that assembly data is complete before the slow close/fsync.
+        # On parity-protected storage (Unraid), file close triggers a parity
+        # write that can take 2-5 minutes. Updating state here means the
+        # frontend sees "validating" instead of stuck at "assembling 100%".
+        if progress_info is not None:
+            progress_info["state"] = "validating"
+            logger.info("Assembly: state → validating (data complete, flushing to disk)")
+
+    finally:
+        out.close()
+        logger.info("Assembly: file closed (%.1fs total)", time.monotonic() - t0)
+
     assembled_hash = file_hash.hexdigest()
     elapsed = time.monotonic() - t0
     speed = (total_written / (1024 * 1024)) / max(elapsed, 0.001)
-    logger.info("Assembly complete: %.1f MB in %.1fs (%.1f MB/s, single-pass), hash=%s",
+    logger.info("Assembly complete: %.1f MB in %.1fs (%.1f MB/s), hash=%s",
                 total_written / (1024 * 1024), elapsed, speed, assembled_hash[:16])
     return total_written, assembled_hash
 
