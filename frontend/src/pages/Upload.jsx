@@ -15,9 +15,10 @@ function getAdaptiveChunkSize() {
     const stored = localStorage.getItem('clipai_chunk_speed');
     if (stored) {
       const bytesPerSec = parseFloat(stored);
-      // Target ~2 seconds per chunk for good balance of overhead vs responsiveness
-      const ideal = Math.round(bytesPerSec * 2);
-      return Math.max(MIN_CHUNK, Math.min(ideal, MAX_CHUNK));
+      // Target ~3 seconds per chunk — larger chunks = fewer round-trips
+      const ideal = Math.round(bytesPerSec * 3);
+      // Floor at 15MB to ensure we don't regress to tiny chunks from old cache
+      return Math.max(15 * 1024 * 1024, Math.min(ideal, MAX_CHUNK));
     }
   } catch { /* ignore */ }
   return DEFAULT_CHUNK_SIZE;
