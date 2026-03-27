@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/upload", tags=["chunked-upload"])
 
 ALLOWED_EXTENSIONS = {"mp4", "mov", "avi", "mkv", "webm"}
-CHUNK_SIZE = 5 * 1024 * 1024  # 5 MB default
+CHUNK_SIZE = 25 * 1024 * 1024  # 25 MB — fewer HTTP round-trips for large files
 UPLOAD_DIR = "/data/uploads"
 # Auto-expire stale uploads after 2 hours
 UPLOAD_EXPIRE_SECONDS = 2 * 60 * 60
@@ -153,7 +153,7 @@ async def init_upload(req: InitRequest):
 
     chunk_size = req.chunk_size or CHUNK_SIZE
     # Clamp chunk size to reasonable range
-    chunk_size = max(1 * 1024 * 1024, min(chunk_size, 50 * 1024 * 1024))
+    chunk_size = max(5 * 1024 * 1024, min(chunk_size, 100 * 1024 * 1024))
     total_chunks = -(-req.file_size // chunk_size)  # ceiling division
 
     upload_id = str(uuid.uuid4())

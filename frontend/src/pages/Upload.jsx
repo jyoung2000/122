@@ -5,9 +5,9 @@ import useResponsive from '../hooks/useResponsive';
 
 const ACCEPTED = '.mp4,.mov,.avi,.mkv,.webm';
 const ACCEPTED_DISPLAY = 'MP4 \u00B7 MOV \u00B7 AVI \u00B7 MKV \u00B7 WEBM';
-const DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024; // 5 MB — matches backend default
-const MIN_CHUNK = 1 * 1024 * 1024;   // 1 MB
-const MAX_CHUNK = 50 * 1024 * 1024;  // 50 MB
+const DEFAULT_CHUNK_SIZE = 25 * 1024 * 1024; // 25 MB — fewer HTTP round-trips
+const MIN_CHUNK = 5 * 1024 * 1024;    // 5 MB
+const MAX_CHUNK = 100 * 1024 * 1024;  // 100 MB
 
 // Adaptive chunk sizing: use stored throughput from previous uploads
 function getAdaptiveChunkSize() {
@@ -308,11 +308,12 @@ export default function Upload() {
   const uploadChunkWithRetry = useCallback(async (uploadId, chunkIndex, blob) => {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const chunkHash = await computeChunkHash(blob);
+        // Skip per-chunk SHA-256 hash — it blocks the main thread for each chunk
+        // and adds significant overhead (~1-2s per 25MB chunk). Server validates
+        // file integrity via size match after assembly instead.
         const formData = new FormData();
         formData.append('upload_id', uploadId);
         formData.append('chunk_index', chunkIndex.toString());
-        formData.append('chunk_hash', chunkHash);
         formData.append('file', blob, `chunk_${chunkIndex}`);
 
         if (attempt > 0) {
@@ -438,8 +439,8 @@ export default function Upload() {
       return;
     }
 
-    // Step 2: Upload chunks in parallel (3 concurrent) with progress tracking
-    const CONCURRENCY = 3;
+    // Step 2: Upload chunks in parallel (6 concurrent) with progress tracking
+    const CONCURRENCY = 6;
     const chunkSize = serverChunkSize || CHUNK_SIZE;
     const totalChunksActual = serverTotalChunks || numChunks;
     // Account for already-resumed chunks
@@ -519,20 +520,16 @@ export default function Upload() {
     }
 
     // Step 3: Complete — kick off assembly (non-blocking)
+    // Skip whole-file SHA-256 — reading 1.6GB into browser memory takes 10-30s
+    // and can crash on large files. Server validates integrity via size match.
     setUploadPhase('assembling');
     setProgress(92);
-    addLog('All chunks uploaded. Computing file hash...');
-
-    const fileHash = await computeFileHash(file);
-    if (fileHash) {
-      addLog(`File SHA-256: ${fileHash.slice(0, 16)}...`);
-    }
-    addLog('Assembling file on server...');
+    addLog('All chunks uploaded. Assembling file on server...');
 
     try {
       const completeForm = new FormData();
       completeForm.append('upload_id', uploadId);
-      completeForm.append('file_hash', fileHash);
+      completeForm.append('file_hash', '');
 
       // This returns immediately — assembly runs in background on server
       const completeResp = await fetch('/api/upload/complete', {
