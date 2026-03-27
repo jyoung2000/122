@@ -18,8 +18,14 @@ import sys
 logger = logging.getLogger(__name__)
 
 
-def _filter_segments(result_segments: list[dict], initial_prompt: str = "") -> list[dict]:
-    """Remove hallucinated segments: ghosts, loops, backward jumps, duplicates."""
+def _filter_segments(result_segments: list[dict], initial_prompt: str = "", task: str = "transcribe") -> list[dict]:
+    """Remove hallucinated segments: ghosts, loops, backward jumps, duplicates.
+
+    When task='translate', applies looser thresholds because English translations
+    of non-English audio produce shorter text for the same audio duration.
+    """
+    is_translate = (task == "translate")
+
     # Build set of prompt fragments to detect echoing
     _prompt_fragments = set()
     if initial_prompt:
@@ -57,21 +63,30 @@ def _filter_segments(result_segments: list[dict], initial_prompt: str = "") -> l
             continue
 
         # Skip ghost segments: long duration + short text + high no_speech
+        # Translate: English output is shorter than source audio, and no_speech_prob
+        # tends higher because Whisper is doing more internal processing.
         duration = seg["end"] - seg["start"]
         no_speech = seg.get("no_speech_prob", 0.0)
-        if duration > 30 and len(text) < 30 and no_speech > 0.5:
+        ghost_ns_dur = 45 if is_translate else 30
+        ghost_ns_textlen = 15 if is_translate else 30
+        ghost_ns_prob = 0.7 if is_translate else 0.5
+        if duration > ghost_ns_dur and len(text) < ghost_ns_textlen and no_speech > ghost_ns_prob:
             logger.warning("Filter: ghost (no_speech) at %.1fs (%.0fs, ns=%.2f): %s", seg["start"], duration, no_speech, text[:60])
             continue
 
         # Ghost check: text-to-duration ratio
-        # Normal speech: ~12-15 chars/sec. 1 char/sec is extremely generous threshold.
+        # Translate: English translations of Japanese are structurally shorter —
+        # a 20s Japanese utterance may be just "That's right." (13 chars = 0.65 c/s).
         chars_per_sec = len(text) / max(duration, 0.1)
-        if duration > 15 and chars_per_sec < 1.0:
+        ghost_ratio_threshold = 0.3 if is_translate else 1.0
+        ghost_min_duration = 25 if is_translate else 15
+        if duration > ghost_min_duration and chars_per_sec < ghost_ratio_threshold:
             logger.warning("Filter: ghost (ratio) at %.1fs (%.0fs, %.2f c/s): %s", seg["start"], duration, chars_per_sec, text[:60])
             continue
 
         # Mega-segments (>120s) need proportional text
-        if duration > 120 and len(text) < 200:
+        mega_min_text = 80 if is_translate else 200
+        if duration > 120 and len(text) < mega_min_text:
             logger.warning("Filter: mega-ghost at %.1fs (%.0fs, %d chars): %s", seg["start"], duration, len(text), text[:60])
             continue
 
@@ -81,11 +96,22 @@ def _filter_segments(result_segments: list[dict], initial_prompt: str = "") -> l
             continue
 
         # Near-duplicate of any recent segment (sliding window)
+        # Translate: short backchannel responses ("Yes.", "Really?", "Is that so?")
+        # repeat legitimately in Japanese conversation — only filter if both text
+        # AND timestamp are nearly identical.
         if len(cleaned) >= 2:
-            recent_texts = [c.get("text", "").strip().lower() for c in cleaned[-5:]]
-            if text.lower() in recent_texts:
-                logger.warning("Filter: near-dup (window) at %.1fs: %s", seg["start"], text[:60])
-                continue
+            if is_translate:
+                last = cleaned[-1]
+                if (text.lower() == last.get("text", "").strip().lower()
+                    and abs(seg["start"] - last["end"]) < 2.0
+                    and duration < 3.0):
+                    logger.warning("Filter: near-dup (translate) at %.1fs: %s", seg["start"], text[:60])
+                    continue
+            else:
+                recent_texts = [c.get("text", "").strip().lower() for c in cleaned[-5:]]
+                if text.lower() in recent_texts:
+                    logger.warning("Filter: near-dup (window) at %.1fs: %s", seg["start"], text[:60])
+                    continue
 
         # Repeated n-gram detection
         words = text.lower().split()
@@ -271,7 +297,7 @@ def main():
                 print(f"PROGRESS:{progress_line}", file=sys.stderr, flush=True)
 
         # Filter hallucinations (ghosts, loops, backward jumps, duplicates)
-        result_segments = _filter_segments(result_segments, initial_prompt=args.initial_prompt or "")
+        result_segments = _filter_segments(result_segments, initial_prompt=args.initial_prompt or "", task=args.task)
 
         result = {
             "segments": result_segments,

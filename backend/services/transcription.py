@@ -275,11 +275,12 @@ async def transcribe_audio_subprocess(
             "--repetition-penalty", "1.1",
             "--no-repeat-ngram-size", "3",
             "--prompt-reset-on-temperature", "0.5",
-            # VAD fine-tuning
+            # VAD fine-tuning — lower thresholds for translate tasks since
+            # English output from non-English audio has different speech patterns
             "--vad-min-silence-ms", "300",
-            "--vad-speech-pad-ms", "600",
-            "--vad-onset", "0.15",
-            "--vad-min-speech-ms", "100",
+            "--vad-speech-pad-ms", "800" if task == "translate" else "600",
+            "--vad-onset", "0.10" if task == "translate" else "0.15",
+            "--vad-min-speech-ms", "80" if task == "translate" else "100",
         ]
         if vad_filter:
             cmd.append("--vad-filter")
