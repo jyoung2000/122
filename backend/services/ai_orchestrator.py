@@ -345,7 +345,8 @@ class AIOrchestrator:
                 )
                 prompt = (
                     f"Summarize this {time_label} segment in 2-3 sentences. "
-                    f"Include: main topic, key speakers, notable moments.\n\n"
+                    f"Include: main topic, key content, notable moments. "
+                    f"Do not reference or speculate about speakers.\n\n"
                     f"TRANSCRIPT:\n{text}\n\nSCENES:\n{scene_text}\n\n"
                     f"Return a plain text summary (no JSON)."
                 )
@@ -382,11 +383,16 @@ class AIOrchestrator:
 
         reduce_prompt = (
             f"You have segment-by-segment summaries of a video. "
-            f"Combine them into a cohesive summary.\n\n"
+            f"Combine them into a cohesive summary. "
+            f"Do not reference or speculate about speakers unless names are explicitly mentioned. "
+            f"Focus on what is discussed, shown, and the key moments.\n\n"
             f"SEGMENT SUMMARIES:\n{combined}\n\n"
             "Return ONLY valid JSON:\n"
-            '{"overview": "<paragraph>", "key_topics": ["topic1", ...], '
-            '"tone": "<tone>", "estimated_audience": "<audience>", "content_category": "<category>"}'
+            '{"overview": "<2-4 sentence paragraph about the video content>", '
+            '"key_topics": ["topic1", "topic2", "topic3"], '
+            '"tone": "<1-2 words>", "estimated_audience": "<who would watch>", '
+            '"content_category": "<specific category>"}\n'
+            "key_topics MUST contain 3-6 specific topics from the video."
         )
 
         for provider in chain:
@@ -463,9 +469,9 @@ class AIOrchestrator:
                 f"Additionally include 'focus_relevance' (1-100) and 'focus_tier' (\"strong\", \"moderate\", "
                 f"or \"weak\") in each clip's JSON.\n\n"
                 f"SCENE & SUBJECT COHERENCE (CRITICAL):\n"
-                f"- The main subject or speaker MUST stay in focus throughout the entire clip\n"
+                f"- The main subject MUST stay in focus throughout the entire clip\n"
                 f"- NEVER cut across unrelated scenes or topics — the clip must feel like ONE moment\n"
-                f"- If a clip covers a conversation, keep it within the same exchange between the same speakers\n"
+                f"- If a clip covers a conversation, keep it within the same exchange\n"
                 f"- The visual setting should remain consistent — don't span across location changes\n"
                 f"- Prefer segments where the camera stays on the main action without jarring cuts\n"
                 f"- If scene descriptions show different settings at different timestamps, do NOT combine them into one clip\n\n"

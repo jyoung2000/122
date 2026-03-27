@@ -158,8 +158,10 @@ def build_fallback_summary(raw: str) -> dict:
                     i += 1
             result[field] = ''.join(chars).strip()
 
-    # Try to extract key_topics array
-    m = re.search(r'"key_topics"\s*:\s*\[', text)
+    # Try to extract key_topics array (case-insensitive)
+    m = re.search(r'"[Kk]ey_[Tt]opics"\s*:\s*\[', text)
+    if not m:
+        m = re.search(r'"KEY_TOPICS"\s*:\s*\[', text)
     if m:
         start = m.end()
         end = text.find(']', start)
@@ -283,19 +285,24 @@ def build_summary_from_transcript(
     else:
         overview = "Video analysis completed but no transcript was available to generate a detailed summary."
 
-    # Extract key topics from high-importance scenes
+    # Extract key topics from high-importance scenes (skip synthetic descriptions)
+    _synthetic_prefixes = ("Frame at ", "Video frame at ", "Continuation of video")
     topics = []
     seen_topic_words = set()
     for scene in sorted(scenes, key=lambda s: s.importance_score, reverse=True):
         if len(topics) >= 5:
             break
         desc = scene.description.strip()
-        if not desc:
+        if not desc or any(desc.startswith(p) for p in _synthetic_prefixes):
+            continue
+        if "unavailable" in desc.lower() or "analysis" in desc.lower():
             continue
         # Use first sentence or first 60 chars as topic
         topic = desc.split(".")[0].strip()
         if len(topic) > 60:
             topic = topic[:60].rsplit(" ", 1)[0]
+        if len(topic) < 5:
+            continue
         # Deduplicate by checking for word overlap
         topic_words = set(topic.lower().split())
         if topic_words & seen_topic_words and len(topic_words & seen_topic_words) > 2:
@@ -878,7 +885,18 @@ class ChunkedClipDetectionMixin:
             except Exception:
                 pass
 
+        # Scale per-window clip request so total across windows reaches clip_count
+        _requested_total = kwargs.get("clip_count", 12)
+        _clips_per_window = max(5, min(12, (_requested_total // len(windows)) + 2))
+        _mixin_logger.info(
+            "Windowed detection: %d windows, requesting %d clips/window (target total: %d)",
+            len(windows), _clips_per_window, _requested_total,
+        )
+
         async def _process_window(idx: int, w_start: float, w_end: float):
+            # Override clip_count for per-window calls
+            window_kwargs = dict(kwargs)
+            window_kwargs["clip_count"] = _clips_per_window
             window_transcript = [
                 seg for seg in transcript
                 if seg.start >= w_start - overlap_duration / 2
@@ -898,7 +916,7 @@ class ChunkedClipDetectionMixin:
             try:
                 clips = await self._single_pass_clip_detection(
                     window_transcript, window_scenes, w_end - w_start,
-                    **kwargs,
+                    **window_kwargs,
                 )
                 collected_clips.extend(clips)
                 if _partial_results is not None:
@@ -1167,7 +1185,9 @@ class ChunkedClipDetectionMixin:
         raw_count = len(all_clips)
         all_clips = self._deduplicate_clips(all_clips, max_overlap=0.6)
         after_overlap = len(all_clips)
-        all_clips = self._deduplicate_thematic(all_clips, max_similar=2)
+        # Scale thematic dedup tolerance with video length
+        _thematic_max = 2 if video_duration < 1800 else 3 if video_duration < 5400 else 4
+        all_clips = self._deduplicate_thematic(all_clips, max_similar=_thematic_max)
         after_thematic = len(all_clips)
         all_clips.sort(key=lambda c: c.viral_score, reverse=True)
 

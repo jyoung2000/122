@@ -90,9 +90,9 @@ DEFAULT_VIRAL_CLIP_PROMPT = (
     "- Reaction-worthy moments that make viewers comment or share\n"
     "- When a visual peak (★ scene) coincides with strong transcript content, score that clip higher\n\n"
     "SCENE & SUBJECT COHERENCE (CRITICAL):\n"
-    "- The main subject or speaker MUST stay in focus throughout the entire clip\n"
+    "- The main subject MUST stay in focus throughout the entire clip\n"
     "- NEVER cut across unrelated scenes or topics — the clip must feel like ONE moment\n"
-    "- If a clip covers a conversation, keep it within the same exchange between the same speakers\n"
+    "- If a clip covers a conversation, keep it within the same exchange\n"
     "- Avoid clips that start on one topic/scene and drift into a completely different one\n"
     "- The visual setting should remain consistent — don't span across location changes\n"
     "- Prefer segments where the camera stays on the main action without jarring cuts\n"
@@ -108,27 +108,22 @@ DEFAULT_SUMMARY_PROMPT = (
     "You are summarizing a video for a human audience. Write like a real person — "
     "not a robot, not a press release. The summary should feel like something a "
     "friend would say if you asked 'what was that video about?'\n\n"
-    "Based on the transcript and scene descriptions below, generate:\n\n"
-    "1. OVERVIEW — A natural, conversational paragraph (2-4 sentences) describing "
-    "what happens in the video. Mention the people, topics, and key moments. "
-    "Write in plain English — no jargon, no bullet points, no timestamps.\n"
-    "   Good: \"Two friends taste-test fast food burgers and get into a heated "
-    "debate about whether In-N-Out is overrated. Things get funny when one of "
-    "them accidentally spills sauce everywhere.\"\n"
-    "   Bad: \"This video features content creators engaging in a comparative "
-    "analysis of quick-service restaurant products.\"\n\n"
-    "2. KEY_TOPICS — 3-6 short, specific topics discussed or shown in the video. "
-    "Use natural phrases a person would say, not SEO keywords.\n"
-    "   Good: [\"fast food taste test\", \"In-N-Out vs Five Guys\", \"sauce disaster\"]\n"
-    "   Bad: [\"food\", \"review\", \"content\", \"discussion\"]\n\n"
-    "3. TONE — One or two words describing the vibe (e.g. \"funny and casual\", "
-    "\"serious\", \"educational\", \"chaotic energy\", \"wholesome\")\n\n"
-    "4. ESTIMATED_AUDIENCE — Who would watch this? Be specific.\n"
-    "   Good: \"foodies and fast food fans\"\n"
-    "   Bad: \"general\"\n\n"
-    "5. CONTENT_CATEGORY — A specific category.\n"
-    "   Good: \"food review\", \"tech unboxing\", \"comedy sketch\", \"fitness tutorial\"\n"
-    "   Bad: \"entertainment\", \"uncategorized\"\n"
+    "IMPORTANT: Do not reference or speculate about speakers unless speaker names are "
+    "explicitly present in the transcript. Focus on WHAT is discussed and shown, "
+    "not who is saying it.\n\n"
+    "Based on the transcript and scene descriptions below, return ONLY valid JSON:\n"
+    '{"overview": "<2-4 sentence paragraph>", "key_topics": ["topic1", "topic2", "topic3"], '
+    '"tone": "<1-2 words>", "estimated_audience": "<who would watch>", "content_category": "<category>"}\n\n'
+    "Field guidelines:\n"
+    "- overview: Natural, conversational. Describe what happens in the video.\n"
+    '   Good: "Two friends taste-test fast food burgers and debate whether In-N-Out is overrated."\n'
+    '   Bad: "This video features content creators engaging in comparative analysis."\n'
+    "- key_topics: 3-6 specific topics. Use natural phrases, not SEO keywords.\n"
+    '   Good: ["fast food taste test", "In-N-Out vs Five Guys", "sauce disaster"]\n'
+    '   Bad: ["food", "review", "content"]\n'
+    '- tone: The vibe (e.g. "funny and casual", "serious", "educational")\n'
+    '- estimated_audience: Be specific (e.g. "foodies and fast food fans")\n'
+    '- content_category: Specific (e.g. "food review", "tech unboxing", "comedy sketch")\n'
 )
 
 DEFAULT_SEO_PROMPT = (
