@@ -246,20 +246,29 @@ async def upload_chunk(
             raise HTTPException(422, f"Chunk {chunk_index} hash mismatch")
 
     # Write directly to output file at correct byte offset (write-in-place)
-    # Use asyncio.to_thread to avoid blocking the event loop during disk I/O
     output_path = info.get("output_path")
     if output_path:
         offset = chunk_index * info["chunk_size"]
         def _write_chunk():
-            with open(output_path, "r+b") as f:
-                f.seek(offset)
-                f.write(data)
+            fd = os.open(output_path, os.O_WRONLY | os.O_CREAT, 0o644)
+            try:
+                os.lseek(fd, offset, os.SEEK_SET)
+                os.write(fd, data)
+            finally:
+                os.close(fd)
         try:
             await asyncio.to_thread(_write_chunk)
         except OSError as exc:
             if exc.errno == errno.ENOSPC:
                 raise HTTPException(507, "Server storage is full")
-            raise
+            # Write-in-place failed — fall back to legacy chunk file
+            logger.warning("Write-in-place failed for chunk %d (offset %d): %s — falling back to chunk file",
+                           chunk_index, offset, exc)
+            chunk_path = os.path.join(info["chunk_dir"], f"chunk_{chunk_index:06d}")
+            async with aiofiles.open(chunk_path, "wb") as f:
+                await f.write(data)
+            # Mark that this upload needs legacy assembly
+            info["output_path"] = None
     else:
         # Legacy path: individual chunk files
         chunk_path = os.path.join(info["chunk_dir"], f"chunk_{chunk_index:06d}")
