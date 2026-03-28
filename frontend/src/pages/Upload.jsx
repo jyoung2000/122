@@ -484,6 +484,9 @@ export default function Upload() {
     // Only queue chunks that haven't been uploaded yet
     const queue = Array.from({ length: totalChunksActual }, (_, i) => i).filter((i) => !resumedChunks.has(i));
     let uploadError = null;
+    let lastLogPct = 0;  // Track last logged percentage for milestone logging
+
+    addLog(`Uploading ${queue.length} chunks (${formatBytes(file.size - bytesUploaded)} remaining)...`);
 
     async function uploadNext() {
       while (queue.length > 0 && !abortRef.current && !uploadError) {
@@ -525,7 +528,24 @@ export default function Upload() {
             try { localStorage.setItem('clipai_chunk_speed', (chunkBytes / chunkDuration).toString()); } catch {}
           }
 
+          const pct = Math.round((completedCount / totalChunksActual) * 100);
           setProgress(Math.round((completedCount / totalChunksActual) * 90));
+
+          // Log milestones at 10%, 25%, 50%, 75%, 90%, and every 25 chunks for large uploads
+          const milestones = [10, 25, 50, 75, 90];
+          const hitMilestone = milestones.find(m => pct >= m && lastLogPct < m);
+          const chunkMilestone = totalChunksActual > 30 && completedCount % 25 === 0 && !hitMilestone;
+          if (hitMilestone || chunkMilestone || completedCount === totalChunksActual) {
+            lastLogPct = pct;
+            const elapsedSec = (Date.now() - startTime) / 1000;
+            const avgSpeed = bytesUploaded / Math.max(elapsedSec, 0.1);
+            const etaStr = avgSpeed > 0 ? formatETA((file.size - bytesUploaded) / avgSpeed) : '';
+            if (completedCount === totalChunksActual) {
+              addLog(`All ${totalChunksActual} chunks uploaded (${formatBytes(file.size)}) in ${Math.round(elapsedSec)}s`);
+            } else {
+              addLog(`Upload ${pct}% — ${formatBytes(bytesUploaded)} / ${formatBytes(file.size)} at ${formatSpeed(avgSpeed)}${etaStr ? ` — ETA ${etaStr}` : ''}`);
+            }
+          }
         } catch (err) {
           setChunkStates((prev) => ({ ...prev, [i]: 'error' }));
           uploadError = err;
