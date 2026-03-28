@@ -1378,33 +1378,38 @@ async def _run_analysis_inner(job_id: str):
             # Final torch release — ensure CUDA context isn't hogging VRAM
             release_torch_gpu_memory()
 
-            # Extra pause for CUDA driver to reclaim across Docker containers
-            await asyncio.sleep(5)
+            # Wait for CUDA driver to fully reclaim VRAM across Docker containers.
+            # CTranslate2's subprocess exit releases memory, but the NVIDIA driver
+            # needs 10-15 seconds to actually free it on GTX 1650.
+            logger.info("[%s] Waiting 15s for CUDA driver to reclaim Whisper VRAM...", job_id)
+            await asyncio.sleep(15)
 
-            # Trigger Ollama GPU re-discovery if torch was hogging VRAM at Ollama's boot
+            # Trigger Ollama GPU re-discovery with retry
+            # First attempt may fail if VRAM isn't fully released yet
             if is_ollama_primary and _primary_provider:
-                try:
-                    gpu_ok = await _trigger_ollama_gpu_rediscovery(job_id, _primary_provider)
-                    if gpu_ok:
-                        logger.info("[%s] Ollama confirmed GPU access after torch VRAM release", job_id)
-                except Exception as e:
-                    logger.warning("[%s] Ollama GPU re-discovery failed (non-fatal): %s", job_id, e)
+                gpu_ok = False
+                for _rediscovery_attempt in range(3):
+                    try:
+                        gpu_ok = await _trigger_ollama_gpu_rediscovery(job_id, _primary_provider)
+                        if gpu_ok:
+                            logger.info("[%s] Ollama GPU access confirmed (attempt %d)", job_id, _rediscovery_attempt + 1)
+                            # DON'T clear the model — leave it loaded on GPU for scene analysis
+                            break
+                        else:
+                            logger.warning("[%s] GPU rediscovery attempt %d: CLIP still on CPU, waiting 10s...",
+                                           job_id, _rediscovery_attempt + 1)
+                            # Clear CPU-loaded model and wait before retry
+                            if hasattr(_primary_provider, 'clear_vram'):
+                                await _primary_provider.clear_vram()
+                            await asyncio.sleep(10)
+                    except Exception as e:
+                        logger.warning("[%s] GPU rediscovery attempt %d failed: %s", job_id, _rediscovery_attempt + 1, e)
+                        await asyncio.sleep(5)
 
-            # Ensure Ollama has no models resident before scene analysis loads vision model
-            if is_ollama_primary and _primary_provider and hasattr(_primary_provider, 'clear_vram'):
-                try:
-                    await _primary_provider.clear_vram()
-                    logger.info("[%s] Ollama models cleared before scene analysis — full VRAM available for vision model", job_id)
+                if not gpu_ok:
+                    logger.warning("[%s] All GPU rediscovery attempts failed — scene analysis will use CPU (slow)", job_id)
                     if hasattr(_primary_provider, '_force_cpu'):
-                        _primary_provider._force_cpu = False  # Allow GPU retry
-                    # Verify GPU health — if poisoned from a prior OOM, reset scheduler
-                    if hasattr(_primary_provider, 'verify_gpu_health'):
-                        gpu_ok = await _primary_provider.verify_gpu_health()
-                        if not gpu_ok and hasattr(_primary_provider, 'reset_gpu_scheduler'):
-                            logger.warning("[%s] GPU scheduler poisoned — attempting reset before scene analysis", job_id)
-                            await _primary_provider.reset_gpu_scheduler()
-                except Exception as e:
-                    logger.warning("[%s] Failed to clear Ollama models before scene analysis: %s", job_id, e)
+                        _primary_provider._force_cpu = False  # Still allow GPU attempt during analysis
 
             await _update_progress(
                 job_id, JobStatus.ANALYZING_SCENES, 40,
