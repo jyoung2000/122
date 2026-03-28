@@ -466,10 +466,8 @@ export default function Upload() {
       return;
     }
 
-    // Step 2: Upload chunks in parallel (3 concurrent) with progress tracking
-    // Reduced from 6 to 3: each chunk does a random-access disk write (parity storage)
-    // which is slower than sequential append — too many concurrent writes stall I/O
-    const CONCURRENCY = 3;
+    // Step 2: Upload chunks in parallel (6 concurrent) with progress tracking
+    const CONCURRENCY = 6;
     const chunkSize = serverChunkSize || CHUNK_SIZE;
     const totalChunksActual = serverTotalChunks || numChunks;
     // Account for already-resumed chunks
