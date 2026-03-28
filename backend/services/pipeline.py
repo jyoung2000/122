@@ -194,6 +194,7 @@ async def _trigger_ollama_gpu_rediscovery(job_id: str, provider):
                     "model": vision_model,
                     "messages": [{"role": "user", "content": "test", "images": [_tiny_img]}],
                     "stream": False,
+                    "keep_alive": "10m",
                     "options": {"num_gpu": 99, "num_predict": 1},
                 },
                 timeout=120,

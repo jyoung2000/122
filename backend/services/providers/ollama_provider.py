@@ -1065,6 +1065,20 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
     ) -> list[SceneDescription]:
         total = len(frames)
 
+        # Keep the vision model warm — if it was loaded on GPU by the pipeline's
+        # GPU rediscovery, Ollama's 30s KEEP_ALIVE may have unloaded it during
+        # the base64 encoding phase. Send a quick keep-alive to prevent cold start.
+        try:
+            await self._client.post(
+                f"{self._host}/api/generate",
+                json={"model": self._vision_model, "prompt": "", "keep_alive": "5m",
+                      "options": {"num_gpu": 99, "num_predict": 0}},
+                timeout=30,
+            )
+            logger.info("Vision model keep-alive sent (5m) — preventing unload before speed test")
+        except Exception:
+            pass
+
         # ── Speed gate: test first frame, skip if impractically slow ──
         # On Sandy Bridge CPU with llava:7b, each frame takes 360s+ (timeout).
         # Detect this early and limit frames rather than wasting 30+ minutes.
@@ -1074,8 +1088,6 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
             await self._ensure_model_active(self._vision_model)
             t0 = _t.monotonic()
             try:
-                # Use the ACTUAL prompt for speed testing (not a simplified version)
-                # The real prompt is 3-4x longer and triggers different tokenization
                 _test_suffix = (
                     _VISION_JSON_SUFFIX_SIMPLE
                     if "moondream" in self._vision_model.lower()
@@ -1087,9 +1099,10 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                     "Be specific and factual — only describe what is ACTUALLY VISIBLE."
                     + _test_suffix
                 )
+                # First call may need to load model — give it extra time (180s)
                 test_result = await asyncio.wait_for(
-                    self._call_vision(test_prompt, frames[0].base64),
-                    timeout=120.0,
+                    self._call_vision(test_prompt, frames[0].base64, timeout=180),
+                    timeout=180.0,
                 )
                 elapsed = _t.monotonic() - t0
                 logger.info(
@@ -1153,8 +1166,8 @@ class OllamaProvider(ChunkedClipDetectionMixin, AIProvider):
                 try:
                     t0 = _t.monotonic()
                     test_result = await asyncio.wait_for(
-                        self._call_vision(test_prompt, frames[0].base64),
-                        timeout=120.0,
+                        self._call_vision(test_prompt, frames[0].base64, timeout=180),
+                        timeout=180.0,
                     )
                     elapsed_retry = _t.monotonic() - t0
                     logger.info(
