@@ -33,10 +33,12 @@ def _get_whisper_model():
         if _whisper_model is None:
             from faster_whisper import WhisperModel
             import ctranslate2
+            import os
 
             # Pick best device and compute type automatically
             device = "cpu"
             compute_type = "int8"
+            model_kwargs = {}
             try:
                 if ctranslate2.get_cuda_device_count() > 0:
                     device = "cuda"
@@ -44,6 +46,17 @@ def _get_whisper_model():
                     logger.info("CUDA GPU detected — using float16 for Whisper")
             except Exception:
                 pass
+
+            if device == "cpu":
+                # Use all available CPU cores for faster inference
+                cpu_count = os.cpu_count() or 4
+                model_kwargs["cpu_threads"] = cpu_count
+                # num_workers > 1 enables parallel batch processing
+                model_kwargs["num_workers"] = min(cpu_count, 4)
+                logger.info(
+                    f"CPU mode: using {cpu_count} threads, "
+                    f"{model_kwargs['num_workers']} workers"
+                )
 
             logger.info(
                 f"Loading Whisper model: {settings.WHISPER_MODEL} "
@@ -53,6 +66,7 @@ def _get_whisper_model():
                 settings.WHISPER_MODEL,
                 device=device,
                 compute_type=compute_type,
+                **model_kwargs,
             )
             logger.info(f"Whisper model '{settings.WHISPER_MODEL}' loaded successfully")
     return _whisper_model
